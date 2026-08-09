@@ -25,6 +25,7 @@ class ExportStartRequest(BaseModel):
     detector: str = "YOLOv8"
     landmarker: str = "insightface-2d106det"
     res_scale: float = 0.5
+    hwaccel: str = ''
     num_workers: int = 0
 
 
@@ -111,6 +112,7 @@ async def export_start(req: ExportStartRequest):
                 detector=req.detector,
                 landmarker=req.landmarker,
                 res_scale=req.res_scale,
+                hwaccel=req.hwaccel,
                 progress_callback=_update_progress,
                 stop_event=_export_stop,
                 num_workers=nw,

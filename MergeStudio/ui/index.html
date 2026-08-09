@@ -221,6 +221,9 @@
         <select id="layer-export-encoder" class="form-input"><option value="h264_nvenc">h264_nvenc (GPU)</option><option value="libx264">libx264 (CPU)</option></select>
       </div>
       <div class="form-group">
+        <label class="form-label" style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="layer-export-gpu" checked> GPU 解码加速（提取帧硬解码，无 GPU 时自动回退软解）</label>
+      </div>
+      <div class="form-group">
         <label class="form-label">Output Path</label>
         <input id="export-path" class="form-input" type="text" placeholder="Default: source_result.mp4" style="background:#121214;border:1px solid #2a2a2e;border-radius:6px;padding:10px;color:#e0e0e0;width:100%;font-size:13px;">
       </div>

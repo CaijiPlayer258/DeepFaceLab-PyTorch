@@ -13,6 +13,8 @@
   <a href="README_EN.md"><img src="https://img.shields.io/badge/English-Docs-green" alt="English"></a>
 </p>
 
+> **⚠️ 维护状态：本项目已进入低维护模式**（v4.0.7 起）。核心功能（训练/合成/导出）保持可用，但不再积极开发新功能；严重 bug 仍会修复，欢迎 fork 继续维护。
+
 <br>
 
 <p align="center">

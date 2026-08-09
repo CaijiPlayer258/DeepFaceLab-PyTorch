@@ -224,6 +224,7 @@
       var settings = {
         image_format: (document.getElementById('layer-export-format') || {}).value || 'jpg',
         encoder: (document.getElementById('layer-export-encoder') || {}).value || 'h264_nvenc',
+        hwaccel: (document.getElementById('layer-export-gpu') && document.getElementById('layer-export-gpu').checked) ? 'auto' : '',
         output_path: (document.getElementById('export-path') || {}).value || '',
         config: app ? app.state.config : {},
         video_path: app ? app.state.videoPath : '',

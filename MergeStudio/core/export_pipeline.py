@@ -1090,6 +1090,7 @@ def run_export_pipeline(
     detector: str = "YOLOv8",
     landmarker: str = "insightface-2d106det",
     res_scale: float = 0.5,
+    hwaccel: str = '',
     progress_callback: Optional[Callable] = None,
     stop_event=None,
     num_workers: int = 4,
@@ -1156,7 +1157,8 @@ def run_export_pipeline(
             progress(0, 1.0, "DFL project — frames already extracted")
         else:
             progress(0, 0.0, "Extracting frames...")
-            _stage1_extract_frames(video_path, frames_dir, image_format, progress, stop_event=stop_event)
+            _hw = hwaccel if hwaccel else _hwaccel_for_encoder(encoder)
+            _stage1_extract_frames(video_path, frames_dir, image_format, progress, stop_event=stop_event, hwaccel=_hw)
             progress(0, 1.0, "Frames extracted")
 
         # Keep only frames within cut segments (inclusion logic)
@@ -1238,31 +1240,58 @@ def run_export_pipeline(
 
 
 # ---------------------------------------------------------------------------
+def _hwaccel_for_encoder(encoder):
+    """GPU 编码器 → 对应硬解码器（提取帧加速）。软编码器返回 None（软解码）。"""
+    if not encoder:
+        return None
+    enc = encoder.lower()
+    if 'nvenc' in enc or 'nv' in enc:
+        return 'cuda'
+    if 'amf' in enc:
+        return 'd3d11va'
+    if 'qsv' in enc:
+        return 'qsv'
+    if 'videotoolbox' in enc or 'vt' in enc:
+        return 'videotoolbox'
+    return None
+
+
 # Stage 1: FFmpeg frame extraction
 # ---------------------------------------------------------------------------
-def _stage1_extract_frames(video_path, out_dir, fmt, progress, stop_event=None):
+def _stage1_extract_frames(video_path, out_dir, fmt, progress, stop_event=None, hwaccel=None):
     out_dir.mkdir(parents=True, exist_ok=True)
     ext = "png" if fmt == "png" else "jpg"
     out_pattern = str(out_dir / f"%08d.{ext}")
     quality_args = ["-q:v", "2"] if ext == "jpg" else []
-    cmd = [_FFMPEG, "-y", "-i", video_path, "-pix_fmt", "rgb24", *quality_args, out_pattern]
-    print(f"[Export] Stage1: {' '.join(cmd)}", flush=True)
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    _last_done = 0
-    while proc.poll() is None:
-        if stop_event and stop_event.is_set():
-            proc.terminate()
-            try: proc.wait(timeout=5)
-            except: proc.kill(); proc.wait()
-            raise StopRequested("Export cancelled")
-        if out_dir.exists():
-            _done = len([f for f in out_dir.iterdir() if f.suffix in ('.jpg', '.png')])
-            if _done != _last_done:
-                _last_done = _done
-                print(f"[Export] Extracting frames: {_done}", flush=True)
-        time.sleep(0.5)
-    if proc.returncode != 0:
-        raise RuntimeError(f"FFmpeg extract failed (exit={proc.returncode})")
+
+    def _run(_hw):
+        cmd = [_FFMPEG, "-y"]
+        if _hw:
+            cmd += ["-hwaccel", _hw]
+        cmd += ["-i", video_path, "-pix_fmt", "rgb24", *quality_args, out_pattern]
+        print(f"[Export] Stage1: {' '.join(cmd)}", flush=True)
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        last_done = 0
+        while proc.poll() is None:
+            if stop_event and stop_event.is_set():
+                proc.terminate()
+                try: proc.wait(timeout=5)
+                except: proc.kill(); proc.wait()
+                raise StopRequested("Export cancelled")
+            if out_dir.exists():
+                done = len([f for f in out_dir.iterdir() if f.suffix in ('.jpg', '.png')])
+                if done != last_done:
+                    last_done = done
+                    print(f"[Export] Extracting frames: {done}", flush=True)
+            time.sleep(0.5)
+        return proc.returncode, last_done
+
+    rc, _last_done = _run(hwaccel)
+    if rc != 0 and hwaccel:
+        print(f"[Export] GPU 硬解码失败（exit={rc}），自动回退软解码", flush=True)
+        rc, _last_done = _run(None)
+    if rc != 0:
+        raise RuntimeError(f"FFmpeg extract failed (exit={rc})")
     print(f"[Export] Frame extraction complete: {_last_done} frames")
     progress(0, 1.0, "Frames extracted")
 
