@@ -243,7 +243,7 @@ class XSegLiteModel(ModelBase):
         return torch.cat([x, edge], dim=1)
 
     def _train_step(self, input_np: np.ndarray, target_np: np.ndarray) -> float:
-        use_bf16 = bool(self.options.get('use_bf16', False)) and self.device.type == 'cuda'
+        use_bf16 = bool(self.load_or_def_option('use_bf16', True)) and self.device.type == 'cuda'  # None（旧模型未存）时回退 True
         dtype = torch.bfloat16 if use_bf16 else torch.float32
         x = torch.from_numpy(input_np).to(self.device, dtype=dtype)
         y = torch.from_numpy(target_np).to(self.device, dtype=dtype)

@@ -121,10 +121,9 @@ class Conv2D(nn.LayerBase):
 
         # Match TF behavior: explicit pad then VALID conv.
         if self._same_padding:
-            # TF SAME: always pad (kernel-1)//2 per side, symmetric.
-            # THIS is critical — matching TF's exact padding avoids 1-pixel
-            # spatial shifts that accumulate through the network.
-            pad = (self.kernel_size - 1) // 2
+            # 原版 iperov DeepFakeArchi：SAME = 对称 pad ((k-1)*d+1)//2 + VALID conv
+            # （不是 TF 自动 SAME 的不对称 pad！stride>1 时也必须对称）
+            pad = ((self.kernel_size - 1) * self.dilations + 1) // 2
             x = F.pad(x, (pad, pad, pad, pad), mode='constant', value=0.0)
             padding = 0
         elif self.pad_4 is not None:

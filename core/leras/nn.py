@@ -10,6 +10,9 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 import numpy as np
+import torch
+
+import numpy as np
 
 from core.interact import interact as io
 from .device import Devices
@@ -207,10 +210,11 @@ class nn:
 
     @staticmethod
     def flatten(x):
+        # 原版 iperov：通道优先展平（NCHW reshape），与 ops 版本一致
         return x.view(x.size(0), -1)
 
     @staticmethod
-    def pixel_norm(x, epsilon=1e-8, axes=-1):
+    def pixel_norm(x, epsilon=1e-6, axes=-1):
         import torch
 
         return x / torch.sqrt(torch.mean(x**2, dim=axes, keepdim=True) + epsilon)
@@ -218,6 +222,7 @@ class nn:
     @staticmethod
     def reshape_4D(x, h, w, c):
         batch_size = x.size(0)
+        # 原版 iperov：通道优先（先按 (c,h,w) 解释），与 ops 版本一致
         return x.view(batch_size, c, h, w)
 
     class DeviceConfig:
@@ -260,6 +265,7 @@ class nn:
 
 
 from . import ops  # noqa: F401
+
 
 from core.leras.archis.ArchiBase import ArchiBase
 from core.leras.archis.DeepFakeArchi import DeepFakeArchi

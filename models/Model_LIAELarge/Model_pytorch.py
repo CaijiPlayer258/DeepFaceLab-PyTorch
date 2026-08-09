@@ -448,7 +448,7 @@ class LIAELargeModel(ModelBase):
         self.eyes_mouth_prio = bool(self.options['eyes_mouth_prio'])
         self.masked_training = bool(self.options['masked_training'])
         self.blur_out_mask = bool(self.options['blur_out_mask'])
-        self.use_bf16 = bool(self.options.get('use_bf16', False))
+        self.use_bf16 = bool(self.load_or_def_option('use_bf16', True))  # None（旧模型未存）时回退 True，避免误用 FP32
 
         ae_dims = int(self.options['ae_dims'])
         e_dims = int(self.options['e_dims'])

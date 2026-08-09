@@ -109,7 +109,7 @@ def resize2d_nearest(x, size=2):
     return x
 
 def flatten(x):
-    # PyTorch uses NCHW by default
+    # 原版 iperov：NHWC→NCHW 后 reshape（通道优先展平），与 DFL 权重布局一致
     return x.reshape(x.size(0), -1)
 
 def max_pool(x, kernel_size=2, strides=2):
@@ -118,7 +118,7 @@ def max_pool(x, kernel_size=2, strides=2):
     return F.max_pool2d(x, kernel_size=kernel_size, stride=strides, padding=0)
 
 def reshape_4D(x, w,h,c):
-    # PyTorch uses NCHW format
+    # 原版 iperov：展平按 (c,h,w) 通道优先解释（与原版 NCHW 分支一致）
     return x.reshape(-1, c, h, w)
 
 def random_normal(shape, mean=0.0, stddev=1.0, dtype=None):
@@ -181,7 +181,7 @@ def space_to_depth(x, block_size):
     return F.pixel_unshuffle(x, block_size)
 def gaussian_blur(x, kernel_size):
     """
-    应用高斯模糊
+    应用高斯模糊（可分离 1D 两遍——数学等价于 2D 高斯卷积，计算量 k²→2k，GPU 更快）
     
     Args:
         x: 输入张量 (N, C, H, W)
@@ -217,24 +217,22 @@ def gaussian_blur(x, kernel_size):
     # 计算sigma
     sigma = 0.3 * ((kernel_size - 1) * 0.5 - 1) + 0.8
     
-    # 创建1D高斯核
+    # 创建1D高斯核（可分离）
     coords = t.arange(kernel_size, dtype=x.dtype, device=x.device)
     coords -= kernel_size // 2
     
     g = t.exp(-(coords ** 2) / (2 * sigma ** 2))
     g /= g.sum()
     
-    # 扩展到2D
-    kernel = g[None, :] * g[:, None]
-    kernel = kernel / kernel.sum()
-    
-    # 为每个通道创建kernel
+    # 为每个通道创建1D核（可分离：先列后行，等价于 2D 外积核卷积）
     channels = x.shape[1]
-    kernel = kernel.repeat(channels, 1, 1, 1)
+    gv = g.view(1, 1, kernel_size, 1).repeat(channels, 1, 1, 1)  # (C,1,k,1)
+    gh = g.view(1, 1, 1, kernel_size).repeat(channels, 1, 1, 1)  # (C,1,1,k)
     
-    # 应用卷积
+    # 应用卷积（1D 两遍，SAME padding 与 2D 等价——列核只在 H 维 pad，行核只在 W 维 pad）
     padding = kernel_size // 2
-    blurred = F.conv2d(x, kernel, padding=padding, groups=channels)
+    blurred = F.conv2d(x, gv, padding=(padding, 0), groups=channels)
+    blurred = F.conv2d(blurred, gh, padding=(0, padding), groups=channels)
     
     return blurred
 
@@ -296,42 +294,52 @@ def dssim(x, y, max_val=1.0, filter_size=11, k1=0.01, k2=0.03):
     if filter_size % 2 == 0:
         filter_size += 1
     
-    # 创建高斯窗口
+    # 创建高斯窗口（可分离：1D 两遍，等价于 2D 外积核——VALID 输出形状相同，k²→2k 计算量）
     sigma = 1.5
-    coords = t.arange(filter_size, dtype=x.dtype, device=x.device)
-    coords -= filter_size // 2
-    
-    g = t.exp(-(coords ** 2) / (2 * sigma ** 2))
-    g /= g.sum()
-    
-    window = g[None, :] * g[:, None]
-    window = window / window.sum()
-    
-    # 为每个通道创建窗口
     channels = x.shape[1]
-    window = window.repeat(channels, 1, 1, 1)
+    # 缓存 1D 核（按 filter_size/sigma/channels/device——省每次生成）
+    cache_key = (filter_size, sigma, channels, str(x.device))
+    _cache = globals().setdefault('_dssim_kernel_cache', {})
+    gv_gh = _cache.get(cache_key)
+    if gv_gh is None:
+        coords = t.arange(filter_size, dtype=x.dtype, device=x.device)
+        coords -= filter_size // 2
+        g = t.exp(-(coords ** 2) / (2 * sigma ** 2))
+        g /= g.sum()
+        gv = g.view(1, 1, filter_size, 1).repeat(channels, 1, 1, 1)  # (C,1,k,1)
+        gh = g.view(1, 1, 1, filter_size).repeat(channels, 1, 1, 1)  # (C,1,1,k)
+        gv_gh = (gv, gh)
+        if len(_cache) > 64:
+            _cache.clear()
+        _cache[cache_key] = gv_gh
+    gv, gh = gv_gh
     
     # SSIM常数
     c1 = (k1 * max_val) ** 2
     c2 = (k2 * max_val) ** 2
     
-    # 计算均值
-    padding = filter_size // 2
-    mu_x = F.conv2d(x, window, padding=padding, groups=channels)
-    mu_y = F.conv2d(y, window, padding=padding, groups=channels)
+    # 计算均值（padding=VALID，与原版 iperov DFL 一致——滤波器不越界，
+    # 巨大饱和输入下 SAME 补 0 会扭曲边缘 dssim 数值/梯度导致训练发散）
+    def _sep(xx):
+        v = F.conv2d(xx, gv, padding=0, groups=channels)
+        return F.conv2d(v, gh, padding=0, groups=channels)
+    mu_x = _sep(x)
+    mu_y = _sep(y)
     
     mu_x_sq = mu_x ** 2
     mu_y_sq = mu_y ** 2
     mu_xy = mu_x * mu_y
     
     # 计算方差和协方差
-    sigma_x_sq = F.conv2d(x ** 2, window, padding=padding, groups=channels) - mu_x_sq
-    sigma_y_sq = F.conv2d(y ** 2, window, padding=padding, groups=channels) - mu_y_sq
-    sigma_xy = F.conv2d(x * y, window, padding=padding, groups=channels) - mu_xy
+    sigma_x_sq = _sep(x ** 2) - mu_x_sq
+    sigma_y_sq = _sep(y ** 2) - mu_y_sq
+    sigma_xy = _sep(x * y) - mu_xy
     
-    # 计算SSIM
+    # 计算SSIM（数值稳定：巨大饱和输入下分母接近 0 会导致 luminance/cs 巨大 → 梯度爆炸发散）
+    eps = 1e-6
     ssim_map = ((2 * mu_xy + c1) * (2 * sigma_xy + c2)) / \
-               ((mu_x_sq + mu_y_sq + c1) * (sigma_x_sq + sigma_y_sq + c2))
+               ((mu_x_sq + mu_y_sq + c1 + eps) * (sigma_x_sq + sigma_y_sq + c2 + eps))
+    ssim_map = ssim_map.clamp(-1.0, 1.0)
     
     # 计算DSSIM
     dssim_map = (1 - ssim_map) / 2

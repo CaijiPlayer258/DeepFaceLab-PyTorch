@@ -129,7 +129,8 @@ class DeepFakeArchi(ArchiBase):
                     x = nn.flatten(x)
                     if 'u' in opts:
                         # pixel_norm: x / sqrt(mean(x^2) + epsilon)
-                        epsilon = 1e-8
+                        # epsilon 与原版 iperov DFL 一致（1e-6）
+                        epsilon = 1e-6
                         x = x / torch.sqrt(torch.mean(x**2, dim=-1, keepdim=True) + epsilon)
 
                     if use_fp16:

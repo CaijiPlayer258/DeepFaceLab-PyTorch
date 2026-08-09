@@ -1,3 +1,9 @@
+4.0.6
+- dssim 与高斯模糊改为可分离卷积并缓存高斯核
+- dssim padding 与 pixel_norm epsilon 对齐原版 DFL
+- Conv2D 对称 padding 公式修正（含 dilation）
+- use_bf16 旧模型默认开启
+
 4.0.5
 - 修复更新弹窗信息过长导致更新按钮无法点击（只显示最新版本更新信息）
 
