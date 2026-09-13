@@ -7,6 +7,7 @@ import numpy as np
 from core import mathlib
 from core.interact import interact as io
 from core.leras import nn
+from core.leras.archis.archi_parse import parse_archi_string, build_archi_classes, archi_is_lite
 from facelib import FaceType
 from models import ModelBase
 from samplelib import *
@@ -101,14 +102,12 @@ class SAEHDModel(ModelBase):
 Examples: df, liae, df-d, df-ud, liae-ud, ...
 """).lower()
 
-                archi_split = archi.split('-')
-
-                if len(archi_split) == 2:
-                    archi_type, archi_opts = archi_split
-                elif len(archi_split) == 1:
-                    archi_type, archi_opts = archi_split[0], None
-                else:
+                # 统一走 parse_archi_string：支持第三段 DFLite 修饰符（df-udt-l / -l5 / -l3 ...）
+                _parsed = parse_archi_string(archi)
+                if _parsed is None:
                     continue
+
+                archi_type, archi_opts, archi_mod = _parsed
 
                 if archi_type not in ['df', 'liae']:
                     continue
@@ -216,14 +215,17 @@ Examples: df, liae, df-d, df-ud, liae-ud, ...
 
         eyes_mouth_prio = self.options['eyes_mouth_prio']
 
-        archi_split = self.options['archi'].split('-')
-
-        if len(archi_split) == 2:
-            archi_type, archi_opts = archi_split
-        elif len(archi_split) == 1:
-            archi_type, archi_opts = archi_split[0], None
+        # 与 Model_pytorch 保持一致：走统一解析器，支持 DFLite 第三段修饰符
+        _parsed = parse_archi_string(self.options['archi'])
+        if _parsed is None:
+            archi_type, archi_opts, archi_mod = 'df', 'ud', ''
+        else:
+            archi_type, archi_opts, archi_mod = _parsed
 
         self.archi_type = archi_type
+        self.archi_opts = archi_opts
+        self.archi_mod = archi_mod
+        self.is_lite = archi_is_lite(archi_mod)
 
         ae_dims = self.options['ae_dims']
         e_dims = self.options['e_dims']
@@ -284,7 +286,11 @@ Examples: df, liae, df-d, df-ud, liae-ud, ...
             self.target_dstm_em = tf.placeholder (nn.floatx, mask_shape, name='target_dstm_em')
 
         # Initializing model classes
-        model_archi = nn.DeepFakeArchi(resolution, use_fp16=use_fp16, opts=archi_opts)
+        # Lite 修饰符 -> DFLiteArchi；无修饰符时仍是 DeepFakeArchi，行为不变。
+        _ArchiClass, _archi_kwargs = build_archi_classes(
+            archi_mod, {'ae_dims': ae_dims} if archi_is_lite(archi_mod) else None)
+        model_archi = _ArchiClass(resolution, use_fp16=use_fp16, opts=archi_opts, **_archi_kwargs)
+        self.archi_class_name = _ArchiClass.__name__
 
         with tf.device (models_opt_device):
             if 'df' in archi_type:

@@ -193,13 +193,17 @@ class AMPModel(ModelBase):
 			default_lr_scheduler = self.options['lr_scheduler'] = self.load_or_def_option('lr_scheduler', 'none')
 			self.options['lr_scheduler'] = io.input_str(
 				'学习率调度器', default_lr_scheduler, ['none', 'cosine'],
-				help_message='cosine: 余弦退火调度器，周期重置学习率。none: 固定学习率。',
+				help_message='cosine: 余弦退火·热重启（SGDR）—— 每次周期结束把 lr 弹回峰值重开一轮，'
+				             '不是单调退火。none: 固定学习率。',
 			)
 			if self.options['lr_scheduler'] == 'cosine':
 				default_cos = self.options['lr_cos_period'] = self.load_or_def_option('lr_cos_period', 500)
 				self.options['lr_cos_period'] = io.input_int(
-					'余弦退火周期(迭代)', default_cos, add_info='建议 500~2000',
-					help_message='余弦退火一个完整周期的迭代数。',
+					'余弦退火·热重启单轮长度(迭代)', default_cos, add_info='建议 500~2000',
+					help_message='一轮热重启的迭代数：走完一轮 lr 弹回峰值重新开始。'
+					             '注意「余弦退火」与「余弦退火·热重启」是两个不同的东西 —— '
+					             '前者单调下降不重启（PyTorch 的 CosineAnnealingLR），'
+					             '后者周期性重启（CosineAnnealingWarmRestarts）。这里用的是后者。',
 				)
 
 		default_gan_power = self.options['gan_power'] = self.load_or_def_option('gan_power', 0.0)

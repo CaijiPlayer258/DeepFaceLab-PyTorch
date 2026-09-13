@@ -574,9 +574,15 @@ class TrainingConfigChildPage(SiChildPage):
             self.learning_rate_card.addWidget(self.learning_rate_input)
             self.learning_rate_card.adjustSize()
             
-            # 余弦退火周期
+            # 余弦退火·热重启（Cosine Annealing with Warm Restarts, SGDR）
+            # 注意术语：这里用的是**热重启**版 —— lr 周期性弹回峰值。
+            # 单纯的「余弦退火（Cosine Annealing）」是单调下降、不重启，那是另一回事。
             self.lr_cos_card = SiOptionCardLinear(self)
-            self.lr_cos_card.setTitle("余弦退火周期", "余弦退火周期迭代步数（0=关闭）")
+            self.lr_cos_card.setTitle(
+                "余弦退火·热重启（谨慎开启）",
+                "Cosine Annealing with Warm Restarts（SGDR）：每 N 步把 lr 弹回峰值重新开始一轮。"
+                "注意它不是单调退火。实测后期会反复把模型踢出已收敛的极小值，质量比不开启更差。"
+                "0=关闭。想要单调下降请用「平台期自动降 lr」")
             self.lr_cos_card.load(safe_get_icon("ic_fluent_calendar_schedule_filled"))
             self.lr_cos_input = SiLabeledLineEdit(self.lr_cos_card)
             self.lr_cos_input.setTitle("整数")
@@ -587,9 +593,71 @@ class TrainingConfigChildPage(SiChildPage):
             self.lr_cos_card.addWidget(self.lr_cos_input)
             self.lr_cos_card.adjustSize()
 
+            # 单调余弦退火（单次，不重启）。与上面的热重启是两个东西。
+            self.lr_anneal_card = SiOptionCardLinear(self)
+            self.lr_anneal_card.setTitle(
+                "单调余弦退火总步数（0=关闭）",
+                "Cosine Annealing（单次）：lr 从设定值沿余弦单调降到接近 0，不重启。"
+                "必须大致等于你打算跑的总步数 —— 设准了跑完时 lr 正好接近 0（没收敛就会卡住）；"
+                "设成实际步数的好几倍则几乎不退火（5 倍余量时跑完只降到 90%）。"
+                "填 0 关闭。它与上面的热重启互斥，同时非 0 时以本项优先")
+            self.lr_anneal_card.load(safe_get_icon("ic_fluent_trending_down_filled"))
+            self.lr_anneal_input = SiLabeledLineEdit(self.lr_anneal_card)
+            self.lr_anneal_input.setTitle("整数")
+            self.lr_anneal_input.setText("0")
+            self.lr_anneal_input.setFixedHeight(48)
+            self.lr_anneal_input.resize(150, 48)
+            self.lr_anneal_input.textChanged.connect(lambda: self.update_config('lr_total_steps'))
+            self.lr_anneal_card.addWidget(self.lr_anneal_input)
+            self.lr_anneal_card.adjustSize()
+
+            # ---- 平台期自动降 lr ----
+            # 针对"训练没有预定总步数"的常态：连续 patience 步没有实质改善就降一次 lr。
+            self.lr_plateau_card = SiOptionCardLinear(self)
+            self.lr_plateau_card.setTitle(
+                "平台期自动降 lr",
+                "连续 N 步 loss 无改善则把 lr 乘以衰减系数（0=关闭）。不依赖预定总步数")
+            self.lr_plateau_card.load(safe_get_icon("ic_fluent_calendar_schedule_filled"))
+
+            self.lr_plateau_factor_combo = SiCapsuleComboBox(self.lr_plateau_card)
+            self.lr_plateau_factor_combo.setTitle("衰减系数")
+            self.lr_plateau_factor_combo.setFixedWidth(150)
+            self.lr_plateau_factor_combo.setMinimumHeight(32)
+            self.lr_plateau_factor_combo.setMaximumHeight(32)
+            self.lr_plateau_factor_combo.setEditable(False)
+            self.lr_plateau_factor_combo.addItems(["1.0（关闭）", "0.5", "0.7", "0.3"])
+            self.lr_plateau_factor_combo.setCurrentText("1.0（关闭）")
+            self.lr_plateau_factor_combo.currentTextChanged.connect(
+                lambda text: self.update_config('lr_plateau_factor', text.split('（')[0]))
+            self.lr_plateau_card.addWidget(self.lr_plateau_factor_combo)
+
+            self.lr_plateau_patience_input = SiLabeledLineEdit(self.lr_plateau_card)
+            self.lr_plateau_patience_input.setTitle("耐心步数 0=自动")
+            self.lr_plateau_patience_input.setText("0")
+            self.lr_plateau_patience_input.setFixedHeight(48)
+            self.lr_plateau_patience_input.resize(150, 48)
+            self.lr_plateau_patience_input.textChanged.connect(
+                lambda: self.update_config('lr_plateau_patience'))
+            self.lr_plateau_card.addWidget(self.lr_plateau_patience_input)
+
+            self.lr_plateau_min_ratio_input = SiLabeledLineEdit(self.lr_plateau_card)
+            self.lr_plateau_min_ratio_input.setTitle("下限(初始lr的比例)")
+            self.lr_plateau_min_ratio_input.setText("0.1")
+            self.lr_plateau_min_ratio_input.setFixedHeight(48)
+            self.lr_plateau_min_ratio_input.resize(150, 48)
+            self.lr_plateau_min_ratio_input.textChanged.connect(
+                lambda: self.update_config('lr_plateau_min_ratio'))
+            self.lr_plateau_card.addWidget(self.lr_plateau_min_ratio_input)
+
+            self.lr_plateau_card.adjustSize()
+
             # === 学习率丢弃策略 ===
             self.lr_dropout_card = SiOptionCardLinear(self)
-            self.lr_dropout_card.setTitle("学习率丢弃", "LR dropout 策略（y/n/cpu）")
+            self.lr_dropout_card.setTitle(
+                "LR dropout（历史参数，建议保持 n）",
+                "iperov 遗留项。在反传之后用 bernoulli 掩码丢弃更新量，前向/反向看到的都是完整模型，"
+                "所以不构成 dropout 那种正则化；期望效应约等于把 lr 乘上掩码保留率。"
+                "实测开关它质量基本无变化，和余弦退火热重启同开还会拖累后期。想减小有效步长请直接调 lr")
             self.lr_dropout_card.load(safe_get_icon("ic_fluent_trending_down_filled"))
             self.lr_dropout_combo = SiCapsuleComboBox(self.lr_dropout_card)
             self.lr_dropout_combo.setTitle("策略")
@@ -624,6 +692,8 @@ class TrainingConfigChildPage(SiChildPage):
             _cfg_mc = self.model_info.get('class_name', 'SAEHD')
             if _cfg_mc not in ('DeepFakeLarge', 'LIAELarge'):
                 group.addWidget(self.lr_cos_card)
+                group.addWidget(self.lr_anneal_card)
+                group.addWidget(self.lr_plateau_card)
                 group.addWidget(self.lr_dropout_card)
                 self.lr_policy_card.setParent(None)
             else:
@@ -1100,7 +1170,7 @@ class TrainingConfigChildPage(SiChildPage):
         for card_name in [
             'archi_card',
             'd_mask_dims_card',
-            'lr_cos_card', 'lr_dropout_card',
+            'lr_cos_card', 'lr_plateau_card', 'lr_dropout_card',
             'gan_patch_size_card', 'gan_dims_card',
             'true_face_power_card', 'face_style_power_card', 'bg_style_power_card',
             'models_opt_on_gpu_card', 'use_fast_generator_card',
@@ -1265,6 +1335,10 @@ class TrainingConfigChildPage(SiChildPage):
                             ('lr_dropout',                'lr_dropout',          str),
                             ('lr_policy',                 'lr_policy',           str),
                             ('lr_cos',                    'lr_cos',              int),
+                            ('lr_total_steps',            'lr_total_steps',           int),
+                            ('lr_plateau_factor',         'lr_plateau_factor',        float),
+                            ('lr_plateau_patience',       'lr_plateau_patience',      int),
+                            ('lr_plateau_min_ratio',      'lr_plateau_min_ratio',     float),
                             ('use_bf16',                  'use_bf16',            bool),
                             ('gan_patch_size',            'gan_patch_size',      int),
                             ('gan_dims',                  'gan_dims',            int),
@@ -1698,6 +1772,15 @@ class TrainingConfigChildPage(SiChildPage):
         self.prioritize_mouth_eyes_switch.setChecked(bool(cfg.get('prioritize_mouth_eyes', False)))
         self.optimizer_combo.setCurrentText(str(cfg.get('optimizer', 'adabelief')))
         self.lr_cos_input.setText(str(cfg.get('lr_cos', '0')))
+        _pf = cfg.get('lr_plateau_factor', '1.0')
+        try:
+            _pf = str(float(_pf))
+        except (TypeError, ValueError):
+            _pf = '1.0'
+        self.lr_plateau_factor_combo.setCurrentText(_pf if _pf != '1.0' else '1.0（关闭）')
+        self.lr_anneal_input.setText(str(cfg.get('lr_total_steps', '0')))
+        self.lr_plateau_patience_input.setText(str(cfg.get('lr_plateau_patience', '0')))
+        self.lr_plateau_min_ratio_input.setText(str(cfg.get('lr_plateau_min_ratio', '0.1')))
         self.random_hsv_power_input.setText(str(cfg.get('random_hsv_power', '0.0')))
         self.random_warp_switch.setChecked(bool(cfg.get('random_warp', True)))
         self.random_src_flip_switch.setChecked(bool(cfg.get('random_src_flip', False)))
@@ -1793,6 +1876,14 @@ class TrainingConfigChildPage(SiChildPage):
                     self.config_data[key] = self.clipgrad_switch.isChecked()
                 elif key == 'lr_cos':
                     self.config_data[key] = self.lr_cos_input.text()
+                elif key == 'lr_total_steps':
+                    self.config_data[key] = self.lr_anneal_input.text()
+                elif key == 'lr_plateau_patience':
+                    self.config_data[key] = self.lr_plateau_patience_input.text()
+                elif key == 'lr_plateau_min_ratio':
+                    self.config_data[key] = self.lr_plateau_min_ratio_input.text()
+                elif key == 'lr_plateau_factor':
+                    self.config_data[key] = value if value is not None else '1.0'
                 elif key == 'random_warp':
                     self.config_data[key] = self.random_warp_switch.isChecked()
                 elif key == 'random_src_flip':

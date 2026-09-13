@@ -4,6 +4,16 @@ import ctypes
 
 _DEBUG = '--debug' in sys.argv or os.environ.get('UI_DEBUG', '') == '1'
 
+# 控制台/日志重定向时默认编码可能是 GBK，而 ui.py 里有 "✓ / ✗" 这类字符，
+# 直接 print 会抛 UnicodeEncodeError 把整个启动打断。
+# errors='replace' 只为兜住这类装饰性输出——正常控制台下无影响。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors='replace')
+    except Exception:
+        pass
+del _stream
+
 def _dbg(msg):
     if _DEBUG:
         print(f'Debug: {msg}')

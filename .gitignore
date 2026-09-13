@@ -73,7 +73,6 @@ node_modules/
 ui/user/
 使用说明.txt
 PyQt-SiliconUI-main/
-docs/
 
 # Experimental/research tools (orphan scripts)
 tools/bench_*
@@ -85,3 +84,30 @@ tools/verify_*
 tools/TF_TO_TORCH_*
 tools/__pycache__/
 FaceCompleter/
+
+# ============================================================
+# 以下为本次本地仓库初始化时新增的排除项
+# ============================================================
+
+# 【硬要求】不含另一个项目（DeepFaceLive-NextGen）的代码。
+# modelhub/xlib 是 DeepFaceLive 的库副本（3.6 GB），
+# modelhub/onnx/* 依赖它的 xlib.onnxruntime / xlib.trt / xlib.face。
+# 这不是本项目源码，一律不进仓库。
+modelhub/xlib/
+modelhub/modelhub/
+
+# 研究笔记与实验脚本（本地资料，不入库）
+hypothesis/
+
+# Cursor / 本地编辑器
+.cursor/
+*.orig
+*.rej
+
+# 构建与临时产物
+*.tmp
+*.bak2
+
+# Agent Tool 本地状态（含会话标题、本地路径，属隐私，禁止入库）
+.reasonix/
+reasonix.toml

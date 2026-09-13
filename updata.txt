@@ -1,3 +1,5 @@
+﻿[2026-09-13] feat: DFLite lightweight architecture (depthwise separable encoder/decoder, df-udt-l family, -25.3% params, 1.95x inference)
+[2026-09-13] fix: DFLite BN inplace buffer update broke backward; lr_dropout mask sampled only once
 [2026-06-21] cleanup: remove redundant DFM export step from XSeg export script
 [2026-06-21] fix: set dynamo=False in ONNX export to avoid .data split files
 [2026-06-21] fix: XSeg ONNX route send NCHW to match PyTorch export format

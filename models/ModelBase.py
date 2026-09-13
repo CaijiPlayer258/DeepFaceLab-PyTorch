@@ -377,15 +377,60 @@ class ModelBase(object):
         )
 
     def ask_lr_scheduler(self, default_value=0):
+        """余弦退火·热重启（Cosine Annealing with Warm Restarts, SGDR）。
+
+        术语要分清楚（容易混）：
+          余弦退火 (Cosine Annealing)                    —— lr 单调下降，不重启
+          余弦退火·热重启 (Cosine Annealing + Warm Restarts) —— lr 周期性弹回峰值
+
+        这里用的是**后者**：每 lr_cos 步把 lr 弹回峰值重开一轮。
+        实测在训练后期会反复把模型踢出已收敛的极小值，质量比不开启更差，
+        所以建议保持 0。想要单调下降请用 ask_lr_plateau()。
+        """
         default_lr_cos = self.load_or_def_option('lr_cos', default_value)
         self.options['lr_cos'] = int(
             io.input_int(
-                "学习率余弦退火周期 (LR Cosine Annealing Cycles)",
+                "余弦退火·热重启周期 (Cosine Annealing Warm Restarts)",
                 default_lr_cos,
-                add_info='0=关闭, >0=周期长度',
-                help_message='使用余弦退火调度学习率。0 表示关闭。正值表示余弦周期的迭代步数（例如 500 步一个周期）。需要配合学习率 dropout 使用。',
+                add_info='0=关闭, >0=单轮长度',
+                help_message='注意这是「热重启」：每 N 步把 lr 弹回峰值重新开始一轮，不是单调退火。'
+                             '实测后期会拖累质量，建议保持 0。想要单调下降请用「平台期自动降 lr」。',
             )
         )
+
+    def ask_lr_plateau(self):
+        """平台期自动降 lr 的交互式设置。
+
+        为什么需要它：真实训练通常**没有预定总步数**（一直挂着训），
+        所以"提前声明退火总步数"这种接口不实用。平台期检测是唯一不需要
+        预知总步数的自适应策略 —— 连续 N 步没有实质改善就降一次 lr。
+
+        默认关闭（factor=1.0）：这是会改变训练动态的功能，不静默替用户开启。
+        想用就在训练配置页把「平台期自动降 lr」的衰减系数选成 0.5 之类。
+        """
+        d_factor = self.load_or_def_option('lr_plateau_factor', 1.0)
+        try:
+            d_factor = float(d_factor)
+        except (TypeError, ValueError):
+            d_factor = 1.0
+        if d_factor > 0.0 and io.input_bool(
+                "启用平台期自动降 lr（连续无改善则衰减学习率）", d_factor < 1.0,
+                help_message='不依赖预定总步数。连续 N 步 loss 没有实质改善时把 lr 乘以衰减系数。'
+                             '适合"一直挂着训"的场景。'):
+            self.options['lr_plateau_factor'] = float(
+                io.input_number("衰减系数", d_factor if d_factor < 1.0 else 0.5, add_info='0.1..0.9'))
+            self.options['lr_plateau_patience'] = int(
+                io.input_int("耐心步数", self.load_or_def_option('lr_plateau_patience', 0),
+                             add_info='0=自动'))
+            self.options['lr_plateau_min_ratio'] = float(
+                io.input_number("学习率下限（占初始值的比例）",
+                                self.load_or_def_option('lr_plateau_min_ratio', 0.1),
+                                add_info='0.01..0.5'))
+        else:
+            self.options['lr_plateau_factor'] = 1.0
+            self.options['lr_plateau_patience'] = int(
+                self.load_or_def_option('lr_plateau_patience', 0) or 0)
+            self.options['lr_plateau_min_ratio'] = 0.1
 
     def ask_gradient_checkpointing(self, default_value=False):
         default_grad_ckpt = self.load_or_def_option('gradient_checkpointing', default_value)

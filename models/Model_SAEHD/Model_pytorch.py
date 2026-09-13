@@ -34,6 +34,7 @@ except ImportError:
 
 from core.interact import interact as io
 from core.leras import nn
+from core.leras.archis.archi_parse import parse_archi_string, build_archi_classes, archi_is_lite
 from facelib import FaceType
 from models import ModelBase
 from samplelib import SampleGeneratorFace, SampleProcessor, SampleLoaderV4, SampleGeneratorV2
@@ -318,6 +319,8 @@ class SAEHDModel(ModelBase):
 
             self.ask_lr_scheduler()
 
+            self.ask_lr_plateau()
+
             self.options['random_warp'] = io.input_bool(
                 '启用样本随机形变（random warp）',
                 default_random_warp,
@@ -573,19 +576,25 @@ class SAEHDModel(ModelBase):
         self.blur_out_mask = bool(self.options['blur_out_mask'])
         self.use_bf16 = bool(self.load_or_def_option('use_bf16', True))  # None（旧模型未存）时回退 True，避免误用 FP32
 
-        archi_split = self.options['archi'].split('-')
-        if len(archi_split) == 2:
-            archi_type, archi_opts = archi_split
+        # 统一走 parse_archi_string：它支持第三段 DFLite 修饰符（df-udt-l / -l5 / -l3 / -lx ...），
+        # 两段式旧写法（df-ud）行为不变。
+        _parsed = parse_archi_string(self.options['archi'])
+        if _parsed is None:
+            io.log_info(f"[archi] 无法解析 {self.options['archi']!r}，回退到 df-ud")
+            archi_type, archi_opts, archi_mod = 'df', 'ud', ''
         else:
-            archi_type, archi_opts = archi_split[0], None
+            archi_type, archi_opts, archi_mod = _parsed
 
         self.archi_type = archi_type
         self.archi_opts = archi_opts
+        self.archi_mod = archi_mod
+        self.is_lite = archi_is_lite(archi_mod)
 
         # 兼容旧数据：archi 可能被误存为 'SAEHD' 而非 'df-ud'
         if self.archi_type not in ('df', 'liae'):
             self.archi_type = 'df'
             self.archi_opts = 'ud'
+            self.archi_mod = archi_mod
 
         ae_dims = int(self.options['ae_dims'])
         e_dims = int(self.options['e_dims'])
@@ -629,7 +638,14 @@ class SAEHDModel(ModelBase):
         input_ch = 3
         self.model_filename_list = []
 
-        model_archi = nn.DeepFakeArchi(resolution, use_fp16=use_fp16, use_bf16=use_bf16, opts=archi_opts)
+        # Lite 修饰符 -> DFLiteArchi；无修饰符时仍是 DeepFakeArchi，行为与改动前完全一致。
+        # DFLite 里 ae_dims 同时决定瓶颈宽度和解码器输入通道，必须与下面 Inter 的
+        # ae_out_ch 一致，所以显式传进去。
+        _ArchiClass, _archi_kwargs = build_archi_classes(
+            archi_mod, {'ae_dims': ae_dims} if archi_is_lite(archi_mod) else None)
+        model_archi = _ArchiClass(resolution, use_fp16=use_fp16, use_bf16=use_bf16,
+                                  opts=archi_opts, **_archi_kwargs)
+        self.archi_class_name = _ArchiClass.__name__
 
         if 'df' in archi_type:
             self.encoder = model_archi.Encoder(in_ch=input_ch, e_ch=e_dims, name='encoder')
@@ -719,12 +735,35 @@ class SAEHDModel(ModelBase):
             except (ValueError, TypeError):
                 lr = 5e-5
                 io.log_info(f'[WARN] 学习率值异常 ({_lr_raw!r})，已重置为 {lr}')
-            if self.options['lr_dropout'] in ['y', 'cpu'] and not self.pretrain:
-                lr_cos = self.options.get('lr_cos', 500)
-                lr_dropout = 0.3
-            else:
-                lr_cos = self.options.get('lr_cos', 0)
-                lr_dropout = 1.0
+            # lr_cos 与 lr_dropout **解耦**。
+            # lr_dropout 是 iperov 时代的历史参数（只在那行 lr_masks 加噪上有作用，
+            # 对新架构基本没用），以前却把它当"学习率策略"的开关、还会顺手改 lr_cos，
+            # 导致选了 y 就莫名其妙开了余弦热重启。现在：lr_cos != 0 就是开启
+            # 余弦退火·热重启（SGDR），与 lr_dropout 无关。
+            # 术语：余弦退火=单调下降；余弦退火·热重启=周期性弹回峰值。这里是后者。
+            lr_cos = int(self.options.get('lr_cos', 0) or 0)
+            lr_dropout = 0.3 if (self.options['lr_dropout'] in ['y', 'cpu'] and not self.pretrain) else 1.0
+
+            # ---- 单调余弦退火（单次，不重启）----
+            # 术语：余弦退火 = 单调下降到 ~0、不重启；余弦退火·热重启(SGDR) = 周期性弹回峰值。
+            # lr_total_steps > 0 时启用前者，且优先于 lr_cos 的热重启。
+            # 它必须大致等于实际总步数：设准了跑完时 lr 接近 0；设太远则几乎不退火。
+            lr_total_steps = int(self.options.get('lr_total_steps', 0) or 0)
+            if lr_total_steps > 0:
+                io.log_info("[LR] 单调余弦退火已开启：总步数 %d（跑完时 lr 降到接近 0）" % lr_total_steps)
+
+            # ---- 平台期自动降 lr（针对"训练没有预定总步数"的常态）----
+            # factor >= 1.0 视为关闭。patience<=0 时自动按 lr_cos 推导（lr_cos 也没设就给 2000）。
+            lr_plateau_factor     = float(self.options.get('lr_plateau_factor', 1.0) or 1.0)
+            lr_plateau_patience   = int(self.options.get('lr_plateau_patience', 0) or 0)
+            lr_plateau_delta      = float(self.options.get('lr_plateau_delta', 1e-4) or 0.0)
+            lr_plateau_min_ratio  = float(self.options.get('lr_plateau_min_ratio', 0.1) or 0.0)
+            lr_plateau_partitions = int(self.options.get('lr_plateau_partitions', 1) or 1)
+            if lr_plateau_factor < 1.0:
+                io.log_info(
+                    "[LR] 平台期自动降 lr 已开启：连续 %d 步无改善则 lr x%.2f，下限为初始的 %.0f%%"
+                    % (lr_plateau_patience or (lr_cos if lr_cos > 0 else 2000),
+                       lr_plateau_factor, lr_plateau_min_ratio * 100))
 
             optimizer_map = {'adam': nn.Adam, 'adabelief': nn.AdaBelief, 'lion': nn.Lion}
             OptimizerClass = optimizer_map.get(optimizer_name, nn.AdaBelief)
@@ -760,6 +799,12 @@ class SAEHDModel(ModelBase):
                 lr=lr,
                 lr_dropout=lr_dropout,
                 lr_cos=lr_cos,
+                lr_total_steps=lr_total_steps,
+                lr_plateau_factor=lr_plateau_factor,
+                lr_plateau_patience=lr_plateau_patience,
+                lr_plateau_delta=lr_plateau_delta,
+                lr_plateau_min_ratio=lr_plateau_min_ratio,
+                lr_plateau_partitions=lr_plateau_partitions,
                 clipnorm=clipnorm,
                 name='src_dst_opt',
             )
@@ -771,6 +816,12 @@ class SAEHDModel(ModelBase):
                     lr=lr,
                     lr_dropout=lr_dropout,
                     lr_cos=lr_cos,
+                    lr_total_steps=lr_total_steps,
+                    lr_plateau_factor=lr_plateau_factor,
+                    lr_plateau_patience=lr_plateau_patience,
+                    lr_plateau_delta=lr_plateau_delta,
+                    lr_plateau_min_ratio=lr_plateau_min_ratio,
+                    lr_plateau_partitions=lr_plateau_partitions,
                     clipnorm=clipnorm,
                     name='D_code_opt',
                 )
@@ -782,6 +833,12 @@ class SAEHDModel(ModelBase):
                     lr=lr,
                     lr_dropout=lr_dropout,
                     lr_cos=lr_cos,
+                    lr_total_steps=lr_total_steps,
+                    lr_plateau_factor=lr_plateau_factor,
+                    lr_plateau_patience=lr_plateau_patience,
+                    lr_plateau_delta=lr_plateau_delta,
+                    lr_plateau_min_ratio=lr_plateau_min_ratio,
+                    lr_plateau_partitions=lr_plateau_partitions,
                     clipnorm=clipnorm,
                     name='GAN_opt',
                 )
@@ -1655,6 +1712,14 @@ class SAEHDModel(ModelBase):
             )
 
         # backward + optimizer steps
+        # 平台期检测：把监测指标喂给优化器。用 src+dst 的和（与界面显示的两个 loss 同源），
+        # 必须放在 step() 之前 —— step() 里判断"是否刚好积累够一个窗口"依赖这里已经入列。
+        # 拿不到 float 时（XLA 等）静默跳过，不影响训练。
+        try:
+            self.src_dst_opt.observe_loss(
+                float(src_loss_vec.mean().detach().cpu()) + float(dst_loss_vec.mean().detach().cpu()))
+        except Exception:
+            pass
         self.src_dst_opt.zero_grad()
         G_loss.backward()
         self.src_dst_opt.step()
@@ -1750,6 +1815,11 @@ class SAEHDModel(ModelBase):
             )
 
         # backward + optimizer steps (ALL inside compiled region)
+        try:
+            self.src_dst_opt.observe_loss(
+                float(src_loss_vec.mean().detach().cpu()) + float(dst_loss_vec.mean().detach().cpu()))
+        except Exception:
+            pass
         self.src_dst_opt.zero_grad()
         G_loss.backward()
         self.src_dst_opt.step()

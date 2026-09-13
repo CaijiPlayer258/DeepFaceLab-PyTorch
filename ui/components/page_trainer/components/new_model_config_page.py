@@ -11,6 +11,13 @@ from siui.components.combobox_ import SiCapsuleComboBox
 from siui.core import SiGlobal
 
 
+from core.leras.archis.archi_spec import (
+    ARCHI_CHOICES, ARCHI_DESCRIPTIONS, SUBARCHI_CHOICES, SUBARCHI_DESCRIPTIONS,
+    KERNEL_CHOICES, build_archi_string as _build_archi_string,
+    kernel_desc_for, is_lite_display, default_kernel_label,
+)
+
+
 def safe_get_icon(name):
     """安全获取图标"""
     try:
@@ -39,6 +46,7 @@ class NewModelConfigChildPage(SiChildPage):
             'resolution': '256',
             'archi': 'DF',
             'subarchi': '-ud',
+            'kernel': None,   # None -> default_kernel_label()，下面初始化时填
             'e_dims': '64',
             'ae_dims': '256',
             'd_dims': '128',
@@ -87,8 +95,8 @@ class NewModelConfigChildPage(SiChildPage):
             self.archi_combo.setMinimumHeight(32)
             self.archi_combo.setMaximumHeight(32)
             self.archi_combo.setEditable(False)
-            self.archi_combo.addItems(["DF", "LIAE", "AMP"])
-            self.archi_combo.setCurrentText("DF")
+            self.archi_combo.addItems([c[0] for c in ARCHI_CHOICES])
+            self.archi_combo.setCurrentText(ARCHI_CHOICES[0][0])
             self.archi_combo.currentTextChanged.connect(lambda text: self.update_architecture(text))
             self.archi_card.addWidget(self.archi_combo)
             self.archi_card.adjustSize()
@@ -103,11 +111,29 @@ class NewModelConfigChildPage(SiChildPage):
             self.subarchi_combo.setMinimumHeight(32)
             self.subarchi_combo.setMaximumHeight(32)
             self.subarchi_combo.setEditable(False)
-            self.subarchi_combo.addItems(["-u", "-ud", "-ut", "-udt", "-d", "-dt", "-t"])
+            self.subarchi_combo.addItems(list(SUBARCHI_CHOICES))
             self.subarchi_combo.setCurrentText("-ud")
             self.subarchi_combo.currentTextChanged.connect(lambda text: self.update_subarchitecture(text))
             self.subarchi_card.addWidget(self.subarchi_combo)
             self.subarchi_card.adjustSize()
+
+            # 算子 - 仅对 Lite 架构生效（DF Lite / LIAE Lite）
+            self.kernel_card = SiOptionCardLinear(self)
+            self.kernel_card.setTitle("算子", "Lite 架构的卷积算子（决定速度/参数量/感受野）")
+            self.kernel_card.load(safe_get_icon("ic_fluent_settings_filled"))
+            self.kernel_combo = SiCapsuleComboBox(self.kernel_card)
+            self.kernel_combo.setTitle("算子")
+            self.kernel_combo.setFixedWidth(330)
+            self.kernel_combo.setMinimumHeight(32)
+            self.kernel_combo.setMaximumHeight(32)
+            self.kernel_combo.setEditable(False)
+            self.kernel_combo.addItems([c[0] for c in KERNEL_CHOICES])
+            _default_kernel = default_kernel_label()
+            self.kernel_combo.setCurrentText(_default_kernel)
+            self.config_data['kernel'] = _default_kernel
+            self.kernel_combo.currentTextChanged.connect(lambda text: self.update_kernel(text))
+            self.kernel_card.addWidget(self.kernel_combo)
+            self.kernel_card.adjustSize()
             
             # e_dims - 编码器维度大小
             self.e_dims_card = SiOptionCardLinear(self)
@@ -169,6 +195,7 @@ class NewModelConfigChildPage(SiChildPage):
             group.addWidget(self.resolution_card)
             group.addWidget(self.archi_card)
             group.addWidget(self.subarchi_card)
+            group.addWidget(self.kernel_card)
             group.addWidget(self.e_dims_card)
             group.addWidget(self.ae_dims_card)
             group.addWidget(self.d_dims_card)
@@ -197,33 +224,42 @@ class NewModelConfigChildPage(SiChildPage):
         """更新架构选择并改变描述"""
         self.config_data['archi'] = text
         print(f"[CONFIG] archi = {text}")
-        
-        # 根据选择的架构更新副标题描述
-        descriptions = {
-            "DF": "编码器-inter-双解码器架构",
-            "LIAE": "编码器-双inter-解码器架构",
-            "AMP": "编码器-双inter(身份分离)-解码器架构"
-        }
-        if text in descriptions:
-            self.archi_card.setTitle("架构", descriptions[text])
+        if text in ARCHI_DESCRIPTIONS:
+            self.archi_card.setTitle("架构", ARCHI_DESCRIPTIONS[text])
+        self._refresh_archi_str()
+
+    def update_kernel(self, text):
+        """更新算子选择（仅 Lite 架构生效）"""
+        self.config_data['kernel'] = text
+        print(f"[CONFIG] kernel = {text}")
+        self.kernel_card.setTitle("算子", kernel_desc_for(text))
+        self._refresh_archi_str()
+
+    def _refresh_archi_str(self):
+        """把「架构 + 子分支 + 算子」拼成后端可解析的 archi 串。
+
+        显示名 'DF' 要变成 'df'；选了 Lite 架构才追加第三段算子修饰符。
+        结果放进 config_data['archi_str']，page_trainer 直接取用。
+        """
+        try:
+            self.config_data['archi_str'] = _build_archi_string(
+                self.config_data.get('archi', 'DF'),
+                self.config_data.get('subarchi', '-ud'),
+                self.config_data.get('kernel') or default_kernel_label(),
+            )
+        except Exception as e:
+            print(f"[CONFIG] build_archi_string 失败: {e}")
+            self.config_data['archi_str'] = None
+        print(f"[CONFIG] archi_str = {self.config_data['archi_str']}")
     
     def update_subarchitecture(self, text):
         """更新子分支选择并改变描述"""
         self.config_data['subarchi'] = text
         print(f"[CONFIG] subarchi = {text}")
         
-        # 根据选择的子分支更新副标题描述
-        descriptions = {
-            "-u": "像素进行归一化处理",
-            "-d": "提供一种可学习的上采样",
-            "-t": "编码器增加一次下采样",
-            "-ud": "像素归一化 + 可学习上采样",
-            "-ut": "像素归一化 + 编码器增加下采样",
-            "-udt": "像素归一化 + 可学习上采样 + 编码器增加下采样 ",
-            "-dt": "可学习上采样 + 编码器增加@下采样"
-        }
-        if text in descriptions:
-            self.subarchi_card.setTitle("子分支", descriptions[text])
+        if text in SUBARCHI_DESCRIPTIONS:
+            self.subarchi_card.setTitle("子分支", SUBARCHI_DESCRIPTIONS[text])
+        self._refresh_archi_str()
     
     def update_config(self, key, value=None):
         """更新配置值"""

@@ -441,7 +441,7 @@ def trainerThread (s2c, c2s, e,
                             model.options[k] = v
                             io.log_info(f'[WebUI] Model option {k}: {old} -> {v}')
 
-                        # 余弦退火周期
+                        # 余弦退火·热重启周期（Cosine Annealing with Warm Restarts）
                         if k == 'lr_cos':
                             try:
                                 model.src_dst_opt.lr_cos = int(v)
@@ -581,10 +581,24 @@ def trainerThread (s2c, c2s, e,
 
                         loss_history = model.get_loss_history()
                         time_str = time.strftime("[%H:%M:%S]")
+
+                        # 当前实际学习率。调度器（余弦退火 / 平台期衰减）会让它随时变化，
+                        # 只看起始 lr 没法判断"现在是多少"，所以直接打进日志。
+                        # 格式 "lr:1.23e-05"；拿不到就显示 "lr:?"，不影响训练。
+                        _opt = getattr(model, 'src_dst_opt', None)
+                        try:
+                            if _opt is not None and hasattr(_opt, 'get_lr'):
+                                _lr_now = float(_opt.get_lr())
+                                lr_txt = "[lr:{0:.2e}]".format(_lr_now)
+                            else:
+                                lr_txt = "[lr:?]"
+                        except Exception:
+                            lr_txt = "[lr:?]"
+
                         if iter_time >= 10:
-                            loss_string = "{0}[#{1:06d}][{2:.5s}s]".format ( time_str, iter, '{:0.4f}'.format(iter_time) )
+                            loss_string = "{0}[#{1:06d}][{2:.5s}s]{3}".format ( time_str, iter, '{:0.4f}'.format(iter_time), lr_txt )
                         else:
-                            loss_string = "{0}[#{1:06d}][{2:04d}ms]".format ( time_str, iter, int(iter_time*1000) )
+                            loss_string = "{0}[#{1:06d}][{2:04d}ms]{3}".format ( time_str, iter, int(iter_time*1000), lr_txt )
 
                         if shared_state['after_save']:
                             shared_state['after_save'] = False

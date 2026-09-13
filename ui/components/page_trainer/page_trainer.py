@@ -21,6 +21,11 @@ from siui.core import SiGlobal, Si, SiExpAnimation, SiColor
 from siui.core.event_filter import WidgetToolTipRedirectEventFilter
 
 # 导入独立的子页面类
+from core.leras.archis.archi_spec import (
+    ARCHI_CHOICES, SUBARCHI_CHOICES, KERNEL_CHOICES,
+    build_archi_string, default_kernel_label, kernel_desc_for, is_lite_display,
+)
+
 from .components.training_config_page import TrainingConfigChildPage
 from .components.new_model_config_page import NewModelConfigChildPage, NewLargeModelConfigChildPage, XSegTrainingConfigChildPage
 
@@ -1342,10 +1347,19 @@ class TrainerPage(SiPage):
         resolution = config_data.get('resolution', '256')
 
         # Store model info for training config lookup
-        _archi_val = config_data.get('archi', 'DF') + config_data.get('subarchi', '-ud')
+        # 用 archi_spec.build_archi_string 拼后端可解析的 archi 串：
+        # 显示名 'DF' + '-udt' 要变成 'df-udt'，而不是 'DF-udt'；
+        # 选了 Lite 架构还要带上第三段算子修饰符（'df-udt-l'）。
+        _archi_val = config_data.get('archi_str')
+        if not _archi_val:
+            _archi_val = build_archi_string(
+                config_data.get('archi', 'DF'),
+                config_data.get('subarchi', '-ud'),
+                config_data.get('kernel', default_kernel_label()),
+            )
         info = {
             'name': model_name,
-            'type': _archi_val.lower() if model_class in ('SAEHD', 'DFSingle') else model_class,
+            'type': _archi_val.split('-')[0] if model_class in ('SAEHD', 'DFSingle') else model_class.lower(),
             'class_name': model_class,
             'precision': 'fp32',
             'resolution': resolution,
@@ -1354,7 +1368,7 @@ class TrainerPage(SiPage):
             'd_dims': config_data.get('d_dims', '128'),
             'face_type': 'wf',
             'iter': 0,
-            'archi': _archi_val.lower() if model_class in ('SAEHD', 'DFSingle') else model_class,
+            'archi': _archi_val if model_class in ('SAEHD', 'DFSingle') else model_class,
         }
 
         # 记录到 _models_info，否则点击"训练"时 model_info 为空，会回退到 SAEHD 界面
@@ -1372,11 +1386,16 @@ class TrainerPage(SiPage):
             btn_text = btn_text_map.get(model_class, '新建模型')
         else:
             # Legacy SAEHD path
-            archi = config_data.get('archi', 'DF')
-            subarchi = config_data.get('subarchi', '-ud')
-            info['type'] = f"{archi.lower()}{subarchi}"  # 例如: df-ud, liae-udt
+            # 同上：走 build_archi_string，显示名 'DF' 要变成 'df'，
+            # 选 Lite 架构时还要带第三段算子修饰符。
+            _archi = config_data.get('archi_str') or build_archi_string(
+                config_data.get('archi', 'DF'),
+                config_data.get('subarchi', '-ud'),
+                config_data.get('kernel', default_kernel_label()),
+            )
+            info['type'] = _archi        # 例如: df-ud, liae-udt, df-udt-l
             info['d_mask_dims'] = config_data.get('d_mask_dims', '32')
-            info['archi'] = f"{archi.lower()}{subarchi}"
+            info['archi'] = _archi
             info['batch_size'] = config_data.get('batch_size', '?')
             info['lr'] = config_data.get('lr', '?')
             if info['lr'] == '' or info['lr'] == '?':
