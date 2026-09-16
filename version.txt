@@ -1,4 +1,31 @@
-﻿4.0.8
+4.0.8.2
+- 新增「预训练单解码器支路」（DF 架构 + 预训练时生效，默认关闭）
+  · 预训练只跑 src 支路（encoder + inter + decoder_src），完全跳过 decoder_dst
+    的前向与反向，并把 decoder_dst 从优化器参数表摘除，省下其优化器状态
+  · 保存时自动把 decoder_src 权重复制到 decoder_dst（两解码器结构一致，复制无损）
+  · 预训练两条支路读取同一份多身份数据集，故与「训练 dst 支路再复制给 src」等价
+  · 收益：省掉一条支路的算力与显存，可开出更大的 batch（取舍见设计记录文档）
+- 恢复预训练开关：此前 4.0.8.1 将 pretrain 强制关闭，现恢复为可加载选项并重新提供询问入口
+- 修复：GUI 写回模型选项时遗漏 pretrain / pretrain_single_decoder（未登记进 _runtime_opts），
+  导致界面开关不生效、模型摘要仍显示「预训练: False」
+- 修复：预训练结束转正训练时迭代计数未归零，会让 lr 调度错位（对齐原 pretrain_just_disabled 语义）
+- 预训练集默认使用 dst 训练集（GUI 无该选项时的默认行为；CLI 的 --pretraining-data-dir 可覆盖），
+  不再因未指定而抛「未定义 pretraining_data_path」
+- 预训练集不做格式限制：既支持「含 faceset.pak 的打包目录」，也支持「散装 DFLJPG 对齐人脸目录」
+  （两种由 SampleLoader / SampleLoaderV4 自动识别）；直接把 faceset.pak 文件本身传入时，
+  自动改用其所在目录
+- 模型摘要「训练设置」新增「单解码器」一行，便于确认开关是否真的生效
+- 性能：训练步内的 pred_src_dst / pred_src_dst_no_code_grad 改为「按需计算」。
+  这两个换脸输出只服务 face_style / bg_style；两者都为 0 时（默认配置）没有任何
+  loss 会读它们，原实现却每步照跑 —— decoder_src 每步跑 3 次（实际只需 1 次），
+  解码器前向等于翻倍。现在仅在对应 style 开启时才计算；预览（AE_view）也只算
+  它真正要用的那一次（不再算 no_code_grad）。
+  涉及 _forward_df / _forward_liae / train_one_step / _xla_core / AE_view。
+
+4.0.8.1
+- 修复 GUI 启动崩溃（WinError 1114 / c10.dll）：页面模块不再经 core.leras 导入 torch
+
+4.0.8
 - 新增 DFLite 轻量架构（l 后缀）：编码器与解码器的 5x5 稠密卷积换为深度可分离
   · 新增 df-udt-l / l3 / l5 / lm / lx 等算子，旧两段式 df-ud 写法不受影响
   · 新建模型界面新增架构（DF Lite / LIAE Lite）与算子下拉，共 6 种算子

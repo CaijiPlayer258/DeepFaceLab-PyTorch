@@ -889,7 +889,7 @@ class DeepFakeLargeModel(ModelBase):
 
     # ---- Forward ----
 
-    def _forward(self, warped_src, warped_dst):
+    def _forward(self, warped_src, warped_dst, need_swap=True, need_swap_ng=True):
         src_enc, _ = self.net.encoder(warped_src)
         src_lat, _ = self.net.bottleneck(src_enc)
         dst_enc, _ = self.net.encoder(warped_dst)
@@ -897,8 +897,14 @@ class DeepFakeLargeModel(ModelBase):
 
         pred_src_src, pred_src_srcm, _ = self.net.decoderA(src_lat)
         pred_dst_dst, pred_dst_dstm, _ = self.net.decoderB(dst_lat)
-        pred_src_dst, pred_src_dstm, _ = self.net.decoderA(dst_lat)
-        pred_src_dst_no_code_grad, _, _ = self.net.decoderA(dst_lat.detach())
+        if need_swap:
+            pred_src_dst, pred_src_dstm, _ = self.net.decoderA(dst_lat)
+        else:
+            pred_src_dst, pred_src_dstm = None, None
+        if need_swap_ng:
+            pred_src_dst_no_code_grad, _, _ = self.net.decoderA(dst_lat.detach())
+        else:
+            pred_src_dst_no_code_grad = None
 
         return {
             'src_code': src_lat,
@@ -945,7 +951,12 @@ class DeepFakeLargeModel(ModelBase):
                     self._forward, warped_src, warped_dst, use_reentrant=False,
                 )
             else:
-                fw = self._forward(warped_src, warped_dst)
+                _fsp = float(self.options.get('face_style_power', 0.0))
+        _bsp = float(self.options.get('bg_style_power', 0.0))
+        # 换脸输出只服务 face_style / bg_style；两者都为 0 时无人读取 -> 跳过这两次 decoder 前向
+        _need_swap = (not self.pretrain) and (_fsp != 0.0 or _bsp != 0.0)
+        _need_swap_ng = (not self.pretrain) and _fsp != 0.0
+        fw = self._forward(warped_src, warped_dst, _need_swap, _need_swap_ng)
 
         if self.use_bf16:
             fw = {k: (v.float() if isinstance(v, torch.Tensor) else v)
@@ -1107,7 +1118,7 @@ class DeepFakeLargeModel(ModelBase):
 
         with torch.no_grad():
             with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=self.use_bf16):
-                fw = self._forward(target_src, target_dst)
+                fw = self._forward(target_src, target_dst, True, False)
 
         return (
             fw['pred_src_src'].detach().cpu().float().numpy(),

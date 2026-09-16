@@ -772,7 +772,7 @@ class LIAELargeModel(ModelBase):
 
     # ---- Forward (LIAE) ----
 
-    def _forward(self, warped_src, warped_dst):
+    def _forward(self, warped_src, warped_dst, need_swap=True, need_swap_ng=True):
         # LIAE forward: encoder → bottleneck_AB + bottleneck_B → decoder
         src_enc, _ = self.net.encoder(warped_src)
         src_ab, _ = self.net.bottleneck_AB(src_enc)
@@ -787,8 +787,14 @@ class LIAELargeModel(ModelBase):
 
         pred_src_src, pred_src_srcm, _ = self.net.decoder(src_cat)
         pred_dst_dst, pred_dst_dstm, _ = self.net.decoder(dst_cat)
-        pred_src_dst, pred_src_dstm, _ = self.net.decoder(src_dst_cat)
-        pred_src_dst_no_code_grad, _, _ = self.net.decoder(src_dst_cat.detach())
+        if need_swap:
+            pred_src_dst, pred_src_dstm, _ = self.net.decoder(src_dst_cat)
+        else:
+            pred_src_dst, pred_src_dstm = None, None
+        if need_swap_ng:
+            pred_src_dst_no_code_grad, _, _ = self.net.decoder(src_dst_cat.detach())
+        else:
+            pred_src_dst_no_code_grad = None
 
         return {
             'src_code': src_cat, 'dst_code': dst_cat,
@@ -825,7 +831,12 @@ class LIAELargeModel(ModelBase):
                 fw = torch.utils.checkpoint.checkpoint(
                     self._forward, warped_src, warped_dst, use_reentrant=False)
             else:
-                fw = self._forward(warped_src, warped_dst)
+                _fsp = float(self.options.get('face_style_power', 0.0))
+        _bsp = float(self.options.get('bg_style_power', 0.0))
+        # 换脸输出只服务 face_style / bg_style；两者都为 0 时无人读取 -> 跳过这两次 decoder 前向
+        _need_swap = (not self.pretrain) and (_fsp != 0.0 or _bsp != 0.0)
+        _need_swap_ng = (not self.pretrain) and _fsp != 0.0
+        fw = self._forward(warped_src, warped_dst, _need_swap, _need_swap_ng)
 
         if self.use_bf16:
             fw = {k: (v.float() if isinstance(v, torch.Tensor) else v)
@@ -949,7 +960,7 @@ class LIAELargeModel(ModelBase):
         target_dst = self._np_to_torch(target_dst)
         with torch.no_grad():
             with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=self.use_bf16):
-                fw = self._forward(target_src, target_dst)
+                fw = self._forward(target_src, target_dst, True, False)
         return (fw['pred_src_src'].detach().cpu().float().numpy(),
                 fw['pred_dst_dst'].detach().cpu().float().numpy(),
                 fw['pred_dst_dstm'].detach().cpu().float().numpy(),

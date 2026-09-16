@@ -120,7 +120,7 @@ class SAEHDModel(ModelBase):
         default_vgg_perceptual_power = self.options['vgg_perceptual_power'] = self.load_or_def_option('vgg_perceptual_power', 0.0)
         default_ct_mode = self.options['ct_mode'] = self.load_or_def_option('ct_mode', 'none')
         default_clipgrad = self.options['clipgrad'] = self.load_or_def_option('clipgrad', False)
-        default_pretrain = self.options['pretrain'] = False  # pretrain 已停用：无论读到什么一律强制 False
+        default_pretrain = self.options['pretrain'] = self.load_or_def_option('pretrain', False)
 
         # Freeze layer options
         default_freeze_encoder = self.options['freeze_encoder'] = self.load_or_def_option('freeze_encoder', False)
@@ -129,6 +129,13 @@ class SAEHDModel(ModelBase):
         default_freeze_inter_B = self.options['freeze_inter_B'] = self.load_or_def_option('freeze_inter_B', False)
         default_freeze_decoder_mask = self.options['freeze_decoder_mask'] = self.load_or_def_option('freeze_decoder_mask', False)
         default_freeze_decoder_dst = self.options['freeze_decoder_dst'] = self.load_or_def_option('freeze_decoder_dst', False)  # 仅 DF 架构生效
+
+        # 预训练单解码器支路（仅 DF + pretrain 生效）：预训练只训练 src 支路
+        # （encoder + inter + decoder_src），保存时把权重同步给 decoder_dst。
+        # 因预训练两条支路读取同一份多身份数据集（见 on_initialize 的
+        # training_data_{src,dst}_path），与"训练 dst 支路再复制给 src"完全等价；
+        # 收益：省掉一条支路的前向/反向 + 其优化器状态，可开更大 batch。
+        default_pretrain_single_decoder = self.options['pretrain_single_decoder'] = self.load_or_def_option('pretrain_single_decoder', False)
 
         ask_override = self.ask_override()
         if self.is_first_run() or ask_override:
@@ -448,13 +455,50 @@ class SAEHDModel(ModelBase):
                 help_message='梯度裁剪可降低模型崩溃概率，但会牺牲训练速度。',
             )
 
-            # pretrain 已停用：强制 False，不再提供询问入口
-            self.options['pretrain'] = False
+            self.options['pretrain'] = io.input_bool(
+                '启用预训练（先跑预训练，再转正训练）',
+                default_pretrain,
+                help_message='预训练时 src / dst 都使用 pretraining 数据集（多身份人脸集），'
+                             '目的是让编码器先学会通用人脸特征。非常耗时耗力，'
+                             '通常直接用现成的预训练模型即可。',
+            )
+            if self.options['pretrain']:
+                self.options['pretrain_single_decoder'] = io.input_bool(
+                    '预训练只训练单条解码器支路（省显存/算力，可开更大 batch）',
+                    default_pretrain_single_decoder,
+                    help_message='只跑 src 支路（encoder + inter + decoder_src），'
+                                 '保存时把权重同步给 decoder_dst。两条支路预训练同分布，'
+                                 '效果与双支路一致，但省掉一条支路的前向/反向与优化器状态。'
+                                 '仅 DF 架构生效。',
+                )
 
             self.ask_gradient_checkpointing()
 
-        if self.options['pretrain'] and self.get_pretraining_data_path() is None:
-            raise Exception('未定义 pretraining_data_path')
+        if self.options['pretrain']:
+            # 预训练集解析：
+            #   1) 默认值 = dst 训练集（GUI 无该选项时的默认行为）；
+            #      CLI 可用 --pretraining-data-dir 覆盖。
+            #   2) 不限制格式：既支持「含 faceset.pak 的打包目录」，也支持
+            #      「散装 DFLJPG 对齐人脸目录」—— 由 SampleLoader / SampleLoaderV4
+            #      自动识别；若直接指到 faceset.pak 文件本身，自动改用其所在目录。
+            if self.get_pretraining_data_path() is None:
+                _default_pt = getattr(self, 'training_data_dst_path', None) if self.is_training else None
+                if _default_pt is not None:
+                    self.pretraining_data_path = _default_pt
+                    io.log_info('[预训练] 未指定预训练集，默认使用 dst 训练集：%s' % _default_pt)
+
+            _pt = self.get_pretraining_data_path()
+            if _pt is not None and Path(_pt).suffix.lower() == '.pak':
+                # 容忍直接把 faceset.pak 文件当预训练集传入
+                self.pretraining_data_path = Path(_pt).parent
+                io.log_info('[预训练] 预训练集指向 pak 文件，已改用其所在目录：%s'
+                            % self.pretraining_data_path)
+
+            if self.get_pretraining_data_path() is None:
+                raise Exception('未定义 pretraining_data_path')
+
+            io.log_info('[预训练] 预训练集支持「含 faceset.pak 的打包目录」或「散装 DFLJPG 人脸目录」，不做格式限制。')
+            io.log_info('[预训练] 提示：预训练理想上使用多身份人脸集；用 dst 单一身份也能跑，但收益会打折。')
 
         default_fast_gen = self.load_or_def_option('use_fast_generator', False)
         if self.is_first_run() or ask_override:
@@ -604,6 +648,18 @@ class SAEHDModel(ModelBase):
         self.pretrain = bool(self.options['pretrain'])
         if getattr(self, 'pretrain_just_disabled', False):
             self.set_iter(0)
+
+        # 预训练单解码器支路：仅 DF 架构 + 预训练 时生效。
+        # 生效时只跑 src 支路前向/反向，decoder_dst 不参与训练，
+        # 保存时由 _sync_pretrain_single_decoder() 把权重同步过去。
+        self.pretrain_single_decoder = bool(
+            self.pretrain
+            and self.archi_type == 'df'
+            and bool(self.options.get('pretrain_single_decoder', False))
+        )
+        if self.pretrain_single_decoder:
+            io.log_info('[预训练] 已启用「单解码器支路」：只训练 encoder/inter/decoder_src，'
+                        'decoder_dst 不参与前向与反向，保存时自动同步权重。')
 
         optimizer_name = str(self.options.get('optimizer', 'adabelief'))
 
@@ -776,7 +832,17 @@ class SAEHDModel(ModelBase):
                     + list(self.decoder_src.get_weights())
                     + list(self.decoder_dst.get_weights())
                 )
-                self.src_dst_trainable_weights = self.src_dst_saveable_weights
+                if self.pretrain_single_decoder:
+                    # decoder_dst 不参与前向/反向，从优化器参数表摘除，
+                    # 省下它的优化器状态（Adam/AdaBelief 每参数 2 份 m/v）。
+                    # saveable 仍保留四个模块 -> 存档结构（decoder_dst.pth）不变。
+                    self.src_dst_trainable_weights = (
+                        list(self.encoder.get_weights())
+                        + list(self.inter.get_weights())
+                        + list(self.decoder_src.get_weights())
+                    )
+                else:
+                    self.src_dst_trainable_weights = self.src_dst_saveable_weights
             else:
                 self.src_dst_saveable_weights = (
                     list(self.encoder.get_weights())
@@ -1243,8 +1309,36 @@ class SAEHDModel(ModelBase):
         return self.model_filename_list
 
     def onSave(self):
+        # 预训练单支路：保存前先把训练好的 decoder_src 权重同步给 decoder_dst，
+        # 保证转正训练时两个解码器都带着预训练好的初始化。
+        self._sync_pretrain_single_decoder()
         for model, filename in io.progress_bar_generator(self.get_model_filename_list(), 'Saving', leave=False):
             model.save_weights(self.get_strpath_storage_for_file(filename))
+
+    def _sync_pretrain_single_decoder(self):
+        """预训练单支路：把 decoder_src 的权重复制到 decoder_dst。
+
+        预训练阶段两条支路读取同一份多身份数据集，两个解码器结构完全一致，
+        因此这次复制是无损的。
+        """
+        if not getattr(self, 'pretrain_single_decoder', False):
+            return
+        if not (hasattr(self, 'decoder_src') and hasattr(self, 'decoder_dst')):
+            return
+        try:
+            src_ws = self.decoder_src.get_weights()
+            dst_ws = self.decoder_dst.get_weights()
+        except Exception as e:
+            io.log_info(f'[预训练] 取解码器权重失败，跳过同步：{e}')
+            return
+        if len(src_ws) != len(dst_ws):
+            io.log_info('[预训练] 两个解码器权重数量不一致，跳过同步。')
+            return
+        with torch.no_grad():
+            for dst_w, src_w in zip(dst_ws, src_ws):
+                src_data = src_w.data if hasattr(src_w, 'data') else src_w
+                dst_w.data.copy_(src_data.to(device=dst_w.device, dtype=dst_w.dtype))
+        io.log_info('[预训练] 已把 decoder_src 权重同步到 decoder_dst。')
 
     def should_save_preview_history(self):
         return (not io.is_colab() and self.iter % (10 * (max(1, self.resolution // 64))) == 0) or (io.is_colab() and self.iter % 100 == 0)
@@ -1407,14 +1501,23 @@ class SAEHDModel(ModelBase):
         pass
 
     # --- core forward helpers ---
-    def _forward_df(self, warped_src, warped_dst):
+    def _forward_df(self, warped_src, warped_dst, need_swap=True, need_swap_ng=True):
         src_code = self.inter(self.encoder(warped_src))
         dst_code = self.inter(self.encoder(warped_dst))
 
         pred_src_src, pred_src_srcm = self.decoder_src(src_code)
         pred_dst_dst, pred_dst_dstm = self.decoder_dst(dst_code)
-        pred_src_dst, pred_src_dstm = self.decoder_src(dst_code)
-        pred_src_dst_no_code_grad, _ = self.decoder_src(dst_code.detach())
+        # 换脸输出（pred_src_dst / _no_code_grad）只被 face_style / bg_style 使用。
+        # 两个 style 都为 0 时（默认配置）任何 loss 都不会读它们 —— 属于纯死算，
+        # 每步白跑两次 decoder 前向。按需计算可省掉约一半解码器前向。
+        if need_swap:
+            pred_src_dst, pred_src_dstm = self.decoder_src(dst_code)
+        else:
+            pred_src_dst, pred_src_dstm = None, None
+        if need_swap_ng:
+            pred_src_dst_no_code_grad, _ = self.decoder_src(dst_code.detach())
+        else:
+            pred_src_dst_no_code_grad = None
 
         return {
             'src_code': src_code,
@@ -1439,7 +1542,7 @@ class SAEHDModel(ModelBase):
             'pred_src_srcm': pred_src_srcm,
         }
 
-    def _forward_liae(self, warped_src, warped_dst):
+    def _forward_liae(self, warped_src, warped_dst, need_swap=True, need_swap_ng=True):
         src_code = self.encoder(warped_src)
         src_inter_ab = self.inter_AB(src_code)
         src_code_cat = torch.cat([src_inter_ab, src_inter_ab], dim=1)
@@ -1453,8 +1556,15 @@ class SAEHDModel(ModelBase):
 
         pred_src_src, pred_src_srcm = self.decoder(src_code_cat)
         pred_dst_dst, pred_dst_dstm = self.decoder(dst_code_cat)
-        pred_src_dst, pred_src_dstm = self.decoder(src_dst_code_cat)
-        pred_src_dst_no_code_grad, _ = self.decoder(src_dst_code_cat.detach())
+        # 同 _forward_df：只在 face_style / bg_style 需要时才计算换脸输出
+        if need_swap:
+            pred_src_dst, pred_src_dstm = self.decoder(src_dst_code_cat)
+        else:
+            pred_src_dst, pred_src_dstm = None, None
+        if need_swap_ng:
+            pred_src_dst_no_code_grad, _ = self.decoder(src_dst_code_cat.detach())
+        else:
+            pred_src_dst_no_code_grad = None
 
         return {
             'src_code': src_code_cat,
@@ -1629,9 +1739,18 @@ class SAEHDModel(ModelBase):
 
         # 冻结 decoder_dst（DF 架构）：训练只跑 src 分支，前向+反向完全跳过 dst（真正提速）
         _freeze_ddst = ('df' in self.archi_type) and bool(self.options.get('freeze_decoder_dst', False))
+        # 预训练单支路 与 冻结dst 共用同一条 src-only 前向
+        _src_only = _freeze_ddst or getattr(self, 'pretrain_single_decoder', False)
+
+        # 换脸输出 pred_src_dst / pred_src_dst_no_code_grad 只服务 face_style / bg_style。
+        # 两者都为 0（默认）时无人读取 -> 跳过它们的 forward，省掉两次 decoder 前向。
+        _face_style_on = (not self.pretrain) and float(self.options['face_style_power']) != 0.0
+        _bg_style_on = (not self.pretrain) and float(self.options['bg_style_power']) != 0.0
+        _need_swap = (not _src_only) and (_face_style_on or _bg_style_on)
+        _need_swap_ng = (not _src_only) and _face_style_on
 
         with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=self.use_bf16):
-            if _freeze_ddst:
+            if _src_only:
                 fw = self._forward_df_src_only(warped_src)
             else:
                 if 'df' in self.archi_type:
@@ -1640,9 +1759,12 @@ class SAEHDModel(ModelBase):
                     fw_fn = self._forward_liae
 
                 if self.options.get('gradient_checkpointing', False) and self.is_training:
-                    fw = torch.utils.checkpoint.checkpoint(fw_fn, warped_src, warped_dst, use_reentrant=False)
+                    fw = torch.utils.checkpoint.checkpoint(
+                        fw_fn, warped_src, warped_dst,
+                        need_swap=_need_swap, need_swap_ng=_need_swap_ng,
+                        use_reentrant=False)
                 else:
-                    fw = fw_fn(warped_src, warped_dst)
+                    fw = fw_fn(warped_src, warped_dst, _need_swap, _need_swap_ng)
 
         if self.use_bf16:
             fw = {k: (v.float() if isinstance(v, torch.Tensor) else v) for k, v in fw.items()}
@@ -1660,7 +1782,7 @@ class SAEHDModel(ModelBase):
 
         src_loss_vec, dst_loss_vec, extra_style_loss, extra_masked_gan_loss = self._recon_losses(
             target_src, target_dst, target_srcm, target_dstm, target_srcm_em, target_dstm_em, fw,
-            skip_dst=_freeze_ddst,
+            skip_dst=_src_only,
         )
 
         G_loss = src_loss_vec.mean() + dst_loss_vec.mean() + extra_style_loss + extra_masked_gan_loss
@@ -1761,17 +1883,22 @@ class SAEHDModel(ModelBase):
         # forward (XLA device, no autocast needed)
         # 冻结 decoder_dst（DF 架构）：训练只跑 src 分支
         _freeze_ddst = ('df' in self.archi_type) and bool(self.options.get('freeze_decoder_dst', False))
-        if _freeze_ddst:
+        _src_only = _freeze_ddst or getattr(self, 'pretrain_single_decoder', False)
+        _face_style_on = (not self.pretrain) and float(self.options['face_style_power']) != 0.0
+        _bg_style_on = (not self.pretrain) and float(self.options['bg_style_power']) != 0.0
+        _need_swap = (not _src_only) and (_face_style_on or _bg_style_on)
+        _need_swap_ng = (not _src_only) and _face_style_on
+        if _src_only:
             fw = self._forward_df_src_only(warped_src)
         elif 'df' in self.archi_type:
-            fw = self._forward_df(warped_src, warped_dst)
+            fw = self._forward_df(warped_src, warped_dst, _need_swap, _need_swap_ng)
         else:
-            fw = self._forward_liae(warped_src, warped_dst)
+            fw = self._forward_liae(warped_src, warped_dst, _need_swap, _need_swap_ng)
 
         # losses
         src_loss_vec, dst_loss_vec, extra_style_loss, extra_masked_gan_loss = self._recon_losses(
             target_src, target_dst, target_srcm, target_dstm, target_srcm_em, target_dstm_em, fw,
-            skip_dst=_freeze_ddst,
+            skip_dst=_src_only,
         )
         G_loss = src_loss_vec.mean() + dst_loss_vec.mean() + extra_style_loss + extra_masked_gan_loss
 
@@ -1891,17 +2018,18 @@ class SAEHDModel(ModelBase):
 
         with torch.no_grad():
             # XLA device 上不能用 torch.cuda.amp.autocast
+            # 预览要用 pred_src_dst（SD 列），但不用 pred_src_dst_no_code_grad
             if self.options.get('eager_mode', False):
                 if 'df' in self.archi_type:
-                    fw = self._forward_df(target_src, target_dst)
+                    fw = self._forward_df(target_src, target_dst, True, False)
                 else:
-                    fw = self._forward_liae(target_src, target_dst)
+                    fw = self._forward_liae(target_src, target_dst, True, False)
             else:
                 with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=self.use_bf16):
                     if 'df' in self.archi_type:
-                        fw = self._forward_df(target_src, target_dst)
+                        fw = self._forward_df(target_src, target_dst, True, False)
                     else:
-                        fw = self._forward_liae(target_src, target_dst)
+                        fw = self._forward_liae(target_src, target_dst, True, False)
 
         pred_src_src = fw['pred_src_src'].detach().cpu().float().numpy()
         pred_src_srcm = fw['pred_src_srcm'].detach().cpu().float().numpy()
