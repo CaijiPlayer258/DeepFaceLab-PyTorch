@@ -35,7 +35,8 @@ python Analyzer.py -i "workspace/A" --merge "workspace/B"
 
 ```bash
 # 质量过滤（基于清晰度）
-python Filter.py -i "workspace/data_dst/aligned" --mode quality --threshold 20
+python Filter.py -i "workspace/data_dst/aligned" --mode quality    # 相对分位，自动标定
+python Filter.py -i "workspace/data_dst/aligned" --mode quality --train-res 256 --absolute   # 绝对门槛
 
 # 人脸ID分组（基于 embedding 聚类）
 python Filter.py -i "workspace/data_dst/aligned" --mode face_id --eps 0.3
@@ -58,6 +59,24 @@ python Sorter.py -i "workspace/data_dst/aligned" --method resolution   # 分辨�
 python Sorter.py -i "workspace/data_dst/aligned" --method color        # 颜色
 python Sorter.py -i "workspace/data_dst/aligned" --method name         # 文件名
 ```
+
+#### 按清晰度排序筛掉模糊图（推荐用法）
+
+```bash
+# --train-res 应与训练分辨率一致（默认 256）
+python Sorter.py -i "workspace/data_dst/aligned" --method blur --train-res 256 --rename
+```
+
+排序结果：**分数越高 = 越清晰 = 序号越靠前**，重命名后形如
+`sorted_00000_a3f7...jpg`（最清晰）… `sorted_01999_...jpg`（最糊）。
+
+之后**直接打开文件夹看图删就行** —— 文件管理器按文件名排序，等于一张按清晰度
+排好的缩略图长条。不需要任何 GUI，也不用真的执行"过滤"。
+
+- 指标 = `E(b0)/E(b2)` 高频/低频能量比，与 `Filter.py` 是同一份实现（排序/过滤同一把尺子）
+- 结果写进 `metadata.h5`，字段名 `sharpness_br{train_res}`；**第二次跑直接读缓存**
+- 自动扣掉噪声贡献（噪声=高频=高分，不扣的话高 ISO 帧会排到最前面）
+- `--motion-blur` 已废弃：新指标对运动模糊同样敏感，不再需要单独分支
 
 ## ✨ 核心特性
 
@@ -115,8 +134,12 @@ analyzer = MetadataAnalyzer("path/to/faceset", features=['phash', 'embedding'])
 analyzer.analyze_batch(force_reanalyze=False, workers=8)
 
 # 2. 质量过滤
+# 清晰度 = E(b0)/E(b2) 高频/低频能量比（不再是拉普拉斯方差）
+#   train_res: 归一化分辨率，应与训练分辨率一致
+#   absolute=False（默认）: 按本数据集 10/30/60 分位分组
+#   absolute=True:          用合成高斯模糊定绝对门槛（比 σ=1/2 更糊才判低）
 quality_filter = QualityFilter("path/to/faceset")
-stats = quality_filter.filter_by_quality(threshold=20.0, workers=8)
+stats = quality_filter.filter_by_quality(workers=8, train_res=256, absolute=False)
 
 # 3. 人脸ID分组
 faceid_filter = FaceIDFilter("path/to/faceset")

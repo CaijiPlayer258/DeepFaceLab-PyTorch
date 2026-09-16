@@ -1,3 +1,10 @@
+[2026-09-16] fix: onnxruntime is now imported lazily - importing FacesetProcessor.Filter/Sorter after Qt no longer crashes with WinError 1114 (native-extension DLL init failure, same mechanism as the earlier torch/c10.dll crash); facelib.FaceDetector is loaded on demand via PEP 562
+[2026-09-16] feat: faceset sharpness metric switched to high/low band energy ratio E(b0)/var(b2) - blur separation 2.53 -> 3.31 (+31%), content CV 0.224 -> 0.240 (on par), measured on 150 aligned faces with the XSeg mask; the threshold is now transferable across images
+[2026-09-16] fix: the ratio denominator uses var(b2) instead of mean(b2^2) - b2 is the low-pass residual and carries image brightness (DC is 96.5% of mean(b2^2)), so the old form degraded into a brightness-normalized HF energy; removing DC gives separation 2.81 -> 3.31 and CV 0.264 -> 0.240
+[2026-09-16] fix: sharpness mask no longer multiplies pixels (image * mask created hard fake edges at the mask border that dominated the Laplacian response); mask is now used only to select which pixels to average
+[2026-09-16] feat: noise compensation in the sharpness metric - noise reads as high frequency and inflated the score 4.97x at sigma_n=0.04, which made iterated "keep the top" filtering enrich noisy frames
+[2026-09-16] feat: Filter --mode blur thresholds are auto-derived (dataset percentiles 10/30/60 by default, --absolute uses synthetic Gaussian-blur anchors); the report shows a median equivalent blur sigma per bucket
+[2026-09-16] feat: Sorter --method blur now sorts sharpest-first (sorted_00000 is the sharpest) using the same metric as the filter, caches scores in metadata.h5 as sharpness_br{train_res}, and adds --train-res; --motion-blur is deprecated
 [2026-08-27] feat: pretrain single-decoder branch - pretrain trains only the src branch (encoder+inter+decoder_src), skips decoder_dst forward/backward, drops it from the optimizer param list, and syncs decoder_src weights to decoder_dst on save
 [2026-08-27] perf: compute pred_src_dst / pred_src_dst_no_code_grad on demand (they only serve face_style/bg_style) - removes 2 dead decoder passes per step, decoder forward effectively halved, -13.7% compute-only step at bs8 res256 ae320 e88 d88
 [2026-08-27] fix: GUI never wrote pretrain / pretrain_single_decoder into the model options (_runtime_opts whitelist), so the toggles had no effect and the summary still showed "pretrain: False"
@@ -8,7 +15,7 @@
 [2026-08-27] feat: restore the pretrain option (4.0.8.1 force-disabled it) and re-add the interactive prompt
 [2026-08-27] feat: show "single decoder" row in the model summary so the switch state is visible
 
-﻿[2026-09-13] feat: DFLite lightweight architecture (depthwise separable encoder/decoder, df-udt-l family, -25.3% params, 1.95x inference)
+[2026-09-13] feat: DFLite lightweight architecture (depthwise separable encoder/decoder, df-udt-l family, -25.3% params, 1.95x inference)
 [2026-09-13] fix: DFLite BN inplace buffer update broke backward; lr_dropout mask sampled only once
 [2026-06-21] cleanup: remove redundant DFM export step from XSeg export script
 [2026-06-21] fix: set dynamo=False in ONNX export to avoid .data split files
