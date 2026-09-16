@@ -474,16 +474,32 @@ class TrainingConfigChildPage(SiChildPage):
             self.write_preview_history_card.adjustSize()
 
             # === 预训练模式 ===
-            # 预训练模式暂时弃用（空壳功能，硬件需求复杂）
             self.pretrain_card = SiOptionCardLinear(self)
-            self.pretrain_card.setTitle("预训练模式", "（暂不可用）使用通用人脸数据进行预训练")
+            self.pretrain_card.setTitle(
+                "预训练模式",
+                "用通用人脸数据集（多身份）先训练编码器，让 inter 更快向 src 靠拢。"
+                "非常耗时耗力，通常直接用现成的预训练模型即可。")
             self.pretrain_card.load(safe_get_icon("ic_fluent_hat_graduation_filled"))
             self.pretrain_switch = SiSwitch(self.pretrain_card)
             self.pretrain_switch.setChecked(False)
-            self.pretrain_switch.setEnabled(False)
             self.pretrain_switch.toggled.connect(lambda state: self.update_config('pretrain'))
             self.pretrain_card.addWidget(self.pretrain_switch)
             self.pretrain_card.adjustSize()
+
+            # === 预训练：单解码器支路 ===
+            self.pretrain_single_decoder_card = SiOptionCardLinear(self)
+            self.pretrain_single_decoder_card.setTitle(
+                "预训练单解码器支路 (Single Decoder)",
+                "预训练只训练 src 支路（encoder+inter+decoder_src），完全跳过 decoder_dst 的"
+                "前向与反向，保存时自动把权重同步给 decoder_dst。省算力/显存，可开更大 batch。"
+                "仅 DF 架构 + 预训练模式生效")
+            self.pretrain_single_decoder_card.load(safe_get_icon("ic_fluent_hat_graduation_filled"))
+            self.pretrain_single_decoder_switch = SiSwitch(self.pretrain_single_decoder_card)
+            self.pretrain_single_decoder_switch.setChecked(False)
+            self.pretrain_single_decoder_switch.toggled.connect(
+                self._on_pretrain_single_decoder_toggled)
+            self.pretrain_single_decoder_card.addWidget(self.pretrain_single_decoder_switch)
+            self.pretrain_single_decoder_card.adjustSize()
 
             # === 崩溃阈值 ===
             self.crash_threshold_card = SiOptionCardLinear(self)
@@ -538,6 +554,7 @@ class TrainingConfigChildPage(SiChildPage):
                 group.addWidget(self.use_fast_generator_card)
             group.addWidget(self.write_preview_history_card)
             group.addWidget(self.pretrain_card)
+            group.addWidget(self.pretrain_single_decoder_card)
             group.addWidget(self.crash_threshold_card)
             group.addWidget(self.log_code_stats_card)
             group.addWidget(self.max_backups_card)
@@ -1276,6 +1293,8 @@ class TrainingConfigChildPage(SiChildPage):
                     import pickle
                     _fc_data = pickle.loads(_fc_dat_path.read_bytes())
                     if 'options' in _fc_data:
+                        # 写入前的旧预训练开关：用于判断"预训练结束 → 转正训练"并归零迭代
+                        _prev_pretrain_flag = bool(_fc_data['options'].get('pretrain', False))
                         # Freeze options (bool) — handled per model class
                         _fc_data['options']['freeze_encoder'] = self.freeze_encoder_switch.isChecked()
                         if _fc_model_class == 'DeepFakeLarge':
@@ -1342,6 +1361,8 @@ class TrainingConfigChildPage(SiChildPage):
                             ('use_bf16',                  'use_bf16',            bool),
                             ('gan_patch_size',            'gan_patch_size',      int),
                             ('gan_dims',                  'gan_dims',            int),
+                            ('pretrain',                  'pretrain',            bool),
+                            ('pretrain_single_decoder',   'pretrain_single_decoder', bool),
                         ]
                         # 过滤 DFLarge/LIAELarge 不存在的参数，避免摘要里出现空值字段
                         _fc_large_irrelevant = {
@@ -1377,6 +1398,10 @@ class TrainingConfigChildPage(SiChildPage):
                                     _fc_data['options'][_mkey] = _cast(_raw)
                                 except (ValueError, TypeError):
                                     pass  # skip invalid value
+                        # 预训练 → 正训练 切换：把迭代归零，避免正训练带着预训练的 iter 继续跑
+                        # 导致 lr 调度错位（与原 pretrain_just_disabled 的 set_iter(0) 语义一致）
+                        if _prev_pretrain_flag and not bool(self.pretrain_switch.isChecked()):
+                            _fc_data['iter'] = 1
                         # 确保 iter >= 1，否则 ModelBase.is_first_run() 返回 True
                         # 会导致控制台弹出交互式参数询问（全是 GUI 已设置的参数）
                         _fc_data['iter'] = max(_fc_data.get('iter', 0), 1)
@@ -1593,6 +1618,12 @@ class TrainingConfigChildPage(SiChildPage):
             else:
                 self.freeze_inter_switch.setChecked(True)
 
+    def _on_pretrain_single_decoder_toggled(self, state):
+        """预训练单解码器支路：开启时联动打开「预训练模式」（该选项只在预训练时生效）。"""
+        self.update_config('pretrain_single_decoder')
+        if state and not self.pretrain_switch.isChecked():
+            self.pretrain_switch.setChecked(True)
+
     @staticmethod
     def _opt(info, key, default):
         """从模型 info 获取值，'?' 或 None 时视为未找到，返回 default"""
@@ -1707,7 +1738,8 @@ class TrainingConfigChildPage(SiChildPage):
             'models_opt_on_gpu': bool(_(info, 'models_opt_on_gpu', True)),
             'use_fast_generator': bool(_(info, 'use_fast_generator', False)),
             'write_preview_history': bool(_(info, 'write_preview_history', False)),
-            'pretrain': False,  # pretrain 已停用：无论读到什么一律强制 False
+            'pretrain': bool(_(info, 'pretrain', False)),
+            'pretrain_single_decoder': bool(_(info, 'pretrain_single_decoder', False)),
             'lr_dropout': str(_(info, 'lr_dropout', 'n')),
             'lr_policy': str(_(info, 'lr_policy', 'CosineAnnealingLR')),
             'true_face_power': str(_(info, 'true_face_power', '0.0')),
@@ -1793,7 +1825,9 @@ class TrainingConfigChildPage(SiChildPage):
         self.models_opt_on_gpu_switch.setChecked(bool(cfg.get('models_opt_on_gpu', True)))
         self.use_fast_generator_switch.setChecked(bool(cfg.get('use_fast_generator', False)))
         self.write_preview_history_switch.setChecked(bool(cfg.get('write_preview_history', False)))
-        self.pretrain_switch.setChecked(False)  # pretrain 已停用：强制关闭（不读取旧配置）
+        self.pretrain_switch.setChecked(bool(cfg.get('pretrain', False)))
+        self.pretrain_single_decoder_switch.setChecked(
+            bool(cfg.get('pretrain_single_decoder', False)))
 
         # 文本输入框（新）
         self.crash_threshold_input.setText(str(cfg.get('crash_threshold', '0.0')))
@@ -1907,7 +1941,9 @@ class TrainingConfigChildPage(SiChildPage):
                 elif key == 'write_preview_history':
                     self.config_data[key] = self.write_preview_history_switch.isChecked()
                 elif key == 'pretrain':
-                    self.config_data[key] = False  # pretrain 已停用：强制 False
+                    self.config_data[key] = self.pretrain_switch.isChecked()
+                elif key == 'pretrain_single_decoder':
+                    self.config_data[key] = self.pretrain_single_decoder_switch.isChecked()
                 elif key == 'random_hsv_power':
                     self.config_data[key] = self.random_hsv_power_input.text()
                 elif key == 'crash_threshold':

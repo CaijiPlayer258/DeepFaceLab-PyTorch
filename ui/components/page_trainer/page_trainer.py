@@ -21,7 +21,9 @@ from siui.core import SiGlobal, Si, SiExpAnimation, SiColor
 from siui.core.event_filter import WidgetToolTipRedirectEventFilter
 
 # 导入独立的子页面类
-from core.leras.archis.archi_spec import (
+# ⚠️ 必须走 core.archi_names（不 import torch）。走 core.leras.* 会拉起 nn.py -> import torch，
+# 而此时 QApplication 已经加载过 Qt 的 DLL，Windows 上会 WinError 1114 (c10.dll)。
+from core.archi_names import (
     ARCHI_CHOICES, SUBARCHI_CHOICES, KERNEL_CHOICES,
     build_archi_string, default_kernel_label, kernel_desc_for, is_lite_display,
 )
@@ -860,7 +862,8 @@ class TrainerPage(SiPage):
                 'uniform_yaw': options.get('uniform_yaw', '?'),
                 'blur_out_mask': options.get('blur_out_mask', '?'),
                 'masked_training': options.get('masked_training', '?'),
-                'pretrain': False,  # pretrain 已停用：强制 False
+                'pretrain': options.get('pretrain', False),
+                'pretrain_single_decoder': options.get('pretrain_single_decoder', False),
                 'models_opt_on_gpu': options.get('models_opt_on_gpu', '?'),
                 'use_fast_generator': options.get('use_fast_generator', '?'),
                 'gradient_checkpointing': options.get('gradient_checkpointing', '?'),
@@ -1032,7 +1035,8 @@ class TrainerPage(SiPage):
                 'uniform_yaw': options.get('uniform_yaw', '?'),
                 'blur_out_mask': options.get('blur_out_mask', '?'),
                 'masked_training': options.get('masked_training', '?'),
-                'pretrain': False,  # pretrain 已停用：强制 False
+                'pretrain': options.get('pretrain', False),
+                'pretrain_single_decoder': options.get('pretrain_single_decoder', False),
                 'gradient_checkpointing': options.get('gradient_checkpointing', '?'),
                 # freeze options
                 'freeze_encoder': options.get('freeze_encoder', False),

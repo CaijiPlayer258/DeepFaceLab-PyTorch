@@ -838,6 +838,7 @@ class ModelBase(object):
             ('models_opt_on_gpu', '优化器GPU'),
             ('use_fast_generator', '快速生成器'),
             ('pretrain', '预训练'),
+            ('pretrain_single_decoder', '单解码器'),
             ('write_preview_history', '预览历史'),
             ('target_iter', '目标迭代'),
             ('backup_interval', '备份间隔（迭代）'),

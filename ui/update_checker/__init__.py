@@ -146,9 +146,15 @@ def _install_git_winget() -> bool:
 
 
 def _parse_versions(text: str):
-    """解析 version.txt 格式，返回 [(ver, [notes...]), ...]"""
+    """解析 version.txt 格式，返回 [(ver, [notes...]), ...]
+
+    version.txt 是 UTF-8 **带 BOM** 的：read_text(encoding='utf-8') 会把 BOM
+    留在首行变成 '\ufeff4.0.8'，_ver_to_tuple 解析失败退化成 (0,)，版本比较
+    随之完全失效（本地 4.0.8.1 对着远程 4.0.8 会被误判成「有新版本」）。
+    统一在这里剥掉 BOM，所有调用点都不用再操心编码。
+    """
     sections = []
-    for block in text.strip().split("\n\n"):
+    for block in text.lstrip("\ufeff").strip().split("\n\n"):
         lines = [l.strip() for l in block.strip().split("\n") if l.strip()]
         if lines:
             sections.append((lines[0], lines[1:]))
@@ -230,7 +236,9 @@ def check_for_updates(callback=None):
             print("[Update] 无法获取本地版本")
             return
         print(f"[Update] 本地: v{local_ver}  远程: v{remote_ver}", flush=True)
-        if remote_ver == local_ver:
+        # 必须比大小而不是比字符串：本地 4.0.8.1 对着远程 4.0.8 时字符串不相等，
+        # 比字符串会误报「有新版本」，而 _get_changelog_since 又只会返回空列表。
+        if _ver_to_tuple(remote_ver) <= _ver_to_tuple(local_ver):
             print(f"[Update] 当前版本 v{local_ver}（已是最新）")
             return
         changelog = _get_changelog_since(local_ver, remote_text)

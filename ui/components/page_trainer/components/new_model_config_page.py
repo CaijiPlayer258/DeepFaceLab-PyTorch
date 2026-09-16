@@ -11,7 +11,8 @@ from siui.components.combobox_ import SiCapsuleComboBox
 from siui.core import SiGlobal
 
 
-from core.leras.archis.archi_spec import (
+# ⚠️ 同 page_trainer：走 core.archi_names，别把 torch 拉进 GUI 进程。
+from core.archi_names import (
     ARCHI_CHOICES, ARCHI_DESCRIPTIONS, SUBARCHI_CHOICES, SUBARCHI_DESCRIPTIONS,
     KERNEL_CHOICES, build_archi_string as _build_archi_string,
     kernel_desc_for, is_lite_display, default_kernel_label,
@@ -535,15 +536,23 @@ class XSegTrainingConfigChildPage(SiChildPage):
             bf16_card.addWidget(self.use_bf16_switch)
             bf16_card.adjustSize()
 
-            # 预训练模式暂时弃用
+            # 预训练模式
             pt_card = SiOptionCardLinear(self)
-            pt_card.setTitle("预训练模式", "（暂不可用）使用通用人脸数据进行预训练")
+            pt_card.setTitle("预训练模式", "用通用人脸数据集（多身份）先训练编码器，转正训练后成像更快。非常耗时")
             pt_card.load(safe_get_icon("ic_fluent_hat_graduation_filled"))
             self.pretrain_switch = SiSwitch(pt_card)
             self.pretrain_switch.setChecked(False)
-            self.pretrain_switch.setEnabled(False)
             pt_card.addWidget(self.pretrain_switch)
             pt_card.adjustSize()
+
+            # 预训练单解码器支路
+            psd_card = SiOptionCardLinear(self)
+            psd_card.setTitle("预训练单解码器支路 (Single Decoder)", "预训练只训 src 支路并跳过 dst 支路，保存时同步权重。省显存/算力。仅 DF 架构")
+            psd_card.load(safe_get_icon("ic_fluent_hat_graduation_filled"))
+            self.pretrain_single_decoder_switch = SiSwitch(psd_card)
+            self.pretrain_single_decoder_switch.setChecked(False)
+            psd_card.addWidget(self.pretrain_single_decoder_switch)
+            psd_card.adjustSize()
 
             # 快速加载器开关
             fast_card = SiOptionCardLinear(self)
@@ -621,7 +630,8 @@ class XSegTrainingConfigChildPage(SiChildPage):
                 if 'options' in data:
                     data['options']['batch_size'] = int(self.batch_size_input.text() or '4')
                     data['options']['use_bf16'] = self.use_bf16_switch.isChecked()
-                    data['options']['pretrain'] = False  # pretrain 已停用：强制 False
+                    data['options']['pretrain'] = self.pretrain_switch.isChecked()
+                    data['options']['pretrain_single_decoder'] = self.pretrain_single_decoder_switch.isChecked()
                     data['options']['face_type'] = self.face_type_combo.currentText()
                     data['options']['loader_skip'] = self.fast_loader_switch.isChecked()
                     data['options']['use_compile'] = self.use_compile_switch.isChecked()

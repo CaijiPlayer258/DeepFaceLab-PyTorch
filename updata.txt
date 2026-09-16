@@ -1,3 +1,13 @@
+[2026-08-27] feat: pretrain single-decoder branch - pretrain trains only the src branch (encoder+inter+decoder_src), skips decoder_dst forward/backward, drops it from the optimizer param list, and syncs decoder_src weights to decoder_dst on save
+[2026-08-27] perf: compute pred_src_dst / pred_src_dst_no_code_grad on demand (they only serve face_style/bg_style) - removes 2 dead decoder passes per step, decoder forward effectively halved, -13.7% compute-only step at bs8 res256 ae320 e88 d88
+[2026-08-27] fix: GUI never wrote pretrain / pretrain_single_decoder into the model options (_runtime_opts whitelist), so the toggles had no effect and the summary still showed "pretrain: False"
+[2026-08-27] fix: reset iteration counter when pretraining transitions to normal training (lr schedule was offset)
+[2026-08-27] fix: add missing core/archi_names.py - imported by archi_parse/archi_spec but absent from the v4.0.8 push
+[2026-08-27] feat: pretraining set defaults to the dst dataset instead of raising "pretraining_data_path undefined"
+[2026-08-27] feat: pretraining set is not restricted to pak - accepts a packed faceset.pak dir or a plain DFLJPG aligned dir; a faceset.pak file path auto-resolves to its parent dir
+[2026-08-27] feat: restore the pretrain option (4.0.8.1 force-disabled it) and re-add the interactive prompt
+[2026-08-27] feat: show "single decoder" row in the model summary so the switch state is visible
+
 ﻿[2026-09-13] feat: DFLite lightweight architecture (depthwise separable encoder/decoder, df-udt-l family, -25.3% params, 1.95x inference)
 [2026-09-13] fix: DFLite BN inplace buffer update broke backward; lr_dropout mask sampled only once
 [2026-06-21] cleanup: remove redundant DFM export step from XSeg export script
