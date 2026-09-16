@@ -1,3 +1,31 @@
+4.0.8.3
+- 人脸集筛选与排序的清晰度指标换成「高频/低频能量比」= E(b0)/var(b2)
+  · 旧版拉普拉斯方差测的是【绝对值】，把内容对比度和锐度混在一起 ——
+    高对比的模糊图会拿到比低对比清晰图更高的分，阈值无法跨图通用
+  · 实测（150 张对齐人脸 + 合成高斯模糊，XSeg 遮罩内）：
+    模糊分离度 2.53 -> 3.31（+31%），内容变异系数 CV 0.224 -> 0.240（基本持平）
+  · 分母用 var 而不是 mean(b^2)：b2 是低频残差、带着画面亮度，实测 DC 占了
+    mean(b2^2) 的 96.5%，不去掉的话指标会退化成「亮度归一化的高频能量」；
+    去掉 DC 后分离度 2.81 -> 3.31、CV 0.264 -> 0.240
+  · 掩码改为只用于【选择统计像素】，不再 image * mask
+    （后者会在掩码边界制造强度极高的假边缘，主导拉普拉斯响应）
+  · 新增噪声补偿：噪声=高频=高分，实测 sigma_n=0.04 会让分数虚高 4.97 倍，
+    而「多轮取 high」的筛法会把噪声图一路富集上来
+- Filter（--mode blur）：4 档阈值不再写死（旧的 10/20/40 是拉普拉斯方差的量纲）
+  · 默认按本数据集 10/30/60 分位切；--absolute 改用合成模糊定绝对门槛
+  · 报告新增「中位等效模糊 sigma」一列，让分级有绝对含义
+  · 新增 --train-res（默认 256，应与训练分辨率一致）
+- Sorter（--method blur）：分数越高 = 越清晰 = 序号越靠前
+  · 重命名后 sorted_00000 最清晰，直接开文件夹看图删即可，不需要 GUI
+  · 结果写入 metadata.h5，字段名 sharpness_br{train_res}；第二次跑直接读缓存
+  · 新增 --train-res；--motion-blur 废弃（新指标对运动模糊同样敏感）
+- 修复：onnxruntime 改为惰性导入，GUI 进程不再因原生扩展 DLL 初始化失败而崩溃
+  · Filter / Sorter 原来在模块顶部直接 import onnxruntime；即使去掉，
+    facelib/__init__ 仍会经 FaceDetector 把它拽进来
+  · FaceDetector 改为 PEP 562 惰性加载，其余名字与调用方式完全不变
+  · 实测：Qt 之后 import Filter / Sorter 从「WinError 1114 崩溃」变为正常导入，
+    且 onnxruntime 全程未加载；Extractor / Util / FacesetResizer / DFLJPG 全部照常
+
 4.0.8.2
 - 新增「预训练单解码器支路」（DF 架构 + 预训练时生效，默认关闭）
   · 预训练只跑 src 支路（encoder + inter + decoder_src），完全跳过 decoder_dst

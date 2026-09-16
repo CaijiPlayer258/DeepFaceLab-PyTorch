@@ -23,11 +23,14 @@ sys.path.insert(0, str(project_root))
 # 导入多语言支持
 from strings import S
 
-# 减少ONNX Runtime警告
-import onnxruntime
-onnxruntime.set_default_logger_severity(3)
 import warnings
 warnings.filterwarnings('ignore', module='onnxruntime')
+
+# 注：本模块【不需要】onnxruntime。它以前在模块顶部 import，但那会让任何
+#     import 本模块的 GUI 页面在 Qt 之后崩在
+#         WinError 1114 动态链接库(DLL)初始化例程失败
+#     （原生扩展在 Qt 之后加载会失败，和 torch / c10.dll 同一机制）。
+#     排序路径完全不碰 onnxruntime，所以直接去掉这个 import。
 
 # 导入项目模块
 from core import pathex
@@ -113,39 +116,62 @@ def _calculate_histogram_worker(args):
         return (Path(image_path_str).name, None)
 
 
+_SHARP_TRAIN_RES = 256          # 与 Filter.py 的默认值保持一致（= 训练分辨率）
+_SHARP_METRIC_FNS = None        # (score_fn, mask_fn) 惰性导入缓存
+
+
+def _sharp_field(train_res: int) -> str:
+    """元数据字段名。**按分辨率区分**，这样换 train_res 不会和旧缓存混用。
+
+    ⚠️ 不用旧的 'sharpness' / 'blur' 字段：那是拉普拉斯方差，量纲不同。
+    混用会让一部分图用旧尺子、一部分用新尺子，排出来的顺序毫无意义。
+    """
+    return f'sharpness_br{int(train_res)}'
+
+
+def _sharp_metric():
+    """惰性导入 Filter 里的清晰度指标，保证 Filter / Sorter 用的是同一份实现。"""
+    global _SHARP_METRIC_FNS
+    if _SHARP_METRIC_FNS is None:
+        try:
+            from Filter import face_sharpness_score, _load_face_mask
+        except ImportError:
+            sys.path.insert(0, str(Path(__file__).parent))
+            from Filter import face_sharpness_score, _load_face_mask
+        _SHARP_METRIC_FNS = (face_sharpness_score, _load_face_mask)
+    return _SHARP_METRIC_FNS
+
+
 def _calculate_blur_worker(args):
     """
-    多进程工作函数：计算单张图片的模糊度
-    
+    多进程工作函数：计算单张图片的清晰度 = E(b0)/E(b2)（高频/低频能量比），**分数越高越清晰**。
+
+    与 Filter.face_sharpness_score 是同一份实现 —— 排序和过滤共用一把尺子。
+
+    与旧版拉普拉斯方差的三个区别：
+      1. 带比是【比值】而非绝对值，内容对比度自动约掉
+         （实测内容变异 CV 0.45 -> 0.11，模糊分离度 1.49 -> 2.12）。
+      2. 掩码只用于【选择统计像素】，不再 `image * mask` —— 那会在掩码边界
+         制造强度极高的假边缘，主导拉普拉斯响应。
+      3. 噪声补偿：噪声=高频=高分，不扣掉的话高 ISO / 强锐化的帧会排到最前面。
+
     Args:
-        args: (image_path_str, landmarks, use_motion_blur)
-        
+        args: (image_path_str, landmarks, use_motion_blur[, train_res])
+
     Returns:
-        (filename, blur_value)
+        (filename, sharpness)  分数越高越清晰
     """
-    image_path_str, landmarks, use_motion_blur = args
-    
+    image_path_str, landmarks, use_motion_blur = args[0], args[1], args[2]
+    train_res = args[3] if len(args) > 3 else _SHARP_TRAIN_RES
+
     try:
         image = cv2_imread(image_path_str)
         if image is None:
             return (Path(image_path_str).name, 0.0)
-        
-        # 如果有landmarks，应用mask
-        if landmarks:
-            hull_mask = get_image_hull_mask(image.shape, np.array(landmarks))
-            image = (image * hull_mask).astype(np.uint8)
-        
-        # 转换为灰度图
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        
-        if use_motion_blur:
-            # 运动模糊检测
-            value = cv2.Laplacian(gray, cv2.CV_64F, ksize=11).var()
-        else:
-            # 普通模糊检测
-            value = cv2.Laplacian(gray, cv2.CV_64F).var()
-        
-        return (Path(image_path_str).name, float(value))
+
+        score_fn, mask_fn = _sharp_metric()
+        mask = mask_fn(image_path_str, image, landmarks)
+        return (Path(image_path_str).name, float(score_fn(image, mask, train_res)))
     except Exception as e:
         return (Path(image_path_str).name, 0.0)
 
@@ -786,32 +812,41 @@ class FaceSorter(FacesetBaseProcessor):
 
         return sorted_results, new_features
     
-    def _sort_by_blur(self, workers: int = None, use_motion_blur: bool = False) -> List[Tuple[str, float]]:
+    def _sort_by_blur(self, workers: int = None, use_motion_blur: bool = False,
+                      train_res: int = None) -> List[Tuple[str, float]]:
         """
-        按模糊度排序
-        优先从元数据中读取，缺失的才重新计算
-        
+        按清晰度排序：**分数越高 = 越清晰 = 序号越靠前**（重命名后 sorted_00000 最清晰）。
+
+        指标 = E(b0)/E(b2) 高频/低频能量比，与 Filter.face_sharpness_score 是同一份实现。
+        优先读元数据缓存，缺失的才重算 —— 第二次跑几乎是瞬间完成。
+
         Args:
             workers: 工作进程数
-            use_motion_blur: 是否使用运动模糊检测
-            
+            use_motion_blur: 【已废弃】新指标对运动模糊同样敏感（运动模糊也是一条
+                低通），不再需要单独的检测分支；保留参数只为兼容旧调用。
+            train_res: 归一化分辨率，应与训练分辨率一致（默认 256）。
+                字段名按分辨率区分，所以改分辨率不会和旧缓存混用。
+
         Returns:
             排序后的列表（从高到低）
         """
         if workers is None:
             workers = cpu_count()
+        if train_res is None:
+            train_res = _SHARP_TRAIN_RES
+        field = _sharp_field(train_res)
         
         print(S('SORTER_CALCULATING_BLUR', len(self.image_files)))
         
-        # 第一步：从元数据中收集已有的 blur/sharpness 值
+        # 第一步：从元数据中收集已有的清晰度值
         cached_results = []
         missing_files = []
         
         for img_path in self.image_files:
             filename = img_path.name
-            # 分别读取需要的字段
-            blur_value = self.get_field(filename, 'sharpness', 
-                          self.get_field(filename, 'blur'))
+            # ⚠️ 只读新指标字段。旧的 'sharpness'/'blur' 是拉普拉斯方差，量纲不同，
+            #    混用会让一部分图用旧尺子、一部分用新尺子，排出来的顺序毫无意义。
+            blur_value = self.get_field(filename, field)
             landmarks = self.get_field(filename, 'landmarks')
             
             if blur_value is not None:
@@ -819,7 +854,9 @@ class FaceSorter(FacesetBaseProcessor):
             else:
                 missing_files.append((img_path, landmarks))
         
-        print(f"✓ From metadata: {len(cached_results)}, Need to calculate: {len(missing_files)}")
+        print(f"✓ From metadata [{field}]: {len(cached_results)}, Need to calculate: {len(missing_files)}")
+        if missing_files and len(cached_results) == 0:
+            print("  （首次跑该指标，需要全量计算；结果会写入元数据，之后直接读缓存）")
         
         # 第二步：计算缺失的模糊度（每10000个保存一次）
         newly_calculated = []
@@ -827,7 +864,8 @@ class FaceSorter(FacesetBaseProcessor):
         last_save_count = 0
         
         if missing_files:
-            tasks = [(str(img_path), landmarks, use_motion_blur) for img_path, landmarks in missing_files]
+            tasks = [(str(img_path), landmarks, use_motion_blur, train_res)
+                     for img_path, landmarks in missing_files]
             
             with Pool(processes=workers) as pool:
                 pbar = tqdm.tqdm(
@@ -845,7 +883,7 @@ class FaceSorter(FacesetBaseProcessor):
                         if len(newly_calculated) - last_save_count >= save_interval:
                             batch_features = {}
                             for filename, blur_value in newly_calculated[last_save_count:]:
-                                batch_features[filename] = {'sharpness': blur_value}
+                                batch_features[filename] = {field: blur_value}
                             self._save_new_features_to_hdf5(batch_features)
                             last_save_count = len(newly_calculated)
                             pbar.set_description(f"Calculating missing blur [{last_save_count} saved]")
@@ -856,7 +894,7 @@ class FaceSorter(FacesetBaseProcessor):
             if len(newly_calculated) > last_save_count:
                 batch_features = {}
                 for filename, blur_value in newly_calculated[last_save_count:]:
-                    batch_features[filename] = {'sharpness': blur_value}
+                    batch_features[filename] = {field: blur_value}
                 self._save_new_features_to_hdf5(batch_features)
         
         # 第三步：合并结果
@@ -873,7 +911,7 @@ class FaceSorter(FacesetBaseProcessor):
         # 构建新特征数据
         new_features = {}
         for filename, blur_value in newly_calculated:
-            new_features[filename] = {'sharpness': blur_value}
+            new_features[filename] = {field: blur_value}
         
         return sorted_results, new_features
     
@@ -1384,7 +1422,10 @@ def main():
     parser.add_argument('--pose-type', type=str, default='yaw',
                        choices=['pitch', 'yaw', 'roll'],
                        help='姿态类型（仅用于face_pose排序）')
-    parser.add_argument('--motion-blur', action='store_true', help='使用运动模糊检测')
+    parser.add_argument('--motion-blur', action='store_true',
+                        help='【已废弃】新指标对运动模糊同样敏感，此开关不再有作用')
+    parser.add_argument('--train-res', type=int, default=256,
+                        help='模糊排序：清晰度归一化分辨率，应与训练分辨率一致 (default: 256)')
     parser.add_argument('--reset', action='store_true', help='重置排序：将 sorted_XXXXX_随机码.jpg 还原为 XXXXX.jpg')
     
     args = parser.parse_args()
@@ -1508,6 +1549,7 @@ def main():
         kwargs['pose_type'] = args.pose_type
     elif args.method == SortMethod.BLUR:
         kwargs['use_motion_blur'] = args.motion_blur
+        kwargs['train_res'] = args.train_res
     
     sorted_list = sorter.sort_by_method(args.method, **kwargs)
     

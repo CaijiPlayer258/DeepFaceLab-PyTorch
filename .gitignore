@@ -99,6 +99,9 @@ modelhub/modelhub/
 # 研究笔记与实验脚本（本地资料，不入库）
 hypothesis/
 
+# GPU / TensorRT 实验脚本：内含另一个项目（DeepFaceLive-NextGen）的路径与产物，不入库
+DFL_GPU_LAB/
+
 # Cursor / 本地编辑器
 .cursor/
 *.orig
