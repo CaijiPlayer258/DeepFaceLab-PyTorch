@@ -85,6 +85,14 @@ tools/TF_TO_TORCH_*
 tools/__pycache__/
 FaceCompleter/
 
+# ⚠️ 例外：TF→Torch 转换工具是【用户要用的功能】，不是孤立脚本。
+#    core/leras/layers/Saveable.py 的注释就直接引用了 convert_dfl_tf_to_torch.py。
+#    之前它们被上面的 tools/convert_* / verify_* / TF_TO_TORCH_* 一起挡住了，
+#    结果 clone 本仓库的人根本拿不到转换器 —— 只能转换 DF 模型的修复也就无从谈起。
+!tools/convert_dfl_tf_to_torch.py
+!tools/verify_converted_dfl_model.py
+!tools/TF_TO_TORCH_CONVERSION.md
+
 # ============================================================
 # 以下为本次本地仓库初始化时新增的排除项
 # ============================================================

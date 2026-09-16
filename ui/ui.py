@@ -133,7 +133,7 @@ class MySiliconApp(SiliconApplication):
     def _show_update_dlg(self, has_update, info):
         """在主线程中显示更新对话框"""
         try:
-            from ui.update_checker import show_update_dialog, pull_updates
+            from ui.update_checker import show_update_dialog, pull_updates, _reflow_notes
             if has_update and isinstance(info, dict):
                 _lines = ["当前 v%s -> 最新 v%s" % (info.get("local_ver", "?"), info.get("remote_ver", "?"))]
                 _changelog = info.get("changelog", [])
@@ -143,7 +143,18 @@ class MySiliconApp(SiliconApplication):
                     # 照顾长时间未更新、突然想更新的用户）
                     for _ver, _notes in _changelog[:1]:
                         _lines.append("【v%s】" % _ver)
-                        _lines.extend("  " + n for n in _notes)
+                        # 按 version.txt 的缩进还原层级：主条目之间空一行，子条目缩进两格。
+                        # 旧版是「每行统一加两个空格」，于是 · 子条目和 - 主条目同层，
+                        # 折行、层级、条目间隔全部丢失，看起来就是一段没分行的文字。
+                        _first = True
+                        for _lvl, _txt in _reflow_notes(_notes):
+                            if _lvl == 0:
+                                if not _first:
+                                    _lines.append("")
+                                _lines.append("· " + _txt)
+                                _first = False
+                            else:
+                                _lines.append("    · " + _txt)
                         _lines.append("")
                 show_update_dialog(self, "发现更新", chr(10).join(_lines), "立即更新", pull_updates)
         except Exception as e:
