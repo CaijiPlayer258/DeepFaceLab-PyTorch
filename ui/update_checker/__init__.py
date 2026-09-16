@@ -2,7 +2,7 @@
 自动更新检查器
 启动后在后台检查 GitHub 是否有新版本，询问用户是否拉取。
 """
-import subprocess, sys, os, json, shutil
+import subprocess, sys, os, json, shutil, re
 from pathlib import Path
 
 # 测试开关：设为 True 可模拟有更新（即使本地已最新）
@@ -155,10 +155,50 @@ def _parse_versions(text: str):
     """
     sections = []
     for block in text.lstrip("\ufeff").strip().split("\n\n"):
-        lines = [l.strip() for l in block.strip().split("\n") if l.strip()]
+        # 关键：不能对每行 l.strip()。version.txt 用「- 」主条目 + 「  · 」子条目 +
+        # 4 空格续行来表达层级，strip() 会把缩进一并吃掉，界面上就退化成一坨没有
+        # 层次的文字（只剩行首那个 · / - 字符本身），这正是「更新信息没有分行」。
+        lines = [l.rstrip() for l in block.strip("\n").split("\n") if l.strip()]
         if lines:
-            sections.append((lines[0], lines[1:]))
+            sections.append((lines[0].strip(), lines[1:]))
     return sections
+
+
+_BULLET_RE = re.compile(r'^(\s*)([-•·*])\s+(.*)$')
+_ASCII_TAIL_RE = re.compile(r'[0-9A-Za-z_]$')
+_ASCII_HEAD_RE = re.compile(r'^[0-9A-Za-z_]')
+
+
+def _reflow_notes(notes):
+    """把 version.txt 里为终端宽度做的「手工折行」还原成有层级的条目。
+
+    version.txt 的版式是：
+        - 主条目
+          · 子条目
+            续行（2 或 4 空格起）
+    续行的缩进不代表新条目，只是上一句在同一段里被折到了下一行。直接塞进 QLabel
+    会同时丢掉层级和折行的意义，所以这里先把续行并回上一条，再按缩进判层级。
+
+    返回 [(level, text), ...]：level 0 = 主条目，level 1 = 子条目。
+    """
+    items = []
+    for raw in notes:
+        if not raw.strip():
+            continue
+        m = _BULLET_RE.match(raw)
+        if m:
+            indent = len(m.group(1).expandtabs(4))
+            items.append([0 if indent == 0 else 1, m.group(3).strip()])
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        if indent >= 2 and items:
+            prev, piece = items[-1][1], raw.strip()
+            # 中英文混排：两边都是 ASCII 词时才补空格，否则直接接上
+            sep = " " if (_ASCII_TAIL_RE.search(prev) and _ASCII_HEAD_RE.match(piece)) else ""
+            items[-1][1] = prev + sep + piece
+        else:
+            items.append([0, raw.strip()])
+    return [(lv, tx) for lv, tx in items]
 
 
 def _ver_to_tuple(v: str) -> tuple:
@@ -355,6 +395,27 @@ def ensure_git_installed(callback=None):
         callback(ok)
 
 
+def _truncate_to_height(text, font, width, max_h):
+    """按实际渲染高度截断文本（对话框不能无限长，否则更新按钮会被挤出屏幕）"""
+    from PyQt5.QtGui import QTextDocument
+    _doc = QTextDocument()
+    _doc.setDefaultFont(font)
+    _doc.setPlainText(text)
+    _doc.setTextWidth(width)
+    if _doc.size().height() <= max_h:
+        return text
+    _tail = "\n…（内容过长已截断，完整更新说明见「更新日志」页）"
+    lines = text.split("\n")
+    while lines:
+        lines = lines[:-1]
+        cand = "\n".join(lines) + _tail
+        _doc.setPlainText(cand)
+        _doc.setTextWidth(width)
+        if _doc.size().height() <= max_h:
+            return cand
+    return _tail.strip()
+
+
 def show_update_dialog(window, title, text, btn_text, btn_callback):
     """显示更新对话框（SiModalDialog，失败回退 QMessageBox）"""
     try:
@@ -366,29 +427,37 @@ def show_update_dialog(window, title, text, btn_text, btn_callback):
         _layer = window.layerModalDialog()
         if _layer is None:
             raise RuntimeError("layerModalDialog is None")
+        # 版式宽度：content_container 宽 = 对话框宽 - 2*body_padding_h(43)
+        # 旧版对话框只有 480 宽、文本区只有 250px（约 18 个汉字一行），一条更新说明就被
+        # 折成两三行，条目的层级完全看不出来，观感就是一坨。这里放宽到 620。
+        _DLG_W, _PAD_R = 700, 80   # _PAD_R 让出右上角那个 32px 的 alert 图标
+        _TXT_W = _DLG_W - 86
+        _CONTENT_W = _TXT_W - _PAD_R
         _dlg = SiModalDialog(_layer)
-        _dlg.setFixedWidth(480)
-        _dlg.resize(480, 1)  # 让实际宽度立刻生效，否则后面 adjustSize 里 self.width() 是错的
+        _dlg.setFixedWidth(_DLG_W)
+        _dlg.resize(_DLG_W, 1)  # 让实际宽度立刻生效，否则后面 adjustSize 里 self.width() 是错的
         _dlg.icon().load(SiGlobal.siui.iconpack.get("ic_fluent_alert_filled"))
         _dlg.icon().setSvgSize(32, 32)
         _dlg.icon().resize(32, 32)
         _dlg.reloadStyleSheet()
-        _txt = SiLabel(_dlg.contentContainer())
-        _txt.setText(text)
-        _txt.setWordWrap(True)
         from PyQt5.QtCore import Qt
-        _txt.setTextFormat(Qt.PlainText)
         from PyQt5.QtGui import QTextDocument, QFont
-        # 用 QTextDocument 精确计算换行文本高度
-        _doc = QTextDocument()
-        _doc.setPlainText(text)
-        _doc.setTextWidth(250)  # 322 - 72（右侧 padding 给图标）
+        _txt = SiLabel(_dlg.contentContainer())
+        _txt.setWordWrap(True)
+        _txt.setTextFormat(Qt.PlainText)
         _font = QFont(_txt.font())
         _font.setPixelSize(14)
+        # 太长会把「更新」按钮挤出屏幕，超出高度就截断并指路更新日志页
+        text = _truncate_to_height(text, _font, _CONTENT_W, 470)
+        _txt.setText(text)
+        # 用 QTextDocument 精确计算换行高度：宽度必须和实际渲染宽度一致，否则高度会算错
+        _doc = QTextDocument()
         _doc.setDefaultFont(_font)
+        _doc.setPlainText(text)
+        _doc.setTextWidth(_CONTENT_W)
         _txt_height = int(_doc.size().height()) + 16  # +上下 padding
-        _txt.setFixedSize(322, _txt_height)
-        _txt.setStyleSheet("font-size: 14px; padding: 8px 72px 8px 0; color: #FFFFFF;")
+        _txt.setFixedSize(_TXT_W, _txt_height)
+        _txt.setStyleSheet(f"font-size: 14px; padding: 8px {_PAD_R}px 8px 0; color: #FFFFFF;")
         _dlg.contentContainer().addWidget(_txt)
         # 更新按钮：绿色背景 + 白色文字
         _btn = SiPushButton(_dlg.buttonContainer())

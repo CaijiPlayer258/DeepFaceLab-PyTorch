@@ -221,10 +221,13 @@ class XSegNet(object):
                 target_shape = tuple(param_tensor.shape)
                 src = self._convert_weight_to_shape(w_val, target_shape)
                 if src is None:
-                    if int(np.prod(w_val.shape)) == int(np.prod(target_shape)):
-                        src = w_val.reshape(target_shape)
-                    else:
-                        continue
+                    # No element-count reshape fallback: two layers can hold the
+                    # same number of elements and still be different parameters,
+                    # so reinterpreting one as the other silently corrupts the
+                    # model. Skip and report instead.
+                    print(f'  [WARN] XSeg .npy: {tf_name} shape {w_val.shape} '
+                          f'cannot be converted to {target_shape}, skipped')
+                    continue
 
                 t = torch.from_numpy(src).to(device=param_tensor.device, dtype=param_tensor.dtype)
                 param_tensor.data.copy_(t)
@@ -232,40 +235,46 @@ class XSegNet(object):
 
         return loaded_any
 
+    @staticmethod
+    def _degenerate_reshape(w: np.ndarray, target_shape: tuple[int, ...]) -> Optional[np.ndarray]:
+        """Reshape ONLY across size-1 axes (squeeze / unsqueeze).
+
+        A free element-count reshape is never allowed: two different layers can
+        have the same element count, so reshaping would write one parameter into
+        another's slot.
+        """
+        if int(np.prod(w.shape)) != int(np.prod(target_shape)):
+            return None
+        a = tuple(int(x) for x in w.shape if int(x) != 1)
+        b = tuple(int(x) for x in target_shape if int(x) != 1)
+        if a != b:
+            return None
+        return w.reshape(target_shape)
+
     def _convert_weight_to_shape(self, w: np.ndarray, target_shape: tuple[int, ...]) -> Optional[np.ndarray]:
         if tuple(w.shape) == tuple(target_shape):
             return w
 
         if w.ndim == 1:
-            if int(np.prod(w.shape)) == int(np.prod(target_shape)):
-                return w.reshape(target_shape)
-            return None
+            return self._degenerate_reshape(w, target_shape)
 
         if w.ndim == 2:
             if w.T.shape == tuple(target_shape):
                 return w.T
-            if int(np.prod(w.shape)) == int(np.prod(target_shape)):
-                return w.reshape(target_shape)
-            return None
+            return self._degenerate_reshape(w, target_shape)
 
         if w.ndim == 4:
-            # Common candidates:
-            #  - HWIO -> OIHW: (k,k,in,out) -> (out,in,k,k)
+            # TF layout candidates for this codebase's .npy export:
+            #  - HWIO -> OIHW: (k,k,in,out) -> (out,in,k,k)   [primary]
             #  - HWOI -> IOHW: (k,k,out,in) -> (in,out,k,k)
-            candidates = [
-                w,
-                np.transpose(w, (3, 2, 0, 1)),
-                np.transpose(w, (2, 3, 0, 1)),
-                np.transpose(w, (1, 0, 2, 3)),
-                np.transpose(w, (0, 1, 3, 2)),
-            ]
-            for c in candidates:
-                if tuple(c.shape) == tuple(target_shape):
-                    return c
-            if int(np.prod(w.shape)) == int(np.prod(target_shape)):
-                return w.reshape(target_shape)
-            return None
+            candidates = [w, np.transpose(w, (3, 2, 0, 1)), np.transpose(w, (2, 3, 0, 1))]
+            hits = [c for c in candidates if tuple(c.shape) == tuple(target_shape)]
+            if len(hits) == 1:
+                return hits[0]
+            if len(hits) > 1:
+                # Ambiguous permutation (can happen for square in==out kernels):
+                # prefer the canonical TF HWIO -> torch OIHW transpose.
+                return np.transpose(w, (3, 2, 0, 1)) if tuple(np.transpose(w, (3, 2, 0, 1)).shape) == tuple(target_shape) else None
+            return self._degenerate_reshape(w, target_shape)
 
-        if int(np.prod(w.shape)) == int(np.prod(target_shape)):
-            return w.reshape(target_shape)
-        return None
+        return self._degenerate_reshape(w, target_shape)

@@ -1,106 +1,80 @@
+4.0.8.4
+- 修复：LIAE 大模型转换后权重错乱（输出纯色块）
+- 修复：训练自动转换与合成器页面的 .npy 转换
+- 修复：转换工具未被仓库收录
+- 修复：验证器读取 .pth 报错
+- 修复：权重加载失败时的提示
+- 新增：转换器 --strict
+- 新增：验证器 --deep
+- 改进：转换过程的诊断输出
+
 4.0.8.3
-- 人脸集筛选与排序的清晰度指标换成「高频/低频能量比」= E(b0)/var(b2)
-  · 旧版拉普拉斯方差测的是【绝对值】，把内容对比度和锐度混在一起 ——
-    高对比的模糊图会拿到比低对比清晰图更高的分，阈值无法跨图通用
-  · 实测（150 张对齐人脸 + 合成高斯模糊，XSeg 遮罩内）：
-    模糊分离度 2.53 -> 3.31（+31%），内容变异系数 CV 0.224 -> 0.240（基本持平）
-  · 分母用 var 而不是 mean(b^2)：b2 是低频残差、带着画面亮度，实测 DC 占了
-    mean(b2^2) 的 96.5%，不去掉的话指标会退化成「亮度归一化的高频能量」；
-    去掉 DC 后分离度 2.81 -> 3.31、CV 0.264 -> 0.240
-  · 掩码改为只用于【选择统计像素】，不再 image * mask
-    （后者会在掩码边界制造强度极高的假边缘，主导拉普拉斯响应）
-  · 新增噪声补偿：噪声=高频=高分，实测 sigma_n=0.04 会让分数虚高 4.97 倍，
-    而「多轮取 high」的筛法会把噪声图一路富集上来
-- Filter（--mode blur）：4 档阈值不再写死（旧的 10/20/40 是拉普拉斯方差的量纲）
-  · 默认按本数据集 10/30/60 分位切；--absolute 改用合成模糊定绝对门槛
-  · 报告新增「中位等效模糊 sigma」一列，让分级有绝对含义
-  · 新增 --train-res（默认 256，应与训练分辨率一致）
-- Sorter（--method blur）：分数越高 = 越清晰 = 序号越靠前
-  · 重命名后 sorted_00000 最清晰，直接开文件夹看图删即可，不需要 GUI
-  · 结果写入 metadata.h5，字段名 sharpness_br{train_res}；第二次跑直接读缓存
-  · 新增 --train-res；--motion-blur 废弃（新指标对运动模糊同样敏感）
-- 修复：onnxruntime 改为惰性导入，GUI 进程不再因原生扩展 DLL 初始化失败而崩溃
-  · Filter / Sorter 原来在模块顶部直接 import onnxruntime；即使去掉，
-    facelib/__init__ 仍会经 FaceDetector 把它拽进来
-  · FaceDetector 改为 PEP 562 惰性加载，其余名字与调用方式完全不变
-  · 实测：Qt 之后 import Filter / Sorter 从「WinError 1114 崩溃」变为正常导入，
-    且 onnxruntime 全程未加载；Extractor / Util / FacesetResizer / DFLJPG 全部照常
+- 改进：人脸集筛选与排序改用「高频/低频能量比」清晰度指标
+- 改进：Filter 分级阈值改为按数据集自动确定，报告新增中位等效模糊 sigma
+- 新增：Filter / Sorter 的 --train-res 参数
+- 改进：Sorter 结果写入 metadata.h5 缓存，第二次运行直接复用
+- 废弃：Sorter 的 --motion-blur
+- 修复：GUI 进程因原生扩展 DLL 初始化失败而崩溃
 
 4.0.8.2
-- 新增「预训练单解码器支路」（DF 架构 + 预训练时生效，默认关闭）
-  · 预训练只跑 src 支路（encoder + inter + decoder_src），完全跳过 decoder_dst
-    的前向与反向，并把 decoder_dst 从优化器参数表摘除，省下其优化器状态
-  · 保存时自动把 decoder_src 权重复制到 decoder_dst（两解码器结构一致，复制无损）
-  · 预训练两条支路读取同一份多身份数据集，故与「训练 dst 支路再复制给 src」等价
-  · 收益：省掉一条支路的算力与显存，可开出更大的 batch（取舍见设计记录文档）
-- 恢复预训练开关：此前 4.0.8.1 将 pretrain 强制关闭，现恢复为可加载选项并重新提供询问入口
-- 修复：GUI 写回模型选项时遗漏 pretrain / pretrain_single_decoder（未登记进 _runtime_opts），
-  导致界面开关不生效、模型摘要仍显示「预训练: False」
-- 修复：预训练结束转正训练时迭代计数未归零，会让 lr 调度错位（对齐原 pretrain_just_disabled 语义）
-- 预训练集默认使用 dst 训练集（GUI 无该选项时的默认行为；CLI 的 --pretraining-data-dir 可覆盖），
-  不再因未指定而抛「未定义 pretraining_data_path」
-- 预训练集不做格式限制：既支持「含 faceset.pak 的打包目录」，也支持「散装 DFLJPG 对齐人脸目录」
-  （两种由 SampleLoader / SampleLoaderV4 自动识别）；直接把 faceset.pak 文件本身传入时，
-  自动改用其所在目录
-- 模型摘要「训练设置」新增「单解码器」一行，便于确认开关是否真的生效
-- 性能：训练步内的 pred_src_dst / pred_src_dst_no_code_grad 改为「按需计算」。
-  这两个换脸输出只服务 face_style / bg_style；两者都为 0 时（默认配置）没有任何
-  loss 会读它们，原实现却每步照跑 —— decoder_src 每步跑 3 次（实际只需 1 次），
-  解码器前向等于翻倍。现在仅在对应 style 开启时才计算；预览（AE_view）也只算
-  它真正要用的那一次（不再算 no_code_grad）。
-  涉及 _forward_df / _forward_liae / train_one_step / _xla_core / AE_view。
+- 新增：预训练单解码器支路（DF 架构 + 预训练，默认关闭）
+- 新增：预训练开关（此前被强制关闭）
+- 新增：模型摘要「训练设置」显示是否启用单解码器
+- 改进：训练步内换脸输出改为按需计算，纯计算整步约 -13.7%
+- 修复：界面上的预训练 / 单解码器开关不生效
+- 修复：预训练转正训练时迭代计数未归零
+- 修复：预训练集未指定时直接报错
+- 改进：预训练集支持打包目录与散装对齐目录
 
 4.0.8.1
-- 修复 GUI 启动崩溃（WinError 1114 / c10.dll）：页面模块不再经 core.leras 导入 torch
+- 修复：GUI 启动崩溃（WinError 1114 / c10.dll）
 
 4.0.8
-- 新增 DFLite 轻量架构（l 后缀）：编码器与解码器的 5x5 稠密卷积换为深度可分离
-  · 新增 df-udt-l / l3 / l5 / lm / lx 等算子，旧两段式 df-ud 写法不受影响
-  · 新建模型界面新增架构（DF Lite / LIAE Lite）与算子下拉，共 6 种算子
-  · res256 ae256 e64 d128 dm42：参数 171,641,406 -> 128,151,717（-25.3%）
-  · 推理 bs1 20.87ms -> 10.71ms（1.95x）；TRT 逐层 bf16 编译后 4.23ms（2.53x，engine 179MB）
-- 修复 DFLite 的 BN 缓冲区原地更新导致 backward 报错（此前 df-udt-l 完全无法训练）
-- 修复 lr_dropout 掩码只在初始化抽样一次（改为每步重采样，恢复原版语义）
-- 解耦 lr_cos 与 lr_dropout；术语更正为「余弦退火·热重启」(SGDR)
-- 新增平台期自动降 lr（不依赖预定总步数）与单调余弦退火，四个优化器统一支持
-- 训练日志增加当前学习率；修复学习率控件键名不匹配导致设置失效
+- 新增：DFLite 轻量架构（l 后缀），参数 -25.3%、推理 1.95x
+- 新增：新建模型界面的架构与算子下拉，共 6 种算子
+- 新增：平台期自动降 lr 与单调余弦退火，四个优化器统一支持
+- 新增：训练日志显示当前学习率
+- 改进：解耦 lr_cos 与 lr_dropout，术语更正为「余弦退火·热重启」
+- 修复：DFLite 的 BN 缓冲区原地更新导致反向传播报错
+- 修复：lr_dropout 掩码只抽样一次
+- 修复：学习率控件键名不匹配导致设置失效
 
 4.0.7
 - 本项目已进入低维护模式（核心功能可用，不再积极开发新功能）
-- 批量导出新增「GPU 解码加速」选项（提取帧硬解码，失败自动回退软解）
+- 新增：批量导出的「GPU 解码加速」选项
 
 4.0.6
-- dssim 与高斯模糊改为可分离卷积并缓存高斯核
-- dssim padding 与 pixel_norm epsilon 对齐原版 DFL
-- Conv2D 对称 padding 公式修正（含 dilation）
-- use_bf16 旧模型默认开启
+- 改进：dssim 与高斯模糊改为可分离卷积并缓存高斯核
+- 改进：use_bf16 旧模型默认开启
+- 修复：dssim padding 与 pixel_norm epsilon 对齐原版 DFL
+- 修复：Conv2D 对称 padding 公式（含 dilation）
 
 4.0.5
-- 修复更新弹窗信息过长导致更新按钮无法点击（只显示最新版本更新信息）
+- 修复：更新弹窗信息过长导致更新按钮无法点击
 
 4.0.4
-- 新增 FastFaceAlign 检测器（one-stage 旋转框检测，Top-1 无阈值，旋转矫正后提特征点）
-- 新增冻结解码器Dst功能（仅DF架构，联动冻结编码器/中间层，训练后期只精修src解码器）
-- VGG 感知损失默认值改为 0.0
-- modelhub 导入安全化（缺失检测器不再导致启动失败）
-- 更新 modelhub 下载链接
+- 新增：FastFaceAlign 检测器
+- 新增：冻结解码器 Dst 功能（仅 DF 架构）
+- 改进：VGG 感知损失默认值改为 0.0
+- 改进：更新 modelhub 下载链接
+- 修复：modelhub 缺失检测器导致启动失败
 
 4.0.3
-- 修复了预训练无法关闭的问题
+- 修复：预训练无法关闭
 
 4.0.2
-- 新增 Sliding Window / One-Stage 检测模式选择
-- 新增 LetterBox / WarpAffine 缩放方式选择
-- 新增窗口/输入尺寸参数（Sliding Window 窗口边长 / One-Stage 缩放尺寸）
-- One-Stage 模式自动跳过预缩放（整图缩放无意义）
-- GUI 增加模式选择控件与检测器适用性提示
+- 新增：Sliding Window / One-Stage 检测模式选择
+- 新增：LetterBox / WarpAffine 缩放方式选择
+- 新增：窗口 / 输入尺寸参数
+- 改进：One-Stage 模式自动跳过预缩放
+- 改进：GUI 增加模式选择控件与检测器适用性提示
 
 4.0.1
-- 修复模型转换时 _data.dat 找不到导致配置错误
-- 修复旧模型 .npy 模块被识别为独立模型
-- 修复导出崩溃（autobackups_path 未初始化）
-- 新增 OS 级 stdin 重定向抑制交互回显
-- 新增配置丢失时自动从 old/ 恢复
+- 新增：OS 级 stdin 重定向抑制交互回显
+- 新增：配置丢失时自动从 old/ 恢复
+- 修复：模型转换时 _data.dat 找不到导致配置错误
+- 修复：旧模型 .npy 模块被识别为独立模型
+- 修复：导出崩溃（autobackups_path 未初始化）
 
 4.0.0
 - 初始公开版本
@@ -108,6 +82,6 @@
 - XSeg / XSegLite 遮罩模型
 - HDR 色调映射 & 杜比视界转码
 - TRT 编译工具 & 模型导出
-- 自动更新检查（远程 version.txt 对比 + zip 下载）
+- 自动更新检查
 - PyQt-SiliconUI 图形界面
 - 默认 BF16 混合精度训练

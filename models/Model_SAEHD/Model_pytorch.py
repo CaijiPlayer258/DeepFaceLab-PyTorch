@@ -935,6 +935,14 @@ class SAEHDModel(ModelBase):
 
             if do_init:
                 model.init_weights()
+                if (not self.is_first_run()
+                        and not getattr(self, 'pretrain_just_disabled', False)
+                        and not getattr(self, 'is_exporting', False)):
+                    # A failed load silently becomes a random re-init, which
+                    # exports as a solid-colour / noise model. Say so loudly.
+                    print(f"[WARN] {filename}: 权重加载失败，已改为随机初始化（该模块输出将是噪声）。")
+                    print(f"       若源为 DFL 的 .npy，请先运行 "
+                          f"python tools/convert_dfl_tf_to_torch.py --strict 核对转换报告后再重试。")
                 status = '已重置'
             else:
                 status = '已加载'

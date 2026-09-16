@@ -172,10 +172,15 @@ class Saveable():
     def _load_tf_weights(self, d):
         """Load original DeepFaceLab (TensorFlow) .npy weights.
 
-        Mirrors tools/convert_dfl_tf_to_torch.py logic:
-          1. Build TF name → param mapping from layer hierarchy
-          2. Try exact name match first
-          3. Fall back to shape-based greedy matching
+        NOTE: this is an independent COPY of the matching logic in
+        tools/convert_dfl_tf_to_torch.py (that CLI is not imported here, so the
+        two must be kept in sync by hand). It is the code path actually used by
+        training auto-convert (load_weights -> ':0' in key) and by the merger
+        page (.npy -> DFM via tools/export_dfm.py convert_npy_to_pth).
+
+          1. Build TF name -> param mapping from layer hierarchy
+          2. Try exact name match first, then with/without the ':0' suffix
+          3. Fall back to shape-based matching ONLY when the candidate is unique
           4. Two-pass: verify ALL params match before applying any
         """
         if not hasattr(self, '_get_tf_weight_names'):
@@ -200,9 +205,17 @@ class Saveable():
             if src.ndim == 2 and len(dst_shape) == 2:
                 if src.shape[::-1] == dst_shape:
                     return src.T
-            # Resize if element count matches
+            # Degenerate-dimension reshape only (squeeze / unsqueeze).
+            # A free element-count reshape is deliberately NOT allowed: whenever
+            # two layers happen to hold the same number of elements it would
+            # silently reinterpret one parameter as another. That is exactly what
+            # turned large LIAE models (e.g. ae_dims=352 at res 384) into
+            # solid-colour output.
             if int(np.prod(src.shape)) == int(np.prod(dst_shape)):
-                return np.reshape(src, dst_shape)
+                _s = tuple(int(x) for x in src.shape if int(x) != 1)
+                _d = tuple(int(x) for x in dst_shape if int(x) != 1)
+                if _s == _d:
+                    return np.reshape(src, dst_shape)
             raise ValueError(f"shape mismatch: src {src.shape} -> dst {dst_shape}")
 
         def _try_key(key: str, dst_shape) -> object:
@@ -213,34 +226,58 @@ class Saveable():
             except ValueError:
                 return None
 
+        n_exact = n_suffix = n_shape = 0
+
         # --- Pass 1: name-based + shape-fallback matching ---
         for tf_name, param in tf_weights:
             dst_shape = tuple(int(x) for x in param.shape)
             chosen = None
+            chosen_key = None
 
             # 1a) exact name
             chosen = _try_key(tf_name, dst_shape)
+            if chosen is not None:
+                chosen_key = tf_name
+                n_exact += 1
 
             # 1b) without / with :0 suffix
             if chosen is None:
-                if tf_name.endswith(':0'):
-                    chosen = _try_key(tf_name[:-2], dst_shape)
-                else:
-                    chosen = _try_key(tf_name + ':0', dst_shape)
+                alt = tf_name[:-2] if tf_name.endswith(':0') else tf_name + ':0'
+                chosen = _try_key(alt, dst_shape)
+                if chosen is not None:
+                    chosen_key = alt
+                    n_suffix += 1
 
-            # 1c) shape-based greedy fallback among unused keys
+            # 1c) shape-based fallback among unused keys -- ONLY if unique.
+            # Two same-shaped layers in one model (the decoder alone holds
+            # (1024,1024,3,3) x2 and (512,512,3,3) x2) are not distinguishable
+            # by shape, so guessing here corrupts the model silently.
             if chosen is None:
-                for cand in list(remaining_keys):
-                    chosen = _try_key(cand, dst_shape)
-                    if chosen is not None:
-                        remaining_keys.remove(cand)
-                        break
+                cands = [c for c in sorted(remaining_keys)
+                         if _try_key(c, dst_shape) is not None]
+                if len(cands) > 1:
+                    # Prefer candidates already in torch layout (no transpose)
+                    _exact = [c for c in cands if tuple(d[c].shape) == dst_shape]
+                    if len(_exact) == 1:
+                        cands = _exact
+                if len(cands) == 1:
+                    chosen = _try_key(cands[0], dst_shape)
+                    chosen_key = cands[0]
+                    n_shape += 1
+                elif len(cands) > 1:
+                    name_hint = self.name or type(self).__name__
+                    print(f"[WARN] TF weight '{tf_name}' (shape {param.shape}) 在 {name_hint} 中有 "
+                          f"{len(cands)} 个同形候选，无法唯一确定，放弃转换以免写错权重：")
+                    for c in cands[:8]:
+                        print(f"         candidate: {c} {d[c].shape}")
+                    return False
 
             if chosen is None:
                 name_hint = self.name or type(self).__name__
                 print(f"[WARN] TF weight '{tf_name}' (shape {param.shape}) 在 {name_hint} 中无匹配，跳过加载")
                 return False  # refuse partial load
 
+            remaining_keys.discard(chosen_key)
             validated.append((param, chosen))
 
         # --- Pass 2: apply ---
@@ -250,6 +287,10 @@ class Saveable():
                 torch.from_numpy(w_val).to(device=param.device, dtype=param.dtype)
             )
 
+        if n_shape:
+            name_hint = self.name or type(self).__name__
+            print(f"[INFO] {name_hint}: TF weights 名称命中 {n_exact} + 后缀命中 {n_suffix} "
+                  f"+ 形状推断 {n_shape} / 共 {len(tf_weights)}")
         return True
 
     def init_weights(self):
