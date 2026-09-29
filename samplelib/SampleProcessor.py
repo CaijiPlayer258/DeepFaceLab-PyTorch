@@ -93,6 +93,9 @@ class SampleProcessor(object):
                 warp           = opts.get('warp', False)
                 transform      = opts.get('transform', False)
                 random_hsv_shift_amount = opts.get('random_hsv_shift_amount', 0)
+                random_color_cast = opts.get('random_color_cast', 0.0)
+                random_occlusion = opts.get('random_occlusion', False)
+                random_noise     = opts.get('random_noise', False)
                 normalize_tanh = opts.get('normalize_tanh', False)
                 ct_mode        = opts.get('ct_mode', None)
                 data_format    = opts.get('data_format', 'NHWC')
@@ -200,6 +203,15 @@ class SampleProcessor(object):
                             img_s = np.clip (img_s + (rnd_state.random()-0.5)*a, 0, 1 )
                             img_v = np.clip (img_v + (rnd_state.random()-0.5)*a, 0, 1 )
                             img = np.clip( cv2.cvtColor(cv2.merge([img_h, img_s, img_v]), cv2.COLOR_HSV2BGR) , 0, 1 )
+
+                        # 随机偏色（定义重建目标的 C；输入项与目标项用同一 seed，结果一致）
+                        if random_color_cast:
+                            img = imagelib.apply_random_color_cast(
+                                img, random_color_cast, seed=sample_rnd_seed)
+
+                        # 扭曲之前的随机增强（固定顺序：先噪点，再遮挡）；与 random_warp 相互独立
+                        img = imagelib.apply_pre_warp_augmentations(
+                            img, do_noise=random_noise, do_occlusion=random_occlusion, rnd_state=rnd_state)
 
                         img  = imagelib.warp_by_params (warp_params, img,  warp, transform, can_flip=True, border_replicate=border_replicate)
   

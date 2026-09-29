@@ -248,6 +248,19 @@ class SampleGeneratorV2(SampleGeneratorBase):
             img = np.clip(cv2.cvtColor(cv2.merge([img_h, img_s, img_v]),
                                         cv2.COLOR_HSV2BGR), 0, 1)
 
+        # 随机偏色（定义重建目标的 C；输入项与目标项用同一 seed，结果一致）
+        _cc = opts.get('random_color_cast', 0.0)
+        if _cc:
+            img = imagelib.apply_random_color_cast(img, _cc, seed=sample_rnd_seed)
+
+        # 扭曲之前的随机增强（固定顺序：先噪点，再遮挡）；与 random_warp 相互独立
+        img = imagelib.apply_pre_warp_augmentations(
+            img,
+            do_noise=opts.get('random_noise', False),
+            do_occlusion=opts.get('random_occlusion', False),
+            rnd_state=rnd_state,
+        )
+
         # 弹性变形 / 随机变换 / 随机翻转
         border_replicate = opts.get('border_replicate', True)
         can_warp = opts.get('warp', False)

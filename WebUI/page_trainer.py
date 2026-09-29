@@ -641,6 +641,10 @@ function renderLabels() {
   const sx = pw / iw, sy = ph / ih;
   const srcF = _previewLabels.src_fnames || [];
   const dstF = _previewLabels.dst_fnames || [];
+  const _colSpec = (_previewLabels.col_spec && _previewLabels.col_spec.length === nCols)
+    ? _previewLabels.col_spec : null;
+  // 调色列的实际算法名（rct / mt / sot / lut / ...），标签上如实显示
+  const _gradeName = _previewLabels.grade_name || '';
   const sLoss = _previewLabels.src_loss;
   const dLoss = _previewLabels.dst_loss;
   const sLossVec = _previewLabels.src_loss_vec || null;
@@ -677,6 +681,18 @@ function renderLabels() {
         };
       } else {
         rowLabel = function(col) {
+          // 模型可自报列规格（随机偏色开启时会多出 cast / rct 两组列）
+          if (_colSpec) {
+            const t = _colSpec[col];
+            if (t === 'src') return sRaw;
+            if (t === 'dst') return dRaw;
+            if (t === 'src_loss') return fmtLoss(sLossVec && sLossVec.length ? sLossVec[rowIdx] : sLoss);
+            if (t === 'dst_loss') return fmtLoss(dLossVec && dLossVec.length ? dLossVec[rowIdx] : dLoss);
+            if (t === 'pred') return 'pred';
+            if (t === 'cast') return 'cast';
+            if (t === 'grade') return (_gradeName || 'rct') + ' pred';
+            return '';
+          }
           switch (col) {
             case 0: return sRaw;
             case 1: return fmtLoss(sLossVec && sLossVec.length ? sLossVec[rowIdx] : sLoss);

@@ -433,7 +433,8 @@ class QModel(ModelBase):
         # 获取预测结果
         S, D, SS, DD, DDM, SD, SDM = [
             np.clip(nn.to_data_format(x, "NHWC", self.model_data_format), 0.0, 1.0)
-            for x in ([target_src, target_dst] + list(self.AE_view(target_src, target_dst)))
+            # 预测输入改用「训练输入」(warped：已含随机扭曲/遮挡/噪点)，对齐原版 DFL；预览会差一点但更真实。S/D 参照仍取干净目标图。
+            for x in ([target_src, target_dst] + list(self.AE_view(warped_src, warped_dst)))
         ]
         
         # 重复掩码通道

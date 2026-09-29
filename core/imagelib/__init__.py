@@ -12,7 +12,7 @@ from .warp import gen_warp_params, warp_by_params
 
 from .reduce_colors import reduce_colors
 
-from .color_transfer import color_transfer, color_transfer_mix, color_transfer_sot, color_transfer_mkl, color_transfer_idt, color_hist_match, reinhard_color_transfer, linear_color_transfer
+from .color_transfer import color_transfer, color_transfer_mix, color_transfer_sot, color_transfer_mkl, color_transfer_idt, color_hist_match, reinhard_color_transfer, linear_color_transfer, match_tone_np, color_transfer_lut
 
 from .common import random_crop, normalize_channels, cut_odd_image, overlay_alpha_image
 
@@ -29,4 +29,8 @@ from .filters import apply_random_rgb_levels, \
                      apply_random_nearest_resize, \
                      apply_random_bilinear_resize, \
                      apply_random_jpeg_compress, \
-                     apply_random_relight
+                     apply_random_relight, \
+                     apply_random_noise, \
+                     apply_random_occlusion, \
+                     apply_pre_warp_augmentations, \
+                     apply_random_color_cast

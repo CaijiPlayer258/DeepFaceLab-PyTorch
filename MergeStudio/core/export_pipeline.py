@@ -877,7 +877,8 @@ def _phase_merge_worker(fp_str):
             _sct = str(ct_mode)
             dw = cv2.warpAffine(fc, fmat, (sz, sz), flags=cv2.INTER_CUBIC)
             from core.imagelib.color_transfer import (reinhard_color_transfer, linear_color_transfer,
-                color_transfer_mkl, color_transfer_idt, color_transfer_sot, color_transfer_mix)
+                color_transfer_mkl, color_transfer_idt, color_transfer_sot, color_transfer_mix,
+                match_tone_np, color_transfer_lut)
             _mask_a = wrk_mask[..., None] if wrk_mask.ndim == 2 else wrk_mask
             try:
                 if _sct in ('rct', '1'):
@@ -896,6 +897,12 @@ def _phase_merge_worker(fp_str):
                     fo = color_transfer_sot(fo * _mask_a, dw * _mask_a, steps=10, batch_size=30)
                 elif _sct in ('mix-m', '8'):
                     fo = color_transfer_mix(fo * _mask_a, dw * _mask_a)
+                elif _sct in ('mt', '9'):
+                    # 截图那一版：遮罩**软加权**求均值/方差，原生通道空间（不转 Lab）
+                    fo = match_tone_np(fo, dw, src_mask=_mask_a, trg_mask=_mask_a)
+                elif _sct in ('lut', '10'):
+                    # 拟合式 3D LUT：先由 SOT 求像素级对应，再最小二乘拟合 LUT 并查表
+                    fo = color_transfer_lut(fo, dw)
             except Exception as _ct_e:
                 print(f"[MergeW]   face {ffi}: CT {_sct} FAILED: {_ct_e}", flush=True)
         if 'hist-match' in mode:

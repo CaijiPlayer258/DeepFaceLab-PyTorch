@@ -868,7 +868,7 @@
       // Normalize: convert int color_transfer_mode to string for consistent save
       Object.keys(s.config).forEach(function (k) { cfg[k] = s.config[k]; });
       if (typeof cfg.color_transfer_mode === 'number') {
-        cfg.color_transfer_mode = {0:'none',1:'rct',2:'lct',3:'mkl',4:'idt',5:'sot-m',6:'mix-m'}[cfg.color_transfer_mode] || cfg.color_transfer_mode;
+        cfg.color_transfer_mode = {0:'none',1:'rct',2:'lct',3:'mkl',4:'idt',5:'sot-m',6:'mix-m',9:'mt',10:'lut'}[cfg.color_transfer_mode] || cfg.color_transfer_mode;
       }
       API.saveConfig({
         config: cfg,

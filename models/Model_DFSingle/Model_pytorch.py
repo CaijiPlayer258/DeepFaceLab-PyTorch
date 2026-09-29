@@ -366,7 +366,8 @@ class SAEHDDFSingleModel(ModelBase):
         ((ws, ts, tsm, tsme), (wd, td, tdm, tdme)) = samples
         # 用 numpy 做预览
         S = np.clip(nn.to_data_format(ts, 'NHWC', self.model_data_format), 0.0, 1.0)
-        SS, SSM = [np.clip(nn.to_data_format(x, 'NHWC', self.model_data_format), 0.0, 1.0) for x in self.AE_view(ts, td)]
+        # 预测输入改用「训练输入」(warped：已含随机扭曲/遮挡/噪点)，对齐原版 DFL；预览会差一点但更真实。S/D 参照仍取干净目标图。
+        SS, SSM = [np.clip(nn.to_data_format(x, 'NHWC', self.model_data_format), 0.0, 1.0) for x in self.AE_view(ws, wd)]
         WS = np.clip(nn.to_data_format(ws, 'NHWC', self.model_data_format), 0.0, 1.0)
         n = min(4, ts.shape[0])
         st = []

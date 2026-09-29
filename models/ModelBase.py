@@ -810,6 +810,10 @@ class ModelBase(object):
         ]
         aug_opts = [
             ('random_warp', '随机形变'),
+            ('random_occlusion', '随机遮挡'),
+            ('random_noise', '随机噪点'),
+            ('random_color_power', '随机偏色'),
+            ('random_color_alg', '偏色算法'),
             ('random_hsv_power', 'HSV强度'),
             ('ct_mode', '色彩迁移'),
             ('random_src_flip', 'SRC翻转'),
@@ -825,6 +829,8 @@ class ModelBase(object):
             ('face_style_power', '面部风格'),
             ('bg_style_power', '背景风格'),
             ('vgg_perceptual_power', 'VGG感知损失'),
+            ('edge_enhance_power', '边缘强化'),
+            ('preview_grade_alg', '预览调色'),
             ('gan_patch_size', 'GAN块大小'),
             ('gan_dims', 'GAN维度'),
         ]

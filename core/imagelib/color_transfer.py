@@ -169,21 +169,27 @@ def reinhard_color_transfer(target : np.ndarray, source : np.ndarray, target_mas
     source = cv2.cvtColor(source, cv2.COLOR_BGR2LAB)
     target = cv2.cvtColor(target, cv2.COLOR_BGR2LAB)
 
-    source_input = source
-    if source_mask is not None:
-        source_input = source_input.copy()
-        source_input[source_mask[...,0] < mask_cutoff] = [0,0,0]
-    
-    target_input = target
-    if target_mask is not None:
-        target_input = target_input.copy()
-        target_input[target_mask[...,0] < mask_cutoff] = [0,0,0]
+    # 统计量**只在遮罩区域内**求。
+    # 旧写法是把遮罩外置 0、再对【整幅图】求 mean/std —— 那等于把统计量按"遮罩覆盖率"稀释：
+    #     mean_算出来 = Σ(遮罩内) / (H*W) = 覆盖率 * 真实均值
+    # 于是 out = (x - m_t*k)/(s_t*k) * (s_s*k) + m_s*k
+    #   -> 斜率被比值抵消（正常），但**偏移量算错** -> 合成后残留一层洗不掉的色偏。
+    def _mask_stats(x, m):
+        if m is None:
+            return ([x[..., i].mean() for i in range(3)],
+                    [x[..., i].std() for i in range(3)])
+        sel = m[..., 0] >= mask_cutoff
+        if int(sel.sum()) < 8:
+            return ([x[..., i].mean() for i in range(3)],
+                    [x[..., i].std() for i in range(3)])
+        return ([x[..., i][sel].mean() for i in range(3)],
+                [x[..., i][sel].std() for i in range(3)])
 
-    target_l_mean, target_l_std, target_a_mean, target_a_std, target_b_mean, target_b_std, \
-        = target_input[...,0].mean(), target_input[...,0].std(), target_input[...,1].mean(), target_input[...,1].std(), target_input[...,2].mean(), target_input[...,2].std()
-    
-    source_l_mean, source_l_std, source_a_mean, source_a_std, source_b_mean, source_b_std, \
-        = source_input[...,0].mean(), source_input[...,0].std(), source_input[...,1].mean(), source_input[...,1].std(), source_input[...,2].mean(), source_input[...,2].std()
+    (target_l_mean, target_a_mean, target_b_mean), \
+        (target_l_std, target_a_std, target_b_std) = _mask_stats(target, target_mask)
+
+    (source_l_mean, source_a_mean, source_b_mean), \
+        (source_l_std, source_a_std, source_b_std) = _mask_stats(source, source_mask)
     
     # not as in the paper: scale by the standard deviations using reciprocal of paper proposed factor
     target_l = target[...,0]
@@ -335,7 +341,7 @@ def color_transfer_mix(img_src,img_trg):
 
     return (img_rct / 255.0).astype(np.float32)
 
-def color_transfer(ct_mode, img_src, img_trg):
+def color_transfer(ct_mode, img_src, img_trg, src_mask=None, trg_mask=None):
     """
     color transfer for [0,1] float32 inputs
     """
@@ -350,6 +356,191 @@ def color_transfer(ct_mode, img_src, img_trg):
     elif ct_mode == 'sot':
         out = color_transfer_sot (img_src, img_trg)
         out = np.clip( out, 0.0, 1.0)
+    elif ct_mode == 'lut':
+        out = color_transfer_lut (img_src, img_trg)
+    elif ct_mode == 'mt':
+        # 截图那一版：遮罩加权、RGB 空间
+        out = match_tone_np (img_src, img_trg, src_mask=src_mask, trg_mask=trg_mask)
     else:
         raise ValueError(f"unknown ct_mode {ct_mode}")
     return out
+
+
+# ---------------------------------------------------------------------------
+# 拟合式 3D LUT 色彩迁移
+# ---------------------------------------------------------------------------
+_LUT_LUMA = np.array([0.114, 0.587, 0.299], dtype=np.float32)   # BGR 亮度权重
+
+
+def _lut_build_basis(x, size):
+    """在 size^3 网格上，对每个像素做三线性插值 -> 稀疏设计矩阵 (N, size^3)。
+
+    每个像素只触及 8 个节点，所以非常稀疏。
+    """
+    import scipy.sparse as sps
+    n = len(x)
+    g = np.clip(x, 0.0, 1.0) * (size - 1)
+    i0 = np.clip(np.floor(g).astype(np.int32), 0, size - 2)
+    f = (g - i0).astype(np.float32)
+
+    rows, cols, vals = [], [], []
+    for dx in (0, 1):
+        for dy in (0, 1):
+            for dz in (0, 1):
+                wgt = ((f[:, 0] if dx else 1.0 - f[:, 0]) *
+                       (f[:, 1] if dy else 1.0 - f[:, 1]) *
+                       (f[:, 2] if dz else 1.0 - f[:, 2]))
+                lin = ((i0[:, 0] + dx) * size + (i0[:, 1] + dy)) * size + (i0[:, 2] + dz)
+                rows.append(np.arange(n, dtype=np.int32))
+                cols.append(lin)
+                vals.append(wgt)
+    rows = np.concatenate(rows); cols = np.concatenate(cols); vals = np.concatenate(vals)
+    return sps.csr_matrix((vals, (rows, cols)), shape=(n, size ** 3), dtype=np.float32)
+
+
+def _lut_laplacian(size):
+    """size^3 网格上的 6 邻接图拉普拉斯（用于平滑先验）。"""
+    import scipy.sparse as sps
+    n = size ** 3
+    idx = np.arange(n, dtype=np.int32).reshape(size, size, size)
+    rows, cols = [], []
+    for ax in range(3):
+        a = np.take(idx, np.arange(size - 1), axis=ax)
+        b = np.take(idx, np.arange(1, size), axis=ax)
+        rows.append(a.ravel()); cols.append(b.ravel())
+        rows.append(b.ravel()); cols.append(a.ravel())
+    rows = np.concatenate(rows); cols = np.concatenate(cols)
+    vals = -np.ones(len(rows), dtype=np.float32)
+    deg = np.bincount(rows, minlength=n).astype(np.float32)
+    L = sps.csr_matrix((vals, (rows, cols)), shape=(n, n))
+    return L + sps.diags(deg)
+
+
+def _lut_apply(img, lut, size):
+    """三线性查表。img 为 HWC [0,1]，lut 为 (size,size,size,3)。"""
+    h, w, c = img.shape
+    x = img.reshape(-1, c)
+    g = np.clip(x, 0.0, 1.0) * (size - 1)
+    i0 = np.clip(np.floor(g).astype(np.int32), 0, size - 2)
+    f = (g - i0).astype(np.float32)
+    out = np.zeros_like(x)
+    for dx in (0, 1):
+        for dy in (0, 1):
+            for dz in (0, 1):
+                wgt = ((f[:, 0] if dx else 1.0 - f[:, 0]) *
+                       (f[:, 1] if dy else 1.0 - f[:, 1]) *
+                       (f[:, 2] if dz else 1.0 - f[:, 2]))[:, None]
+                out += wgt * lut[i0[:, 0] + dx, i0[:, 1] + dy, i0[:, 2] + dz]
+    return np.clip(out.reshape(h, w, c), 0.0, 1.0)
+
+
+def color_transfer_lut(src, trg, size=17, n_samples=40000, lam_smooth=0.05,
+                       lam_ident=0.002, sot_steps=10, sot_batch=5, seed=0):
+    """拟合式 3D LUT 色彩迁移（自适应 / 有界 / 非线性 / 确定性）。
+
+    与 rct / lct / mkl 这类**仿射**方法的根本差别：
+      * 输出只能取 LUT 表内插出来的值 -> **不会外推**，饱和区域（嘴唇、纯色）不会被顶爆；
+      * 三维非线性查表 -> 暗部与高光可以各自重分布（**阴影可调**）；
+      * 同一输入必得同一输出 -> **逐帧稳定，不会闪烁**；
+      * 拟合完就是查表 -> 逐帧应用极快。
+
+    做法：
+      1) 先用 color_transfer_sot 求出**像素级对应**的目标 y（SOT 是分位数传输，有界、非线性）
+      2) 在 size^3 网格上用三线性插值建立稀疏设计矩阵，最小二乘拟合 lut 使 lut(src) ≈ y
+         正则项：拉普拉斯平滑（保证曲线光滑）+ 恒等先验（不过度偏离原图）
+      3) 三线性查表输出
+
+    src / trg : HWC float32 [0,1]（BGR）
+    size      : LUT 分辨率（17 是 .cube 常见规格；越大越精细，代价是拟合稍慢）
+    """
+    import scipy.sparse.linalg as spla
+
+    if src.shape != trg.shape:
+        raise ValueError("src and trg must have the same shape")
+    if src.shape[2] != 3:
+        raise ValueError("only 3-channel images are supported")
+
+    # ---- 1) SOT 求像素级对应 ----
+    # SOT 内部用 np.random 抽投影方向，这里临时播种，保证**同一输入必得同一结果**
+    # （确定性正是 LUT 相对 SOT 的核心优势之一，不能因为内部调 SOT 就丢掉）。
+    _rng_state = np.random.get_state()
+    np.random.seed(seed)
+    try:
+        y = color_transfer_sot(src, trg, steps=sot_steps, batch_size=sot_batch)
+    finally:
+        np.random.set_state(_rng_state)
+    y = np.clip(y, 0.0, 1.0).astype(np.float32)
+
+    x = src.reshape(-1, 3).astype(np.float32)
+    yy = y.reshape(-1, 3).astype(np.float32)
+
+    # 抽样（按亮度分层：暗部也要有样本，否则阴影会被平滑先验压平）
+    n = len(x)
+    if n > n_samples:
+        rng = np.random.RandomState(seed)
+        lum = x @ _LUT_LUMA
+        order = np.argsort(lum)
+        # 均匀抽，保证整条亮度轴都有覆盖
+        sel = order[np.linspace(0, n - 1, n_samples).astype(np.int64)]
+        sel = np.unique(np.concatenate([sel, rng.choice(n, n_samples // 4, replace=False)]))
+        x_s, y_s = x[sel], yy[sel]
+    else:
+        x_s, y_s = x, yy
+
+    Phi = _lut_build_basis(x_s, size)                      # (N, size^3)
+    L = _lut_laplacian(size)                               # 平滑先验
+    n_node = size ** 3
+
+    # 恒等映射作为先验目标
+    grid = np.stack(np.meshgrid(np.linspace(0, 1, size), np.linspace(0, 1, size),
+                                np.linspace(0, 1, size), indexing='ij'), axis=-1)
+    ident = grid.reshape(-1, 3).astype(np.float32)
+
+    A = (Phi.T @ Phi).tocsr() + lam_smooth * L + lam_ident * n_node *         __import__('scipy.sparse', fromlist=['eye']).eye(n_node, format='csr', dtype=np.float32)
+    B = np.asarray(Phi.T @ y_s) + lam_ident * n_node * ident
+
+    lut = np.zeros((n_node, 3), dtype=np.float32)
+    for ch in range(3):
+        sol, info = spla.cg(A, B[:, ch], rtol=1e-5, maxiter=500)
+        lut[:, ch] = sol
+    lut = np.clip(lut, 0.0, 1.0).reshape(size, size, size, 3)
+
+    return _lut_apply(src, lut, size)
+
+
+def match_tone_np(src, trg, src_mask=None, trg_mask=None):
+    """遮罩加权的逐通道均值/标准差匹配（**RGB/原生通道空间，不转 Lab**）。
+
+    对应「截图那一版 match_tone」：
+        mean = Σ(x·m) / Σm
+        var  = Σ((x-mean)^2·m) / Σm
+        out  = (x - mean_src) * (std_trg/std_src) + mean_trg     再 clamp 到 [0,1]
+
+    与 reinhard_color_transfer 的两点差别：
+      1) 不转 Lab —— 直接在 BGR 里逐通道缩放，更快，但会连带影响色相/饱和度；
+      2) 遮罩是**软加权**（按 mask 的数值加权求均值/方差），而不是按 mask_cutoff 阈值截断。
+         羽化过的遮罩因此能被正确利用。
+    """
+    src = np.ascontiguousarray(np.asarray(src, np.float32))
+    trg = np.ascontiguousarray(np.asarray(trg, np.float32))
+
+    def _stats(x, m):
+        flat = x.reshape(-1, x.shape[2])
+        if m is None:
+            return flat.mean(axis=0), flat.std(axis=0)
+        w = np.asarray(m, np.float32)
+        if w.ndim == 2:
+            w = w[..., None]
+        if w.shape[2] == 1:
+            w = np.repeat(w, x.shape[2], axis=2)
+        w = w.reshape(-1, x.shape[2])
+        ws = w.sum(axis=0) + 1e-8
+        mean = (flat * w).sum(axis=0) / ws
+        var = ((flat - mean) ** 2 * w).sum(axis=0) / ws
+        return mean, np.sqrt(var + 1e-6)
+
+    s_mean, s_std = _stats(src, src_mask)
+    t_mean, t_std = _stats(trg, trg_mask)
+    scale = t_std / (s_std + 1e-6)
+    out = (src - s_mean.reshape(1, 1, -1)) * scale.reshape(1, 1, -1) + t_mean.reshape(1, 1, -1)
+    return np.clip(out, 0.0, 1.0).astype(np.float32)

@@ -114,6 +114,16 @@ class SAEHDModel(ModelBase):
 
         default_random_warp = self.options['random_warp'] = self.load_or_def_option('random_warp', True)
         default_random_hsv_power = self.options['random_hsv_power'] = self.load_or_def_option('random_hsv_power', 0.0)
+        # 扭曲之前的两个独立随机增强（互不影响，也不受 random_warp 影响）
+        default_random_occlusion = self.options['random_occlusion'] = self.load_or_def_option('random_occlusion', False)
+        default_random_noise = self.options['random_noise'] = self.load_or_def_option('random_noise', False)
+        # 随机偏色：强度 + 算法（算法 = none 时整个功能关闭）
+        default_random_color_power = self.options['random_color_power'] = self.load_or_def_option('random_color_power', 0.0)
+        default_random_color_alg = self.options['random_color_alg'] = self.load_or_def_option('random_color_alg', 'none')
+        # 边缘强化：把 pred 用模型自己的遮罩 overlay 合成回原图，再与原图算 loss（0 = 关闭）
+        default_edge_enhance_power = self.options['edge_enhance_power'] = self.load_or_def_option('edge_enhance_power', 0.0)
+        # 合并预览的调色算法：独立于「颜色模式」(ct_mode)，避免为了看预览而改掉训练用的色彩迁移
+        default_preview_grade_alg = self.options['preview_grade_alg'] = self.load_or_def_option('preview_grade_alg', 'same')
         default_true_face_power = self.options['true_face_power'] = self.load_or_def_option('true_face_power', 0.0)
         default_face_style_power = self.options['face_style_power'] = self.load_or_def_option('face_style_power', 0.0)
         default_bg_style_power = self.options['bg_style_power'] = self.load_or_def_option('bg_style_power', 0.0)
@@ -333,6 +343,56 @@ class SAEHDModel(ModelBase):
                 default_random_warp,
                 help_message='随机形变有助于泛化表情；后期可关闭以获得更锐利的结果。',
             )
+
+            self.options['random_occlusion'] = io.input_bool(
+                '启用随机遮挡（random occlusion）',
+                default_random_occlusion,
+                help_message='在画面上随机添加数量和大小都不固定的黑色方块（作用于随机扭曲之前），'
+                             '目的是让模型学会从被遮挡处重建人脸。与其它增强互不影响。',
+            )
+
+            self.options['random_noise'] = io.input_bool(
+                '启用随机噪点（random noise）',
+                default_random_noise,
+                help_message='加入随机噪点与轻微偏色（作用于随机扭曲和随机遮挡之前），'
+                             '目的是让模型即使输入噪点明显也不重建出偏色的人脸。与其它增强互不影响。',
+            )
+
+            self.options['random_color_power'] = float(np.clip(
+                io.input_number(
+                    '随机偏色强度（0 = 关闭）',
+                    default_random_color_power,
+                    help_message='给画面加异色光照：A -> 偏色得 C，其他增强再作用于 C 得 W；'
+                                 '喂 W，loss 比较 CT(pred,C) 与 C。0 为关闭。',
+                ), 0.0, 1.0))
+
+            self.options['random_color_alg'] = io.input_str(
+                '随机偏色算法（loss 侧色彩迁移方法）',
+                default_random_color_alg,
+                ['none', 'rct', 'mt', 'lct', 'direct'],
+                help_message='偏色只作用于输入项，重建目标始终是原图 A。'
+                             'none = 整个功能关闭；'
+                             'direct = loss 不做色彩迁移 -> 强制模型输出正常光照；'
+                             'rct / lct = loss 里先把 pred 的色彩迁移到目标 A 再做比较（色彩中性化，不强迫光照）。',
+            ).strip().lower()
+
+            self.options['edge_enhance_power'] = float(np.clip(
+                io.input_number(
+                    '边缘强化强度（0 = 关闭）',
+                    default_edge_enhance_power,
+                    help_message='把 pred 用模型自己的遮罩 overlay 合成回原图，再与原图算 loss。'
+                                 '专门惩罚过渡带（0<mask<1）的颜色差，用于消除合成后人脸边缘的硬边。0 为关闭。',
+                ), 0.0, 20.0))
+
+            self.options['preview_grade_alg'] = io.input_str(
+                '合并预览调色算法（独立于颜色模式）',
+                default_preview_grade_alg,
+                ['same', 'none', 'rct', 'mt', 'lct', 'mkl', 'idt', 'sot', 'lut'],
+                help_message='「合并预览」那一行第 5 列用哪种算法调色。'
+                             'same = 跟随颜色模式(ct_mode)；none = 不调色；'
+                             'rct/lct/mkl/idt/sot/lut = 指定算法（lut 为拟合式 3D LUT）。'
+                             '这只是一项预览设置，不影响训练，也不影响真正的合成。',
+            ).strip().lower()
 
             self.options['random_hsv_power'] = float(
                 np.clip(
@@ -675,6 +735,37 @@ class SAEHDModel(ModelBase):
         random_src_flip = True if self.pretrain else bool(self.random_src_flip)
         random_dst_flip = True if self.pretrain else bool(self.random_dst_flip)
         random_hsv_power = 0.0 if self.pretrain else float(self.options['random_hsv_power'])
+        # 随机遮挡 / 随机噪点：与 random_warp 相互独立，开关互不影响，也不随预训练改变
+        random_occlusion = bool(self.options.get('random_occlusion', False))
+        random_noise = bool(self.options.get('random_noise', False))
+        # 随机偏色：算法为 none 时整个功能关闭（目标不加偏色，loss 也不做色彩迁移）
+        self.random_color_alg = str(self.options.get('random_color_alg', 'none') or 'none').strip().lower()
+        self.random_color_power = float(self.options.get('random_color_power', 0.0) or 0.0)
+        if self.random_color_alg == 'none':
+            self.random_color_power = 0.0
+        random_color_power = self.random_color_power
+        # 目标项**一律不加**偏色（= 原图 A）。原因：
+        #   1) 偏色是逐像素双射，A 与 C 的空间结构完全相同；
+        #   2) loss 里的 CT 已经把色彩中性化，在 A 的色空间比较与在 C 的色空间比较等价。
+        # 所以「C 作为目标」是多余的，而保持 A 能让预览里的「原图」列不被偏色污染。
+        random_color_cast_target = 0.0
+
+        # 冻结 dst 解码器时，dst 支路**完全不参与训练**（前向都被 _forward_df_src_only 跳过），
+        # 所以没必要再给 dst 做数据增强：既省生成器算力，也让预览里的 dst 直接就是原图。
+        _freeze_dst_branch = ('df' in archi_type) and bool(self.options.get('freeze_decoder_dst', False))
+        random_warp_dst = False if _freeze_dst_branch else random_warp
+        random_occlusion_dst = False if _freeze_dst_branch else random_occlusion
+        random_noise_dst = False if _freeze_dst_branch else random_noise
+        random_hsv_power_dst = 0.0 if _freeze_dst_branch else random_hsv_power
+        # 冻结 dst 时**保留随机偏色**给 dst：它同时充当 dst 的输入与 dst 的目标
+        # （把偏色后的 dst 直接当成 dst 的「原图」）。dst 支路此时不参与训练，纯为预览：
+        # 这样四种预览里 dst 的列全带偏色，能直观检验颜色矫正能力。
+        # 未冻结时仍保持「目标项不加偏色」（目标 = 干净原图）。
+        random_color_cast_target_dst = random_color_power if _freeze_dst_branch else 0.0
+        self.edge_enhance_power = float(self.options.get('edge_enhance_power', 0.0) or 0.0)
+        if _freeze_dst_branch:
+            io.log_info('[冻结dst] dst 支路不参与训练：已关闭 dst 侧的随机扭曲/遮挡/噪点/HSV，'
+                        '但保留随机偏色（偏色后的 dst 直接当作 dst 的原图，便于观察颜色矫正）。')
 
         if self.pretrain:
             self.options_show_override['lr_dropout'] = 'n'
@@ -1065,6 +1156,34 @@ class SAEHDModel(ModelBase):
 
             use_fast = self.options.get('use_fast_generator', False)
 
+            # ---- 预览用额外输出：偏色但**不含其它增强**的原图 C ----
+            # 只在「随机偏色」真正开启时才追加，避免平时白跑一路输出。
+            # 它与输入项用同一个 sample_rnd_seed -> 拿到同一份偏色，
+            # 所以正好等于「输入项去掉噪点/遮挡/扭曲之后」的那张图。
+            _cast_pv_on = (self.random_color_alg != 'none') and (float(self.random_color_power) > 0.0)
+            _cast_entry_src = ([{
+                'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
+                'warp': False,
+                'transform': True,
+                'channel_type': SampleProcessor.ChannelType.BGR,
+                'ct_mode': ct_mode,
+                'face_type': self.face_type,
+                'random_color_cast': random_color_power,
+                'data_format': nn.data_format,
+                'resolution': resolution,
+            }] if _cast_pv_on else [])
+            # 冻结 dst 解码器时不加 dst 的偏色原图（预览里也不需要 dst 的偏色列）
+            _cast_entry_dst = ([{
+                'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
+                'warp': False,
+                'transform': True,
+                'channel_type': SampleProcessor.ChannelType.BGR,
+                'face_type': self.face_type,
+                'random_color_cast': random_color_power,
+                'data_format': nn.data_format,
+                'resolution': resolution,
+            }] if (_cast_pv_on and not _freeze_dst_branch) else [])
+
             if use_fast:
                 # === 快速生成器路径（V4 loader + V2 generator）===
                 src_loader = SampleLoaderV4(
@@ -1086,6 +1205,9 @@ class SAEHDModel(ModelBase):
                     {
                         'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
                         'warp': random_warp,
+                        'random_occlusion': random_occlusion,
+                        'random_noise': random_noise,
+                        'random_color_cast': random_color_power,
                         'transform': True,
                         'channel_type': SampleProcessor.ChannelType.BGR,
                         'ct_mode': ct_mode,
@@ -1101,7 +1223,7 @@ class SAEHDModel(ModelBase):
                         'channel_type': SampleProcessor.ChannelType.BGR,
                         'ct_mode': ct_mode,
                         'face_type': self.face_type,
-                        'random_hsv_shift_amount': random_hsv_power,
+                        'random_color_cast': random_color_cast_target,
                         'data_format': nn.data_format,
                         'resolution': resolution,
                     },
@@ -1125,16 +1247,19 @@ class SAEHDModel(ModelBase):
                         'data_format': nn.data_format,
                         'resolution': resolution,
                     },
-                ]
+                ] + _cast_entry_src
 
                 gen_dst_outputs = [
                     {
                         'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
-                        'warp': random_warp,
+                        'warp': random_warp_dst,
+                        'random_occlusion': random_occlusion_dst,
+                        'random_noise': random_noise_dst,
+                        'random_color_cast': random_color_power,
                         'transform': True,
                         'channel_type': SampleProcessor.ChannelType.BGR,
                         'face_type': self.face_type,
-                        'random_hsv_shift_amount': random_hsv_power,
+                        'random_hsv_shift_amount': random_hsv_power_dst,
                         'data_format': nn.data_format,
                         'resolution': resolution,
                     },
@@ -1144,7 +1269,7 @@ class SAEHDModel(ModelBase):
                         'transform': True,
                         'channel_type': SampleProcessor.ChannelType.BGR,
                         'face_type': self.face_type,
-                        'random_hsv_shift_amount': random_hsv_power,
+                        'random_color_cast': random_color_cast_target_dst,
                         'data_format': nn.data_format,
                         'resolution': resolution,
                     },
@@ -1168,7 +1293,7 @@ class SAEHDModel(ModelBase):
                         'data_format': nn.data_format,
                         'resolution': resolution,
                     },
-                ]
+                ] + _cast_entry_dst
 
                 self.set_training_data_generators(
                     [
@@ -1211,6 +1336,9 @@ class SAEHDModel(ModelBase):
                                 {
                                     'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
                                     'warp': random_warp,
+                                    'random_occlusion': random_occlusion,
+                                    'random_noise': random_noise,
+                                    'random_color_cast': random_color_power,
                                     'transform': True,
                                     'channel_type': SampleProcessor.ChannelType.BGR,
                                     'ct_mode': ct_mode,
@@ -1225,7 +1353,7 @@ class SAEHDModel(ModelBase):
                                     'transform': True,
                                     'channel_type': SampleProcessor.ChannelType.BGR,
                                     'ct_mode': ct_mode,
-                                    'random_hsv_shift_amount': random_hsv_power,
+                                    'random_color_cast': random_color_cast_target,
                                     'face_type': self.face_type,
                                     'data_format': nn.data_format,
                                     'resolution': resolution,
@@ -1250,7 +1378,7 @@ class SAEHDModel(ModelBase):
                                     'data_format': nn.data_format,
                                     'resolution': resolution,
                                 },
-                            ],
+                            ] + _cast_entry_src,
                             uniform_yaw_distribution=bool(self.options['uniform_yaw']) or self.pretrain,
                             generators_count=src_generators_count,
                         ),
@@ -1262,11 +1390,14 @@ class SAEHDModel(ModelBase):
                             output_sample_types=[
                                 {
                                     'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
-                                    'warp': random_warp,
+                                    'warp': random_warp_dst,
+                                    'random_occlusion': random_occlusion_dst,
+                                    'random_noise': random_noise_dst,
+                                    'random_color_cast': random_color_power,
                                     'transform': True,
                                     'channel_type': SampleProcessor.ChannelType.BGR,
                                     'face_type': self.face_type,
-                                    'random_hsv_shift_amount': random_hsv_power,
+                                    'random_hsv_shift_amount': random_hsv_power_dst,
                                     'data_format': nn.data_format,
                                     'resolution': resolution,
                                 },
@@ -1276,7 +1407,7 @@ class SAEHDModel(ModelBase):
                                     'transform': True,
                                     'channel_type': SampleProcessor.ChannelType.BGR,
                                     'face_type': self.face_type,
-                                    'random_hsv_shift_amount': random_hsv_power,
+                                    'random_color_cast': random_color_cast_target_dst,
                                     'data_format': nn.data_format,
                                     'resolution': resolution,
                                 },
@@ -1300,7 +1431,7 @@ class SAEHDModel(ModelBase):
                                     'data_format': nn.data_format,
                                     'resolution': resolution,
                                 },
-                            ],
+                            ] + _cast_entry_dst,
                             uniform_yaw_distribution=bool(self.options['uniform_yaw']) or self.pretrain,
                             generators_count=dst_generators_count,
                         ),
@@ -1603,6 +1734,16 @@ class SAEHDModel(ModelBase):
             pred_src_dstm = fw['pred_src_dstm']
             pred_src_dst_no_code_grad = fw['pred_src_dst_no_code_grad']
 
+        # 随机偏色：先把预测的**全局色彩**迁移到目标 C 的色彩分布，再做比较。
+        # 效果：全局色彩被中性化 —— 输入色彩异常不会导致解码异常，
+        # 同时也不强迫模型收敛到某种固定光照（数据集光照不一致时更稳）。
+        _cc_alg = getattr(self, 'random_color_alg', 'none')
+        if _cc_alg in ('rct', 'mt', 'lct'):
+            # 传脸部遮罩：全图统计会被背景/头发带偏（脸只占一部分）
+            pred_src_src = nn.color_transfer_torch(_cc_alg, pred_src_src, target_src, mask=target_srcm)
+            if pred_dst_dst is not None:
+                pred_dst_dst = nn.color_transfer_torch(_cc_alg, pred_dst_dst, target_dst, mask=target_dstm)
+
         # mask blur
         k_blur = max(1, resolution // 32)
         target_srcm_blur = nn.gaussian_blur(target_srcm, k_blur)
@@ -1663,6 +1804,21 @@ class SAEHDModel(ModelBase):
         src_loss = src_loss + mse(target_srcm, pred_src_srcm, 10)
         if not skip_dst:
             dst_loss = dst_loss + mse(target_dstm, pred_dst_dstm, 10)
+
+        # ---- 边缘强化 ----
+        # 用**模型自己的遮罩**把 pred 直接 overlay 合成回原图，再与原图比：
+        #     comp = pred*m + tgt*(1-m)   ->   comp - tgt = m*(pred - tgt)
+        # 所以误差被 m 加权，过渡带（0<m<1）上的颜色差会被专门惩罚 ——
+        # 这正是「合成后人脸边缘硬边 / 边缘颜色不自然」的成因，也正好被它约束。
+        # 注意：此处 pred 已经在上面做过 CT（rct/lct 档），与主 loss 处在同一色彩空间，
+        # 因此不会和『色彩中性化』互相拆台 —— 三种偏色档下都成立。
+        _edge_p = float(getattr(self, 'edge_enhance_power', 0.0) or 0.0)
+        if _edge_p > 0.0:
+            _comp_src = pred_src_src * pred_src_srcm + target_src * (1.0 - pred_src_srcm)
+            src_loss = src_loss + mse(_comp_src, target_src, _edge_p)
+            if not skip_dst and pred_dst_dst is not None:
+                _comp_dst = pred_dst_dst * pred_dst_dstm + target_dst * (1.0 - pred_dst_dstm)
+                dst_loss = dst_loss + mse(_comp_dst, target_dst, _edge_p)
 
         # VGG 感知损失（在全图未遮罩的 pred/target 上计算）
         vgg_perceptual_power = self.vgg_perceptual_power
@@ -2004,7 +2160,9 @@ class SAEHDModel(ModelBase):
         if self.get_iter() == 0 and not self.pretrain and not getattr(self, 'pretrain_just_disabled', False):
             io.log_info('You are training the model from scratch. It is strongly recommended to use a pretrained model to speed up the training and improve the quality.\n')
 
-        ((warped_src, target_src, target_srcm, target_srcm_em), (warped_dst, target_dst, target_dstm, target_dstm_em)) = self.generate_next_samples()
+        _sb, _db = self.generate_next_samples()
+        warped_src, target_src, target_srcm, target_srcm_em = _sb[:4]
+        warped_dst, target_dst, target_dstm, target_dstm_em = _db[:4]
 
         src_loss, dst_loss = self.train_one_step(
             warped_src,
@@ -2020,24 +2178,30 @@ class SAEHDModel(ModelBase):
         return (('src_loss', src_loss), ('dst_loss', dst_loss))
 
     # --- preview / merge ---
-    def AE_view(self, target_src, target_dst):
-        target_src = self._np_to_torch(target_src)
-        target_dst = self._np_to_torch(target_dst)
+    def AE_view(self, in_src, in_dst):
+        """跑一遍前向，供预览使用。
+
+        传入的是**训练输入**（generator 的 warped 输出，可能已含随机扭曲 / 随机遮挡 /
+        随机噪点），而不是干净的目标图 —— 这样预览里的预测列才反映训练时真实看到的东西。
+        （形参历史上叫 target_src/target_dst，容易误解，已更名。）
+        """
+        in_src = self._np_to_torch(in_src)
+        in_dst = self._np_to_torch(in_dst)
 
         with torch.no_grad():
             # XLA device 上不能用 torch.cuda.amp.autocast
             # 预览要用 pred_src_dst（SD 列），但不用 pred_src_dst_no_code_grad
             if self.options.get('eager_mode', False):
                 if 'df' in self.archi_type:
-                    fw = self._forward_df(target_src, target_dst, True, False)
+                    fw = self._forward_df(in_src, in_dst, True, False)
                 else:
-                    fw = self._forward_liae(target_src, target_dst, True, False)
+                    fw = self._forward_liae(in_src, in_dst, True, False)
             else:
                 with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=self.use_bf16):
                     if 'df' in self.archi_type:
-                        fw = self._forward_df(target_src, target_dst, True, False)
+                        fw = self._forward_df(in_src, in_dst, True, False)
                     else:
-                        fw = self._forward_liae(target_src, target_dst, True, False)
+                        fw = self._forward_liae(in_src, in_dst, True, False)
 
         pred_src_src = fw['pred_src_src'].detach().cpu().float().numpy()
         pred_src_srcm = fw['pred_src_srcm'].detach().cpu().float().numpy()
@@ -2049,9 +2213,15 @@ class SAEHDModel(ModelBase):
         return pred_src_src, pred_src_srcm, pred_dst_dst, pred_dst_dstm, pred_src_dst, pred_src_dstm
 
     def onGetPreview(self, samples, for_history=False):
-        ((warped_src, target_src, target_srcm, target_srcm_em), (warped_dst, target_dst, target_dstm, target_dstm_em)) = samples
+        _sb, _db = samples
+        warped_src, target_src, target_srcm, target_srcm_em = _sb[:4]
+        warped_dst, target_dst, target_dstm, target_dstm_em = _db[:4]
+        # 第 5 个输出（可选）= 偏色但无其它增强的原图 C
+        cast_src = _sb[4] if len(_sb) > 4 else None
+        cast_dst = _db[4] if len(_db) > 4 else None
 
-        _ae_out = list(self.AE_view(target_src, target_dst))
+        # 预测输入改用「训练输入」(warped：已含随机扭曲/遮挡/噪点)，对齐原版 DFL；预览会差一点但更真实。S/D 参照仍取干净目标图。
+        _ae_out = list(self.AE_view(warped_src, warped_dst))
         S, D = [np.clip(nn.to_data_format(x, 'NHWC', self.model_data_format), 0.0, 1.0) for x in (target_src, target_dst)]
         SS, SSM, DD, DDM, SD, SDM = [np.clip(nn.to_data_format(x, 'NHWC', self.model_data_format), 0.0, 1.0) for x in _ae_out]
 
@@ -2075,33 +2245,111 @@ class SAEHDModel(ModelBase):
         WS = np.clip(nn.to_data_format(warped_src, 'NHWC', self.model_data_format), 0.0, 1.0)
         WD = np.clip(nn.to_data_format(warped_dst, 'NHWC', self.model_data_format), 0.0, 1.0)
 
+        # 独立的预览调色算法（same = 跟随颜色模式）
+        _pv_grade = str(self.options.get('preview_grade_alg', 'same') or 'same').strip().lower()
+        if _pv_grade == 'same':
+            _grade_alg = str(self.options.get('ct_mode', 'none') or 'none').strip().lower()
+        else:
+            _grade_alg = _pv_grade
+
+        # ---- 随机偏色开启时，额外插入两组列 ----
+        #   每组两列 = [ 偏色但无其它增强的原图 C , 经过 RCT 的 pred ]
+        #   插入位置：src 组放在 src-pred 之后、dst 原图之前；
+        #             dst 组放在 dst-pred 之后、dst-src 之前。
+        #   冻结 dst 解码器时不给 dst 组（此时 dst 支路不参与训练）。
+        from core.imagelib import reinhard_color_transfer as _rct_pv
+        _freeze_dst_pv = ('df' in self.archi_type) and bool(self.options.get('freeze_decoder_dst', False))
+        _cast_on_pv = ((str(getattr(self, 'random_color_alg', 'none')).lower() != 'none')
+                       and (float(getattr(self, 'random_color_power', 0.0)) > 0.0))
+        _show_src_cast = bool(_cast_on_pv and (cast_src is not None))
+        _show_dst_cast = bool(_cast_on_pv and (not _freeze_dst_pv) and (cast_dst is not None))
+        # dst 解码器被冻结时，它不参与训练、输出也不会变 —— 预览里没必要再占用一列
+        _show_dst_pred = (not _freeze_dst_pv)
+
+        C_S = (np.clip(nn.to_data_format(cast_src, 'NHWC', self.model_data_format), 0.0, 1.0)
+               if _show_src_cast else None)
+        C_D = (np.clip(nn.to_data_format(cast_dst, 'NHWC', self.model_data_format), 0.0, 1.0)
+               if _show_dst_cast else None)
+        # 调色：参考就是左边那列（偏色原图）。
+        # 与「合并预览」行**共用同一个 _grade_alg**，这样你选 MT 时这里也是 MT，
+        # 不会再出现"列里显示的是 RcT、标签写的是 mt"这种不一致。
+        def _grade_pair(a, b):
+            if _grade_alg in ('', 'none'):
+                return np.clip(a, 0.0, 1.0)
+            if _grade_alg == 'rct':
+                return np.clip(_rct_pv(a, b), 0.0, 1.0)
+            if _grade_alg == 'mt':
+                from core.imagelib.color_transfer import match_tone_np as _mt_pv
+                return np.clip(_mt_pv(a, b), 0.0, 1.0)
+            from core import imagelib as _il_pv
+            return np.clip(_il_pv.color_transfer(_grade_alg, a, b), 0.0, 1.0)
+
+        RCT_SS = ([_grade_pair(SS[i], C_S[i]) for i in range(n_samples)] if _show_src_cast else None)
+        RCT_DD = ([_grade_pair(DD[i], C_D[i]) for i in range(n_samples)] if _show_dst_cast else None)
+
+        def _expand_cols(cols5, i):
+            """按需插入/移除列，返回该行的列元组。
+            冻结 dst 解码器时丢掉 dst pred（第 4 个元素）那一列。"""
+            a, b, c, d, e = cols5
+            out = [a, b]
+            if _show_src_cast:
+                out += [C_S[i], RCT_SS[i]]
+            out += [c]
+            if _show_dst_pred:
+                out += [d]
+            if _show_dst_cast:
+                out += [C_D[i], RCT_DD[i]]
+            out += [e]
+            return tuple(out)
+
+        _col_spec = ['src', 'src_loss']
+        if _show_src_cast:
+            _col_spec += ['cast', 'grade']
+        _col_spec += ['dst']
+        if _show_dst_pred:
+            _col_spec += ['dst_loss']
+        if _show_dst_cast:
+            _col_spec += ['cast', 'grade']
+        _col_spec += ['pred']
+        self.last_preview_n_cols = len(_col_spec)
+        self.last_preview_col_spec = _col_spec
+        # 真实使用的调色算法名（标签上显示 "xxx pred"，不再写死 rct）
+        self.last_preview_grade_name = _grade_alg if _grade_alg not in ('', 'none') else 'none'
+
         # (text labels rendered as HTML overlays in WebUI — not drawn on image)
         result = []
 
         # 1. 原图预览 - 5 columns: S, SS, D, DD, SD
         st = []
         for i in range(n_samples):
-            ar = (S[i], SS[i], D[i], DD[i], SD[i])
+            ar = _expand_cols((S[i], SS[i], D[i], DD[i], SD[i]), i)
             st.append(np.concatenate(ar, axis=1))
         result.append(('原图预览', np.concatenate(st, axis=0)))
 
         # 2. 遮罩下 — 5 columns, with masks
+        #    src-pred 与同行的 dd-pred / sd 保持一致：直接乘上**模型预测的遮罩**
+        #    （脸外压黑、脸内保留）。这样一行里各列的观感统一，
+        #    而且左列是「目标 × 数据集遮罩」、本列是「pred × 模型遮罩」，
+        #    两列直接对照就能看出遮罩范围差在哪。
         st = []
         for i in range(n_samples):
             SD_mask = DDM[i] * SDM[i] if self.face_type < FaceType.HEAD else SDM[i]
-            ar = (S[i] * target_srcm[i], SS[i], D[i] * target_dstm[i], DD[i] * DDM[i], SD[i] * SD_mask)
+            # ssm_1ch 是 1 通道（H,W,1），与 (H,W,3) 的 SS 广播相乘
+            ss_masked = np.clip(SS[i] * ssm_1ch[i], 0.0, 1.0)
+            ar = _expand_cols((S[i] * target_srcm[i], ss_masked, D[i] * target_dstm[i], DD[i] * DDM[i], SD[i] * SD_mask), i)
             st.append(np.concatenate(ar, axis=1))
         result.append(('遮罩下', np.concatenate(st, axis=0)))
 
         # 3. 原始输入 — 5 columns: WS, SS, WD, DD, SD
         st = []
         for i in range(n_samples):
-            ar = (WS[i], SS[i], WD[i], DD[i], SD[i])
+            ar = _expand_cols((WS[i], SS[i], WD[i], DD[i], SD[i]), i)
             st.append(np.concatenate(ar, axis=1))
         result.append(('原始输入', np.concatenate(st, axis=0)))
 
         # 4. 合并预览 — 5 columns: S, SS_composite, D, DD_composite, SD_composite
-        # 对 SD 施加 RCT 色彩迁移（参考 D），使预览更接近真实换脸效果
+        # 对 SD 施加色彩迁移（参考 D），使预览更接近真实换脸效果。
+        # 算法取自模型的「颜色模式」ct_mode，支持 none/rct/lct/mkl/idt/sot/lut。
         from core.imagelib import reinhard_color_transfer as _rct
         st = []
         for i in range(n_samples):
@@ -2113,12 +2361,27 @@ class SAEHDModel(ModelBase):
                 src_merge_mask = target_srcm[i]
             ss_composite = SS[i] * src_merge_mask + S[i] * (1.0 - src_merge_mask)
             dd_composite = DD[i] * dst_merge_mask + D[i] * (1.0 - dst_merge_mask)
-            # RCT: 以 D 为参考修正 SD 的颜色
-            _sd_rct = _rct(SD[i], D[i],
-                           target_mask=dst_merge_mask,
-                           source_mask=dst_merge_mask)
-            sd_composite = _sd_rct * dst_merge_mask + D[i] * (1.0 - dst_merge_mask)
-            ar = (S[i], ss_composite, D[i], dd_composite, sd_composite)
+            # 合成调色：这里跟随模型配置的「颜色模式」(ct_mode)，
+            # 这样合并预览展示的就是你实际合成时会得到的效果。
+            #   none -> 不调色；rct -> 带遮罩的 Reinhard（原行为）；
+            #   lct / mkl / idt / sot / lut -> 走 core.imagelib.color_transfer 统一分发。
+            if _grade_alg in ('', 'none'):
+                _sd_graded = SD[i]
+            elif _grade_alg == 'rct':
+                _sd_graded = _rct(SD[i], D[i],
+                                  target_mask=dst_merge_mask,
+                                  source_mask=dst_merge_mask)
+            elif _grade_alg == 'mt':
+                # 截图那一版：遮罩加权、RGB 空间（把合成遮罩当成软权重传进去）
+                from core.imagelib.color_transfer import match_tone_np as _mt
+                _sd_graded = _mt(SD[i], D[i],
+                                 src_mask=dst_merge_mask,
+                                 trg_mask=dst_merge_mask)
+            else:
+                from core import imagelib as _il
+                _sd_graded = np.clip(_il.color_transfer(_grade_alg, SD[i], D[i]), 0.0, 1.0)
+            sd_composite = _sd_graded * dst_merge_mask + D[i] * (1.0 - dst_merge_mask)
+            ar = _expand_cols((S[i], ss_composite, D[i], dd_composite, sd_composite), i)
             st.append(np.concatenate(ar, axis=1))
         result.append(('合并预览', np.concatenate(st, axis=0)))
 
