@@ -179,6 +179,7 @@ const TR_FIELDS = [
   ['tr', 'blur_out_mask', 'toggle', '羽化遮罩外围'],
   ['tr', 'eyes_mouth_prio', 'toggle', '嘴眼优先'],
   ['tr', 'uniform_yaw', 'toggle', 'Yaw 均匀分布'],
+  ['tr', 'pretrain_single_decoder', 'toggle', '预训练单解码器'],
 ];
 
 const SP_FIELDS = [
@@ -191,7 +192,13 @@ const SP_FIELDS = [
 const OC_FIELDS = [
   ['oc', 'warp', 'toggle', '扭曲'],
   ['oc', 'transform', 'toggle', '变换'],
-  ['oc', 'ct_mode', 'select', '色彩迁移', {none:'无', rct:'RCT', lct:'LCT', mkl:'MKL', idt:'IDT', sot:'SOT', sot_s:'SOT-S'}],
+  ['oc', 'ct_mode', 'select', '色彩迁移', {none:'无', rct:'RCT', mt:'MT(RGB遮罩加权)', lct:'LCT', mkl:'MKL', idt:'IDT', sot:'SOT', sot_s:'SOT-S', lut:'LUT'}],
+  ['oc', 'random_occlusion', 'toggle', '随机遮挡'],
+  ['oc', 'random_noise', 'toggle', '随机噪点'],
+  ['oc', 'random_color_power', 'float', '随机偏色强度'],
+  ['oc', 'random_color_alg', 'select', '随机偏色算法', {none:'关闭', direct:'直接（强制正常光照）', rct:'RCT', mt:'MT(遮罩加权)', lct:'LCT'}],
+  ['oc', 'edge_enhance_power', 'float', '边缘强化'],
+  ['oc', 'preview_grade_alg', 'select', '合并预览调色', {same:'跟随颜色模式', none:'不调色', rct:'RCT', mt:'MT(RGB遮罩加权)', lct:'LCT', mkl:'MKL', idt:'IDT', sot:'SOT', lut:'LUT'}],
 ];
 
 const LD_FIELDS = [

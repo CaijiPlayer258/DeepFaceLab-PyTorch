@@ -159,7 +159,7 @@
         '<div style="margin-top:4px;">' +
         '  <div style="font-size:10px;color:#999;margin-bottom:3px;">Color transfer</div>' +
         '  <div class="param-btn-group" id="color-transfer-btns">' +
-        ['rct', 'lct', 'mkl', 'idt', 'sot-m', 'mix-m', 'none'].map(function (c) {
+        ['rct', 'mt', 'lut', 'lct', 'mkl', 'idt', 'sot-m', 'mix-m', 'none'].map(function (c) {
           return '<button class="param-btn ' + (c === 'rct' ? 'param-btn--active' : '') + '" data-ct="' + c + '">' + c + '</button>';
         }).join('') +
         '  </div>' +
@@ -242,7 +242,7 @@
       });
       document.querySelectorAll('[data-ct]').forEach(function (b) {
         var ct = cfg.color_transfer_mode;
-        if (typeof ct === 'number') ct = {0:'none',1:'rct',2:'lct',3:'mkl',4:'idt',5:'sot-m',6:'mix-m'}[ct] || ct;
+        if (typeof ct === 'number') ct = {0:'none',1:'rct',2:'lct',3:'mkl',4:'idt',5:'sot-m',6:'mix-m',9:'mt',10:'lut'}[ct] || ct;
         b.classList.toggle('param-btn--active', b.dataset.ct === ct);
       });
       // Debug button

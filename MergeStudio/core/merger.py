@@ -258,6 +258,9 @@ def MergeMaskedFace(frame_img, face_landmarks, cfg, predictor_func=None,
                             6: lambda s, t: imagelib.color_transfer_idt(s * mask_area, t * mask_area),
                             7: lambda s, t: imagelib.color_transfer_sot(s * mask_area, t * mask_area, steps=10, batch_size=30),
                             8: lambda s, t: imagelib.color_transfer_mix(s * mask_area, t * mask_area),
+                            # 9/10 与训练预览侧对齐（config.ctm_dict 同步）
+                            9: lambda s, t: imagelib.match_tone_np(s, t, src_mask=mask_area, trg_mask=mask_area),
+                            10: lambda s, t: imagelib.color_transfer_lut(s, t),
                     }  # ct_functions
                     fn = ct_functions.get(cfg.color_transfer_mode)
                     if fn:

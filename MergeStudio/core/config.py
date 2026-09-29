@@ -22,7 +22,9 @@ mask_mode_dict = {
 
 ctm_dict = {
     0: "None", 1: "rct", 2: "lct", 3: "mkl", 4: "mkl-m",
-    5: "idt", 6: "idt-m", 7: "sot-m", 8: "mix-m"
+    5: "idt", 6: "idt-m", 7: "sot-m", 8: "mix-m",
+    # 9/10 与训练预览侧对齐：mt = 遮罩加权均值/方差（RGB）；lut = 拟合式 3D LUT
+    9: "mt", 10: "lut"
 }
 
 ctm_str_dict = {v: k for k, v in ctm_dict.items()}

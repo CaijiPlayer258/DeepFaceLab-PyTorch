@@ -877,7 +877,7 @@ class TrainingConfigChildPage(SiChildPage):
             self.ct_mode_combo.setMinimumHeight(32)
             self.ct_mode_combo.setMaximumHeight(32)
             self.ct_mode_combo.setEditable(False)
-            self.ct_mode_combo.addItems(["none", "rct", "lct", "mkl", "idt", "sot"])
+            self.ct_mode_combo.addItems(["none", "rct", "mt", "lct", "mkl", "idt", "sot", "lut"])
             self.ct_mode_combo.setCurrentText("rct")
             self.ct_mode_combo.currentTextChanged.connect(lambda text: self.update_config('ct_mode', text))
             self.ct_mode_card.addWidget(self.ct_mode_combo)
@@ -912,6 +912,91 @@ class TrainingConfigChildPage(SiChildPage):
             self.random_warp_card.addWidget(self.random_warp_switch)
             self.random_warp_card.adjustSize()
 
+            # 随机遮挡（作用于随机扭曲之前，与其它增强相互独立）
+            self.random_occlusion_card = SiOptionCardLinear(self)
+            self.random_occlusion_card.setTitle(
+                "随机遮挡", "在画面上随机添加数量和大小都不固定的黑色方块（作用于随机扭曲之前），让模型学会从被遮挡处重建人脸")
+            self.random_occlusion_card.load(safe_get_icon("ic_fluent_arrow_swap_filled"))
+            self.random_occlusion_switch = SiSwitch(self.random_occlusion_card)
+            self.random_occlusion_switch.setChecked(False)
+            self.random_occlusion_switch.toggled.connect(lambda state: self.update_config('random_occlusion'))
+            self.random_occlusion_card.addWidget(self.random_occlusion_switch)
+            self.random_occlusion_card.adjustSize()
+
+            # 随机噪点（作用于随机扭曲和随机遮挡之前，与其它增强相互独立）
+            self.random_noise_card = SiOptionCardLinear(self)
+            self.random_noise_card.setTitle(
+                "随机噪点", "加入随机噪点与轻微偏色（作用于随机扭曲和随机遮挡之前），让模型即使噪点明显也不重建出偏色的脸")
+            self.random_noise_card.load(safe_get_icon("ic_fluent_arrow_swap_filled"))
+            self.random_noise_switch = SiSwitch(self.random_noise_card)
+            self.random_noise_switch.setChecked(False)
+            self.random_noise_switch.toggled.connect(lambda state: self.update_config('random_noise'))
+            self.random_noise_card.addWidget(self.random_noise_switch)
+            self.random_noise_card.adjustSize()
+
+            # 随机偏色（算法 = none 时整个功能关闭）
+            self.random_color_alg_card = SiOptionCardLinear(self)
+            self.random_color_alg_card.setTitle(
+                "随机偏色算法", "偏色只作用于输入项，重建目标始终是原图 A。none = 关闭；direct = loss 不做色彩迁移（强制输出正常光照）；rct / lct = loss 里先把 pred 色彩迁移到 A 再比较（色彩中性化）")
+            self.random_color_alg_card.load(safe_get_icon("ic_fluent_color_filled"))
+            self.random_color_alg_combo = SiCapsuleComboBox(self.random_color_alg_card)
+            self.random_color_alg_combo.setTitle("偏色算法")
+            self.random_color_alg_combo.setFixedWidth(200)
+            self.random_color_alg_combo.setMinimumHeight(32)
+            self.random_color_alg_combo.setMaximumHeight(32)
+            self.random_color_alg_combo.setEditable(False)
+            self.random_color_alg_combo.addItems(["none", "direct", "rct", "mt", "lct"])
+            self.random_color_alg_combo.setCurrentText("none")
+            self.random_color_alg_combo.currentTextChanged.connect(
+                lambda text: self.update_config('random_color_alg', text))
+            self.random_color_alg_card.addWidget(self.random_color_alg_combo)
+            self.random_color_alg_card.adjustSize()
+
+            self.random_color_power_card = SiOptionCardLinear(self)
+            self.random_color_power_card.setTitle(
+                "随机偏色强度", "给画面加异色光照：A ->偏色-> C，其他增强再作用于 C 得 W；喂 W，loss 比较 CT(pred,C) 与 C。0 = 关闭")
+            self.random_color_power_card.load(safe_get_icon("ic_fluent_color_filled"))
+            self.random_color_power_input = SiLabeledLineEdit(self.random_color_power_card)
+            self.random_color_power_input.setTitle("小数 0.0~1.0")
+            self.random_color_power_input.setText("0.0")
+            self.random_color_power_input.setFixedHeight(48)
+            self.random_color_power_input.resize(150, 48)
+            self.random_color_power_input.textChanged.connect(lambda: self.update_config('random_color_power'))
+            self.random_color_power_card.addWidget(self.random_color_power_input)
+            self.random_color_power_card.adjustSize()
+
+            # 边缘强化（用模型自己的遮罩合成回原图再算 loss）
+            self.edge_enhance_card = SiOptionCardLinear(self)
+            self.edge_enhance_card.setTitle(
+                "边缘强化", "把 pred 用模型自己的遮罩 overlay 合成回原图，再与原图算 loss，专门惩罚过渡带的颜色差，消除合成后的边缘硬边。0 = 关闭")
+            self.edge_enhance_card.load(safe_get_icon("ic_fluent_arrow_swap_filled"))
+            self.edge_enhance_input = SiLabeledLineEdit(self.edge_enhance_card)
+            self.edge_enhance_input.setTitle("小数 0.0~20.0")
+            self.edge_enhance_input.setText("0.0")
+            self.edge_enhance_input.setFixedHeight(48)
+            self.edge_enhance_input.resize(150, 48)
+            self.edge_enhance_input.textChanged.connect(lambda: self.update_config('edge_enhance_power'))
+            self.edge_enhance_card.addWidget(self.edge_enhance_input)
+            self.edge_enhance_card.adjustSize()
+
+            # 合并预览调色算法（独立于「颜色模式」，只影响预览显示）
+            self.preview_grade_card = SiOptionCardLinear(self)
+            self.preview_grade_card.setTitle(
+                "合并预览调色", "「合并预览」行第 5 列用哪种算法调色。same = 跟随颜色模式；none = 不调色；lut = 拟合式 3D LUT。只影响预览显示，不影响训练与真正的合成")
+            self.preview_grade_card.load(safe_get_icon("ic_fluent_color_filled"))
+            self.preview_grade_combo = SiCapsuleComboBox(self.preview_grade_card)
+            self.preview_grade_combo.setTitle("预览调色")
+            self.preview_grade_combo.setFixedWidth(200)
+            self.preview_grade_combo.setMinimumHeight(32)
+            self.preview_grade_combo.setMaximumHeight(32)
+            self.preview_grade_combo.setEditable(False)
+            self.preview_grade_combo.addItems(["same", "none", "rct", "mt", "lct", "mkl", "idt", "sot", "lut"])
+            self.preview_grade_combo.setCurrentText("same")
+            self.preview_grade_combo.currentTextChanged.connect(
+                lambda text: self.update_config('preview_grade_alg', text))
+            self.preview_grade_card.addWidget(self.preview_grade_combo)
+            self.preview_grade_card.adjustSize()
+
             # 随机src翻转
             self.random_src_flip_card = SiOptionCardLinear(self)
             self.random_src_flip_card.setTitle("随机src翻转", "源图像随机水平翻转")
@@ -943,6 +1028,12 @@ class TrainingConfigChildPage(SiChildPage):
             self.uniform_yaw_card.adjustSize()
 
             group.addWidget(self.random_warp_card)
+            group.addWidget(self.random_occlusion_card)
+            group.addWidget(self.random_noise_card)
+            group.addWidget(self.random_color_alg_card)
+            group.addWidget(self.random_color_power_card)
+            group.addWidget(self.edge_enhance_card)
+            group.addWidget(self.preview_grade_card)
             group.addWidget(self.random_src_flip_card)
             group.addWidget(self.random_dst_flip_card)
             group.addWidget(self.prioritize_mouth_eyes_card)
@@ -1342,6 +1433,12 @@ class TrainingConfigChildPage(SiChildPage):
                             ('masked_training',           'masked_training',     bool),
                             ('blur_out_mask',             'blur_out_mask',       bool),
                             ('random_warp',               'random_warp',         bool),
+                            ('random_occlusion',          'random_occlusion',    bool),
+                            ('random_noise',              'random_noise',        bool),
+                            ('random_color_power',        'random_color_power',  float),
+                            ('random_color_alg',          'random_color_alg',    str),
+                            ('edge_enhance_power',        'edge_enhance_power',  float),
+                            ('preview_grade_alg',         'preview_grade_alg',   str),
                             ('random_src_flip',           'random_src_flip',     bool),
                             ('random_dst_flip',           'random_dst_flip',     bool),
                             ('true_face_power',           'true_face_power',     float),
@@ -1725,6 +1822,12 @@ class TrainingConfigChildPage(SiChildPage):
             'optimizer': str(_(info, 'optimizer', 'adabelief')),
             'gan_power': gan_power_str,
             'random_warp': bool(_(info, 'random_warp', True)),
+            'random_occlusion': bool(_(info, 'random_occlusion', False)),
+            'random_noise': bool(_(info, 'random_noise', False)),
+            'random_color_power': str(_(info, 'random_color_power', '0.0')),
+            'random_color_alg': str(_(info, 'random_color_alg', 'none')),
+            'edge_enhance_power': str(_(info, 'edge_enhance_power', '0.0')),
+            'preview_grade_alg': str(_(info, 'preview_grade_alg', 'same')),
             'random_src_flip': bool(_(info, 'random_src_flip', False)),
             'random_dst_flip': bool(_(info, 'random_dst_flip', False)),
             'uniform_yaw_distribution': bool(_(info, 'uniform_yaw', False)),
@@ -1815,6 +1918,12 @@ class TrainingConfigChildPage(SiChildPage):
         self.lr_plateau_min_ratio_input.setText(str(cfg.get('lr_plateau_min_ratio', '0.1')))
         self.random_hsv_power_input.setText(str(cfg.get('random_hsv_power', '0.0')))
         self.random_warp_switch.setChecked(bool(cfg.get('random_warp', True)))
+        self.random_occlusion_switch.setChecked(bool(cfg.get('random_occlusion', False)))
+        self.random_noise_switch.setChecked(bool(cfg.get('random_noise', False)))
+        self.random_color_power_input.setText(str(cfg.get('random_color_power', '0.0')))
+        self.random_color_alg_combo.setCurrentText(str(cfg.get('random_color_alg', 'none')))
+        self.edge_enhance_input.setText(str(cfg.get('edge_enhance_power', '0.0')))
+        self.preview_grade_combo.setCurrentText(str(cfg.get('preview_grade_alg', 'same')))
         self.random_src_flip_switch.setChecked(bool(cfg.get('random_src_flip', False)))
         self.random_dst_flip_switch.setChecked(bool(cfg.get('random_dst_flip', False)))
         self.uniform_yaw_switch.setChecked(bool(cfg.get('uniform_yaw_distribution', False)))
@@ -1920,6 +2029,18 @@ class TrainingConfigChildPage(SiChildPage):
                     self.config_data[key] = value if value is not None else '1.0'
                 elif key == 'random_warp':
                     self.config_data[key] = self.random_warp_switch.isChecked()
+                elif key == 'random_occlusion':
+                    self.config_data[key] = self.random_occlusion_switch.isChecked()
+                elif key == 'random_noise':
+                    self.config_data[key] = self.random_noise_switch.isChecked()
+                elif key == 'random_color_power':
+                    self.config_data[key] = self.random_color_power_input.text()
+                elif key == 'random_color_alg':
+                    self.config_data[key] = self.random_color_alg_combo.currentText()
+                elif key == 'edge_enhance_power':
+                    self.config_data[key] = self.edge_enhance_input.text()
+                elif key == 'preview_grade_alg':
+                    self.config_data[key] = self.preview_grade_combo.currentText()
                 elif key == 'random_src_flip':
                     self.config_data[key] = self.random_src_flip_switch.isChecked()
                 elif key == 'random_dst_flip':

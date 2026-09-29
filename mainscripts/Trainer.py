@@ -249,9 +249,20 @@ def trainerThread (s2c, c2s, e,
                         # n_samples from detected column count
                         cell_h = p_w // n_cols_val
                         n_samples_val = p_h // cell_h if cell_h > 0 else 0
+                    # 模型自报的列数优先（随机偏色开启时会插入额外列，几何猜测可能不够准）
+                    try:
+                        _mp = getattr(model, 'last_preview_n_cols', None)
+                        if _mp:
+                            n_cols_val = int(_mp)
+                            _cell = p_w // n_cols_val if n_cols_val > 0 else 0
+                            n_samples_val = (p_h // _cell) if _cell > 0 else n_samples_val
+                    except Exception:
+                        pass
                     payload = {'op':'show', 'previews': previews, 'iter':model.get_iter(),
                                'loss_history': model.get_loss_history().copy(),
-                               'n_samples': n_samples_val, 'n_cols': n_cols_val}
+                               'n_samples': n_samples_val, 'n_cols': n_cols_val,
+                               'col_spec': getattr(model, 'last_preview_col_spec', None),
+                               'grade_name': getattr(model, 'last_preview_grade_name', None)}
                     if hasattr(model, 'last_filenames') and model.last_filenames:
                         payload['src_filenames'] = model.last_filenames[0] if len(model.last_filenames) > 0 else []
                         payload['dst_filenames'] = model.last_filenames[1] if len(model.last_filenames) > 1 else []
@@ -759,6 +770,8 @@ def main(**kwargs):
                                     'dst_fnames': input.get('dst_filenames', []),
                                     'n_samples': input.get('n_samples', 0),
                                     'n_cols': input.get('n_cols', 5),
+                                    'col_spec': input.get('col_spec', None),
+                                    'grade_name': input.get('grade_name', None),
                                     'src_loss': input.get('src_loss', 0),
                                     'dst_loss': input.get('dst_loss', 0),
                                     'src_loss_vec': input.get('src_loss_vec', []),
@@ -833,6 +846,8 @@ def main(**kwargs):
         cached_dst_loss_vec = []
         cached_n_samples = 0
         cached_n_cols = 0
+        cached_col_spec = None
+        cached_grade_name = None
         cached_mask_data = None
         _webui_cached_previews = None
         _webui_preview_pending = False
@@ -876,6 +891,8 @@ def main(**kwargs):
                     cached_src_loss_vec = input.get('src_loss_vec', [])
                     cached_dst_loss_vec = input.get('dst_loss_vec', [])
                     cached_n_cols = input.get('n_cols', 0)
+                    cached_col_spec = input.get('col_spec', None)
+                    cached_grade_name = input.get('grade_name', None)
                     cached_mask_data = input.get('mask_data')
                     cached_n_samples = input.get('n_samples', 0)
 
@@ -901,6 +918,8 @@ def main(**kwargs):
                                     'dst_fnames': cached_dst_fnames,
                                     'n_samples': cached_n_samples,
                                     'n_cols': cached_n_cols if cached_n_cols else 5,
+                                    'col_spec': cached_col_spec,
+                                    'grade_name': cached_grade_name,
                                     'src_loss': cached_src_loss_val,
                                     'dst_loss': cached_dst_loss_val,
                                     'src_loss_vec': cached_src_loss_vec,

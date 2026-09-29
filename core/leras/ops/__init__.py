@@ -349,6 +349,87 @@ def dssim(x, y, max_val=1.0, filter_size=11, k1=0.01, k2=0.03):
     
     return dssim_val
 
+def _masked_mean_std(x, mask):
+    """遮罩加权的逐通道均值/标准差（mask: (N,1,H,W)，与 x:(N,C,H,W) 广播）。"""
+    t = get_torch()
+    dims = [2, 3]
+    wsum = mask.sum(dim=dims, keepdim=True) + 1e-8
+    m = (x * mask).sum(dim=dims, keepdim=True) / wsum
+    var = ((x - m) ** 2 * mask).sum(dim=dims, keepdim=True) / wsum
+    return m, t.sqrt(var + 1e-8)
+
+
+def color_transfer_torch(alg, img, ref, mask=None):
+    """把 img 的**全局色彩**迁移到 ref 的色彩分布上（可微，NCHW）。
+
+    用途：随机偏色训练时，loss 比较的是 CT(pred, C) 与 C，
+    于是全局色彩被中性化，模型只需对结构负责 —— 输入色彩异常也不会导致解码异常。
+
+    alg: 'rct' -> 均值/标准差匹配，但**在去相关空间**（Y / R-Y / B-Y）里做。
+                  这对应 numpy 侧 Reinhard 用 Lab 的那一层语义：
+                  亮度与色度解耦后再各自匹配，不会因为缩放某一通道而扭曲色相/饱和度。
+         'mt'  -> 均值/标准差匹配，直接在**原生通道空间**做（遮罩加权）。
+                  对应 numpy 侧的 match_tone_np（截图那一版）。
+         'lct' -> 逐样本线性最小二乘（img --affine--> ref 的分布）
+         其它 / None / 'none' -> 原样返回
+    mask: 可选 (N,1,H,W)。给了就**只在该区域内统计**均值/方差。
+          全图统计会被背景/头发带偏（脸只占一部分），所以训练时应当传脸部遮罩。
+    """
+    t = get_torch()
+    if alg in (None, '', 'none'):
+        return img
+
+    if alg in ('rct', 'mt'):
+        dims = [2, 3]
+        if alg == 'rct':
+            # BGR -> [ Y , R-Y , B-Y ]：一个线性去相关变换（BT.601 亮度权重）。
+            # 常数偏移被均值匹配吸收，所以这里不需要 0.5 偏置，也不会引入误差。
+            # 在去相关空间里各自匹配 -> 不会因为缩放单通道而改色相/饱和度，
+            # 这正是 Reinhard 原论文要求用 Lab 的那个性质（YCbCr 是它的线性近似）。
+            ycc = t.tensor([[0.114,  0.587,  0.299],
+                            [-0.114, -0.587, 0.701],
+                            [0.886, -0.587, -0.299]], device=img.device, dtype=img.dtype)
+            ycc_inv = t.linalg.inv(ycc)
+            a = t.einsum('ij,njhw->nihw', ycc, img)
+            b = t.einsum('ij,njhw->nihw', ycc, ref)
+        else:
+            a, b = img, ref
+
+        if mask is None:
+            m_a = a.mean(dim=dims, keepdim=True)
+            s_a = a.std(dim=dims, keepdim=True) + 1e-5
+            m_b = b.mean(dim=dims, keepdim=True)
+            s_b = b.std(dim=dims, keepdim=True) + 1e-5
+        else:
+            m_a, s_a = _masked_mean_std(a, mask); s_a = s_a + 1e-5
+            m_b, s_b = _masked_mean_std(b, mask); s_b = s_b + 1e-5
+
+        out = (a - m_a) / s_a * s_b + m_b
+        if alg == 'rct':
+            out = t.einsum('ij,njhw->nihw', ycc_inv, out)
+        return out
+
+    if alg == 'lct':
+        n, c, hh, ww = img.shape
+        x = img.permute(0, 2, 3, 1).reshape(n, -1, c)
+        y = ref.permute(0, 2, 3, 1).reshape(n, -1, c)
+        xa = t.cat([x, t.ones_like(x[..., :1])], dim=-1)          # (N, HW, C+1)
+        xt = xa.transpose(1, 2)                                     # (N, C+1, HW)
+        eye = t.eye(xa.shape[-1], device=img.device, dtype=img.dtype) * 1e-4
+        if mask is None:
+            a_mat = t.matmul(xt, xa) + eye
+            b_mat = t.matmul(xt, y)
+        else:
+            wm = mask.permute(0, 2, 3, 1).reshape(n, -1, 1)         # (N, HW, 1)
+            a_mat = t.matmul(xt, xa * wm) + eye
+            b_mat = t.matmul(xt, y * wm)
+        sol = t.linalg.solve(a_mat, b_mat)                          # (N, C+1, C)
+        out = t.matmul(xa, sol).reshape(n, hh, ww, c).permute(0, 3, 1, 2)
+        return out
+
+    raise ValueError('unknown color_transfer_torch alg: %r' % (alg,))
+
+
 def register_ops():
     """注册所有ops函数到nn模块，避免循环依赖"""
     nn = get_nn()
@@ -378,3 +459,4 @@ def register_ops():
     nn.dssim = dssim
     nn.total_variation_mse = total_variation_mse
     nn.style_loss = style_loss
+    nn.color_transfer_torch = color_transfer_torch
