@@ -821,6 +821,8 @@ class ModelBase(object):
             ('masked_training', '遮罩训练'),
             ('blur_out_mask', '遮罩羽化'),
             ('eyes_mouth_prio', '嘴眼优先'),
+                        ('eyes_scale', '眼睛范围'),
+            ('mouth_scale', '嘴巴范围'),
             ('uniform_yaw', '均匀偏航'),
         ]
         patch_opts = [

@@ -13,12 +13,37 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torchvision import models
 
 from core.interact import interact as io
 from core.leras import nn
 from facelib import FaceType
 from models import ModelBase
 from samplelib import SampleGeneratorV2, SampleLoaderV4, SampleProcessor
+
+
+# ── VGG 感知损失特征提取器（与 Model_SAEHD 同一实现） ──
+
+class VGGFeatureExtractor(torch.nn.Module):
+    """VGG16 特征提取器（固定权重，不训练）。
+    从 FaceRestoreLite 移植，用于 SAEHD 感知损失。
+    """
+    def __init__(self, layer_ids=(3, 8, 13, 19)):
+        super().__init__()
+        vgg = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1)
+        features = vgg.features
+        self.layers = torch.nn.ModuleList([features[:i+1] for i in layer_ids])
+        # ImageNet 归一化参数
+        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+        for p in self.parameters():
+            p.requires_grad = False
+
+    def forward(self, x):
+        # x 在 [-1, 1] → [0, 1] → ImageNet 归一化
+        x = (x + 1) / 2
+        x = (x - self.mean) / self.std
+        return [layer(x) for layer in self.layers]  # 每个从原始输入重新跑
 
 # =============================================================================
 # Network building blocks (shared with DeepFakeLarge)
@@ -343,6 +368,7 @@ class LIAELargeModel(ModelBase):
         default_clipgrad = self.options['clipgrad'] = self.load_or_def_option('clipgrad', False)
         default_pretrain = self.options['pretrain'] = False  # pretrain 已停用：无论读到什么一律强制 False
         default_gan_power = self.options['gan_power'] = self.load_or_def_option('gan_power', 0.0)
+        default_vgg_perceptual_power = self.options['vgg_perceptual_power'] = self.load_or_def_option('vgg_perceptual_power', 0.0)
         default_use_bf16 = self.options['use_bf16'] = self.load_or_def_option('use_bf16', False)
         default_gradient_checkpointing = self.options['gradient_checkpointing'] = self.load_or_def_option('gradient_checkpointing', False)
         default_freeze_decoder_mask = self.options['freeze_decoder_mask'] = self.load_or_def_option('freeze_decoder_mask', False)
@@ -459,6 +485,18 @@ class LIAELargeModel(ModelBase):
             self.set_iter(0)
 
         self.gan_power = gan_power = 0.0 if self.pretrain else float(self.options['gan_power'])
+
+        # VGG 感知损失：训练且强度 > 0 时才构建提取器
+        self.vgg_perceptual_power = float(self.options.get('vgg_perceptual_power', 0.0))
+        self.vgg_extractor = None
+        if self.is_training and self.vgg_perceptual_power > 0.0:
+            try:
+                self.vgg_extractor = VGGFeatureExtractor().to(self.device)
+                io.log_info(f'[VGG] VGG16 感知损失已启用（权重={self.vgg_perceptual_power}）')
+            except Exception as e:
+                self.vgg_extractor = None
+                self.vgg_perceptual_power = 0.0
+                io.log_info(f'[VGG] 加载 VGG16 失败，已关闭感知损失：{e}')
         random_warp = False if self.pretrain else bool(self.options['random_warp'])
         random_src_flip = True if self.pretrain else bool(self.random_src_flip)
         random_dst_flip = True if self.pretrain else bool(self.random_dst_flip)
@@ -910,6 +948,17 @@ class LIAELargeModel(ModelBase):
         if self.masked_training and self.gan_power != 0.0:
             emgl = emgl + 0.000001 * nn.total_variation_mse(ps)
             emgl = emgl + 0.02 * ((ps_am - ts_am) ** 2).mean()
+
+        # VGG 感知损失（在全图未遮罩的 pred/target 上计算）
+        if self.vgg_perceptual_power > 0.0 and self.vgg_extractor is not None:
+            vgg_weight = self.vgg_perceptual_power / 50.0  # 50=等权，100=2x，25=0.5x
+            with torch.no_grad():
+                tgt_s_vgg = self.vgg_extractor(target_src)
+                tgt_d_vgg = self.vgg_extractor(target_dst)
+            pred_s_vgg = self.vgg_extractor(ps)
+            sl = sl + vgg_weight * sum(F.l1_loss(a, b) for a, b in zip(pred_s_vgg, tgt_s_vgg))
+            pred_d_vgg = self.vgg_extractor(pd)
+            dl = dl + vgg_weight * sum(F.l1_loss(a, b) for a, b in zip(pred_d_vgg, tgt_d_vgg))
 
         G_loss = sl.mean() + dl.mean() + esl + emgl
         self._last_loss_per_sample = (sl + dl).detach().cpu().tolist()

@@ -92,6 +92,9 @@ class SAEHDModel(ModelBase):
 
         default_masked_training = self.options['masked_training'] = self.load_or_def_option('masked_training', True)
         default_eyes_mouth_prio = self.options['eyes_mouth_prio'] = self.load_or_def_option('eyes_mouth_prio', False)
+        # 嘴眼区域范围系数（眼睛 / 嘴巴**分开调**）：1.0 = 原始；>1 膨胀；<1 腐蚀
+        default_eyes_scale = self.options['eyes_scale'] = self.load_or_def_option('eyes_scale', 1.0)
+        default_mouth_scale = self.options['mouth_scale'] = self.load_or_def_option('mouth_scale', 1.0)
         default_uniform_yaw = self.options['uniform_yaw'] = self.load_or_def_option('uniform_yaw', False)
         default_blur_out_mask = self.options['blur_out_mask'] = self.load_or_def_option('blur_out_mask', False)
 
@@ -676,6 +679,8 @@ class SAEHDModel(ModelBase):
             self.options.pop('eyes_prio')
 
         self.eyes_mouth_prio = bool(self.options['eyes_mouth_prio'])
+        self.eyes_scale = float(self.options.get('eyes_scale', 1.0) or 1.0)
+        self.mouth_scale = float(self.options.get('mouth_scale', 1.0) or 1.0)
         self.masked_training = bool(self.options['masked_training'])
         self.blur_out_mask = bool(self.options['blur_out_mask'])
         self.use_bf16 = bool(self.load_or_def_option('use_bf16', True))  # None（旧模型未存）时回退 True，避免误用 FP32
@@ -774,7 +779,6 @@ class SAEHDModel(ModelBase):
             self.options_show_override['random_hsv_power'] = 0.0
             self.options_show_override['face_style_power'] = 0.0
             self.options_show_override['bg_style_power'] = 0.0
-            self.options_show_override['vgg_perceptual_power'] = 0.0
             self.options_show_override['uniform_yaw'] = True
 
         ct_mode = self.options['ct_mode']
@@ -863,7 +867,7 @@ class SAEHDModel(ModelBase):
                 self._move_leras_model_to_device(item)
 
         # VGG 感知损失特征提取器（懒初始化）
-        self.vgg_perceptual_power = 0.0 if self.pretrain else float(self.options.get('vgg_perceptual_power', 0.0))  # 默认 0.0：无 VGG 值时关闭
+        self.vgg_perceptual_power = float(self.options.get('vgg_perceptual_power', 0.0))  # 默认 0.0：无 VGG 值时关闭
         self.vgg_extractor = None
         if self.is_training and self.vgg_perceptual_power > 0.0:
             try:
@@ -1718,6 +1722,41 @@ class SAEHDModel(ModelBase):
         }
 
     # --- losses ---
+    @staticmethod
+    def _em_split(em):
+        """把「眼睛+嘴巴」合并掩码切成 (eyes, mouth)。
+
+        对齐空间是按 landmarks 归一化的，所以上下两团之间必然有一段"谷"，
+        取行投影在中段(35%~65%)的最小值位置当切点即可，不依赖 face_type / 姿态。
+        """
+        # 对齐空间里 眼睛≈0.36~0.46 / 嘴巴≈0.66~0.78，真正的"谷"在 0.46~0.66
+        # 搜索区间必须收窄到这里；用 0.35 起搜会落到眼睛上缘，
+        # 于是眼睛被划进下半区 -> 被当成嘴巴（这正是"眼睛显示成蓝色"的原因）。
+        prof = em.sum(dim=(0, 1, 3))            # (H,) 每行的量
+        Hh = int(em.shape[-2])
+        lo, hi = int(Hh * 0.50), max(int(Hh * 0.50) + 1, int(Hh * 0.70))
+        cut = lo + int(torch.argmin(prof[lo:hi]).item())
+        eyes = em.clone();  eyes[:, :, cut:, :] = 0
+        mouth = em.clone(); mouth[:, :, :cut, :] = 0
+        return eyes, mouth, cut
+
+    @staticmethod
+    def _scale_em_mask(m, k):
+        """按系数 k 缩放嘴眼掩码的空间范围（1.0 不变；>1 膨胀；<1 腐蚀）。
+
+        用 max_pool2d 实现形态学膨胀（-max_pool(-x) 即腐蚀），所以峰值为 1 不被改变，
+        只有"边界往哪挪"在变 —— 正好就是惩罚范围。
+        """
+        k = float(k)
+        if abs(k - 1.0) < 1e-6:
+            return m
+        px = abs(k - 1.0) * 8.0 * (m.shape[-1] / 256.0)   # 系数差 1.0 ≈ 256 分辨率下 8px
+        r = max(1, int(round(px)))
+        ker = 2 * r + 1
+        if k > 1.0:
+            return F.max_pool2d(m, kernel_size=ker, stride=1, padding=r)
+        return -F.max_pool2d(-m, kernel_size=ker, stride=1, padding=r)
+
     def _recon_losses(self, target_src, target_dst, target_srcm, target_dstm, target_srcm_em, target_dstm_em, fw, skip_dst=False):
         resolution = self.resolution
 
@@ -1797,9 +1836,20 @@ class SAEHDModel(ModelBase):
             dst_loss = dst_loss + mse(target_dst_masked_opt, pred_dst_dst_masked_opt, 10)
 
         if self.eyes_mouth_prio:
-            src_loss = src_loss + l1(target_src * target_srcm_em, pred_src_src * target_srcm_em, 300)
+            _ek = float(getattr(self, 'eyes_scale', 1.0) or 1.0)
+            _mk = float(getattr(self, 'mouth_scale', 1.0) or 1.0)
+            # 各自缩放后**裁回自己的半区**：否则系数>1 时膨胀会越过切点互相覆盖
+            _es, _ms, _cs = self._em_split(target_srcm_em)
+            _ed, _md, _cd = self._em_split(target_dstm_em)
+            _a = self._scale_em_mask(_es, _ek); _a[:, :, _cs:, :] = 0
+            _b = self._scale_em_mask(_ms, _mk); _b[:, :, :_cs, :] = 0
+            _em_s = torch.clamp(_a + _b, 0.0, 1.0)
+            _a = self._scale_em_mask(_ed, _ek); _a[:, :, _cd:, :] = 0
+            _b = self._scale_em_mask(_md, _mk); _b[:, :, :_cd, :] = 0
+            _em_d = torch.clamp(_a + _b, 0.0, 1.0)
+            src_loss = src_loss + l1(target_src * _em_s, pred_src_src * _em_s, 300)
             if not skip_dst:
-                dst_loss = dst_loss + l1(target_dst * target_dstm_em, pred_dst_dst * target_dstm_em, 300)
+                dst_loss = dst_loss + l1(target_dst * _em_d, pred_dst_dst * _em_d, 300)
 
         src_loss = src_loss + mse(target_srcm, pred_src_srcm, 10)
         if not skip_dst:
@@ -2266,6 +2316,73 @@ class SAEHDModel(ModelBase):
         # dst 解码器被冻结时，它不参与训练、输出也不会变 —— 预览里没必要再占用一列
         _show_dst_pred = (not _freeze_dst_pv)
 
+        # 嘴眼优先可视化：开启 eyes_mouth_prio 时，在「原始输入」行的输入图上
+        # 用 1px 线框出嘴眼区域（就是 loss 里被额外加权的那一块）。
+        _em_prio_on = bool(getattr(self, 'eyes_mouth_prio', False))
+        _EM_COLOR_EYE = (0.0, 1.0, 0.0)      # BGR 纯绿 (0,255,0) = 眼睛范围
+        _EM_COLOR_MOUTH = (1.0, 0.0, 0.0)    # BGR 纯蓝 (255,0,0) = 嘴巴范围
+        _em_src = _em_dst = None
+        if _em_prio_on:
+            try:
+                _em_src = nn.to_data_format(target_srcm_em, 'NHWC', self.model_data_format)
+                _em_dst = nn.to_data_format(target_dstm_em, 'NHWC', self.model_data_format)
+            except Exception:
+                _em_src = _em_dst = None
+
+        # 预览侧用 numpy 复刻同一套拆分与缩放
+        def _em_split_np(em):
+            m = np.asarray(em)[..., 0]
+            # 与 torch 版同一区间：必须落在眼睛(≈0.46)与嘴巴(≈0.66)之间
+            prof = m.reshape(m.shape[0], -1).sum(axis=1)
+            Hh = m.shape[0]
+            lo = int(Hh * 0.50); hi = max(lo + 1, int(Hh * 0.70))
+            cut = lo + int(np.argmin(prof[lo:hi]))
+            eyes = m.copy();  eyes[cut:, :] = 0
+            mouth = m.copy(); mouth[:cut, :] = 0
+            return eyes[..., None], mouth[..., None], cut
+
+        # 预览侧用 numpy 复刻同一个缩放（3x3 迭代膨胀/腐蚀）
+        def _em_scale_np(m, k):
+            k = float(k)
+            if abs(k - 1.0) < 1e-6:
+                return m
+            r = max(1, int(round(abs(k - 1.0) * 8.0 * (m.shape[0] / 256.0))))
+            grow = k > 1.0
+            cur = m.copy()
+            for _ in range(r):
+                nb = [cur]
+                for sh, ax in ((1, 0), (-1, 0), (1, 1), (-1, 1)):
+                    nb.append(np.roll(cur, sh, axis=ax))
+                cur = np.max(nb, axis=0) if grow else np.min(nb, axis=0)
+            return cur
+
+        def _em_draw(img, em, i):
+            """按当前系数把眼睛(绿)/嘴巴(蓝)两块轮廓画到 img 上并返回新图。"""
+            _ek2 = float(getattr(self, 'eyes_scale', 1.0) or 1.0)
+            _mk2 = float(getattr(self, 'mouth_scale', 1.0) or 1.0)
+            _ey, _mo, _ct = _em_split_np(em[i])
+            _e = _em_scale_np(_ey, _ek2); _e[_ct:, :] = 0
+            _m = _em_scale_np(_mo, _mk2); _m[:_ct, :] = 0
+            _o = _em_outline(img, _e, _EM_COLOR_EYE)
+            _o = _em_outline(_o, _m, _EM_COLOR_MOUTH)
+            return _o
+
+        def _em_outline(img, em, color=(0.0, 1.0, 0.0)):
+            """把 em 掩码(阈值 0.5)的边界描成 1px 线，叠在 img 上返回新图。"""
+            if em is None:
+                return img
+            m = (np.asarray(em)[..., 0] >= 0.5).astype(np.uint8)
+            if int(m.sum()) == 0:
+                return img
+            up = np.zeros_like(m);    up[1:, :]  = m[:-1, :]
+            dn = np.zeros_like(m);    dn[:-1, :] = m[1:, :]
+            lf = np.zeros_like(m);    lf[:, 1:]  = m[:, :-1]
+            rt = np.zeros_like(m);    rt[:, :-1] = m[:, 1:]
+            edge = (m == 1) & ((up == 0) | (dn == 0) | (lf == 0) | (rt == 0))
+            out = np.array(img, copy=True)
+            out[edge] = color
+            return out
+
         C_S = (np.clip(nn.to_data_format(cast_src, 'NHWC', self.model_data_format), 0.0, 1.0)
                if _show_src_cast else None)
         C_D = (np.clip(nn.to_data_format(cast_dst, 'NHWC', self.model_data_format), 0.0, 1.0)
@@ -2322,7 +2439,12 @@ class SAEHDModel(ModelBase):
         # 1. 原图预览 - 5 columns: S, SS, D, DD, SD
         st = []
         for i in range(n_samples):
-            ar = _expand_cols((S[i], SS[i], D[i], DD[i], SD[i]), i)
+            # 嘴眼轮廓画在【未扭曲】的原图上 —— 与 target_*_em 掩码同一空间，必然对齐
+            _s_vis, _d_vis = S[i], D[i]
+            if _em_prio_on and _em_src is not None:
+                _s_vis = _em_draw(S[i], _em_src, i)
+                _d_vis = _em_draw(D[i], _em_dst, i)
+            ar = _expand_cols((_s_vis, SS[i], _d_vis, DD[i], SD[i]), i)
             st.append(np.concatenate(ar, axis=1))
         result.append(('原图预览', np.concatenate(st, axis=0)))
 
@@ -2343,6 +2465,9 @@ class SAEHDModel(ModelBase):
         # 3. 原始输入 — 5 columns: WS, SS, WD, DD, SD
         st = []
         for i in range(n_samples):
+            # 这里【不画】嘴眼轮廓：本行是 WS/WD（已被随机扭曲），
+            # 而 target_*_em 掩码永远在【未扭曲】的对齐空间，两者空间不一致会看着"错位"。
+            # 轮廓画在「原图预览」行的 S/D 上（见该行），那里空间一致，必然对齐。
             ar = _expand_cols((WS[i], SS[i], WD[i], DD[i], SD[i]), i)
             st.append(np.concatenate(ar, axis=1))
         result.append(('原始输入', np.concatenate(st, axis=0)))

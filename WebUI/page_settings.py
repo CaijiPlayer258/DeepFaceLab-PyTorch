@@ -178,6 +178,8 @@ const TR_FIELDS = [
   ['tr', 'masked_training', 'toggle', '遮罩区域训练'],
   ['tr', 'blur_out_mask', 'toggle', '羽化遮罩外围'],
   ['tr', 'eyes_mouth_prio', 'toggle', '嘴眼优先'],
+  ['tr', 'eyes_scale', 'slider', '眼睛范围系数（1=原始，>1 扩大，<1 收缩）', {min: 0.25, max: 2.0, step: 0.05}],
+  ['tr', 'mouth_scale', 'slider', '嘴巴范围系数（1=原始，>1 扩大，<1 收缩）', {min: 0.25, max: 2.0, step: 0.05}],
   ['tr', 'uniform_yaw', 'toggle', 'Yaw 均匀分布'],
   ['tr', 'pretrain_single_decoder', 'toggle', '预训练单解码器'],
 ];
@@ -294,6 +296,20 @@ function buildField(group, key, type, label, opts) {
       sel.appendChild(opt);
     }
     ctrl.appendChild(sel);
+  } else if (type === 'slider') {
+    const o = opts || {};
+    const rc = document.createElement('div');
+    rc.className = 'range-ctrl';
+    const sl = document.createElement('input'); sl.type = 'range';
+    sl.min = (o.min !== undefined ? o.min : 0.25);
+    sl.max = (o.max !== undefined ? o.max : 2.0);
+    sl.step = (o.step !== undefined ? o.step : 0.05);
+    sl.dataset.group = group; sl.dataset.fieldKey = key;
+    const lbl = document.createElement('span'); lbl.className = 'sep';
+    lbl.textContent = sl.value;
+    sl.addEventListener('input', function () { lbl.textContent = sl.value; });
+    rc.appendChild(sl); rc.appendChild(lbl);
+    ctrl.appendChild(rc);
   } else if (type === 'range') {
     const rc = document.createElement('div');
     rc.className = 'range-ctrl';
