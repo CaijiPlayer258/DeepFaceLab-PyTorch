@@ -979,6 +979,33 @@ class TrainingConfigChildPage(SiChildPage):
             self.edge_enhance_card.addWidget(self.edge_enhance_input)
             self.edge_enhance_card.adjustSize()
 
+            # 嘴眼范围系数（配合「嘴眼优先」使用：1=原始，>1 扩大惩罚范围，<1 收缩）
+            self.eyes_scale_card = SiOptionCardLinear(self)
+            self.eyes_scale_card.setTitle(
+                "眼睛范围系数", "配合「嘴眼优先」：1.0 = 原始范围；大于 1 向外扩大惩罚范围；小于 1 向内收缩")
+            self.eyes_scale_card.load(safe_get_icon("ic_fluent_arrow_swap_filled"))
+            self.eyes_scale_input = SiLabeledLineEdit(self.eyes_scale_card)
+            self.eyes_scale_input.setTitle("小数 0.25~2.0")
+            self.eyes_scale_input.setText("1.0")
+            self.eyes_scale_input.setFixedHeight(48)
+            self.eyes_scale_input.resize(150, 48)
+            self.eyes_scale_input.textChanged.connect(lambda: self.update_config('eyes_scale'))
+            self.eyes_scale_card.addWidget(self.eyes_scale_input)
+            self.eyes_scale_card.adjustSize()
+
+            self.mouth_scale_card = SiOptionCardLinear(self)
+            self.mouth_scale_card.setTitle(
+                "嘴巴范围系数", "配合「嘴眼优先」：1.0 = 原始范围；大于 1 向外扩大惩罚范围；小于 1 向内收缩")
+            self.mouth_scale_card.load(safe_get_icon("ic_fluent_arrow_swap_filled"))
+            self.mouth_scale_input = SiLabeledLineEdit(self.mouth_scale_card)
+            self.mouth_scale_input.setTitle("小数 0.25~2.0")
+            self.mouth_scale_input.setText("1.0")
+            self.mouth_scale_input.setFixedHeight(48)
+            self.mouth_scale_input.resize(150, 48)
+            self.mouth_scale_input.textChanged.connect(lambda: self.update_config('mouth_scale'))
+            self.mouth_scale_card.addWidget(self.mouth_scale_input)
+            self.mouth_scale_card.adjustSize()
+
             # 合并预览调色算法（独立于「颜色模式」，只影响预览显示）
             self.preview_grade_card = SiOptionCardLinear(self)
             self.preview_grade_card.setTitle(
@@ -1033,6 +1060,8 @@ class TrainingConfigChildPage(SiChildPage):
             group.addWidget(self.random_color_alg_card)
             group.addWidget(self.random_color_power_card)
             group.addWidget(self.edge_enhance_card)
+            group.addWidget(self.eyes_scale_card)
+            group.addWidget(self.mouth_scale_card)
             group.addWidget(self.preview_grade_card)
             group.addWidget(self.random_src_flip_card)
             group.addWidget(self.random_dst_flip_card)
@@ -1422,6 +1451,8 @@ class TrainingConfigChildPage(SiChildPage):
                             ('learning_rate',             'lr',                  float),
                             ('gan_power',                 'gan_power',           float),
                             ('prioritize_mouth_eyes',     'eyes_mouth_prio',     bool),
+                            ('eyes_scale',                'eyes_scale',          float),
+                            ('mouth_scale',               'mouth_scale',         float),
                             ('face_type',                 'face_type',           str),
                             ('ct_mode',                   'ct_mode',             str),
                             ('clipgrad',                  'clipgrad',            bool),
@@ -1835,6 +1866,8 @@ class TrainingConfigChildPage(SiChildPage):
             'scale_range': '0.15',
             't_range': '0.05',
             'prioritize_mouth_eyes': bool(_(info, 'eyes_mouth_prio', False)),
+            'eyes_scale': str(_(info, 'eyes_scale', '1.0')),
+            'mouth_scale': str(_(info, 'mouth_scale', '1.0')),
             # 缺失的模型参数
             'masked_training': bool(_(info, 'masked_training', True)),
             'blur_out_mask': bool(_(info, 'blur_out_mask', False)),
@@ -1923,6 +1956,8 @@ class TrainingConfigChildPage(SiChildPage):
         self.random_color_power_input.setText(str(cfg.get('random_color_power', '0.0')))
         self.random_color_alg_combo.setCurrentText(str(cfg.get('random_color_alg', 'none')))
         self.edge_enhance_input.setText(str(cfg.get('edge_enhance_power', '0.0')))
+        self.eyes_scale_input.setText(str(cfg.get('eyes_scale', '1.0')))
+        self.mouth_scale_input.setText(str(cfg.get('mouth_scale', '1.0')))
         self.preview_grade_combo.setCurrentText(str(cfg.get('preview_grade_alg', 'same')))
         self.random_src_flip_switch.setChecked(bool(cfg.get('random_src_flip', False)))
         self.random_dst_flip_switch.setChecked(bool(cfg.get('random_dst_flip', False)))
@@ -2039,6 +2074,10 @@ class TrainingConfigChildPage(SiChildPage):
                     self.config_data[key] = self.random_color_alg_combo.currentText()
                 elif key == 'edge_enhance_power':
                     self.config_data[key] = self.edge_enhance_input.text()
+                elif key == 'eyes_scale':
+                    self.config_data[key] = self.eyes_scale_input.text()
+                elif key == 'mouth_scale':
+                    self.config_data[key] = self.mouth_scale_input.text()
                 elif key == 'preview_grade_alg':
                     self.config_data[key] = self.preview_grade_combo.currentText()
                 elif key == 'random_src_flip':
