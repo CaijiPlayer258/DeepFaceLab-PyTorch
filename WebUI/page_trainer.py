@@ -315,41 +315,41 @@ HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>DFL Monitor</title>
 	<style>
-	@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;550;600&display=swap');
+	/* font: system geometric stack (minimalist, no remote fetch) */
 	*{box-sizing:border-box;margin:0;padding:0}
-	html,body{height:100%}body{overflow:hidden;background:#0a0a0b;display:flex;flex-direction:column;color:rgba(255,255,255,.8);font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;font-weight:450;line-height:1.5;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;user-select:none}
-	::selection{background:rgba(91,91,214,.35);color:#fff}
+	html,body{height:100%}body{overflow:hidden;background:#101013;display:flex;flex-direction:column;color:rgba(255,255,255,.8);font-family:'SF Pro Display', 'Segoe UI Variable', 'Segoe UI',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;font-weight:450;line-height:1.5;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;user-select:none}
+	::selection{background:rgba(122,158,159,.35);color:#d2d3d5}
 	::-webkit-scrollbar{width:6px;height:6px}
 	::-webkit-scrollbar-track{background:transparent}
-	::-webkit-scrollbar-thumb{background:rgba(255,255,255,.08);border-radius:3px;transition:background .15s}
+	::-webkit-scrollbar-thumb{background:rgba(255,255,255,.055);border-radius:3px;transition:background .15s}
 	::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.14)}
-	*{scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.08) transparent}
-	header{display:flex;align-items:center;gap:12px;height:40px;padding:0 14px;background:#0d0d0e;border-bottom:1px solid rgba(255,255,255,.06);flex-shrink:0}
+	*{scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.055) transparent}
+	header{display:flex;align-items:center;gap:12px;height:40px;padding:0 14px;background:#16171a;border-bottom:1px solid rgba(255,255,255,.04);flex-shrink:0}
 	header h1{font-size:13px;font-weight:550;color:rgba(255,255,255,.8);letter-spacing:-.01em}
 	#dot{width:8px;height:8px;border-radius:50%;background:rgba(255,255,255,.12);flex-shrink:0;transition:background .4s}
-	#dot.live{background:linear-gradient(135deg,#5b5bd6,#8b5cf6);box-shadow:0 0 8px rgba(91,91,214,.4)}
+	#dot.live{background:linear-gradient(135deg,#6f8f90,#67878a);box-shadow:0 0 8px rgba(122,158,159,.4)}
 	.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);z-index:1000;display:none;align-items:center;justify-content:center}
 	.modal-overlay.open{display:flex}
-	.modal-box{min-width:320px;max-width:420px;background:#0d0d0e;border:1px solid rgba(255,255,255,.08);border-radius:10px;box-shadow:0 16px 48px rgba(0,0,0,.5);padding:20px;text-align:center}
+	.modal-box{min-width:320px;max-width:420px;background:#16171a;border:1px solid rgba(255,255,255,.055);border-radius:10px;box-shadow:0 16px 48px rgba(0,0,0,.5);padding:20px;text-align:center}
 	.modal-box h2{font-size:14px;font-weight:550;color:rgba(255,255,255,.8);margin-bottom:8px}
 	.modal-box p{font-size:12px;color:rgba(255,255,255,.45);margin-bottom:16px}
-	.modal-box input{width:100%;padding:8px 12px;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.08);border-radius:6px;color:rgba(255,255,255,.75);font-size:13px;font-family:inherit;text-align:center;outline:none;transition:border-color .12s}
-	.modal-box input:focus{border-color:rgba(91,91,214,.4);box-shadow:0 0 0 2px rgba(91,91,214,.08)}
-	.modal-box .modal-err{font-size:12px;color:#ef4444;margin-top:8px;display:none}
+	.modal-box input{width:100%;padding:8px 12px;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.055);border-radius:6px;color:rgba(255,255,255,.75);font-size:13px;font-family:inherit;text-align:center;outline:none;transition:border-color .12s}
+	.modal-box input:focus{border-color:rgba(122,158,159,.4);box-shadow:0 0 0 2px rgba(122,158,159,.08)}
+	.modal-box .modal-err{font-size:12px;color:#a65d5d;margin-top:8px;display:none}
 	.modal-box .modal-actions{display:flex;gap:8px;margin-top:16px}
 	.modal-box .modal-actions button{flex:1;padding:7px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:500;font-family:inherit;border:none;transition:opacity .12s}
 	#stats{display:flex;gap:16px;margin-left:auto;font-size:12px;color:rgba(255,255,255,.35);flex-wrap:wrap;align-items:center}
 	#stats span b{color:rgba(255,255,255,.65);font-weight:500}
-	button{padding:5px 12px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:6px;color:rgba(255,255,255,.55);cursor:pointer;font-size:11px;font-family:inherit;font-weight:500;transition:all .12s}
+	button{padding:5px 12px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.055);border-radius:6px;color:rgba(255,255,255,.55);cursor:pointer;font-size:11px;font-family:inherit;font-weight:500;transition:all .12s}
 	button:hover{background:rgba(255,255,255,.07);color:rgba(255,255,255,.75)}
 	button:disabled{opacity:.3;cursor:default;background:rgba(255,255,255,.02)}
-	#btn-auto-refresh.active{background:rgba(91,91,214,.15);border-color:rgba(91,91,214,.3);color:#8b8be6}
-	.btn-apply{background:linear-gradient(135deg,#5b5bd6,#8b5cf6)!important;color:#fff!important}
-	.btn-apply:hover{opacity:.9!important;box-shadow:0 2px 8px rgba(91,91,214,.25)!important}
+	#btn-auto-refresh.active{background:rgba(122,158,159,.15);border-color:rgba(122,158,159,.3);color:#8faeaf}
+	.btn-apply{background:linear-gradient(135deg,#6f8f90,#67878a)!important;color:#d2d3d5!important}
+	.btn-apply:hover{opacity:.9!important;box-shadow:0 2px 8px rgba(122,158,159,.25)!important}
 	.btn-reset{background:rgba(255,255,255,.04)!important;color:rgba(255,255,255,.45)!important}
 	.btn-reset:hover{background:rgba(255,255,255,.07)!important;color:rgba(255,255,255,.65)!important}
 	main{flex:1;min-height:0;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:16px}
-	.card{background:#0d0d0e;border:1px solid rgba(255,255,255,.06);border-radius:8px;padding:14px}
+	.card{background:#16171a;border:1px solid rgba(255,255,255,.04);border-radius:8px;padding:14px}
 	.card h2{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:rgba(255,255,255,.25);margin-bottom:10px}
 	#chart-wrap{height:200px}
 	canvas#chart{width:100%;height:100%}
@@ -357,35 +357,35 @@ HTML = """<!DOCTYPE html>
 	.leg{display:flex;align-items:center;gap:4px;font-size:11px;color:rgba(255,255,255,.35)}
 	.leg-dot{width:8px;height:8px;border-radius:50%}
 	#prev-tabs{display:flex;gap:4px;margin-bottom:10px;flex-wrap:wrap}
-	.prev-tab{padding:4px 12px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.06);border-radius:5px;color:rgba(255,255,255,.35);cursor:pointer;font-size:11px;font-family:inherit;font-weight:500;transition:all .12s}
-	.prev-tab:hover{background:rgba(255,255,255,.06);color:rgba(255,255,255,.55)}
-	.prev-tab.active{background:rgba(91,91,214,.12);border-color:rgba(91,91,214,.25);color:rgba(255,255,255,.75)}
+	.prev-tab{padding:4px 12px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.04);border-radius:5px;color:rgba(255,255,255,.35);cursor:pointer;font-size:11px;font-family:inherit;font-weight:500;transition:all .12s}
+	.prev-tab:hover{background:rgba(255,255,255,.04);color:rgba(255,255,255,.55)}
+	.prev-tab.active{background:rgba(122,158,159,.12);border-color:rgba(122,158,159,.25);color:rgba(255,255,255,.75)}
 	.preview-wrap{display:flex;flex-direction:column;align-items:center;min-width:0;width:100%}
 	.preview-img-wrap{position:relative;display:inline-block;width:100%;line-height:0}
 	#preview-img{width:100%;height:auto;border-radius:5px;border:1px solid rgba(255,255,255,.04);cursor:zoom-in;display:block;box-shadow:0 4px 12px rgba(0,0,0,.3)}
 	#preview-labels{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:hidden}
 	@keyframes gradShift{0%{background-position:0% 50%}100%{background-position:200% 50%}}
 	#prev-hint{font-size:11px;color:rgba(255,255,255,.2);margin-top:6px}
-	#log{font-size:12px;color:rgba(255,255,255,.3);font-family:'Inter',monospace;max-height:80px;overflow-y:auto;line-height:1.6;background:rgba(0,0,0,.15);border-radius:5px;padding:8px 10px;border:1px solid rgba(255,255,255,.04)}
+	#log{font-size:12px;color:rgba(255,255,255,.3);font-family:'SF Pro Display', 'Segoe UI Variable', 'Segoe UI',monospace;max-height:80px;overflow-y:auto;line-height:1.6;background:rgba(0,0,0,.15);border-radius:5px;padding:8px 10px;border:1px solid rgba(255,255,255,.04)}
 	#log div:last-child{color:rgba(255,255,255,.65)}
 	#lightbox{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);z-index:999;align-items:center;justify-content:center;cursor:zoom-out}
 	#lightbox.open{display:flex}
 	#lightbox img{max-width:92vw;max-height:92vh;border-radius:6px;object-fit:contain;box-shadow:0 8px 32px rgba(0,0,0,.5)}
 	@media(max-width:600px){header{padding:0 10px;gap:8px}main{padding:10px}.card{padding:10px}#stats{gap:8px}}
 	/* --- sidebar --- */
-	#sidebar{position:fixed;top:0;left:-260px;width:260px;height:100vh;background:rgba(13,13,14,.85);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border-right:1px solid rgba(255,255,255,.06);z-index:200;transition:left .25s ease;display:flex;flex-direction:column;padding:0;overflow-y:auto}
+	#sidebar{position:fixed;top:0;left:-260px;width:260px;height:100vh;background:rgba(13,13,14,.85);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border-right:1px solid rgba(255,255,255,.04);z-index:200;transition:left .25s ease;display:flex;flex-direction:column;padding:0;overflow-y:auto}
 	#sidebar.open{left:0}
-	#sidebar .shead{padding:14px 16px;border-bottom:1px solid rgba(255,255,255,.06)}
+	#sidebar .shead{padding:14px 16px;border-bottom:1px solid rgba(255,255,255,.04)}
 	#sidebar .shead h2{font-size:13px;font-weight:550;color:rgba(255,255,255,.8)}
 	#sidebar .shead .ssub{font-size:11px;color:rgba(255,255,255,.25);margin-top:4px}
 	#sidebar .shead .ssub span{color:rgba(255,255,255,.5)}
 	#sidebar .snav{flex:1;padding:8px 0}
 	#sidebar .snav a{display:flex;align-items:center;gap:8px;padding:9px 16px;color:rgba(255,255,255,.4);text-decoration:none;font-size:13px;font-weight:450;transition:all .12s;border-left:2px solid transparent}
-	#sidebar .snav a:hover{background:rgba(255,255,255,.03);color:rgba(255,255,255,.65);border-left-color:rgba(91,91,214,.4)}
-	#sidebar .snav a.active{color:rgba(255,255,255,.8);border-left-color:#7b7be6;background:rgba(91,91,214,.06)}
+	#sidebar .snav a:hover{background:rgba(255,255,255,.03);color:rgba(255,255,255,.65);border-left-color:rgba(122,158,159,.4)}
+	#sidebar .snav a.active{color:rgba(255,255,255,.8);border-left-color:#7b7be6;background:rgba(122,158,159,.06)}
 	#sidebar-overlay{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:199;display:none}
 	#sidebar-overlay.open{display:block}
-	#hamburger{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.06);border-radius:5px;color:rgba(255,255,255,.4);cursor:pointer;font-size:16px;line-height:1;padding:0;flex-shrink:0;transition:all .12s}
+	#hamburger{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.04);border-radius:5px;color:rgba(255,255,255,.4);cursor:pointer;font-size:16px;line-height:1;padding:0;flex-shrink:0;transition:all .12s}
 	#hamburger:hover{background:rgba(255,255,255,.07);color:rgba(255,255,255,.65)}
 	</style>
 </head>
@@ -408,7 +408,7 @@ HTML = """<!DOCTYPE html>
   <div class="shead">
     <h2>DFL Torch</h2>
     <div class="ssub">Iter: <span id="sb-iter">--</span> &middot; <span id="sb-speed">-- it/s</span></div>
-    <div class="ssub" id="sb-model" style="margin-top:2px;font-size:10px;color:#555"></div>
+    <div class="ssub" id="sb-model" style="margin-top:2px;font-size:10px;color:#6b6c70"></div>
   </div>
   <div class="snav">
     <a href="/Trainer" class="active">&#9707; 训练监控</a>
@@ -424,7 +424,7 @@ HTML = """<!DOCTYPE html>
     <span>Iter: <b id="s-iter">&#8212;</b></span>
     <span>Speed: <b id="s-speed">&#8212;</b> it/s</span>
     <span>Loss: <b id="s-loss">&#8212;</b></span>
-    <span id="s-time" style="color:#555"></span>
+    <span id="s-time" style="color:#6b6c70"></span>
     <button id="btn-refresh" onclick="requestPreview()">&#21047;&#26032;&#39044;&#35272;</button>
     <button id="btn-auto-refresh" onclick="toggleAutoRefresh()">&#9632; 自动</button>
     <button id="btn-save" onclick="requestSave()">&#20445;&#23384;</button>
@@ -449,7 +449,7 @@ HTML = """<!DOCTYPE html>
     </div>
   </div>
   <div class="card">
-    <h2>Event Log <span id="log-toggle" onclick="toggleLogScroll()" style="font-size:11px;color:#555;cursor:pointer;float:right;font-weight:400;text-transform:none;letter-spacing:0">&#9660; 自动</span></h2>
+    <h2>Event Log <span id="log-toggle" onclick="toggleLogScroll()" style="font-size:11px;color:#6b6c70;cursor:pointer;float:right;font-weight:400;text-transform:none;letter-spacing:0">&#9660; 自动</span></h2>
     <div id="log"></div>
   </div>
 </main>
@@ -499,11 +499,11 @@ function drawChart() {
   for (let g = 0; g <= 4; g++) {
     const y = PAD.t + cH*(1-g/4);
     ctx.beginPath(); ctx.moveTo(PAD.l, y); ctx.lineTo(PAD.l+cW, y); ctx.stroke();
-    ctx.fillStyle = '#555';
+    ctx.fillStyle = '#6b6c70';
     ctx.font = (10*devicePixelRatio) + 'px monospace';
     ctx.fillText((yMax*g/4).toFixed(4), 2, y+4*devicePixelRatio);
   }
-  ctx.fillStyle = '#555'; ctx.font = (10*devicePixelRatio) + 'px monospace';
+  ctx.fillStyle = '#6b6c70'; ctx.font = (10*devicePixelRatio) + 'px monospace';
   for (let g = 0; g <= 4; g++) {
     const idx = Math.round(i0+(i1-i0)*g/4);
     ctx.fillText(idx, PAD.l+cW*g/4-10*devicePixelRatio, H-6*devicePixelRatio);
@@ -801,7 +801,7 @@ function requestSave() {
   document.getElementById('pwd-modal-desc').textContent = '输入密码保存当前训练进度';
   document.getElementById('pwd-confirm-btn').style.background = '#2a5a3a';
   document.getElementById('pwd-confirm-btn').style.borderColor = '#3a7a5a';
-  document.getElementById('pwd-confirm-btn').style.color = '#fff';
+  document.getElementById('pwd-confirm-btn').style.color = '#d2d3d5';
   document.getElementById('pwd-cancel-btn').style.display = 'block';
   openPwdModal();
 }
@@ -825,7 +825,7 @@ function requestQuit() {
   document.getElementById('pwd-modal-desc').textContent = '输入密码保存并退出训练';
   document.getElementById('pwd-confirm-btn').style.background = '#5a2a2a';
   document.getElementById('pwd-confirm-btn').style.borderColor = '#7a3a3a';
-  document.getElementById('pwd-confirm-btn').style.color = '#fff';
+  document.getElementById('pwd-confirm-btn').style.color = '#d2d3d5';
   document.getElementById('pwd-cancel-btn').style.display = 'block';
   openPwdModal();
 }
@@ -957,7 +957,7 @@ function toggleLogScroll() {
   const el = document.getElementById('log-toggle');
   if (_logAutoScroll) {
     el.innerHTML = '▼ 自动';
-    el.style.color = '#555';
+    el.style.color = '#6b6c70';
   } else {
     el.innerHTML = '▼ 暂停';
     el.style.color = '#f77';

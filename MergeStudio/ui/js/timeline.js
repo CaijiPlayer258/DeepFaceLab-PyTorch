@@ -17,11 +17,11 @@
       this._hideContextMenu();
       var menu = document.createElement('div');
       menu.className = 'timeline-ctx-menu';
-      menu.style.cssText = 'position:fixed;left:'+x+'px;top:'+y+'px;z-index:9999;background:#1a1a1e;border:1px solid #2a2a2e;border-radius:6px;padding:4px 0;min-width:100px;box-shadow:0 4px 12px rgba(0,0,0,0.4);';
+      menu.style.cssText = 'position:fixed;left:'+x+'px;top:'+y+'px;z-index:9999;background:#1a1a1e;border:1px solid #222329;border-radius:6px;padding:4px 0;min-width:100px;box-shadow:0 4px 12px rgba(0,0,0,0.4);';
       var item = document.createElement('div');
       item.textContent = label;
-      item.style.cssText = 'padding:6px 16px;cursor:pointer;font-size:12px;color:#e0e0e0;';
-      item.addEventListener('mouseenter', function () { item.style.background = '#5b5bd6'; });
+      item.style.cssText = 'padding:6px 16px;cursor:pointer;font-size:12px;color:#c9cacd;';
+      item.addEventListener('mouseenter', function () { item.style.background = '#6f8f90'; });
       item.addEventListener('mouseleave', function () { item.style.background = ''; });
       item.addEventListener('click', function () { self._hideContextMenu(); if (callback) callback(); });
       menu.appendChild(item);
@@ -441,7 +441,7 @@
         '<span><span class="legend-swatch" style="background:#2a0c4a"></span> 多人脸</span>' +
         '<span><span class="legend-swatch" style="background:#8a6caa"></span> 少人脸</span>' +
         '<span><span class="legend-swatch" style="background:#4c1010"></span> 无人脸</span>' +
-        '<span><span class="legend-swatch" style="background:#5b5bd6"></span> 选中人脸</span>';
+        '<span><span class="legend-swatch" style="background:#6f8f90"></span> 选中人脸</span>';
     },
 
     updateZoom: function (zoom, totalFrames, currentFrame) {

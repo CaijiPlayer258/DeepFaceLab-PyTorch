@@ -122,8 +122,8 @@
     <!-- Frame Jumper -->
     <div id="frame-jumper">
       <div class="frame-jumper__left">
-        <span class="frame-jumper__label" style="font-size:9px;color:#555;margin-right:4px;">Res</span>
-        <select id="res-select" style="background:#1a1a1e;border:1px solid #2a2a2e;border-radius:3px;padding:2px 4px;color:#e0e0e0;font:10px Inter,sans-serif;outline:none;cursor:pointer;">
+        <span class="frame-jumper__label" style="font-size:9px;color:#6b6c70;margin-right:4px;">Res</span>
+        <select id="res-select" style="background:#1a1a1e;border:1px solid #222329;border-radius:3px;padding:2px 4px;color:#c9cacd;font:10px Inter,sans-serif;outline:none;cursor:pointer;">
           <option value="1">1:1</option>
           <option value="0.5" selected>1/2</option>
           <option value="0.25">1/4</option>
@@ -142,10 +142,10 @@
       <div class="frame-jumper__right">
         <span id="timecode">00:00.00</span>
         <button id="zoom-out" class="icon-btn">
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#555" stroke-width="1"/><line x1="8" y1="8" x2="10" y2="10" stroke="#555" stroke-width="1" stroke-linecap="round"/><line x1="3.5" y1="5" x2="6.5" y2="5" stroke="#555" stroke-width="0.8"/></svg>
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#6b6c70" stroke-width="1"/><line x1="8" y1="8" x2="10" y2="10" stroke="#6b6c70" stroke-width="1" stroke-linecap="round"/><line x1="3.5" y1="5" x2="6.5" y2="5" stroke="#6b6c70" stroke-width="0.8"/></svg>
         </button>
         <button id="zoom-in" class="icon-btn">
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#555" stroke-width="1"/><line x1="8" y1="8" x2="10" y2="10" stroke="#555" stroke-width="1" stroke-linecap="round"/><line x1="3.5" y1="5" x2="6.5" y2="5" stroke="#555" stroke-width="0.8"/><line x1="5" y1="3.5" x2="5" y2="6.5" stroke="#555" stroke-width="0.8"/></svg>
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#6b6c70" stroke-width="1"/><line x1="8" y1="8" x2="10" y2="10" stroke="#6b6c70" stroke-width="1" stroke-linecap="round"/><line x1="3.5" y1="5" x2="6.5" y2="5" stroke="#6b6c70" stroke-width="0.8"/><line x1="5" y1="3.5" x2="5" y2="6.5" stroke="#6b6c70" stroke-width="0.8"/></svg>
         </button>
       </div>
     </div>
@@ -199,9 +199,9 @@
     <div class="card-scroll">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
         <h2 style="font-size:16px;font-weight:600;">Face Database</h2>
-        <span id="facedb-count" style="font-size:11px;color:#555;"></span>
+        <span id="facedb-count" style="font-size:11px;color:#6b6c70;"></span>
       </div>
-      <button id="btn-compute-embeddings" class="export-fixed-btn" style="background:linear-gradient(135deg,#5b5bd6,#7c3aed);border:none;border-radius:8px;color:#fff;padding:10px 24px;cursor:pointer;font-size:13px;margin-bottom:16px;">Compute Face Embeddings</button>
+      <button id="btn-compute-embeddings" class="export-fixed-btn" style="background:linear-gradient(135deg,#6f8f90,#67878a);border:none;border-radius:8px;color:#d2d3d5;padding:10px 24px;cursor:pointer;font-size:13px;margin-bottom:16px;">Compute Face Embeddings</button>
       <div id="facedb-list"></div>
     </div>
   </div>
@@ -225,11 +225,11 @@
       </div>
       <div class="form-group">
         <label class="form-label">Output Path</label>
-        <input id="export-path" class="form-input" type="text" placeholder="Default: source_result.mp4" style="background:#121214;border:1px solid #2a2a2e;border-radius:6px;padding:10px;color:#e0e0e0;width:100%;font-size:13px;">
+        <input id="export-path" class="form-input" type="text" placeholder="Default: source_result.mp4" style="background:#121214;border:1px solid #222329;border-radius:6px;padding:10px;color:#c9cacd;width:100%;font-size:13px;">
       </div>
       <div class="form-group">
         <label class="form-label">Swap Workers (0=auto)</label>
-        <input id="export-workers" class="form-input" type="number" min="0" max="16" value="0" style="background:#121214;border:1px solid #2a2a2e;border-radius:6px;padding:10px;color:#e0e0e0;width:100%;font-size:13px;">
+        <input id="export-workers" class="form-input" type="number" min="0" max="16" value="0" style="background:#121214;border:1px solid #222329;border-radius:6px;padding:10px;color:#c9cacd;width:100%;font-size:13px;">
       </div>
     </div>
   </div>

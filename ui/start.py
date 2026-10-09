@@ -111,6 +111,12 @@ def _silent_qt_msg_handler(msg_type, context, message):
         sys.stderr.write(message + '\n')
 qInstallMessageHandler(_silent_qt_msg_handler)
 
+# ── 极简暗色主题（ui-dark）：在页面模块导入前覆写 SiliconUI 全局色组 ──
+import siui  # 提前导入：主题覆写需要
+from siui.core import SiGlobal as _SiG
+import ui.theme_minimal_dark as _theme_minimal_dark
+_theme_minimal_dark.apply()
+
 try:
     from ui.ui import MySiliconApp
 except ModuleNotFoundError:
@@ -118,7 +124,6 @@ except ModuleNotFoundError:
 
 import siui
 from siui.core import SiGlobal
-
 
 def show_version_message(window):
     try:

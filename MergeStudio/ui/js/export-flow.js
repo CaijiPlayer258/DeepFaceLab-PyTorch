@@ -82,7 +82,7 @@
     _showToast: function (msg) {
       var el = document.createElement('div');
       el.textContent = msg;
-      el.style.cssText = 'position:fixed;bottom:30px;left:50%;transform:translateX(-50%);background:#1a1a1e;border:1px solid rgba(91,91,214,0.3);color:#e0e0e0;padding:10px 24px;border-radius:8px;font:13px Inter,sans-serif;z-index:999;box-shadow:0 4px 24px rgba(0,0,0,0.5);opacity:0;transition:opacity 0.3s;';
+      el.style.cssText = 'position:fixed;bottom:30px;left:50%;transform:translateX(-50%);background:#1a1a1e;border:1px solid rgba(122,158,159,0.3);color:#c9cacd;padding:10px 24px;border-radius:8px;font:13px Inter,sans-serif;z-index:999;box-shadow:0 4px 24px rgba(0,0,0,0.5);opacity:0;transition:opacity 0.3s;';
       document.body.appendChild(el);
       requestAnimationFrame(function () { el.style.opacity = '1'; });
       setTimeout(function () { el.style.opacity = '0'; setTimeout(function () { el.remove(); }, 300); }, 3000);
@@ -96,7 +96,7 @@
       var db = app.state.faceDatabase || {};
       var keys = Object.keys(db);
       if (keys.length === 0) {
-        container.innerHTML = '<div style="padding:20px;color:#555;text-align:center;">在帧中勾选人脸以建立数据库</div>';
+        container.innerHTML = '<div style="padding:20px;color:#6b6c70;text-align:center;">在帧中勾选人脸以建立数据库</div>';
         return;
       }
       // Group by model name using faceModelMap
@@ -126,13 +126,13 @@
       var html = '';
       var modelNames = Object.keys(byModel);
       modelNames.forEach(function (mn) {
-        html += '<div class="facedb-group-heading" data-model="' + mn + '" style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.5px;margin:12px 0 6px;padding:4px 8px;border-radius:4px;transition:background 0.15s;">' + mn + ' · ' + byModel[mn].length + ' 张人脸</div>';
+        html += '<div class="facedb-group-heading" data-model="' + mn + '" style="font-size:10px;color:#9a9b9e;text-transform:uppercase;letter-spacing:0.5px;margin:12px 0 6px;padding:4px 8px;border-radius:4px;transition:background 0.15s;">' + mn + ' · ' + byModel[mn].length + ' 张人脸</div>';
         html += '<div class="facedb-group" data-model="' + mn + '" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px;min-height:40px;padding:4px;border-radius:6px;transition:background 0.15s;">';
         byModel[mn].forEach(function (face) {
-          html += '<div draggable="true" data-key="' + face.key + '" style="background:#121214;border:1px solid #2a2a2e;border-radius:6px;padding:8px;cursor:grab;">'
+          html += '<div draggable="true" data-key="' + face.key + '" style="background:#121214;border:1px solid #222329;border-radius:6px;padding:8px;cursor:grab;">'
             + '<img src="' + face.thumbUrl + '" style="width:100%;aspect-ratio:1;border-radius:4px;object-fit:cover;display:block;">'
             + '<div style="font-size:9px;margin-top:4px;">' + face.label + '</div>'
-            + '<div style="font-size:8px;color:#555;">' + face.source + '</div>'
+            + '<div style="font-size:8px;color:#6b6c70;">' + face.source + '</div>'
             + '</div>';
         });
         html += '</div>';
@@ -176,12 +176,12 @@
       }
 
       container.querySelectorAll('.facedb-group').forEach(function (g) {
-        g.addEventListener('dragover', function (e) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; this.style.background = 'rgba(91,91,214,0.08)'; });
+        g.addEventListener('dragover', function (e) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; this.style.background = 'rgba(122,158,159,0.08)'; });
         g.addEventListener('dragleave', function () { this.style.background = ''; });
         g.addEventListener('drop', handleDrop);
       });
       container.querySelectorAll('.facedb-group-heading').forEach(function (h) {
-        h.addEventListener('dragover', function (e) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; this.style.background = 'rgba(91,91,214,0.12)'; });
+        h.addEventListener('dragover', function (e) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; this.style.background = 'rgba(122,158,159,0.12)'; });
         h.addEventListener('dragleave', function () { this.style.background = ''; });
         h.addEventListener('drop', handleDrop);
       });
@@ -338,7 +338,7 @@
     _showToast: function (msg) {
       var el = document.createElement('div');
       el.textContent = msg;
-      el.style.cssText = 'position:fixed;bottom:30px;left:50%;transform:translateX(-50%);background:#1a1a1e;border:1px solid rgba(91,91,214,0.3);color:#e0e0e0;padding:10px 24px;border-radius:8px;font:13px Inter,sans-serif;z-index:999;box-shadow:0 4px 24px rgba(0,0,0,0.5);opacity:0;transition:opacity 0.3s;';
+      el.style.cssText = 'position:fixed;bottom:30px;left:50%;transform:translateX(-50%);background:#1a1a1e;border:1px solid rgba(122,158,159,0.3);color:#c9cacd;padding:10px 24px;border-radius:8px;font:13px Inter,sans-serif;z-index:999;box-shadow:0 4px 24px rgba(0,0,0,0.5);opacity:0;transition:opacity 0.3s;';
       document.body.appendChild(el);
       requestAnimationFrame(function () { el.style.opacity = '1'; });
       setTimeout(function () { el.style.opacity = '0'; setTimeout(function () { el.remove(); }, 300); }, 3000);

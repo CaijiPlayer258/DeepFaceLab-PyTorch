@@ -37,11 +37,11 @@
 
     initTransportSVG: function () {
       var svgs = [
-        '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 2V14" stroke="#888" stroke-width="1.2"/><path d="M12 4L7 8L12 12Z" fill="#888" stroke="#888" stroke-width="0.5"/></svg>',
+        '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 2V14" stroke="#9a9b9e" stroke-width="1.2"/><path d="M12 4L7 8L12 12Z" fill="#9a9b9e" stroke="#9a9b9e" stroke-width="0.5"/></svg>',
         '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 2V14" stroke="#ccc" stroke-width="1.2"/><path d="M12 5L8 8L12 11" stroke="#ccc" stroke-width="1.8" stroke-linecap="round"/></svg>',
         this._playSVG,
         '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 5L8 8L4 11" stroke="#ccc" stroke-width="1.8" stroke-linecap="round"/><path d="M12 2V14" stroke="#ccc" stroke-width="1.2"/></svg>',
-        '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 4L9 8L4 12Z" fill="#888" stroke="#888" stroke-width="0.5"/><path d="M12 2V14" stroke="#888" stroke-width="1.2"/></svg>',
+        '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 4L9 8L4 12Z" fill="#9a9b9e" stroke="#9a9b9e" stroke-width="0.5"/><path d="M12 2V14" stroke="#9a9b9e" stroke-width="1.2"/></svg>',
       ];
       document.getElementById('transport-controls').innerHTML = svgs.join('');
     },
@@ -599,7 +599,7 @@
       }
 
       if (!hasCurrent && dbKeys.length === 0) {
-        container.innerHTML = '<div style="font-size:10px;color:#555;padding:4px 0;">No faces detected</div>';
+        container.innerHTML = '<div style="font-size:10px;color:#6b6c70;padding:4px 0;">No faces detected</div>';
       }
       if (countEl) countEl.textContent = dbKeys.length + ' in DB';
     },
@@ -611,14 +611,14 @@
       div.className = 'face-db-item ' + (isChecked ? 'face-db-item--checked' : 'face-db-item--unchecked');
 
       var cbHtml = isChecked
-        ? '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" stroke="#5b5bd6" stroke-width="1.5"/><circle cx="8" cy="8" r="4" fill="#5b5bd6"/></svg>'
+        ? '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" stroke="#6f8f90" stroke-width="1.5"/><circle cx="8" cy="8" r="4" fill="#6f8f90"/></svg>'
         : '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" stroke="#3a3a3e" stroke-width="1.5"/></svg>';
 
       var modelOpts = Object.keys(self.state.selectedModels);
       var currentModel = self.state.faceModelMap[item.key] || (modelOpts.length > 0 ? modelOpts[modelOpts.length - 1] : '');
       var modelSelectHtml = '';
       if (modelOpts.length > 1) {
-        modelSelectHtml = '<select class="face-model-select" style="font-size:9px;background:#1a1a1e;border:1px solid #2a2a2e;border-radius:3px;padding:1px 4px;color:#ccc;margin-left:4px;" data-face="' + item.faceIdx + '">' +
+        modelSelectHtml = '<select class="face-model-select" style="font-size:9px;background:#1a1a1e;border:1px solid #222329;border-radius:3px;padding:1px 4px;color:#ccc;margin-left:4px;" data-face="' + item.faceIdx + '">' +
           modelOpts.map(function (mn) {
             return '<option value="' + mn + '"' + (mn === currentModel ? ' selected' : '') + '>' + mn + '</option>';
           }).join('') + '</select>';
@@ -817,7 +817,7 @@
       if (!container) return;
       container.innerHTML = '';
       if (!models || models.length === 0) {
-        container.innerHTML = '<div class="list-item list-item--disabled"><span class="list-item__name" style="color:#555">No models found</span></div>';
+        container.innerHTML = '<div class="list-item list-item--disabled"><span class="list-item__name" style="color:#6b6c70">No models found</span></div>';
         return;
       }
       models.forEach(function (m) {

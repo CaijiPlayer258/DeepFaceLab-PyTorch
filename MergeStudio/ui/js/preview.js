@@ -78,7 +78,7 @@
         var sx = dw / iw;
         var sy = dh / ih;
         faces.forEach(function (face) {
-          ctx.strokeStyle = '#5b5bd6';
+          ctx.strokeStyle = '#6f8f90';
           ctx.lineWidth = 1.5;
           ctx.strokeRect(dx + face.x * sx, dy + face.y * sy, face.w * sx, face.h * sy);
 
