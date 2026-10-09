@@ -15,6 +15,82 @@ _FFMPEG_DIR = Path(__file__).parent.parent.parent / "ffmpeg"
 _FFMPEG = str(_FFMPEG_DIR / "ffmpeg.exe")
 _FFPROBE = str(_FFMPEG_DIR / "ffprobe.exe")
 
+# --- 活动 ffmpeg 子进程登记（供 cancel/reset 杀掉残留抽帧、编码进程）-------------
+CHILD_PROCS = {}   # name -> subprocess.Popen
+
+
+def register_child(name, proc):
+    try:
+        CHILD_PROCS[name] = proc
+    except Exception:
+        pass
+
+
+def unregister_child(name, proc=None):
+    try:
+        cur = CHILD_PROCS.get(name)
+        if proc is None or cur is proc:
+            CHILD_PROCS.pop(name, None)
+    except Exception:
+        pass
+
+
+def kill_children():
+    """杀掉所有仍在运行的 ffmpeg 子进程，返回被杀的 pid 列表。"""
+    killed = []
+    for name, proc in list(CHILD_PROCS.items()):
+        try:
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+                killed.append(proc.pid)
+        except Exception:
+            pass
+        finally:
+            CHILD_PROCS.pop(name, None)
+    return killed
+
+
+def probe_frame_count(video_path):
+    """读容器里的总帧数（不解码，仅用于抽帧进度百分比）；失败返回 0。
+
+    注意：AV1/mkv 常没有 nb_frames 字段，必须用 JSON 按键取值后回退到
+    duration × fps —— 早期用 nk=1 行解析会把 duration 当帧数（2026-09-30 实测踩到）。
+    """
+    import json as _json
+    try:
+        out = subprocess.run(
+            [_FFPROBE, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=nb_frames,duration,r_frame_rate",
+             "-of", "json", video_path],
+            capture_output=True, text=True, timeout=60)
+        st = (_json.loads(out.stdout or "{}").get("streams") or [{}])[0]
+        try:
+            n = int(st.get("nb_frames") or 0)
+        except Exception:
+            n = 0
+        if n > 1:
+            return n
+        try:
+            dur = float(st.get("duration") or 0.0)
+        except Exception:
+            dur = 0.0
+        fps = 0.0
+        try:
+            a, b = str(st.get("r_frame_rate") or "0/0").split("/")
+            fps = float(a) / float(b) if float(b) else 0.0
+        except Exception:
+            fps = 0.0
+        if dur and fps:
+            return int(dur * fps)
+    except Exception:
+        pass
+    return 0
+_FFPROBE = str(_FFMPEG_DIR / "ffprobe.exe")
+
 class StopRequested(Exception):
     """Raised when the user cancels the export."""
     pass
@@ -1278,24 +1354,46 @@ def _stage1_extract_frames(video_path, out_dir, fmt, progress, stop_event=None, 
         cmd += ["-i", video_path, "-pix_fmt", "rgb24", *quality_args, out_pattern]
         print(f"[Export] Stage1: {' '.join(cmd)}", flush=True)
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        register_child('stage1_extract', proc)
         last_done = 0
+        total_fr = probe_frame_count(video_path)
+        print(f"[Export] Stage1 expected frames: {total_fr}", flush=True)
         while proc.poll() is None:
             if stop_event and stop_event.is_set():
                 proc.terminate()
                 try: proc.wait(timeout=5)
                 except: proc.kill(); proc.wait()
+                unregister_child('stage1_extract', proc)
                 raise StopRequested("Export cancelled")
             if out_dir.exists():
                 done = len([f for f in out_dir.iterdir() if f.suffix in ('.jpg', '.png')])
                 if done != last_done:
                     last_done = done
                     print(f"[Export] Extracting frames: {done}", flush=True)
+                    # 旧版这里完全不回报进度，UI 全程停在 0% 像死机（2026-09-30 修）
+                    try:
+                        if total_fr > 0:
+                            progress(0, min(0.98, done / float(total_fr)),
+                                     f"Extracting frames {done}/{total_fr}")
+                        else:
+                            progress(0, 0.0, f"Extracting frames {done}")
+                    except StopRequested:
+                        proc.terminate()
+                        try: proc.wait(timeout=5)
+                        except: proc.kill(); proc.wait()
+                        unregister_child('stage1_extract', proc)
+                        raise
             time.sleep(0.5)
+        unregister_child('stage1_extract', proc)
         return proc.returncode, last_done
 
     rc, _last_done = _run(hwaccel)
     if rc != 0 and hwaccel:
         print(f"[Export] GPU 硬解码失败（exit={rc}），自动回退软解码", flush=True)
+        try:
+            progress(0, 0.0, "GPU 解码失败，已回退软件解码（10bit AV1 会明显更慢）")
+        except StopRequested:
+            raise
         rc, _last_done = _run(None)
     if rc != 0:
         raise RuntimeError(f"FFmpeg extract failed (exit={rc})")

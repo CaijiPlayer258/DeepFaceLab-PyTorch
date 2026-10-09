@@ -37,12 +37,7 @@
       var start = document.getElementById('btn-start-export');
       if (start) start.addEventListener('click', function () { self.startExport(); });
       var cancel = document.getElementById('btn-cancel-export');
-      if (cancel) cancel.addEventListener('click', function () {
-        if (window.API && window.API.cancelExport) {
-          window.API.cancelExport(self.state.jobId);
-        }
-        self.close();
-      });
+      if (cancel) cancel.addEventListener('click', function () { self.cancelExport(); });
       var back1 = document.getElementById('btn-back-facedb');
       if (back1) back1.addEventListener('click', function () { self.advance(0); });
       var back2 = document.getElementById('btn-back-settings');
@@ -214,7 +209,11 @@
 
     startExport: function () {
       var self = this;
+      if (this._starting) { return; }
+      this._starting = true;
+      this._stopPolling();
       this.advance(3);
+      this._resetProgressUI();
       this._lastSpeed = { done: 0, time: Date.now() };
       var app = window.App;
       var workers = parseInt((document.getElementById('export-workers') || {}).value) || 0;
@@ -237,12 +236,148 @@
         res_scale: app ? app.state.resScale : 0.5,
         num_workers: workers,
       };
-      if (window.API && window.API.startExport) {
-        window.API.startExport(settings).then(function (data) {
-          if (data) self.state.jobId = data.job_id || 'default';
-          self._pollProgress();
-        });
+      var api = window.API;
+      if (!api || !api.startExport) {
+        this._starting = false;
+        this._setStatusText('❌ API 未就绪');
+        return;
       }
+      var startOnce = function () { return api.startExport(settings); };
+      var detailOf = function (r) { return (r && (r.detail || r.message)) || '未知原因'; };
+
+      startOnce().then(function (data) {
+        if (data && data.status === 'started') {
+          self._starting = false;
+          self.state.jobId = data.job_id || 'default';
+          self._pollProgress();
+          return null;
+        }
+        // 上一次任务还挂着（400 "Export already running"）——旧版在这里静默失败，
+        // 界面什么都不发生，看起来就是“死局”（2026-09-30 修）。
+        // 但区分两种情况：旧任务还活着 → 只提示（别误杀正在跑的导出）；
+        //                旧任务已僵死 → 强制复位后重试。
+        var probe = function () { return api.getExportProgress(self.state.jobId); };
+        self._setStatusText('⚠ ' + detailOf(data) + ' —— 正在确认上一次任务的状态…');
+        probe().then(function (p1) {
+          return new Promise(function (res) { setTimeout(function () { res(p1); }, 4000); });
+        }).then(function (p1) {
+          if (!p1 || !p1.running) {
+            // 上一次其实已经结束，直接重试
+            self._setStatusText('上一次任务已结束，正在重新开始导出…');
+            return startOnce().then(function (r0) {
+              self._starting = false;
+              if (r0 && r0.status === 'started') {
+                self.state.jobId = r0.job_id || 'default';
+                self._pollProgress();
+              } else {
+                self._setStatusText('❌ 导出仍无法启动：' + detailOf(r0));
+              }
+              return null;
+            });
+          }
+          return probe().then(function (p2) {
+            var alive = p2 && p2.running &&
+                        (p2.message !== p1.message || p2.stage !== p1.stage || p2.tick !== p1.tick);
+            if (alive) {
+              self._starting = false;
+              self._setStatusText('⚠ 已有一个导出在运行（' + (p2.stage_name || '') + ' ' +
+                                  Math.round((p2.progress || 0) * 100) + '%）：等它跑完，或先点“取消导出”');
+              self._offerForceReset();
+              return null;
+            }
+            self._setStatusText('⚠ 上一次任务已僵死 —— 正在强制复位并重试…');
+            if (!api.resetExport) { self._starting = false; return null; }
+            return api.resetExport().then(function () { return startOnce(); }).then(function (r2) {
+              self._starting = false;
+              if (r2 && r2.status === 'started') {
+                self._showToast('已强制复位并重新开始导出');
+                self.state.jobId = r2.job_id || 'default';
+                self._pollProgress();
+              } else {
+                self._setStatusText('❌ 导出仍无法启动：' + detailOf(r2));
+              }
+              return null;
+            });
+          });
+        });
+      }).catch(function (e) {
+        self._starting = false;
+        self._setStatusText('❌ 导出请求失败：' + e);
+      });
+    },
+
+    _stopPolling: function () {
+      if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+    },
+
+    _statusEl: function () {
+      var el = document.getElementById('export-status-line');
+      if (el) return el;
+      var host = document.getElementById('layer-progress') || document.body;
+      el = document.createElement('div');
+      el.id = 'export-status-line';
+      el.style.cssText = 'margin:10px 0 0;font:12px Inter,sans-serif;color:#e0a0a0;text-align:center;min-height:16px;';
+      host.appendChild(el);
+      return el;
+    },
+
+    _setStatusText: function (txt) { this._statusEl().textContent = txt || ''; },
+
+    _resetProgressUI: function () {
+      this._setStatusText('');
+      var names = ['Extract', 'Detect', 'Match', 'Swap', 'Mask', 'Merge', 'Encode'];
+      for (var i = 0; i < names.length; i++) {
+        var bar = document.getElementById('progress-bar-' + i);
+        if (bar) bar.style.width = '0%';
+        var lab = document.getElementById('progress-label-' + i);
+        if (lab) lab.textContent = names[i];
+      }
+    },
+
+    _offerForceReset: function () {
+      var self = this;
+      if (document.getElementById('export-force-reset')) return;
+      var el = document.createElement('button');
+      el.id = 'export-force-reset';
+      el.textContent = '强制复位导出状态';
+      el.style.cssText = 'margin:8px auto 0;display:block;padding:6px 14px;background:#2a2a30;border:1px solid rgba(122,158,159,0.4);color:#c9cacd;border-radius:6px;font:12px Inter,sans-serif;cursor:pointer;';
+      el.addEventListener('click', function () {
+        if (window.API && window.API.resetExport) {
+          window.API.resetExport().then(function () {
+            self._setStatusText('');
+            self._showToast('导出状态已复位');
+            if (el.parentElement) el.parentElement.removeChild(el);
+            self.advance(0);
+          });
+        }
+      });
+      (document.getElementById('layer-progress') || document.body).appendChild(el);
+    },
+
+    cancelExport: function () {
+      var self = this;
+      var api = window.API;
+      if (!api || !api.cancelExport) { self.close(); return; }
+      self._setStatusText('正在取消…');
+      api.cancelExport(self.state.jobId).then(function () {
+        var n = 0;
+        var t = setInterval(function () {
+          n++;
+          api.getExportProgress(self.state.jobId).then(function (d) {
+            if (!d || !d.running) {
+              clearInterval(t);
+              self._stopPolling();
+              self._setStatusText('');
+              self._showToast('已取消导出');
+              self.advance(0);
+            } else if (n > 40) {
+              clearInterval(t);
+              self._setStatusText('⚠ 后台任务仍未停下（可点下面按钮强制复位）');
+              self._offerForceReset();
+            }
+          });
+        }, 500);
+      }).catch(function (e) { self._setStatusText('❌ 取消失败：' + e); });
     },
 
     computeEmbeddings: function () {
@@ -273,6 +408,7 @@
 
     _pollProgress: function () {
       var self = this;
+      this._stopPolling();
       var last = {done: 0, time: Date.now()};
       var interval = setInterval(function () {
         (window.API && window.API.getExportProgress(self.state.jobId).then(function (data) {
@@ -303,15 +439,20 @@
           self._updateProgressUI(data);
           if (!data.running) {
             clearInterval(interval);
+            self._pollTimer = null;
             if (data.message && data.message !== 'Complete') {
-              document.getElementById('progress-label-0').parentElement.textContent = '❌ ' + data.message;
+              self._setStatusText('❌ ' + data.message);
+              self._showToast('导出结束：' + data.message);
+              if (/^Failed/i.test(data.message)) self._offerForceReset();
             } else {
+              self._setStatusText('');
               self.advance(0);
               self._showToast('Export completed successfully');
             }
           }
         }));
       }, 100);
+      this._pollTimer = interval;
     },
 
     _updateProgressUI: function (data) {

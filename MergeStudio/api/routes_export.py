@@ -10,6 +10,34 @@ from typing import Optional, List
 router = APIRouter()
 
 _export_stop = threading.Event()  # set to signal cancellation
+_export_thread = None             # 当前导出任务的工作线程（None = 从未启动/已复位）
+
+
+def _job_alive():
+    """导出工作线程是否真的还活着。"""
+    return _export_thread is not None and _export_thread.is_alive()
+
+
+def _reset_export_state(why: str = ""):
+    """把导出状态机强制拨回空闲，并杀掉残留的 ffmpeg 子进程。
+
+    场景：取消/异常之后工作线程已死，但 running 还挂在 True —— 此时任何新的
+    /export/start 都会被 400 'Export already running' 挡掉，表现为“取消一次后再也
+    不能导出”（2026-09-30 实测踩到）。此函数即该死局的唯一出口。
+    """
+    global _export_job, _export_thread
+    _export_stop.clear()
+    killed = []
+    try:
+        from MergeStudio.core import export_pipeline as _ep
+        killed = _ep.kill_children()
+    except Exception as _e:
+        print(f"[Export] reset: kill_children failed: {_e}", flush=True)
+    _export_thread = None
+    _export_job.update({"running": False, "stage": 0, "stage_name": "",
+                        "progress": 0.0, "message": "Reset"})
+    print(f"[Export] state reset ({why}) killed_children={killed}", flush=True)
+    return killed
 
 
 class ExportStartRequest(BaseModel):
@@ -71,9 +99,12 @@ class StopRequested(Exception):
 
 @router.post("/export/start")
 async def export_start(req: ExportStartRequest):
-    global _export_job
+    global _export_job, _export_thread
     if _export_job["running"]:
-        raise HTTPException(400, "Export already running")
+        if _job_alive():
+            raise HTTPException(400, "Export already running")
+        print("[Export] stale running flag: worker thread is dead -> auto-reset", flush=True)
+        _reset_export_state("start: stale job")
 
     video = Path(req.video_path)
     if not video.exists():
@@ -122,10 +153,15 @@ async def export_start(req: ExportStartRequest):
             _export_job.update({"running": False, "message": "Cancelled"})
         except Exception as e:
             print(f"[Export] FAILED: {traceback.format_exc()}", flush=True)
-            _export_job.update({"running": False, "message": f"Failed: {e}"})
+            if _export_stop.is_set():
+                # 取消时 StopRequested 常被 worker 包成别的异常，这里统一记成 Cancelled
+                _export_job.update({"running": False, "message": "Cancelled"})
+            else:
+                _export_job.update({"running": False, "message": f"Failed: {e}"})
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
+    _export_thread = t
     return {"status": "started", "output_path": output}
 
 
@@ -142,7 +178,17 @@ async def export_cancel(job_id: str = "default"):
         return {"status": "not_running"}
     _export_stop.set()
     _export_job.update({"message": "Cancelling..."})
+    if not _job_alive():
+        _reset_export_state("cancel: worker thread not alive")
+        return {"status": "cancelled"}
     return {"status": "cancelling"}
+
+
+@router.post("/export/reset")
+async def export_reset():
+    """强制复位导出状态（死局出口，空闲时调用也无害）。"""
+    killed = _reset_export_state("manual /export/reset")
+    return {"status": "reset", "killed_children": killed}
 
 
 class ComputeEmbeddingsRequest(BaseModel):
