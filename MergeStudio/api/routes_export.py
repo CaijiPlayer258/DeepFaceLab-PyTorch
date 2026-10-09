@@ -1,6 +1,7 @@
 """
 Export pipeline API endpoints.
 """
+import os
 import threading
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
@@ -128,6 +129,12 @@ async def export_start(req: ExportStartRequest):
         try:
             import multiprocessing
             nw = req.num_workers if req.num_workers > 0 else max(1, multiprocessing.cpu_count() // 2)
+            # 2026-10-09: 6 workers (torch+onnxruntime dual CUDA ctx per proc) deadlocked the
+            # driver at swap 75% on 12G VRAM (sess.run never returned, GPU fake-busy 5h).
+            # Cap at 4 workers; override with MERGESTUDIO_EXPORT_WORKERS.
+            _env_nw = os.environ.get("MERGESTUDIO_EXPORT_WORKERS", "").strip()
+            _cap = int(_env_nw) if _env_nw.isdigit() and int(_env_nw) > 0 else 4
+            nw = min(nw, _cap)
             print(f"[Export] Starting pipeline with cut_segments={req.cut_segments}", flush=True)
             print(f"[Export] detector={req.detector} landmarker={req.landmarker}", flush=True)
             run_export_pipeline(
