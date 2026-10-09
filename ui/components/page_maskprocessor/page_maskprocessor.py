@@ -17,8 +17,8 @@ from siui.components.combobox_ import SiCapsuleComboBox
 from siui.core import SiGlobal
 
 # Theme colors matching main window
-_BG = "#1C191F"
-_BG_CARD = "#2a2733"
+_BG = "#1B1B1D"
+_BG_CARD = "#29292b"
 _TEXT = "#FFFFFF"
 _TEXT_DIM = "#999999"
 _THEME = "#6F8F90"

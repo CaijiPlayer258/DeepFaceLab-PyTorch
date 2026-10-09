@@ -2,7 +2,7 @@
 """极简暗色主题（ui-dark 分支）
 
 设计语言：taste-skill/minimalist 的暗色适配
-- 画布 #101013 / 表面 #141418 / 悬浮 #191A1D（无紫调、无渐变）
+- 画布 #121213 / 表面 #161618 / 悬浮 #1B1B1E（无紫调、无渐变）
 - 边框/分隔逻辑收敛到界面层级色差，强调色唯一：去饱和青灰 #6F8F90
 - 文字永不用纯黑/纯白：主 #D9DADB → 弱 #68696E
 - 状态色降饱和：成功 #5F8F6A / 警告 #A98B5F / 错误 #A65D5D
@@ -26,11 +26,11 @@ _TOKENS = {
     SiColor.LAYER_DIM:               '#90000000',
 
     # 界面层级：紫灰调 → 中性近黑
-    SiColor.INTERFACE_BG_A:          '#101013',
-    SiColor.INTERFACE_BG_B:          '#141418',
-    SiColor.INTERFACE_BG_C:          '#191A1D',
-    SiColor.INTERFACE_BG_D:          '#1E1F24',
-    SiColor.INTERFACE_BG_E:          '#242529',
+    SiColor.INTERFACE_BG_A:          '#121213',
+    SiColor.INTERFACE_BG_B:          '#161618',
+    SiColor.INTERFACE_BG_C:          '#1B1B1E',
+    SiColor.INTERFACE_BG_D:          '#212124',
+    SiColor.INTERFACE_BG_E:          '#28282B',
 
     # 文字：离白 → 弱灰
     SiColor.TEXT_A:                  '#D9DADB',
@@ -41,35 +41,35 @@ _TOKENS = {
 
     # 标题
     SiColor.TITLE_INDICATOR:         '#6F8F90',
-    SiColor.TITLE_HIGHLIGHT:         '#1E2829',
+    SiColor.TITLE_HIGHLIGHT:         '#20242A',
 
     # 侧边消息
     SiColor.SIDE_MSG_FLASH:          '#90FFFFFF',
-    SiColor.SIDE_MSG_THEME_NORMAL:   '#242529',
+    SiColor.SIDE_MSG_THEME_NORMAL:   '#28282B',
     SiColor.SIDE_MSG_THEME_SUCCESS:  '#5F8F6A',
     SiColor.SIDE_MSG_THEME_INFO:     '#6F8F90',
     SiColor.SIDE_MSG_THEME_WARNING:  '#A98B5F',
     SiColor.SIDE_MSG_THEME_ERROR:    '#A65D5D',
 
-    SiColor.MENU_BG:                 '#191A1D',
+    SiColor.MENU_BG:                 '#1B1B1E',
 
     # 按钮
-    SiColor.BUTTON_PANEL:            '#1F2023',
+    SiColor.BUTTON_PANEL:            '#212124',
     SiColor.BUTTON_SHADOW:           '#0B0B0C',
     SiColor.BUTTON_THEMED_BG_A:      '#557071',
     SiColor.BUTTON_THEMED_BG_B:      '#638485',
     SiColor.BUTTON_THEMED_SHADOW_A:  '#141D1C',
     SiColor.BUTTON_THEMED_SHADOW_B:  '#17231F',
     SiColor.BUTTON_ON:               '#141D1C',
-    SiColor.BUTTON_OFF:              '#242529',
+    SiColor.BUTTON_OFF:              '#28282B',
     SiColor.BUTTON_TEXT_BUTTON_IDLE: '#6F8F90',
     SiColor.BUTTON_TEXT_BUTTON_FLASH:'#6F8F90',
     SiColor.BUTTON_TEXT_BUTTON_HOVER:'#A8C4C5',
 
     # 单选 / 复选
-    SiColor.RADIO_BUTTON_UNCHECKED:  '#141418',
+    SiColor.RADIO_BUTTON_UNCHECKED:  '#161618',
     SiColor.RADIO_BUTTON_CHECKED:    '#6F8F90',
-    SiColor.CHECKBOX_SVG:            '#101013',
+    SiColor.CHECKBOX_SVG:            '#121213',
     SiColor.CHECKBOX_UNCHECKED:      '#939498',
     SiColor.CHECKBOX_CHECKED:        '#6F8F90',
 
@@ -80,11 +80,11 @@ _TOKENS = {
 
     # 开关
     SiColor.SWITCH_DEACTIVATE:       '#3A3B3F',
-    SiColor.SWITCH_ACTIVATE:         '#101013',
+    SiColor.SWITCH_ACTIVATE:         '#121213',
 
     # 滚动条 / 进度条
     SiColor.SCROLL_BAR:                  '#30FFFFFF',
-    SiColor.PROGRESS_BAR_TRACK:          '#141418',
+    SiColor.PROGRESS_BAR_TRACK:          '#161618',
     SiColor.PROGRESS_BAR_PROCESSING:     '#6F8F90',
     SiColor.PROGRESS_BAR_COMPLETING:     '#5F8F6A',
     SiColor.PROGRESS_BAR_PAUSED:         '#68696E',
@@ -101,4 +101,8 @@ def apply():
             applied += 1
         except Exception as e:
             print(f'[theme] {token.name}: {e}')
+    try:
+        SiGlobal.siui.iconpack.setDefaultColor('#D1D1D3')
+    except Exception:
+        pass
     print(f'[theme] 极简暗色主题已挂载（{applied}/{len(_TOKENS)} tokens）')

@@ -1625,7 +1625,7 @@ class TrainingConfigChildPage(SiChildPage):
         _cancel_btn = SiSimpleButton(_dlg.buttonContainer())
         _cancel_btn.attachment().setText("取消")
         _cancel_btn.setBorderRadius(6)
-        _cancel_btn.setIdleColor("#4C4554")
+        _cancel_btn.setIdleColor("#4A4A4E")
         _cancel_btn.reloadStyleSheet()
         _cancel_btn.resize(400, 40)
         _dlg.buttonContainer().addWidget(_cancel_btn)

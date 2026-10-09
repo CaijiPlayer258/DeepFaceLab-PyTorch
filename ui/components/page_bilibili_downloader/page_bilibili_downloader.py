@@ -36,7 +36,7 @@ class _BilibiliSignals(QObject):
     overall_progress = pyqtSignal(int, int)               # completed, total
     all_done = pyqtSignal()
 
-_BG = "#1C191F"
+_BG = "#1B1B1D"
 _TEXT = "#FFFFFF"
 _TEXT_DIM = "#999999"
 

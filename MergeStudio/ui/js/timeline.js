@@ -438,8 +438,8 @@
       var el = document.getElementById('timeline-legend');
       if (!el) return;
       el.innerHTML =
-        '<span><span class="legend-swatch" style="background:#2a0c4a"></span> 多人脸</span>' +
-        '<span><span class="legend-swatch" style="background:#8a6caa"></span> 少人脸</span>' +
+        '<span><span class="legend-swatch" style="background:#16323a"></span> 多人脸</span>' +
+        '<span><span class="legend-swatch" style="background:#4f7d7f"></span> 少人脸</span>' +
         '<span><span class="legend-swatch" style="background:#4c1010"></span> 无人脸</span>' +
         '<span><span class="legend-swatch" style="background:#6f8f90"></span> 选中人脸</span>';
     },
@@ -523,8 +523,8 @@
         var seg = document.createElement('div');
         seg.className = 'face-density-line__seg';
         var count = d.face_count || 0;
-        if (count === 0) seg.style.background = '#2a0c4a';
-        else if (count < 3) seg.style.background = '#8a6caa';
+        if (count === 0) seg.style.background = '#16323a';
+        else if (count < 3) seg.style.background = '#4f7d7f';
         else seg.style.background = '#4c1010';
         seg.style.flex = d.count || 1;
         line.appendChild(seg);

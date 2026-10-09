@@ -651,7 +651,7 @@ function renderLabels() {
   const dLossVec = _previewLabels.dst_loss_vec || null;
   const pad = Math.max(4, cellW / 50);
   const fs = Math.max(10, cellW / 22);
-  const baseStyle = 'position:absolute;font-size:' + (fs * sx) + 'px;font-family:sans-serif;font-weight:700;white-space:nowrap;pointer-events:none;line-height:1;bottom:auto;color:rgba(255,255,255,.9);background-image:linear-gradient(90deg,#6a4aff,#b07eff);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;filter:drop-shadow(0 0 6px rgba(0,0,0,.9)) drop-shadow(0 0 12px rgba(0,0,0,.7))';
+  const baseStyle = 'position:absolute;font-size:' + (fs * sx) + 'px;font-family:sans-serif;font-weight:700;white-space:nowrap;pointer-events:none;line-height:1;bottom:auto;color:rgba(255,255,255,.9);background-image:linear-gradient(90deg,#6f8f90,#67878a);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;filter:drop-shadow(0 0 6px rgba(0,0,0,.9)) drop-shadow(0 0 12px rgba(0,0,0,.7))';
 
   function fmtLoss(v) {
     return (v !== undefined && v !== 0) ? v.toFixed(4) : '';

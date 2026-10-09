@@ -293,7 +293,7 @@ html, body {
 }
 
 .param-slider__fill--neg {
-  background: linear-gradient(to left, #6f8f90, #3a3a6e);
+  background: linear-gradient(to left, #6f8f90, #67878a);
   right: 50%;
 }
 
@@ -448,7 +448,7 @@ html, body {
 .track { height: 40px; }
 .track--video .track-content { padding: 4px; }
 .track--video .track-inner {
-  background: linear-gradient(to right, #1b1d1f, #2a1a3e, #1b1d1f);
+  background: linear-gradient(to right, #1b1d1f, #202126, #1b1d1f);
   border-radius: var(--radius-sm);
 }
 
