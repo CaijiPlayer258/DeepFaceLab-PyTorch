@@ -1110,3 +1110,45 @@
   if (zin) zin.addEventListener('click', function() { zoomAt(1.25, pa.clientWidth / 2, pa.clientHeight / 2); });
   if (zout) zout.addEventListener('click', function() { zoomAt(1 / 1.25, pa.clientWidth / 2, pa.clientHeight / 2); });
 })();
+
+// ── Auto-load workspace + model on page load (ui-dark v5) ──
+(function() {
+  // 页面加载后自动打开 workspace + 加载 Anna 模型（skill/CLI 已预配置）
+  var WS = 'F:\\DFL-PyTorch\\workspace';
+  var MODEL = 'Anna';
+  fetch('/api/project/open', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ path: WS })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    console.log('[AutoLoad] workspace opened, aligned:', d.aligned_count);
+    return fetch('/api/models/load', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ name: MODEL })
+    });
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    console.log('[AutoLoad] model loaded:', d.name, d.status);
+    // 触发 UI 刷新（加载左侧列表）
+    if (window.App && window.App.refreshModels) window.App.refreshModels();
+  }).catch(function(e) { console.error('[AutoLoad]', e); });
+})();
+
+// ── Timeline track collapse toggle (ui-dark v5) ──
+(function() {
+  var btn = document.getElementById('tl-collapse');
+  if (!btn) return;
+  var tracks = ['track--faces', 'track--cut', 'track--angle'];
+  var saved = localStorage.getItem('ms_tracks') || 'collapsed';
+  function apply(v) {
+    tracks.forEach(function(t) {
+      var el = document.querySelector('.' + t);
+      if (el) el.classList.toggle('tl-collapsed', v === 'collapsed');
+    });
+    btn.textContent = v === 'collapsed' ? '▸ 轨道' : '▾ 轨道';
+    localStorage.setItem('ms_tracks', v);
+  }
+  apply(saved);
+  btn.addEventListener('click', function() {
+    var cur = localStorage.getItem('ms_tracks') || 'collapsed';
+    apply(cur === 'collapsed' ? 'expanded' : 'collapsed');
+  });
+})();
