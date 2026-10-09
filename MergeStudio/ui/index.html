@@ -21,7 +21,6 @@
       <input id="workspace-path" class="title-bar__path" type="text" value="workspace" placeholder="e.g. C:\workspace\project" spellcheck="false">
       <button id="btn-change-workspace" class="title-bar__change-btn">Change</button>
         Change</button>
-        <button id="sidebar-toggle" class="sidebar-toggle-btn" title="显示/隐藏模型面板">☰ 模型</button>
     </div>
     <div class="title-bar__right">
       <span id="status-indicator" class="title-bar__status">● idle</span>
@@ -44,8 +43,7 @@
 
     <!-- Center: Preview Panels -->
     <div id="preview-area">
-      <div id="preview-original" class="preview-panel">
-        <button id="layout-toggle" class="layout-toggle-btn" title="切换 2栏/3栏 布局">2栏</button>\n      <span class="preview-panel__label">Original</span>
+      <div id="preview-original" class="preview-panel">      <span class="preview-panel__label">Original</span>
         <video id="video-original" class="preview-video" muted playsinline preload="auto" style="display:none;"></video>
         <canvas id="canvas-original"></canvas>
         <span class="preview-panel__info" id="frame-info"></span>
