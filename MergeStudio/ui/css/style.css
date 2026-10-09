@@ -98,7 +98,7 @@ html, body {
 .title-bar__status { font-size: 10px; color: var(--accent); }
 
 /* ===== Main Content ===== */
-#main-content { display: flex; flex: 1; min-height: 0; }
+#main-content { display: flex; flex: 1; min-height: 0; overflow: hidden; }
 
 /* ===== Left Sidebar ===== */
 #sidebar {
@@ -162,7 +162,7 @@ html, body {
 }
 
 /* ===== Preview Area ===== */
-#preview-area { flex: 1; display: flex; gap: 2px; padding: 2px; background: var(--bg-deep); }
+#preview-area { flex: 1; display: flex; gap: 2px; padding: 2px; background: var(--bg-deep); overflow: hidden; }
 
 .preview-panel {
   flex: 1; background: var(--bg-elevated); border-radius: var(--radius-sm);
@@ -659,7 +659,7 @@ select.form-input {
 #preview-area.layout-vertical .preview-panel.drag-set { width: 100% !important; }
 
 /* 布局控制条 */
-#layout-controls {
+'#layout-controls { max-width: calc(100% - 8px); overflow: hidden;'
   position: absolute; bottom: 6px; right: 8px; z-index: 100;
   display: flex; gap: 4px; align-items: center;
 }
