@@ -1486,8 +1486,9 @@
   // 面板中心被甩出 300px+）。现在每个面板按自身几何独立居中，存在 p._faceT；
   // 手动缩放/拖动/小地图接管时清除，下一帧 analyze 自动恢复聚焦。
   var FACE_FILL = 0.8;                                   // 对齐框占卡片受限边的比例
+  // 默认强制开启（用户指定 2026-10-09）：不记忆“关闭”状态，每次打开页面都自动聚焦。
+  // FACE 按钮仍可临时关闭看全幅，但刷新/重开页面后恢复默认开启。
   var faceMode = true;
-  try { faceMode = (localStorage.getItem('ms_face_focus') || 'on') !== 'off'; } catch (e) {}
   var faceFaces = null, faceFrameSize = null;
   var faceBtn = document.getElementById('pz-face');
 
@@ -1555,7 +1556,7 @@
 
   function setFaceMode(on) {
     faceMode = !!on;
-    try { localStorage.setItem('ms_face_focus', faceMode ? 'on' : 'off'); } catch (e) {}
+    try { localStorage.setItem('ms_face_focus', faceMode ? 'on' : 'off'); } catch (e) {}  // 仅诊断用，加载时不再读取
     if (faceBtn) faceBtn.classList.toggle('active', faceMode);
     if (!faceMode) {                         // 关闭聚焦：回到整幅适配
       clearFaceT();
