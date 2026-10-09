@@ -19,7 +19,7 @@ import webbrowser
 import threading
 
 HOST = "127.0.0.1"
-PORT = 8000
+PORT = 8001
 
 
 def _check_port():

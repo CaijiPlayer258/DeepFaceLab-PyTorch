@@ -77,6 +77,12 @@
       </div></div>
 
     <!-- Right Panel -->
+    <div id="pz-hud">
+        <button id="pz-fit" title="适配窗口">FIT</button>
+        <span id="pz-pct">100%</span>
+        <button id="pz-zin">+</button>
+        <button id="pz-zout">−</button>
+      </div>
     <aside id="params-panel">
       <!-- Detection Settings -->
       <section class="params-section">
@@ -165,6 +171,7 @@
 
     <!-- Ruler -->
     <div id="timeline-ruler">
+      <button id="tl-collapse" class="layout-toggle-btn" style="position:absolute;top:-4px;right:8px;z-index:5;font-size:8px;padding:1px 6px;">▾ 轨道</button>
       <div class="track-label"></div>
       <div class="track-content" id="ruler-numbers"></div>
     </div>
@@ -178,19 +185,19 @@
     </div>
 
     <!-- Track 2: Faces -->
-    <div class="track track--faces">
+    <div class="track track--faces tl-collapsed">
       <div class="track-label">Faces</div>
       <div class="track-content" id="track-faces"></div>
     </div>
 
     <!-- Track 3: Cut -->
-    <div class="track track--cut">
+    <div class="track track--cut tl-collapsed">
       <div class="track-label">Cut<button id="btn-add-cut" class="btn-cut-add">+</button></div>
       <div class="track-content" id="track-cut"></div>
     </div>
 
     <!-- Track 4: Detection Angle -->
-    <div class="track track--angle">
+    <div class="track track--angle tl-collapsed">
       <div class="track-label">角度<button id="btn-add-angle" class="btn-angle-add">+</button></div>
       <div class="track-content" id="track-angle"></div>
     </div>
