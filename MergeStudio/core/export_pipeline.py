@@ -1514,7 +1514,16 @@ def _stage2_read_dfl_aligned(aligned_dir, frames_dir, db_path, progress, stop_ev
         try:
             frame_idx = int(src_stem)
         except ValueError:
-            continue
+            # 视频直切脸产物把视频文件名存进 source_filename（如 "TENN-052-....mp4"），
+            # int() 必然失败 → 回退用 aligned 文件名自身的数字前缀（"00123_0.jpg" → 123）。
+            # 2026-10-09：不修这里的话 DFL 导出模式会静默跳过全部 17,560 张脸。
+            _stem = jpg.stem
+            if '_' in _stem:
+                _stem = _stem.rsplit('_', 1)[0]
+            try:
+                frame_idx = int(_stem)
+            except ValueError:
+                continue
         # Determine face index: filename like "00003_0.jpg" or "00003.jpg"
         fname_stem = jpg.stem
         face_idx = 0

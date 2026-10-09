@@ -224,6 +224,22 @@
     },
 
     _populateSettings: function () {
+      // 分片导出（省空间）控件：动态注入到设置面板顶部
+      var settingsHost = document.getElementById('layer-export-encoder');
+      if (settingsHost && settingsHost.parentElement && !document.getElementById('layer-export-mode')) {
+        var wrap = document.createElement('div');
+        wrap.style.cssText = 'display:flex;gap:8px;align-items:center;margin:8px 0;flex-wrap:wrap;';
+        wrap.innerHTML =
+          '<label style="font:12px Inter,sans-serif;color:#9a9b9e;white-space:nowrap;">导出模式</label>' +
+          '<select id="layer-export-mode" style="background:#121214;border:1px solid #222329;border-radius:6px;padding:6px;color:#c9cacd;font-size:12px;">' +
+            '<option value="full" selected>全量（帧图落盘，最快）</option>' +
+            '<option value="chunked">分片滚动（按磁盘空余，省空间）</option>' +
+          '</select>' +
+          '<input id="layer-export-buffer" type="text" placeholder="帧缓冲盘（空=输出同盘）" style="background:#121214;border:1px solid #222329;border-radius:6px;padding:6px;color:#c9cacd;font-size:12px;flex:1;min-width:120px;" title="分片帧图临时盘，建议 SSD（如 C:\\Temp）。空=与输出同盘">' +
+          '<input id="layer-export-freefrac" type="number" min="0.05" max="0.9" step="0.05" value="0.25" style="background:#121214;border:1px solid #222329;border-radius:6px;padding:6px;color:#c9cacd;font-size:12px;width:64px;" title="缓冲盘剩余空间使用比例">' +
+          '<input id="layer-export-maxgb" type="number" min="1" max="200" step="1" value="20" style="background:#121214;border:1px solid #222329;border-radius:6px;padding:6px;color:#c9cacd;font-size:12px;width:56px;" title="单片帧图上限 GB">';
+        settingsHost.parentElement.insertBefore(wrap, settingsHost.parentElement.firstChild);
+      }
       var encoderSelect = document.getElementById('layer-export-encoder');
       if (encoderSelect && encoderSelect.options.length === 0) {
         var encoders = ['h264_nvenc', 'h264_amf', 'h264_qsv', 'libx264', 'libx265', 'h264_videotoolbox'];
@@ -276,6 +292,13 @@
         landmarker: app ? app.state.landmarker : 'insightface-2d106det',
         res_scale: app ? app.state.resScale : 0.5,
         num_workers: workers,
+        export_mode: (function () {
+          var sel = document.getElementById('layer-export-mode');
+          return sel ? sel.value : 'full';
+        })(),
+        buffer_dir: (document.getElementById('layer-export-buffer') || {}).value || '',
+        free_frac: parseFloat((document.getElementById('layer-export-freefrac') || {}).value) || 0.25,
+        max_chunk_gb: parseFloat((document.getElementById('layer-export-maxgb') || {}).value) || 20,
       };
       var api = window.API;
       if (!api || !api.startExport) {

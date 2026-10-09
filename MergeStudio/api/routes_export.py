@@ -56,6 +56,10 @@ class ExportStartRequest(BaseModel):
     res_scale: float = 0.5
     hwaccel: str = ''
     num_workers: int = 0
+    export_mode: str = 'full'  # 'full' | 'chunked'
+    buffer_dir: str = ''       # chunked: 帧缓冲盘（默认输出同盘）
+    free_frac: float = 0.25    # chunked: 缓冲盘空余空间使用比例
+    max_chunk_gb: float = 20.0 # chunked: 单片帧图上限 GB
 
 
 class ExportStatusResponse(BaseModel):
@@ -138,24 +142,45 @@ async def export_start(req: ExportStartRequest):
             print(f"[Export] Starting pipeline with cut_segments={req.cut_segments}", flush=True)
             print(f"[Export] detector={req.detector} landmarker={req.landmarker}", flush=True)
             from MergeStudio.core.export_pipeline import _sanitize_config
-            run_export_pipeline(
-                video_path=req.video_path,
-                output_path=output,
-                image_format=req.image_format,
-                encoder=req.encoder,
-                config=_sanitize_config(req.config),
-                face_db=req.face_db,
-                face_model_map=req.face_model_map,
-                cut_segments=req.cut_segments,
-                angle_segments=req.angle_segments,
-                detector=req.detector,
-                landmarker=req.landmarker,
-                res_scale=req.res_scale,
-                hwaccel=req.hwaccel,
-                progress_callback=_update_progress,
-                stop_event=_export_stop,
-                num_workers=nw,
-            )
+            if getattr(req, 'export_mode', 'full') == 'chunked':
+                from MergeStudio.core.chunked_runner import run_chunked_export
+                print(f"[Export] mode=chunked buffer={req.buffer_dir or '(default)'} "
+                      f"free_frac={req.free_frac} max_gb={req.max_chunk_gb}", flush=True)
+                run_chunked_export(
+                    video_path=req.video_path,
+                    output_path=output,
+                    encoder=req.encoder,
+                    config=_sanitize_config(req.config),
+                    face_db=req.face_db,
+                    face_model_map=req.face_model_map,
+                    cut_segments=req.cut_segments,
+                    buffer_dir=req.buffer_dir,
+                    free_frac=req.free_frac,
+                    max_chunk_gb=req.max_chunk_gb,
+                    hwaccel=req.hwaccel,
+                    progress_callback=_update_progress,
+                    stop_event=_export_stop,
+                    num_workers=nw,
+                )
+            else:
+                run_export_pipeline(
+                    video_path=req.video_path,
+                    output_path=output,
+                    image_format=req.image_format,
+                    encoder=req.encoder,
+                    config=_sanitize_config(req.config),
+                    face_db=req.face_db,
+                    face_model_map=req.face_model_map,
+                    cut_segments=req.cut_segments,
+                    angle_segments=req.angle_segments,
+                    detector=req.detector,
+                    landmarker=req.landmarker,
+                    res_scale=req.res_scale,
+                    hwaccel=req.hwaccel,
+                    progress_callback=_update_progress,
+                    stop_event=_export_stop,
+                    num_workers=nw,
+                )
         except StopRequested:
             print("[Export] Cancelled by user", flush=True)
             _export_job.update({"running": False, "message": "Cancelled"})
