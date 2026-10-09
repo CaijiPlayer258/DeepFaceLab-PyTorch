@@ -21,7 +21,7 @@ _BG = "#1C191F"
 _BG_CARD = "#2a2733"
 _TEXT = "#FFFFFF"
 _TEXT_DIM = "#999999"
-_THEME = "#855198"
+_THEME = "#6F8F90"
 
 def safe_get_icon(name):
     try:
