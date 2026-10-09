@@ -440,7 +440,7 @@
       el.innerHTML =
         '<span><span class="legend-swatch" style="background:#16323a"></span> 多人脸</span>' +
         '<span><span class="legend-swatch" style="background:#4f7d7f"></span> 少人脸</span>' +
-        '<span><span class="legend-swatch" style="background:#4c1010"></span> 无人脸</span>' +
+        '<span><span class="legend-swatch" style="background:#2a2a2e"></span> 无人脸</span>' +
         '<span><span class="legend-swatch" style="background:#6f8f90"></span> 选中人脸</span>';
     },
 
@@ -525,7 +525,7 @@
         var count = d.face_count || 0;
         if (count === 0) seg.style.background = '#16323a';
         else if (count < 3) seg.style.background = '#4f7d7f';
-        else seg.style.background = '#4c1010';
+        else seg.style.background = '#2a2a2e';
         seg.style.flex = d.count || 1;
         line.appendChild(seg);
       });

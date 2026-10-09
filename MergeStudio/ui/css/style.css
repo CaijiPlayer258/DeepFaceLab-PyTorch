@@ -624,3 +624,16 @@ select.form-input {
 .progress-header { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; }
 .progress-track { height: 6px; background: #1b1c1f; border-radius: 3px; overflow: hidden; }
 .progress-fill { height: 100%; background: linear-gradient(90deg, #6f8f90, #67878a); border-radius: 3px; transition: width 0.3s; width: 0%; }
+
+/* ===== Layout modes (ui-dark) ===== */
+#preview-area.layout-2col #preview-original { display: none; }
+#preview-area.layout-2col #preview-detection { flex: 0.45; }
+#preview-area.layout-2col #preview-swapped { flex: 1.55; }
+#preview-area.layout-3col-swap-big #preview-original { flex: 0.6; }
+#preview-area.layout-3col-swap-big #preview-detection { flex: 0.6; }
+#preview-area.layout-3col-swap-big #preview-swapped { flex: 1.8; }
+.layout-toggle-btn {
+  background: var(--bg-elevated); border: 1px solid var(--border); color: var(--text-secondary);
+  font-size: 9px; padding: 3px 8px; border-radius: 3px; cursor: pointer; margin-left: 6px;
+}
+.layout-toggle-btn:hover { border-color: var(--accent); color: var(--accent); }

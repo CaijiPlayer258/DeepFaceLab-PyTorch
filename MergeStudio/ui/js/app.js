@@ -894,3 +894,24 @@
 
   document.addEventListener('DOMContentLoaded', function () { window.App.init(); });
 })();
+
+// ── Layout toggle (ui-dark) ──
+(function() {
+  var layoutBtn = document.getElementById('layout-toggle');
+  if (!layoutBtn) return;
+  var saved = localStorage.getItem('ms_layout') || '2col';
+  var pa = document.getElementById('preview-area');
+  function applyLayout(mode) {
+    pa.classList.remove('layout-2col', 'layout-3col-swap-big');
+    if (mode === '2col') pa.classList.add('layout-2col');
+    else if (mode === '3col-big') pa.classList.add('layout-3col-swap-big');
+    layoutBtn.textContent = mode === '2col' ? '2栏' : '3栏';
+    localStorage.setItem('ms_layout', mode);
+  }
+  applyLayout(saved);
+  layoutBtn.addEventListener('click', function() {
+    var cur = localStorage.getItem('ms_layout') || '2col';
+    var next = cur === '2col' ? '3col' : (cur === '3col' ? '3col-big' : '2col');
+    applyLayout(next);
+  });
+})();
