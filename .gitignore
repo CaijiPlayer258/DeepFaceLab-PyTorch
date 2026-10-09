@@ -131,3 +131,15 @@ tools/*.exe
 ui/user/
 _tools_tmp/
 _unzip_log.txt
+
+# 本地调试脚本/一次性补丁/手动备份/临时目录（2026-10-09）
+*.bak-*
+_*.py
+_*.js
+_*.json
+_*.txt
+*.log
+_trash/
+_chrome_direct/
+_chrome_local/
+_fix_backup_20260930/
