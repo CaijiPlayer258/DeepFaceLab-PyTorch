@@ -381,6 +381,7 @@
     },
 
     computeEmbeddings: function () {
+      var self = this;
       if (window.API && window.API.computeEmbeddings) {
         var btn = document.getElementById('btn-compute-embeddings');
         if (btn) { btn.textContent = 'Computing...'; btn.disabled = true; }

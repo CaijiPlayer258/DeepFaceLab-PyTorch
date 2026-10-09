@@ -12,6 +12,33 @@ from concurrent.futures import ThreadPoolExecutor
 import threading
 
 _FFMPEG_DIR = Path(__file__).parent.parent.parent / "ffmpeg"
+
+# DFL project mode: frames are NOT deleted on cut; this is the set of frame
+# indices (0-based stems) to keep. None = no filtering (non-DFL or no cut).
+_cut_keep_set = None
+
+
+def _compute_cut_keep_set(frame_files, valid_segs, zero_based):
+    """P0-2: frame inclusion math for cut segments.
+
+    offset 0 for DFL project frames (0-based stems),
+    offset 1 for FFmpeg-extracted frames (%08d starts at 1).
+    Returns (keep_index_set, removed_count).
+    """
+    offset = 0 if zero_based else 1
+    keep, removed = set(), 0
+    for fp in frame_files:
+        try:
+            idx = int(fp.stem)
+        except ValueError:
+            removed += 1
+            continue
+        if any(s + offset <= idx <= e + offset for s, e in
+               [(x['start'], x['end']) for x in valid_segs]):
+            keep.add(idx)
+        else:
+            removed += 1
+    return keep, removed
 _FFMPEG = str(_FFMPEG_DIR / "ffmpeg.exe")
 _FFPROBE = str(_FFMPEG_DIR / "ffprobe.exe")
 
@@ -1033,6 +1060,9 @@ def _stage4_swap_faces_mp(frames_dir, db_path, work_dir, config, face_model_map,
     import multiprocessing as _mp, time
     from pathlib import Path
     frames = sorted(frames_dir.glob("*.[jp][pn]g"))
+    if _cut_keep_set is not None:  # P0-1: DFL mode keep-set filtering
+        frames = [_f for _f in frames if int(_f.stem) in _cut_keep_set]
+        print(f"[Export] Stage4: {_cut_keep_set.__len__()} frames in keep-set, {len(frames)} matched on disk", flush=True)
     total = len(frames)
     if total == 0: return
     from MergeStudio.core.model_loader import model_loader
@@ -1080,6 +1110,10 @@ def _stage4_swap_faces_mp(frames_dir, db_path, work_dir, config, face_model_map,
     _phase_all_faces = cur.fetchall()
     conn.close()
     _phase_all_faces = [f for f in _phase_all_faces if f[3]]  # only faces with model assigned
+    if _cut_keep_set is not None:  # P0-1: skip faces on cut frames (DFL mode)
+        _before = len(_phase_all_faces)
+        _phase_all_faces = [f for f in _phase_all_faces if f[0] in _cut_keep_set]
+        print(f"[Export] keep-set: {_before - len(_phase_all_faces)} faces on cut frames skipped", flush=True)
 
     # If no faces assigned by ArcFace, default to all faces → first model
     if not _phase_all_faces and all_model_paths:
@@ -1244,27 +1278,45 @@ def run_export_pipeline(
             _stage1_extract_frames(video_path, frames_dir, image_format, progress, stop_event=stop_event, hwaccel=_hw)
             progress(0, 1.0, "Frames extracted")
 
-        # Keep only frames within cut segments (inclusion logic)
+        # Keep only frames within cut segments (inclusion logic).
+        # 2026-10-09 P0 fix: in DFL project mode frames_dir IS the user's project
+        # directory - never unlink user source frames there. Instead compute a
+        # keep-set and let Stage4/5 filter by it (_cut_keep_set).
+        # +1 offset only applies to FFmpeg-extracted frames (1-based, %08d starting
+        # at 1); DFL project frames are 0-based (aligned source stems).
         _cut_count = 0
+        global _cut_keep_set
+        _cut_keep_set = None
         _valid_segs = [s for s in (cut_segments or []) if s.get('start') is not None and s.get('end') is not None]
         print(f"[Export] raw cut_segments from frontend: {cut_segments}", flush=True)
         print(f"[Export] valid keep segments: {_valid_segs}", flush=True)
         if _valid_segs:
             _all_frames = sorted(frames_dir.glob("*.[jp][pn]g"))
             print(f"[Export] Total extracted frames before cut: {len(_all_frames)}", flush=True)
-            for _fp in _all_frames:
-                _idx = int(_fp.stem)  # 1-based file index
-                _keep = any(_s + 1 <= _idx <= _e + 1 for _s, _e in
-                            [(s['start'], s['end']) for s in _valid_segs])
-                if not _keep:
-                    _fp.unlink(); _cut_count += 1
-            print(f"[Export] Removed {_cut_count} frames outside selected segments", flush=True)
+            if _is_dfl:
+                _cut_keep_set, _cut_count = _compute_cut_keep_set(_all_frames, _valid_segs, zero_based=True)
+                print(f"[Export] DFL mode: {_cut_count} frames excluded via keep-set (source frames untouched)", flush=True)
+            else:
+                for _fp in _all_frames:
+                    _idx = int(_fp.stem)  # 1-based file index
+                    _keep = any(_s + 1 <= _idx <= _e + 1 for _s, _e in
+                                [(s['start'], s['end']) for s in _valid_segs])
+                    if not _keep:
+                        _fp.unlink(); _cut_count += 1
+                print(f"[Export] Removed {_cut_count} frames outside selected segments", flush=True)
             _remaining = sorted(frames_dir.glob("*.[jp][pn]g"))
             if _remaining:
                 print(f"[Export] First kept frame file: {_remaining[0].name} (stem={_remaining[0].stem})", flush=True)
                 print(f"[Export] Last kept frame file: {_remaining[-1].name} (stem={_remaining[-1].stem})", flush=True)
         else:
             print(f"[Export] No valid segments, keeping ALL frames", flush=True)
+
+        if _is_dfl and angle_segments:
+            # P0-3: angle detection is a Stage2 feature; DFL mode skips Stage2
+            # entirely (landmarks come from aligned metadata), so multi-angle
+            # detection segments cannot apply. Warn instead of failing silently.
+            print(f"[Export] [WARN] DFL project mode: {len(angle_segments)} angle_segments ignored "
+f"(landmarks come from aligned metadata; re-run detection for multi-angle)", flush=True)
 
         # Stage 2: Face detection → SQLite (skip in DFL mode — use aligned DFLJPG data)
         progress(1, 0.0, "Loading faces..." if _is_dfl else "Detecting faces...")
@@ -1802,14 +1854,22 @@ def _stage5_encode_video(frames_dir, output_path, source_video, encoder, fmt, pr
 
     # Renumber remaining frames sequentially for gap-free encoding
     _frames = sorted(frames_dir.glob(f"*.{ext}"))
+    if _cut_keep_set is not None:  # P0-1: DFL mode keep-set filtering
+        _frames = [_f for _f in _frames if int(_f.stem) in _cut_keep_set]
+        print(f"[Export] Stage5: filtered to {len(_frames)} frames by keep-set", flush=True)
     if not _frames:
         print(f"[Export] Stage5: no frames found in {frames_dir}", flush=True)
         return
     if _valid_segs:
+        # P1-9 fix: two-pass rename (temp suffix first) so an existing target
+        # frame from a previous interrupted run can never collide/raise.
         for _i, _f in enumerate(_frames):
+            _f.rename(frames_dir / (_f.name + ".renum"))
+        for _i, _f in enumerate(_frames):
+            _tmp = frames_dir / (_f.name + ".renum")
             _new = frames_dir / f"{_i + 1:08d}{_f.suffix}"
-            if _new != _f:
-                _f.rename(_new)
+            if _tmp != _new:
+                os.replace(str(_tmp), str(_new))  # replace semantics, no collision
         _pad = 8
         print(f"[Export] Renumbered {len(_frames)} frames for encoding", flush=True)
 
