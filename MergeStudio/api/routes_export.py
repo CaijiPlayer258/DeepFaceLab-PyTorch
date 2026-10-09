@@ -137,12 +137,13 @@ async def export_start(req: ExportStartRequest):
             nw = min(nw, _cap)
             print(f"[Export] Starting pipeline with cut_segments={req.cut_segments}", flush=True)
             print(f"[Export] detector={req.detector} landmarker={req.landmarker}", flush=True)
+            from MergeStudio.core.export_pipeline import _sanitize_config
             run_export_pipeline(
                 video_path=req.video_path,
                 output_path=output,
                 image_format=req.image_format,
                 encoder=req.encoder,
-                config=req.config,
+                config=_sanitize_config(req.config),
                 face_db=req.face_db,
                 face_model_map=req.face_model_map,
                 cut_segments=req.cut_segments,

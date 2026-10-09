@@ -30,19 +30,29 @@ class TestMergerConfigMasked:
         cfg = MergerConfigMasked(mode="不存在的模式")
         assert cfg.mode in mode_str_dict
 
-    def test_extra_kwargs_raises(self):
-        """审阅发现（P1-2b）：非常规 kwargs 直接炸 ——
-        MergerConfig.__init__(type, **kwargs) 不吞未知参数，而
-        routes_export 的导出路径用手工白名单过滤、routes_preview 用 co_varnames
-        过滤。此处锁定现状：传 UI 新增字段（如 face_margin）会 TypeError，
-        任何新配置字段必须同时加进两处白名单，否则导出必炸。"""
-        with pytest.raises(TypeError):
-            MergerConfigMasked(face_margin=0.48)
+    def test_extra_kwargs_swallowed_into_extra(self):
+        """P1-2b 已修：未知 kwargs 不再 TypeError，收进 .extra。"""
+        cfg = MergerConfigMasked(face_margin=0.48)
+        assert cfg.extra.get("face_margin") == 0.48
 
-    def test_masked_hist_match_hardcoded_true(self):
-        """P1-2 回归锚：masked_hist_match=False 被硬编码覆盖为 True。"""
+    def test_ct_mode_string_sanitized_by_helper(self):
+        """P1-3 已修：_sanitize_config 把字符串 ct 模式转 int，白名单过滤后传入。"""
+        from MergeStudio.core.export_pipeline import _sanitize_config
+        cleaned = _sanitize_config({"color_transfer_mode": "lct", "face_margin": 0.48, "mask_mode": 6})
+        assert cleaned["color_transfer_mode"] == 2
+        assert cleaned["mask_mode"] == 6
+        assert "face_margin" not in cleaned  # 非白名单字段被过滤（导出路径行为不变）
+        cfg = MergerConfigMasked(**cleaned)
+        assert cfg.color_transfer_mode == 2
+
+    def test_masked_hist_match_respected(self):
+        """P1-2 已修：masked_hist_match=False 不再被硬编码覆盖。"""
         cfg = MergerConfigMasked(masked_hist_match=False)
-        assert cfg.masked_hist_match is True  # 记录现状（ bug 未修前的行为）
+        assert cfg.masked_hist_match is False
+
+    def test_masked_hist_match_default_true(self):
+        cfg = MergerConfigMasked()
+        assert cfg.masked_hist_match is True
 
     def test_color_transfer_mode_string_not_validated(self):
         """P1-3 回归锚：字符串直接穿透，下游 merger 的 ct_functions[int 键] 会查不到。"""

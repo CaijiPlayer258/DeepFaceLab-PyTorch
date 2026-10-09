@@ -15,6 +15,8 @@
         if (el) el.classList.remove('step-0','step-1','step-2','step-3');
       });
       this.layers.main.classList.add('step-0');
+      var self = this;
+      setTimeout(function () { self._checkRunningOnLoad(); }, 1500);  // U2
     },
 
     _createLayers: function () {
@@ -72,6 +74,45 @@
 
     close: function () {
       this.advance(0);
+    },
+
+    _checkRunningOnLoad: function () {
+      // U2: after a browser refresh the progress overlay shows a stale frozen
+      // frame while the server may still be exporting - re-attach if so.
+      var self = this;
+      var api = window.API;
+      if (!api || !api.getExportProgress) return;
+      api.getExportProgress(this.state.jobId).then(function (d) {
+        if (d && d.running) {
+          self.advance(3);
+          self._pollProgress();
+          self._setStatusText('检测到正在进行的导出，已恢复进度显示');
+        }
+      }).catch(function () {});
+    },
+
+    _showResultBar: function (outputPath, ok) {
+      // U4: persistent result line with a reveal button (toast disappears in 3s).
+      var old = document.getElementById('export-result-bar');
+      if (old && old.parentElement) old.parentElement.removeChild(old);
+      var el = document.createElement('div');
+      el.id = 'export-result-bar';
+      el.style.cssText = 'margin:12px auto 0;padding:10px 14px;background:#141518;border:1px solid rgba(122,158,159,0.35);border-radius:8px;font:12px Inter,sans-serif;color:#c9cacd;max-width:640px;display:flex;align-items:center;gap:10px;';
+      var txt = document.createElement('span');
+      txt.style.cssText = 'flex:1;word-break:break-all;';
+      txt.textContent = (ok ? '✅ ' : '⚠ ') + outputPath;
+      el.appendChild(txt);
+      var btn = document.createElement('button');
+      btn.textContent = '打开所在文件夹';
+      btn.style.cssText = 'padding:6px 12px;background:#2a2a30;border:1px solid rgba(122,158,159,0.4);color:#c9cacd;border-radius:6px;cursor:pointer;white-space:nowrap;';
+      btn.addEventListener('click', function () {
+        fetch('/api/export/reveal', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: outputPath })
+        });
+      });
+      el.appendChild(btn);
+      (document.getElementById('layer-progress') || document.body).appendChild(el);
     },
 
     _showToast: function (msg) {
@@ -196,7 +237,7 @@
       }
       var formatSelect = document.getElementById('layer-export-format');
       if (formatSelect && formatSelect.options.length === 0) {
-        var formats = [['jpeg', 'JPEG'], ['png', 'PNG Sequence'], ['mp4', 'MP4 Video'], ['avi', 'AVI']];
+        var formats = [['jpeg', 'JPEG'], ['png', 'PNG Sequence']];  // U5: mp4/avi 后端从未支持，假选项已移除
         for (var j = 0; j < formats.length; j++) {
           var opt2 = document.createElement('option');
           opt2.value = formats[j][0];
@@ -355,6 +396,11 @@
     },
 
     cancelExport: function () {
+      // U3: confirm before cancelling - a long export is expensive to redo.
+      var stages = ['Extract', 'Detect', 'Match', 'Swap', 'Mask', 'Merge', 'Encode'];
+      var cur = (typeof this._lastStage === 'number') ? this._lastStage : 0;
+      var msg = '确定取消导出？已处理的帧会作废，下次导出需从头再来。';
+      if (!window.confirm(msg)) { return; }
       var self = this;
       var api = window.API;
       if (!api || !api.cancelExport) { self.close(); return; }
@@ -438,6 +484,7 @@
             console.log('Progress:', data.stage, Math.round(data.progress*100)+'%', data.message, 'tick='+data.tick);
           }
           self._updateProgressUI(data);
+          self._lastStage = data.stage;
           if (!data.running) {
             clearInterval(interval);
             self._pollTimer = null;
@@ -447,12 +494,13 @@
               if (/^Failed/i.test(data.message)) self._offerForceReset();
             } else {
               self._setStatusText('');
+              if (data.output_path) self._showResultBar(data.output_path, true);
               self.advance(0);
               self._showToast('Export completed successfully');
             }
           }
         }));
-      }, 100);
+      }, 800);  // U1: server updates progress every 0.5s; 100ms just spammed requests
       this._pollTimer = interval;
     },
 
