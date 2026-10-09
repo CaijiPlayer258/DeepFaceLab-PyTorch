@@ -33,6 +33,7 @@
       this.initDragDrop();
       this.initSliders();
       this._loadSavedConfig();
+      this._syncFromBackend();
     },
 
     initTransportSVG: function () {
@@ -71,11 +72,13 @@
         else if (idx === 3) self.seekFrame(self.state.currentFrame + 1);
         else if (idx === 4) self.seekFrame(Math.min(self.state.totalFrames - 1, self.state.currentFrame + 30));
       });
-      document.getElementById('zoom-out').addEventListener('click', function () {
+      var tlZoomOut = document.getElementById('zoom-out');
+      if (tlZoomOut) tlZoomOut.addEventListener('click', function () {
         self.state.zoom = Math.max(0.25, self.state.zoom / 2);
         Timeline.updateZoom(self.state.zoom, self.state.totalFrames, self.state.currentFrame);
       });
-      document.getElementById('zoom-in').addEventListener('click', function () {
+      var tlZoomIn = document.getElementById('zoom-in');
+      if (tlZoomIn) tlZoomIn.addEventListener('click', function () {
         self.state.zoom = Math.min(8, self.state.zoom * 2);
         Timeline.updateZoom(self.state.zoom, self.state.totalFrames, self.state.currentFrame);
       });
@@ -878,6 +881,82 @@
       });
     },
 
+    // ── 自动加载：页面打开时同步后端已就绪的 workspace/模型/视频 (autoload-sync) ──
+    _syncFromBackend: function () {
+      var self = this;
+      var si = document.getElementById('status-indicator');
+      var attempts = 0, MAX = 150; // ~3min @1.2s（阶段推进会重置；超时不终止，降频续轮询）
+      var lastStage = null;
+      function poll() {
+        if (self.state.projectPath) return; // 用户已手动接管
+        API.getStatus().then(function (st) {
+          if (self.state.projectPath) return;
+          var al = st.autoload || {};
+          var video = st.video, model = st.model;
+          // 自动加载流程：隐藏左侧文件栏（顶栏「文件栏」按钮可再展开）
+          if (((al && al.configured) || video || model) && window.MSSidebar &&
+              localStorage.getItem('ms_sidebar') !== 'hidden') {
+            window.MSSidebar('hidden');
+          }
+          if (video && model && model.loaded) {
+            // 就绪：拉取列表，完整填充页面（等价于手动 open→选视频→选模型的最终态）
+            API.getStatus(true).then(function (st2) {
+              if (self.state.projectPath) return;
+              if (!st.workspace) { setTimeout(poll, 1500); return; } // 状态不完整：等下一轮，不半初始化
+              self.state.projectPath = st.workspace;
+              document.getElementById('workspace-path').value = st.workspace || '';
+              self.state.models = st2.models || [];
+              self.state.videos = st2.videos || [];
+              self.state.videoDflMap = {};
+              self.state.cutSegments = [];
+              self.state.angleSegments = [];
+              self.state.videoPath = video.path;
+              self.state.totalFrames = video.total_frames;
+              self.state.fps = video.fps || 0;
+              self.state.faceDensityData = [];
+              self.state.faceDatabase = {};
+              self.state.selectedModels = {};
+              self.state.selectedModels[model.name] = true;
+              self.state.loadedModel = model.name;
+              self.state.config.detect_mode = video.has_aligned_dir ? 'skip_dfl' : 'always';
+              var dm = document.getElementById('detect-mode-select');
+              if (dm) dm.value = self.state.config.detect_mode;
+              var vid = document.getElementById('video-original');
+              if (vid) { vid.removeAttribute('src'); vid.load(); }
+              document.getElementById('frame-total').textContent = video.total_frames;
+              self.renderModelList(self.state.models);
+              self.renderVideoList(self.state.videos);
+              self.renderFaceSection();
+              Timeline.updateZoom(self.state.zoom, video.total_frames, 0);
+              if (si) si.textContent = '\u2713 ' + model.name + ' + ' + video.name +
+                ' (' + Number(video.total_frames).toLocaleString() + '\u5e27)';
+              self.seekFrame(0);
+              self._startCachePoll();
+            }).catch(function () { setTimeout(poll, 1500); }); // 就绪瞬间的瞬时错误：重试，不让轮询静默死亡
+            return;
+          }
+          // 未就绪：显示进度并继续轮询
+          if (!al.configured && !video && !model) return; // 无自动加载配置，不打扰手动流程
+          if (al.stage && al.stage !== lastStage) { lastStage = al.stage; attempts = 0; } // 阶段有推进：重置预算，慢加载不误判超时
+          var slow = ++attempts > MAX; // 超预算不终止：降频续轮询，后端晚就绪仍能接上
+          var stageTxt = {
+            'idle': '\u7b49\u5f85\u542f\u52a8\u2026',
+            'opening-workspace': '\u6253\u5f00 workspace\u2026',
+            'loading-model': '\u52a0\u8f7d\u6a21\u578b ' + (al.detail || '') + '\u2026',
+            'selecting-video': '\u52a0\u8f7d\u89c6\u9891 ' + (al.detail || '') + '\u2026',
+            'error': '\u5931\u8d25: ' + (al.detail || '')
+          }[al.stage] || '\u81ea\u52a8\u52a0\u8f7d\u4e2d\u2026';
+          if (si) si.textContent = '\u25cf \u81ea\u52a8\u52a0\u8f7d' + (slow ? '\u8d85\u65f6\u2026' : ': ' + stageTxt);
+          setTimeout(poll, slow ? 5000 : 1200);
+        }).catch(function () {
+          var slow = ++attempts > MAX;
+          if (si && slow) si.textContent = '\u25cf \u670d\u52a1\u672a\u54cd\u5e94';
+          setTimeout(poll, slow ? 5000 : 1500);
+        });
+      }
+      poll();
+    },
+
     _loadSavedConfig: function () {
       var self = this;
       API.loadConfig().then(function (saved) {
@@ -895,25 +974,40 @@
   document.addEventListener('DOMContentLoaded', function () { window.App.init(); });
 })();
 
-// ── Layout toggle (ui-dark) ──
+// ── Top-bar layout switches: 双栏/三栏 + 左右/上下 (ui-dark v7) ──
 (function() {
-  var layoutBtn = document.getElementById('layout-toggle');
-  if (!layoutBtn) return;
-  var saved = localStorage.getItem('ms_layout') || '2col';
   var pa = document.getElementById('preview-area');
-  function applyLayout(mode) {
-    pa.classList.remove('layout-2col', 'layout-3col-swap-big');
-    if (mode === '2col') pa.classList.add('layout-2col');
-    else if (mode === '3col-big') pa.classList.add('layout-3col-swap-big');
-    layoutBtn.textContent = mode === '2col' ? '2栏' : '3栏';
-    localStorage.setItem('ms_layout', mode);
+  var swCols = document.getElementById('sw-cols');
+  var swOr = document.getElementById('sw-orient');
+  if (!pa || !swCols || !swOr) return;
+  function settle() {
+    // v2 owns panel sizing: re-run it so the orientation/column change really applies
+    if (window.MSLayoutApply) window.MSLayoutApply();
+    setTimeout(function() {
+      if (window.MSZoomApply) window.MSZoomApply();
+    }, 150);
   }
-  applyLayout(saved);
-  layoutBtn.addEventListener('click', function() {
-    var cur = localStorage.getItem('ms_layout') || '2col';
-    var next = cur === '2col' ? '3col' : (cur === '3col' ? '3col-big' : '2col');
-    applyLayout(next);
-  });
+  function applyCols(on3) {
+    pa.classList.remove('layout-3col-swap-big');
+    pa.classList.toggle('layout-2col', !on3);
+    swCols.classList.toggle('on', on3);
+    var lb = swCols.querySelector('.top-switch__label');
+    if (lb) lb.textContent = on3 ? '三栏' : '双栏';
+    localStorage.setItem('ms_layout', on3 ? '3col' : '2col');
+    settle();
+  }
+  function applyOr(vert) {
+    pa.classList.toggle('layout-vertical', vert);
+    swOr.classList.toggle('on', vert);
+    var lb = swOr.querySelector('.top-switch__label');
+    if (lb) lb.textContent = vert ? '上下' : '左右';
+    localStorage.setItem('ms_layout_mode', vert ? 'v' : 'h');
+    settle();
+  }
+  applyCols((localStorage.getItem('ms_layout') || '2col') !== '2col');
+  applyOr(localStorage.getItem('ms_layout_mode') === 'v');
+  swCols.addEventListener('click', function() { applyCols(pa.classList.contains('layout-2col')); });
+  swOr.addEventListener('click', function() { applyOr(!pa.classList.contains('layout-vertical')); });
 })();
 
 
@@ -924,42 +1018,60 @@
   var splitter = document.getElementById('preview-splitter');
   var detP = document.getElementById('preview-detection');
   var swpP = document.getElementById('preview-swapped');
-  var btnH = document.getElementById('btn-layout-h');
-  var btnV = document.getElementById('btn-layout-v');
   if (!splitter || !detP || !swpP) return;
 
   var isDragging = false, startPos = 0, startPct = 50;
+  var origP = document.getElementById('preview-original');
   var mode = localStorage.getItem('ms_layout_mode') || 'h';
   var ratio = parseFloat(localStorage.getItem('ms_layout_ratio')) || 50;
 
+  // Single source of truth for panel sizing — also driven by the top-bar switches.
+  // Sizes every visible panel along the current axis and leaves room for the 8px splitter.
   function applyLayout() {
-    pa.classList.toggle('layout-vertical', mode === 'v');
-    detP.classList.add('drag-set');
-    swpP.classList.add('drag-set');
-    if (mode === 'h') {
-      detP.style.width = ratio + '%'; detP.style.height = '';
-      swpP.style.width = (100 - ratio) + '%'; swpP.style.height = '';
-    } else {
-      detP.style.height = ratio + '%'; detP.style.width = '';
-      swpP.style.height = (100 - ratio) + '%'; swpP.style.width = '';
+    var vert = pa.classList.contains('layout-vertical');
+    var twoCol = pa.classList.contains('layout-2col');
+    // space NOT available to panels: the 8px splitter plus the 2px flex gaps between
+    // neighbouring items (each gap is charged to one side, so the sums fit exactly).
+    var GAP_EDGE = 2;                             // 3-col: gap between Original and Detection
+    var GAP_SPLIT = 6;                            // half the splitter (4) + one flex gap (2)
+    var wOrig = twoCol ? 0 : 100 / 3;             // 3-col: Original keeps one third
+    var rest = 100 - wOrig;
+    var wDet = rest * ratio / 100, wSwp = rest * (100 - ratio) / 100;
+
+    function size(p, pct, gap) {
+      if (!p || !pct) return;
+      var v = 'calc(' + pct.toFixed(3) + '% - ' + gap + 'px)';
+      if (vert) { p.style.height = v; p.style.width = ''; }
+      else { p.style.width = v; p.style.height = ''; }
     }
-    btnH.classList.toggle('active', mode === 'h');
-    btnV.classList.toggle('active', mode === 'v');
-    localStorage.setItem('ms_layout_mode', mode);
+    [origP, detP, swpP].forEach(function (p) {
+      if (!p) return;
+      p.classList.add('drag-set');
+      p.style.width = '';
+      p.style.height = '';
+    });
+    size(origP, wOrig, GAP_EDGE);
+    size(detP, wDet, GAP_SPLIT);
+    size(swpP, wSwp, GAP_SPLIT);
+    localStorage.setItem('ms_layout_mode', vert ? 'v' : 'h');
     localStorage.setItem('ms_layout_ratio', ratio);
   }
+  window.MSLayoutApply = applyLayout;
 
   splitter.addEventListener('mousedown', function(e) {
-    e.preventDefault(); isDragging = true; startPos = mode === 'h' ? e.clientX : e.clientY;
+    var _v = pa.classList.contains('layout-vertical');
+    e.preventDefault(); e.stopPropagation();
+    isDragging = true; startPos = _v ? e.clientY : e.clientX;
     startPct = ratio; splitter.classList.add('dragging');
-    document.body.style.cursor = mode === 'h' ? 'col-resize' : 'row-resize';
+    document.body.style.cursor = _v ? 'row-resize' : 'col-resize';
     document.body.style.userSelect = 'none';
   });
   document.addEventListener('mousemove', function(e) {
     if (!isDragging) return;
     var rect = pa.getBoundingClientRect();
+    var _vert = pa.classList.contains('layout-vertical');
     var pct;
-    if (mode === 'h') pct = ((e.clientX - rect.left) / rect.width) * 100;
+    if (!_vert) pct = ((e.clientX - rect.left) / rect.width) * 100;
     else pct = ((e.clientY - rect.top) / rect.height) * 100;
     ratio = Math.max(15, Math.min(85, pct));
     applyLayout();
@@ -971,8 +1083,6 @@
     localStorage.setItem('ms_layout_ratio', ratio);
   });
 
-  if (btnH) btnH.addEventListener('click', function() { mode = 'h'; applyLayout(); });
-  if (btnV) btnV.addEventListener('click', function() { mode = 'v'; applyLayout(); });
   applyLayout();
 })();
 
@@ -983,15 +1093,18 @@
   var mc = document.getElementById('main-content');
   if (!btn || !mc) return;
   var saved = localStorage.getItem('ms_sidebar') || 'shown';
+  var showBtn = document.getElementById('sidebar-show');
   function apply(v) {
     mc.classList.toggle('sidebar-hidden', v === 'hidden');
     localStorage.setItem('ms_sidebar', v);
   }
+  window.MSSidebar = apply;
   apply(saved);
   btn.addEventListener('click', function() {
     var cur = localStorage.getItem('ms_sidebar') || 'shown';
     apply(cur === 'shown' ? 'hidden' : 'shown');
   });
+  if (showBtn) showBtn.addEventListener('click', function() { apply('shown'); });
 })();
 
 // ── Preview zoom (ui-dark v3) ──
@@ -1043,6 +1156,58 @@
   var pz = { scale: 1, ox: 0, oy: 0 };
   var isPanning = false, panStart = { mx: 0, my: 0, ox: 0, oy: 0 };
   var pctEl = document.getElementById('pz-pct');
+  var mm = document.getElementById('pz-minimap');
+  var mmThumb = document.getElementById('pz-mini-thumb');
+  var mmBox = document.getElementById('pz-mini-box');
+  var swp = null;
+  for (var k = 0; k < panels.length; k++) if (panels[k].el.id === 'preview-swapped') swp = panels[k];
+  if (!swp) swp = panels[panels.length - 1];
+
+  // 小地图：整帧的缩略投影（画在换脸画布上）+ 标记当前视野的小框
+  var MM_MAX = 120;                     // 最长边 120px，不占画面
+  var mmThumbKey = null;
+  function updateRegion() {
+    if (!mm || !swp || !mmBox || !mmThumb) return;
+    var fit = swp.canvas._fit;
+    if (pz.scale <= 1 || !swp.canvas.width || !fit || fit.w < 4 || fit.h < 4) {
+      mm.style.display = 'none';
+      return;
+    }
+    var ex = swp.canvas.offsetLeft, ey = swp.canvas.offsetTop;
+    var s = pz.scale;
+    var vw = swp.el.clientWidth / s, vh = swp.el.clientHeight / s;
+    var x0 = -pz.ox - ex / s, y0 = -pz.oy - ey / s;      // 可视窗口左上（元素本地 px）
+
+    // minimap 尺寸：保持画面宽高比，最长边 MM_MAX
+    var mmW, mmH;
+    if (fit.w >= fit.h) { mmW = MM_MAX; mmH = Math.max(28, Math.round(MM_MAX * fit.h / fit.w)); }
+    else { mmH = MM_MAX; mmW = Math.max(28, Math.round(MM_MAX * fit.w / fit.h)); }
+    if (mm.style.display !== 'block') mm.style.display = 'block';
+    mm.style.width = mmW + 'px';
+    mm.style.height = mmH + 'px';
+
+    // 缩略图仅在帧变化/画布重建时重画（drawImage 忽略 CSS transform）
+    var key = (swp.canvas._lastImg && swp.canvas._lastImg.src || '') + '|' + swp.canvas.width + 'x' + swp.canvas.height;
+    if (key !== mmThumbKey) {
+      mmThumbKey = key;
+      try {
+        mmThumb.width = mmW; mmThumb.height = mmH;
+        var tctx = mmThumb.getContext('2d');
+        tctx.clearRect(0, 0, mmW, mmH);
+        tctx.drawImage(swp.canvas, 0, 0, mmW, mmH);
+      } catch (e) { /* 跨域或未初始化时静默 */ }
+    }
+
+    // 视野小框：图片坐标 → 小地图坐标（相对比例）
+    var bx = (Math.max(fit.x, x0) - fit.x) / fit.w;
+    var by = (Math.max(fit.y, y0) - fit.y) / fit.h;
+    var bw = Math.min(vw, fit.w) / fit.w;
+    var bh = Math.min(vh, fit.h) / fit.h;
+    mmBox.style.left = (bx * mmW) + 'px';
+    mmBox.style.top = (by * mmH) + 'px';
+    mmBox.style.width = Math.max(6, bw * mmW) + 'px';
+    mmBox.style.height = Math.max(6, bh * mmH) + 'px';
+  }
 
   function apply() {
     var t = 'scale(' + pz.scale + ') translate(' + pz.ox + 'px,' + pz.oy + 'px)';
@@ -1052,6 +1217,7 @@
     });
     pa.classList.toggle('pz-panning', isPanning && pz.scale > 1);
     if (pctEl) pctEl.textContent = Math.round(pz.scale * 100) + '%';
+    updateRegion();
   }
 
   function zoomAt(factor, cx, cy) {
@@ -1062,20 +1228,48 @@
     pz.ox = cx - (cx - pz.ox) * ratio;
     pz.oy = cy - (cy - pz.oy) * ratio;
     pz.scale = newS;
+    if (newS === 1 && window.Preview && typeof Preview.refit === 'function') Preview.refit();
     clampPan();
     apply();
   }
 
-  function clampPan() {
-    var panel = panels[1] || panels[0];
-    var pw = panel.el.clientWidth, ph = panel.el.clientHeight;
-    var maxOx = Math.max(0, (panel.canvas.width * pz.scale - pw) / pz.scale);
-    var maxOy = Math.max(0, (panel.canvas.height * pz.scale - ph) / pz.scale);
-    pz.ox = Math.max(-maxOx, Math.min(0, pz.ox));
-    pz.oy = Math.max(-maxOy, Math.min(0, pz.oy));
+  // Auto-fit (re-drawing the canvases at the panel's current size) is allowed only while
+  // the view is NOT zoomed in. Once zoomed the framed view is kept until the user hits FIT.
+  function refitIfFit() {
+    if (pz.scale > 1) return;
+    if (window.Preview && typeof Preview.refit === 'function') Preview.refit();
   }
 
-  function reset() { pz.scale = 1; pz.ox = 0; pz.oy = 0; apply(); }
+  // Keep the visible window inside the real image rect (_fit) of the swapped panel.
+  // Axis whose image is smaller than the window gets locked, so the view cannot drift
+  // into letterbox and dragging works on both axes.
+  function clampPan() {
+    if (!swp) return;
+    var s = pz.scale;
+    if (s <= 1) { pz.ox = 0; pz.oy = 0; return; }
+    var fit = swp.canvas._fit;
+    var pw = swp.el.clientWidth, ph = swp.el.clientHeight;
+    var ex = swp.canvas.offsetLeft, ey = swp.canvas.offsetTop;
+    var vw = pw / s, vh = ph / s;                    // visible window in element px
+    var fx = fit ? fit.x : 0, fy = fit ? fit.y : 0;
+    var fw = fit ? fit.w : swp.canvas.width, fh = fit ? fit.h : swp.canvas.height;
+    if (fw > vw) {
+      pz.ox = Math.min(-(fx + ex / s), Math.max(-(fx + fw - vw + ex / s), pz.ox));
+    } else {
+      pz.ox = -(fx + (fw - vw) / 2 + ex / s);
+    }
+    if (fh > vh) {
+      pz.oy = Math.min(-(fy + ey / s), Math.max(-(fy + fh - vh + ey / s), pz.oy));
+    } else {
+      pz.oy = -(fy + (fh - vh) / 2 + ey / s);
+    }
+  }
+
+  function reset() {
+    // FIT = manual re-enable of auto-fit (the panel may have changed size while zoomed)
+    if (window.Preview && typeof Preview.refit === 'function') Preview.refit();
+    pz.scale = 1; pz.ox = 0; pz.oy = 0; apply();
+  }
 
   panels.forEach(function(p) {
     p.el.addEventListener('wheel', function(e) {
@@ -1103,33 +1297,75 @@
   });
   document.addEventListener('mouseup', function() { isPanning = false; });
 
+  // 小地图交互：按住小框拖动 = 平移视野；点小地图任意处 = 视野跳到该处
+  if (mm) {
+    var mmDrag = null;
+    function mmPoint(e) {
+      var r = mm.getBoundingClientRect();
+      return { px: e.clientX - r.left, py: e.clientY - r.top, w: r.width, h: r.height };
+    }
+    // 小地图坐标 → 设定视野左上（含钳制），直接写 pz.ox/oy
+    function mmApplyView(p, x0, y0) {
+      var fit = swp.canvas._fit, s = pz.scale;
+      var vw = swp.el.clientWidth / s, vh = swp.el.clientHeight / s;
+      var nx = x0 + (p.px - mmDrag.px) / p.w * fit.w;
+      var ny = y0 + (p.py - mmDrag.py) / p.h * fit.h;
+      nx = Math.max(fit.x, Math.min(fit.x + Math.max(0, fit.w - vw), nx));
+      ny = Math.max(fit.y, Math.min(fit.y + Math.max(0, fit.h - vh), ny));
+      pz.ox = -(nx + swp.canvas.offsetLeft / s);
+      pz.oy = -(ny + swp.canvas.offsetTop / s);
+      apply();
+    }
+    mm.addEventListener('mousedown', function(e) {
+      if (pz.scale <= 1 || !swp || !swp.canvas._fit) return;
+      e.preventDefault(); e.stopPropagation();
+      var p = mmPoint(e);
+      var ex = swp.canvas.offsetLeft, ey = swp.canvas.offsetTop, s = pz.scale;
+      var x0 = -pz.ox - ex / s, y0 = -pz.oy - ey / s;
+      // 点击在小框外：先把视野中心跳到点击处，再从那里开始拖
+      var fit = swp.canvas._fit;
+      var vw = swp.el.clientWidth / s, vh = swp.el.clientHeight / s;
+      var bx = (x0 - fit.x) / fit.w * p.w, by = (y0 - fit.y) / fit.h * p.h;
+      var bw = Math.min(vw, fit.w) / fit.w * p.w, bh = Math.min(vh, fit.h) / fit.h * p.h;
+      if (p.px < bx || p.px > bx + bw || p.py < by || p.py > by + bh) {
+        var cx = fit.x + (p.px / p.w) * fit.w - vw / 2;
+        var cy = fit.y + (p.py / p.h) * fit.h - vh / 2;
+        x0 = Math.max(fit.x, Math.min(fit.x + Math.max(0, fit.w - vw), cx));
+        y0 = Math.max(fit.y, Math.min(fit.y + Math.max(0, fit.h - vh), cy));
+        pz.ox = -(x0 + ex / s);
+        pz.oy = -(y0 + ey / s);
+        apply();
+      }
+      mmDrag = { px: p.px, py: p.py };
+      mm._x0 = x0; mm._y0 = y0;
+    });
+    document.addEventListener('mousemove', function(e) {
+      if (!mmDrag) return;
+      mmApplyView(mmPoint(e), mm._x0, mm._y0);
+    });
+    document.addEventListener('mouseup', function() { mmDrag = null; });
+    var rzT = null;
+    if (window.ResizeObserver) {
+      var onPanelResize = function() {
+        updateRegion();
+        if (rzT) clearTimeout(rzT);
+        rzT = setTimeout(function() { refitIfFit(); clampPan(); apply(); }, 120);
+      };
+      panels.forEach(function(p) { new ResizeObserver(onPanelResize).observe(p.el); });
+    }
+    if (window.MutationObserver && swp) {
+      new MutationObserver(function() { updateRegion(); })
+        .observe(swp.canvas, { attributes: true, attributeFilter: ['width', 'height', 'style'] });
+    }
+  }
+
   var fitBtn = document.getElementById('pz-fit');
   var zin = document.getElementById('pz-zin');
   var zout = document.getElementById('pz-zout');
   if (fitBtn) fitBtn.addEventListener('click', reset);
   if (zin) zin.addEventListener('click', function() { zoomAt(1.25, pa.clientWidth / 2, pa.clientHeight / 2); });
   if (zout) zout.addEventListener('click', function() { zoomAt(1 / 1.25, pa.clientWidth / 2, pa.clientHeight / 2); });
-})();
-
-// ── Auto-load workspace + model on page load (ui-dark v5) ──
-(function() {
-  // 页面加载后自动打开 workspace + 加载 Anna 模型（skill/CLI 已预配置）
-  var WS = 'F:\\DFL-PyTorch\\workspace';
-  var MODEL = 'Anna';
-  fetch('/api/project/open', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ path: WS })
-  }).then(function(r) { return r.json(); }).then(function(d) {
-    console.log('[AutoLoad] workspace opened, aligned:', d.aligned_count);
-    return fetch('/api/models/load', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ name: MODEL })
-    });
-  }).then(function(r) { return r.json(); }).then(function(d) {
-    console.log('[AutoLoad] model loaded:', d.name, d.status);
-    // 触发 UI 刷新（加载左侧列表）
-    if (window.App && window.App.refreshModels) window.App.refreshModels();
-  }).catch(function(e) { console.error('[AutoLoad]', e); });
+  window.MSZoomApply = function() { refitIfFit(); clampPan(); apply(); };
 })();
 
 // ── Timeline track collapse toggle (ui-dark v5) ──

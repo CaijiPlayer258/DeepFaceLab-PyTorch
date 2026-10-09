@@ -20,9 +20,16 @@
       <span class="title-bar__version">v1.0</span>
       <input id="workspace-path" class="title-bar__path" type="text" value="workspace" placeholder="e.g. C:\workspace\project" spellcheck="false">
       <button id="btn-change-workspace" class="title-bar__change-btn">Change</button>
-        Change</button>
     </div>
     <div class="title-bar__right">
+      <div class="top-switch" id="sw-cols" title="切换 双栏 / 三栏">
+        <span class="top-switch__label">双栏</span>
+        <span class="top-switch__track"><span class="top-switch__knob"></span></span>
+      </div>
+      <div class="top-switch" id="sw-orient" title="切换 左右 / 上下排列">
+        <span class="top-switch__label">左右</span>
+        <span class="top-switch__track"><span class="top-switch__knob"></span></span>
+      </div>
       <span id="status-indicator" class="title-bar__status">● idle</span>
     </div>
   </header>
@@ -31,6 +38,7 @@
   <div id="main-content">
     <!-- Left Sidebar -->
     <aside id="sidebar">
+      <button id="sidebar-toggle" class="sidebar-toggle-btn" title="隐藏左侧文件栏">✕</button>
       <section id="model-section">
         <div class="section-header">Models</div>
         <div id="model-list"></div>
@@ -43,6 +51,7 @@
 
     <!-- Center: Preview Panels -->
     <div id="preview-area">
+      <button id="sidebar-show" class="sidebar-toggle-btn" title="显示左侧文件栏">☰</button>
       <div id="preview-original" class="preview-panel">      <span class="preview-panel__label">Original</span>
         <video id="video-original" class="preview-video" muted playsinline preload="auto" style="display:none;"></video>
         <canvas id="canvas-original"></canvas>
@@ -59,22 +68,23 @@
       <div id="preview-swapped" class="preview-panel">
         <span class="preview-panel__label">Swapped <button id="btn-download-swapped" class="preview-download-btn" title="Download full resolution">⬇</button></span>
         <canvas id="canvas-swapped"></canvas>
+        <div id="pz-minimap" title="放大区小地图：拖动小框或点击任意位置移动视野">
+        <canvas id="pz-mini-thumb"></canvas>
+        <div id="pz-mini-box"></div>
+      </div>
+        <div id="pz-hud">
+          <button id="pz-fit" title="适配窗口">FIT</button>
+          <span id="pz-pct">100%</span>
+          <button id="pz-zin" title="放大">+</button>
+          <button id="pz-zout" title="缩小">−</button>
+        </div>
         <div class="debug-grid" id="debug-grid" style="display:none;flex-wrap:wrap;gap:6px;justify-content:center;align-items:center;width:100%;height:100%;overflow-y:auto;padding:6px;"></div>
         
       <div class="panel-loading" id="loading-swapped" style="display:none;"><div class="panel-spinner"></div><div class="panel-loading-label">Loading...</div></div>
       </div>
-    <div id="layout-controls">
-        <button class="layout-ctl-btn" id="btn-layout-h" title="左右排列">⬌</button>
-        <button class="layout-ctl-btn" id="btn-layout-v" title="上下排列">⬍</button>
-      </div></div>
+    </div>
 
     <!-- Right Panel -->
-    <div id="pz-hud">
-        <button id="pz-fit" title="适配窗口">FIT</button>
-        <span id="pz-pct">100%</span>
-        <button id="pz-zin">+</button>
-        <button id="pz-zout">−</button>
-      </div>
     <aside id="params-panel">
       <!-- Detection Settings -->
       <section class="params-section">
@@ -152,10 +162,10 @@
       </div>
       <div class="frame-jumper__right">
         <span id="timecode">00:00.00</span>
-        <button id="zoom-out" class="icon-btn">
+        <button id="zoom-out" class="icon-btn" title="缩小时间轴">
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#6b6c70" stroke-width="1"/><line x1="8" y1="8" x2="10" y2="10" stroke="#6b6c70" stroke-width="1" stroke-linecap="round"/><line x1="3.5" y1="5" x2="6.5" y2="5" stroke="#6b6c70" stroke-width="0.8"/></svg>
         </button>
-        <button id="zoom-in" class="icon-btn">
+        <button id="zoom-in" class="icon-btn" title="放大时间轴">
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#6b6c70" stroke-width="1"/><line x1="8" y1="8" x2="10" y2="10" stroke="#6b6c70" stroke-width="1" stroke-linecap="round"/><line x1="3.5" y1="5" x2="6.5" y2="5" stroke="#6b6c70" stroke-width="0.8"/><line x1="5" y1="3.5" x2="5" y2="6.5" stroke="#6b6c70" stroke-width="0.8"/></svg>
         </button>
       </div>

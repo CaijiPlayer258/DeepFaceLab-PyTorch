@@ -87,6 +87,11 @@
       return (await fetch(BASE + '/export/cancel/' + id, { method: 'POST' })).json();
     },
 
+    // 强制复位导出状态（清掉卡死的 running 标记 + 杀掉残留 ffmpeg）
+    async resetExport() {
+      return (await fetch(BASE + '/export/reset', { method: 'POST' })).json();
+    },
+
     async getModels() {
       return (await fetch(BASE + '/models')).json();
     },
@@ -97,6 +102,12 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name }),
       })).json();
+    },
+
+    async getStatus(lists) {
+      var url = BASE + '/status';
+      if (lists) url += '?lists=1';
+      return (await fetch(url)).json();
     },
 
     async getCacheStatus() {

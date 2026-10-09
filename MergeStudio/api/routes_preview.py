@@ -1,4 +1,7 @@
 import math
+import os
+import asyncio
+import functools
 import cv2
 import numpy as np
 import onnxruntime
@@ -22,6 +25,9 @@ _current_model_path = None
 _current_predictor = None
 _predictors = {}  # model_name -> predictor function (for multi-model)
 _predictor_sizes = {}  # model_name -> input_size
+_current_fps = 0.0
+# ── Auto-load status (shared with GET /api/status & frontend page-sync) ──
+AUTOLOAD_STATE = {"configured": False, "stage": "idle", "detail": ""}
 _cache_dir = None
 
 # ===== Frame cache for 4K playback =====
@@ -29,6 +35,88 @@ _cache_dir = None
 _frame_cache = OrderedDict()
 FRAME_CACHE_MAX = 300
 FRAME_CACHE_QUALITY = 85
+# Recently decoded full-res frames (np arrays): lets /preview/analyze reuse the
+# frame /preview/frame just decoded instead of cold-seeking the 4K source again.
+_recent_frames = OrderedDict()
+RECENT_FRAMES_MAX = 3
+FRAME_DISK_CACHE_MAX = 3000  # bounded disk frame cache (~1 GB at 4K JPEG sizes)
+# Epoch guard (2026-09-30): bumped on every set_current_video. Background writers
+# (predecode worker, tier-3 read-ahead, _read_frame) capture it before caching and
+# stop when it moves, so a stale worker for video A can't write A's frames into
+# video B's freshly-cleared cache. Residual window is one in-flight write (µs-level),
+# acceptable for a preview cache.
+_cache_epoch = 0
+
+
+def _remember_frame(idx, frame):
+    if frame is None:
+        return
+    _recent_frames[idx] = frame
+    while len(_recent_frames) > RECENT_FRAMES_MAX:
+        _recent_frames.popitem(last=False)
+
+
+def _recall_frame(idx):
+    return _recent_frames.get(idx)
+
+
+def _same_file(a, b):
+    if not a or not b:
+        return False
+    try:
+        return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+    except Exception:
+        return False
+
+
+# AV1/10-bit sources software-decode at ~6 fps; the sibling H.264 proxy made by
+# tools/make_proxy.ps1 (same resolution, 1:1 frame indexing) decodes ~7x faster,
+# so interactive previews read frames from it whenever it is frame-compatible.
+_preview_source = None
+_preview_source_video = None
+
+
+def _resolve_preview_source(video_path):
+    """File that interactive previews should read frames from (cached per video)."""
+    global _preview_source, _preview_source_video
+    if not video_path:
+        return None
+    if _preview_source_video == video_path:
+        return _preview_source
+    resolved = video_path
+    try:
+        stem, _ext = os.path.splitext(video_path)
+        cand = stem + '_proxy.mp4'
+        if os.path.exists(cand) and not _same_file(cand, video_path):
+            cap_o = cv2.VideoCapture(video_path)
+            cap_p = cv2.VideoCapture(cand)
+            ok = False
+            try:
+                if cap_o.isOpened() and cap_p.isOpened():
+                    w1, h1 = cap_o.get(cv2.CAP_PROP_FRAME_WIDTH), cap_o.get(cv2.CAP_PROP_FRAME_HEIGHT)
+                    w2, h2 = cap_p.get(cv2.CAP_PROP_FRAME_WIDTH), cap_p.get(cv2.CAP_PROP_FRAME_HEIGHT)
+                    n1, n2 = cap_o.get(cv2.CAP_PROP_FRAME_COUNT), cap_p.get(cv2.CAP_PROP_FRAME_COUNT)
+                    ok = (abs(w1 - w2) < 2 and abs(h1 - h2) < 2 and
+                          (n1 <= 0 or n2 <= 0 or abs(n1 - n2) <= 2))
+                    if ok:
+                        resolved = cand
+            finally:
+                cap_o.release()
+                cap_p.release()
+    except Exception as _e:
+        print('[MergeStudio] proxy probe failed: %s' % _e, flush=True)
+    _preview_source, _preview_source_video = resolved, video_path
+    print('[MergeStudio] preview source: %s' % os.path.basename(resolved), flush=True)
+    return _preview_source
+
+
+def get_preview_source_info():
+    """Descriptor for /api/status (probe is cached per video, so it stays cheap)."""
+    if _current_video is None:
+        return {"kind": "none", "name": None}
+    src = _resolve_preview_source(_current_video) or _current_video
+    return {"kind": "original" if _same_file(src, _current_video) else "proxy",
+            "name": os.path.basename(src)}
 _total_frames_for_cache = 0
 _cache_dir_frames = None
 _predecode_task = None  # track if predecode is already running
@@ -72,18 +160,23 @@ def _predecode_worker(start: int, count: int = 80):
         if end <= start:
             return
 
+        epoch = _cache_epoch
         disk_dir = _get_frames_cache_dir()
-        cap = cv2.VideoCapture(_current_video)
+        cap = cv2.VideoCapture(_resolve_preview_source(_current_video) or _current_video)
         if not cap.isOpened():
             return
 
         # Seek to start
         cap.set(cv2.CAP_PROP_POS_FRAMES, start)
         for i in range(start, end):
+            if _cache_epoch != epoch:
+                break  # video switched under us: stop instead of caching stale frames
             # Check if already cached on disk (skip if so)
             disk_path = disk_dir / f"{i}.jpg"
             if disk_path.exists():
-                # Skip to next frame without decoding
+                # Advance the stream: a plain `continue` leaves the position behind
+                # and every following frame would be written under the wrong index.
+                cap.grab()
                 continue
 
             ret, frame = cap.read()
@@ -105,6 +198,18 @@ def _predecode_worker(start: int, count: int = 80):
                 _frame_cache.popitem(last=False)
 
         cap.release()
+        if _cache_epoch != epoch:
+            return  # stale worker: leave the new video's freshly-cleared cache alone
+        try:
+            files = sorted(disk_dir.glob("*.jpg"), key=lambda p: p.stat().st_mtime)
+            excess = len(files) - FRAME_DISK_CACHE_MAX
+            for p in files[:max(0, excess)]:
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+        except Exception:
+            pass
     finally:
         _predecode_task = None
 
@@ -122,12 +227,18 @@ def _trigger_predecode(start: int):
 
 def _get_cached_frame(idx: int) -> bytes:
     """Three-tier frame access: memory LRU → disk cache → live decode + predecode."""
+    epoch0 = _cache_epoch
     # Tier 1: memory LRU
     if idx in _frame_cache:
         _frame_cache.move_to_end(idx)
         # Trigger background predecode from this position (non-blocking)
         _trigger_predecode(idx + 1)
-        return _frame_cache[idx]
+        _jb = _frame_cache[idx]
+        try:
+            _remember_frame(idx, cv2.imdecode(np.frombuffer(_jb, np.uint8), cv2.IMREAD_COLOR))
+        except Exception:
+            pass
+        return _jb
 
     if _current_video is None:
         raise HTTPException(400, "No video loaded")
@@ -139,11 +250,15 @@ def _get_cached_frame(idx: int) -> bytes:
         _frame_cache[idx] = jpeg_bytes
         while len(_frame_cache) > FRAME_CACHE_MAX:
             _frame_cache.popitem(last=False)
+        try:
+            _remember_frame(idx, cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR))
+        except Exception:
+            pass
         _trigger_predecode(idx + 1)
         return jpeg_bytes
 
     # Tier 3: live decode
-    cap = cv2.VideoCapture(_current_video)
+    cap = cv2.VideoCapture(_resolve_preview_source(_current_video) or _current_video)
     if not cap.isOpened():
         raise HTTPException(500, "Cannot open video")
 
@@ -156,6 +271,12 @@ def _get_cached_frame(idx: int) -> bytes:
 
     _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, FRAME_CACHE_QUALITY])
     jpeg_bytes = jpeg.tobytes()
+
+    if _cache_epoch != epoch0:
+        # video switched mid-decode: serve this frame but don't cache stale data
+        cap.release()
+        return jpeg_bytes
+    _remember_frame(idx, frame)
 
     # Cache to memory
     _frame_cache[idx] = jpeg_bytes
@@ -171,11 +292,14 @@ def _get_cached_frame(idx: int) -> bytes:
     # Keep cap open for sequential predecode of next 30 frames
     try:
         for n in range(1, 31):
+            if _cache_epoch != epoch0:
+                break  # video switched: stop read-ahead
             nidx = idx + n
             if nidx >= _total_frames_for_cache:
                 break
             ndisk = _disk_cache_path(nidx)
             if ndisk.exists() or nidx in _frame_cache:
+                cap.grab()  # advance without a full decode, else later frames misalign
                 continue
             ret_n, frame_n = cap.read()
             if not ret_n:
@@ -269,8 +393,11 @@ def _resolve_video_path(path_param: str = None) -> str:
     return _current_video
 
 
-def _read_frame(video_path: str, idx: int, quality: int = 85):
+def _read_frame(video_path: str, idx: int, quality: int = 85, use_proxy: bool = True):
     """Open video, read frame, encode JPEG."""
+    epoch0 = _cache_epoch
+    if use_proxy and _same_file(video_path, _current_video):
+        video_path = _resolve_preview_source(_current_video) or video_path
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise HTTPException(500, "Cannot open video: " + video_path)
@@ -279,38 +406,48 @@ def _read_frame(video_path: str, idx: int, quality: int = 85):
     cap.release()
     if not ret:
         raise HTTPException(404, "Frame " + str(idx) + " not found")
+    if _cache_epoch == epoch0:
+        _remember_frame(idx, frame)  # don't remember frames from a superseded decode
     _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
     return jpeg.tobytes()
 
 
 @router.get("/preview/frame/{idx}")
 async def get_frame(idx: int, q: int = Query(85, alias="q", ge=10, le=100),
-                    path: str = Query(None, alias="path")):
+                    path: str = Query(None, alias="path"),
+                    src: str = Query(None, alias="src")):
     video_path = _resolve_video_path(path)
+    loop = asyncio.get_event_loop()
 
-    # Quick path: cached at default quality (85) — only for _current_video path
-    if q >= FRAME_CACHE_QUALITY - 5 and not path:
+    # Three-tier cache also when the caller passes the *current* video's path
+    # (the UI always does) — otherwise every seek is a cold 4K decode.
+    _is_current = True
+    if path:
         try:
-            return Response(content=_get_cached_frame(idx), media_type="image/jpeg",
+            _is_current = (os.path.normcase(os.path.abspath(video_path)) ==
+                           os.path.normcase(os.path.abspath(_current_video or "")))
+        except Exception:
+            _is_current = False
+
+    if src == 'original':
+        # escape hatch: read the true source frame, bypassing proxy + cache
+        jpeg_bytes = await loop.run_in_executor(
+            None, functools.partial(_read_frame, video_path, idx, q, False))
+        return Response(content=jpeg_bytes, media_type="image/jpeg",
+                        headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+    if q >= FRAME_CACHE_QUALITY - 5 and _is_current and _current_video is not None:
+        try:
+            # 4K decode is heavy sync work: keep it off the event loop
+            jpeg_bytes = await loop.run_in_executor(None, _get_cached_frame, idx)
+            return Response(content=jpeg_bytes, media_type="image/jpeg",
                             headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
         except HTTPException:
             raise
 
-    jpeg_bytes = _read_frame(video_path, idx, q)
+    jpeg_bytes = await loop.run_in_executor(
+        None, functools.partial(_read_frame, video_path, idx, q))
     return Response(content=jpeg_bytes, media_type="image/jpeg",
-                    headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
-    if not cap.isOpened():
-        raise HTTPException(500, "Cannot open video")
-
-    cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-    ret, frame = cap.read()
-    cap.release()
-
-    if not ret:
-        raise HTTPException(404, "Frame " + str(idx) + " not found")
-
-    _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, q])
-    return Response(content=jpeg.tobytes(), media_type="image/jpeg",
                     headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
@@ -332,13 +469,21 @@ async def analyze_frame(req: AnalyzeRequest):
     if _current_video is None:
         raise HTTPException(400, "No video loaded")
 
-    cap = cv2.VideoCapture(_current_video)
-    cap.set(cv2.CAP_PROP_POS_FRAMES, req.frame_idx)
-    ret, frame = cap.read()
-    cap.release()
+    loop = asyncio.get_event_loop()
 
-    if not ret:
-        raise HTTPException(404, "Frame " + str(req.frame_idx) + " not found")
+    # Reuse the frame /preview/frame just decoded (saves a full 4K cold seek)
+    frame = _recall_frame(req.frame_idx)
+    if frame is None:
+        def _read_current():
+            _cap = cv2.VideoCapture(_resolve_preview_source(_current_video) or _current_video)
+            _cap.set(cv2.CAP_PROP_POS_FRAMES, req.frame_idx)
+            _ret, _f = _cap.read()
+            _cap.release()
+            return _f if _ret else None
+        frame = await loop.run_in_executor(None, _read_current)
+        if frame is None:
+            raise HTTPException(404, "Frame " + str(req.frame_idx) + " not found")
+        _remember_frame(req.frame_idx, frame)
 
     cfg = _config_from_dict(req.config)
     cache_dir = _get_cache_dir()
@@ -420,9 +565,10 @@ async def analyze_frame(req: AnalyzeRequest):
                         except Exception as _ae:
                             print(f"[Preview] angle parse error: {_ae}", flush=True)
                         break
-            face_list = detect_and_align(_cached_detector, _cached_landmarker, det_frame,
-                                         cfg.face_type, margin=face_margin,
-                                         detection_angles=_da)
+            face_list = await loop.run_in_executor(
+                None, functools.partial(detect_and_align, _cached_detector, _cached_landmarker,
+                                        det_frame, cfg.face_type, margin=face_margin,
+                                        detection_angles=_da))
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -539,7 +685,6 @@ async def analyze_frame(req: AnalyzeRequest):
         stale_swap.unlink()
 
     # Run merge in thread executor so event loop stays free for detection poll
-    import asyncio, functools
 
     merge_is_debug = (req.config or {}).get('mode') == 'debug' or (req.config or {}).get('show_debug')
 
@@ -658,7 +803,7 @@ async def remerge(req: AnalyzeRequest):
     from MergeStudio.core import merger as _merger_mod
     input_size = getattr(_merger_mod, '_model_input_size', 256)
 
-    cap = cv2.VideoCapture(_current_video)
+    cap = cv2.VideoCapture(_resolve_preview_source(_current_video) or _current_video)
     if not cap.isOpened():
         raise HTTPException(500, "Cannot open video")
     cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
@@ -827,7 +972,7 @@ async def recomposite(req: ReCompositeRequest):
     if _current_predictor is None:
         raise HTTPException(400, "No model loaded")
 
-    cap = cv2.VideoCapture(_current_video)
+    cap = cv2.VideoCapture(_resolve_preview_source(_current_video) or _current_video)
     cap.set(cv2.CAP_PROP_POS_FRAMES, req.frame_idx)
     ret, frame = cap.read()
     cap.release()
@@ -886,17 +1031,32 @@ async def select_video(req: SelectVideoRequest):
         raise HTTPException(400, "Cannot open video: " + path)
     cap = cv2.VideoCapture(path)
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    set_current_video(path, total)
     fps = cap.get(cv2.CAP_PROP_FPS)
+    set_current_video(path, total, fps)
     cap.release()
     dfl_info = _check_dfl(path)
     return {"status": "ok", "total_frames": total, "fps": fps, "is_dfl": dfl_info["is_dfl"], "aligned_count": dfl_info["aligned_count"]}
 
 
-def set_current_video(video_path: str, total_frames: int = 0):
-    global _current_video, _frame_cache, _prediction_cache, _last_detection
+def set_current_video(video_path: str, total_frames: int = 0, fps: float = 0.0):
+    global _current_video, _frame_cache, _prediction_cache, _last_detection, _current_fps
+    global _preview_source, _preview_source_video, _cache_epoch
+    _cache_epoch += 1  # invalidate in-flight predecode/read-ahead for the previous video
+    if not _same_file(video_path, _current_video):
+        # frames cached from the previous source must not be reused
+        try:
+            for _f in _get_frames_cache_dir().glob("*.jpg"):
+                try:
+                    _f.unlink()
+                except Exception:
+                    pass
+        except Exception:
+            pass
     _current_video = video_path
+    _current_fps = float(fps or 0.0)
     _frame_cache.clear()
+    _recent_frames.clear()
+    _preview_source, _preview_source_video = None, None  # re-resolve (sibling proxy?)
     _prediction_cache.clear()
     _last_detection["frame_idx"] = -1  # invalidate detection cache
     if total_frames > 0:

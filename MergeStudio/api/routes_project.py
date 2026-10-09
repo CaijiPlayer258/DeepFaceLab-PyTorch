@@ -93,7 +93,7 @@ async def open_project(req: OpenProjectRequest):
 
     # Set current video for preview
     if video_path:
-        set_current_video(video_path, total_frames)
+        set_current_video(video_path, total_frames, fps)
 
     # Save workspace path for model loading
     global _current_workspace_path
@@ -112,6 +112,64 @@ async def open_project(req: OpenProjectRequest):
         aligned_count=aligned_count,
         video_dfl_map=video_dfl_map,
     )
+
+
+@router.get("/status")
+async def get_status(lists: int = 0):
+    """Lightweight status for page auto-sync & external verification.
+    Polled by the frontend -- must stay cheap (no aligned-glob, no _check_dfl)."""
+    from MergeStudio.api.routes_preview import (
+        _current_video, _current_model_path, _current_predictor,
+        _current_fps, _total_frames_for_cache, AUTOLOAD_STATE,
+        get_preview_source_info,
+    )
+    resp = {
+        "workspace": _current_workspace_path,
+        "autoload": dict(AUTOLOAD_STATE),
+        "preview_source": get_preview_source_info(),
+        "video": None,
+        "model": None,
+    }
+    if _current_video:
+        _p = Path(_current_video)
+        resp["video"] = {
+            "path": _current_video,
+            "name": _p.name,
+            "total_frames": _total_frames_for_cache,
+            "fps": _current_fps,
+            # cheap DFL hint: same-name aligned dir exists (no file counting)
+            "has_aligned_dir": (_p.parent / _p.stem / "aligned").is_dir(),
+        }
+    if _current_model_path:
+        resp["model"] = {
+            "path": _current_model_path,
+            "name": Path(_current_model_path).stem,
+            "file": Path(_current_model_path).name,
+            "loaded": _current_predictor is not None,
+        }
+    if lists and _current_workspace_path:
+        _ws = Path(_current_workspace_path)
+        models = []
+        model_dir = _ws / "model"
+        if model_dir.exists():
+            _groups = {}
+            for f in model_dir.glob("*"):
+                if f.suffix.lower() not in ('.dfm', '.pth', '.npy', '.dat'):
+                    continue
+                prefix = f.stem.split('_')[0] if '_' in f.stem else f.stem
+                if prefix not in _groups:
+                    _groups[prefix] = {'has_dfm': False, 'files': []}
+                _groups[prefix]['files'].append(f.name)
+                if f.suffix.lower() == '.dfm':
+                    _groups[prefix]['has_dfm'] = True
+            for prefix, info in _groups.items():
+                models.append({"name": prefix, "files": info['files'],
+                               "format": "dfm" if info['has_dfm'] else "dfl", "size_mb": 0})
+        videos = [f.name for ext in ('.mp4', '.avi', '.mov', '.mkv')
+                  for f in _ws.glob('*' + ext)]
+        resp["models"] = models
+        resp["videos"] = videos
+    return resp
 
 
 @router.get("/models")
