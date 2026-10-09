@@ -915,3 +915,63 @@
     applyLayout(next);
   });
 })();
+
+
+// ── Draggable preview layout (ui-dark v2) ──
+(function() {
+  var pa = document.getElementById('preview-area');
+  if (!pa) return;
+  var splitter = document.getElementById('preview-splitter');
+  var detP = document.getElementById('preview-detection');
+  var swpP = document.getElementById('preview-swapped');
+  var btnH = document.getElementById('btn-layout-h');
+  var btnV = document.getElementById('btn-layout-v');
+  if (!splitter || !detP || !swpP) return;
+
+  var isDragging = false, startPos = 0, startPct = 50;
+  var mode = localStorage.getItem('ms_layout_mode') || 'h';
+  var ratio = parseFloat(localStorage.getItem('ms_layout_ratio')) || 50;
+
+  function applyLayout() {
+    pa.classList.toggle('layout-vertical', mode === 'v');
+    detP.classList.add('drag-set');
+    swpP.classList.add('drag-set');
+    if (mode === 'h') {
+      detP.style.width = ratio + '%'; detP.style.height = '';
+      swpP.style.width = (100 - ratio) + '%'; swpP.style.height = '';
+    } else {
+      detP.style.height = ratio + '%'; detP.style.width = '';
+      swpP.style.height = (100 - ratio) + '%'; swpP.style.width = '';
+    }
+    btnH.classList.toggle('active', mode === 'h');
+    btnV.classList.toggle('active', mode === 'v');
+    localStorage.setItem('ms_layout_mode', mode);
+    localStorage.setItem('ms_layout_ratio', ratio);
+  }
+
+  splitter.addEventListener('mousedown', function(e) {
+    e.preventDefault(); isDragging = true; startPos = mode === 'h' ? e.clientX : e.clientY;
+    startPct = ratio; splitter.classList.add('dragging');
+    document.body.style.cursor = mode === 'h' ? 'col-resize' : 'row-resize';
+    document.body.style.userSelect = 'none';
+  });
+  document.addEventListener('mousemove', function(e) {
+    if (!isDragging) return;
+    var rect = pa.getBoundingClientRect();
+    var pct;
+    if (mode === 'h') pct = ((e.clientX - rect.left) / rect.width) * 100;
+    else pct = ((e.clientY - rect.top) / rect.height) * 100;
+    ratio = Math.max(15, Math.min(85, pct));
+    applyLayout();
+  });
+  document.addEventListener('mouseup', function() {
+    if (!isDragging) return;
+    isDragging = false; splitter.classList.remove('dragging');
+    document.body.style.cursor = ''; document.body.style.userSelect = '';
+    localStorage.setItem('ms_layout_ratio', ratio);
+  });
+
+  if (btnH) btnH.addEventListener('click', function() { mode = 'h'; applyLayout(); });
+  if (btnV) btnV.addEventListener('click', function() { mode = 'v'; applyLayout(); });
+  applyLayout();
+})();

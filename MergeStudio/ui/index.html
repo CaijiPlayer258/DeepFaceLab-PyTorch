@@ -55,13 +55,17 @@
         <span class="preview-panel__info" id="face-count"></span>
         <div class="panel-loading" id="loading-detection" style="display:none;"><div class="panel-spinner"></div><div class="panel-loading-label">Loading...</div></div>
       </div>
+      <div id="preview-splitter"></div>
       <div id="preview-swapped" class="preview-panel">
         <span class="preview-panel__label">Swapped <button id="btn-download-swapped" class="preview-download-btn" title="Download full resolution">⬇</button></span>
         <canvas id="canvas-swapped"></canvas>
         <div class="debug-grid" id="debug-grid" style="display:none;flex-wrap:wrap;gap:6px;justify-content:center;align-items:center;width:100%;height:100%;overflow-y:auto;padding:6px;"></div>
         <div class="panel-loading" id="loading-swapped" style="display:none;"><div class="panel-spinner"></div><div class="panel-loading-label">Loading...</div></div>
       </div>
-    </div>
+    <div id="layout-controls">
+        <button class="layout-ctl-btn" id="btn-layout-h" title="左右排列">⬌</button>
+        <button class="layout-ctl-btn" id="btn-layout-v" title="上下排列">⬍</button>
+      </div></div>
 
     <!-- Right Panel -->
     <aside id="params-panel">

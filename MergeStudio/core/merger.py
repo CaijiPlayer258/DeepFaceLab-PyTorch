@@ -74,8 +74,8 @@ def MergeMaskedFace(frame_img, face_landmarks, cfg, predictor_func=None,
 
         input_size = _model_input_size
         output_size = input_size
-        if cfg.super_resolution_power != 0:
-            output_size *= 4
+        if cfg.super_resolution_power != 0 and face_enhancer_func is not None:
+            output_size *= 4  # 仅在 face_enhancer 可用时才放大（否则预测脸与蒙版尺寸不匹配导致黑脸）
 
         # Normalize frame to 0-1
         img_bgr = frame_img.astype(np.float32) / 255.0

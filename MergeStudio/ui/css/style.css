@@ -632,8 +632,40 @@ select.form-input {
 #preview-area.layout-3col-swap-big #preview-original { flex: 0.6; }
 #preview-area.layout-3col-swap-big #preview-detection { flex: 0.6; }
 #preview-area.layout-3col-swap-big #preview-swapped { flex: 1.8; }
-.layout-toggle-btn {
-  background: var(--bg-elevated); border: 1px solid var(--border); color: var(--text-secondary);
-  font-size: 9px; padding: 3px 8px; border-radius: 3px; cursor: pointer; margin-left: 6px;
+
+
+
+/* ===== Draggable preview layout (ui-dark v2) ===== */
+#preview-area { position: relative; }
+#preview-area.layout-vertical { flex-direction: column; }
+
+#preview-area .preview-panel.drag-active { pointer-events: none; user-select: none; }
+
+#preview-splitter {
+  flex: none; width: 8px; cursor: col-resize; background: var(--border);
+  display: flex; align-items: center; justify-content: center; position: relative; z-index: 5;
+  transition: background 0.15s;
 }
-.layout-toggle-btn:hover { border-color: var(--accent); color: var(--accent); }
+#preview-splitter:hover, #preview-splitter.dragging { background: var(--accent); }
+#preview-splitter::after {
+  content: '⋯'; font-size: 10px; color: var(--text-muted); letter-spacing: -2px;
+}
+#preview-area.layout-vertical #preview-splitter {
+  width: auto; height: 8px; cursor: row-resize;
+}
+#preview-area.layout-vertical #preview-splitter::after { content: '⋮'; letter-spacing: 0; }
+
+.preview-panel.drag-set { flex: none !important; }
+#preview-area.layout-vertical .preview-panel.drag-set { width: 100% !important; }
+
+/* 布局控制条 */
+#layout-controls {
+  position: absolute; bottom: 6px; right: 8px; z-index: 100;
+  display: flex; gap: 4px; align-items: center;
+}
+.layout-ctl-btn {
+  background: rgba(0,0,0,0.5); border: 1px solid var(--border); color: var(--text-secondary);
+  font-size: 9px; padding: 2px 6px; border-radius: 3px; cursor: pointer;
+}
+.layout-ctl-btn:hover { border-color: var(--accent); color: var(--accent); }
+.layout-ctl-btn.active { border-color: var(--accent); color: var(--accent); }
