@@ -122,3 +122,12 @@ DFL_GPU_LAB/
 # Agent Tool 本地状态（含会话标题、本地路径，属隐私，禁止入库）
 .reasonix/
 reasonix.toml
+
+# 本地环境/临时（ui-dark 工作区追加）
+_anna_src/
+_pipcache/
+*.bak_autofix
+tools/*.exe
+ui/user/
+_tools_tmp/
+_unzip_log.txt

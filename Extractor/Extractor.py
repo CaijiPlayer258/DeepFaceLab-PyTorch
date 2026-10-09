@@ -788,6 +788,25 @@ def extract_landmarks(landmarker, image: np.ndarray, faces: List[Tuple[int, int,
                     landmarks_list.append(pts)
                 else:
                     landmarks_list.append(None)
+            elif isinstance(landmarker, InsightFace3D68):
+                # 1k3d68 returns (3309,) flat: last 68 rows of reshape(-1,3) are the true 3D landmarks
+                # (insightface model_zoo/landmark.py convention). Coords in [-1,1] -> +1 then *(size/2).
+                pred = landmarker.extract(face_img)
+                if pred is not None and getattr(pred, 'size', 0) >= 204:
+                    pred = np.asarray(pred).reshape(-1, 3)
+                    if pred.shape[0] > 68:
+                        pred = pred[-68:, :]
+                    pts = pred[:, 0:2].astype(np.float32).copy()
+                    pts[:, 0] += 1.0
+                    pts[:, 1] += 1.0
+                    H_f, W_f = face_img.shape[:2]
+                    pts[:, 0] = pts[:, 0] * (W_f / 2.0)
+                    pts[:, 1] = pts[:, 1] * (H_f / 2.0)
+                    pts[:, 0] += l_crop
+                    pts[:, 1] += t_crop
+                    landmarks_list.append(pts)
+                else:
+                    landmarks_list.append(None)
             else:
                 # Generic landmarker: assume extract() returns [(N,2)] list
                 lmks = landmarker.extract(face_img)
@@ -1074,6 +1093,7 @@ def visualize_extraction_stages(original_image: np.ndarray, face_data_list: List
         color_map = {0: (0, 255, 0), 90: (255, 0, 0), 180: (0, 0, 255), 270: (255, 255, 0)}
         color = color_map.get(angle, (255, 255, 255))
         
+        l, t, r, b = int(l), int(t), int(r), int(b)
         cv2.rectangle(vis_resized, (l, t), (r, b), color, 2)
         cv2.putText(vis_resized, f'{angle}°', (l, t-5), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
@@ -2884,6 +2904,7 @@ def main():
         if hasattr(args, 'quick_test') and args.quick_test:
             # 显式指定了 --quick-test 参数
             quick_test = True
+            skip_frames = getattr(args, 'skip_frames', 0)
         else:
             # UI调用或命令行未指定：默认禁用
             quick_test = False
