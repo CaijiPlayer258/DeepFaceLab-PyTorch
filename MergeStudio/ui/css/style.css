@@ -669,3 +669,22 @@ select.form-input {
 }
 .layout-ctl-btn:hover { border-color: var(--accent); color: var(--accent); }
 .layout-ctl-btn.active { border-color: var(--accent); color: var(--accent); }
+
+/* ===== Sidebar collapse (ui-dark v3) ===== */
+#main-content.sidebar-hidden > aside:first-of-type { display: none; }
+.sidebar-toggle-btn {
+  background: none; border: 1px solid var(--border); color: var(--text-secondary);
+  font-size: 10px; padding: 4px 10px; border-radius: 4px; cursor: pointer;
+}
+.sidebar-toggle-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ===== Preview zoom (ui-dark v3) ===== */
+#preview-swapped .zoom-canvas-wrap {
+  flex: 1; overflow: auto; display: flex; align-items: center; justify-content: center;
+  position: relative; width: 100%; min-height: 0;
+}
+#preview-swapped .zoom-canvas-wrap canvas {
+  transform-origin: center center; transition: transform 0.1s;
+}
+.zoom-btn { background: none; border: none; color: #c9cacd; font-size: 14px; cursor: pointer; padding: 0 4px; }
+.zoom-btn:hover { color: #7a9e9f; }

@@ -975,3 +975,58 @@
   if (btnV) btnV.addEventListener('click', function() { mode = 'v'; applyLayout(); });
   applyLayout();
 })();
+
+
+// ── Sidebar collapse (ui-dark v3) ──
+(function() {
+  var btn = document.getElementById('sidebar-toggle');
+  var mc = document.getElementById('main-content');
+  if (!btn || !mc) return;
+  var saved = localStorage.getItem('ms_sidebar') || 'shown';
+  function apply(v) {
+    mc.classList.toggle('sidebar-hidden', v === 'hidden');
+    localStorage.setItem('ms_sidebar', v);
+  }
+  apply(saved);
+  btn.addEventListener('click', function() {
+    var cur = localStorage.getItem('ms_sidebar') || 'shown';
+    apply(cur === 'shown' ? 'hidden' : 'shown');
+  });
+})();
+
+// ── Preview zoom (ui-dark v3) ──
+(function() {
+  var slider = document.getElementById('zoom-slider');
+  var label = document.getElementById('zoom-label');
+  var canvas = document.getElementById('canvas-swapped');
+  var zoomIn = document.getElementById('zoom-in');
+  var zoomOut = document.getElementById('zoom-out');
+  var zoomReset = document.getElementById('zoom-reset');
+  var controls = document.getElementById('zoom-controls');
+  if (!slider || !canvas) return;
+
+  var zoom = 100;
+  function applyZoom(z) {
+    zoom = Math.max(100, Math.min(500, z));
+    canvas.style.transform = 'scale(' + (zoom / 100) + ')';
+    canvas.style.transformOrigin = 'center center';
+    if (label) label.textContent = zoom + '%';
+    if (slider) slider.value = zoom;
+    localStorage.setItem('ms_zoom', zoom);
+  }
+  // 交换面板有图时显示缩放控制
+  var swpPanel = document.getElementById('preview-swapped');
+  if (swpPanel) {
+    var obs = new MutationObserver(function() {
+      var hasImg = canvas.width > 0;
+      controls.style.display = hasImg ? 'flex' : 'none';
+    });
+    obs.observe(canvas, { attributes: true, attributeFilter: ['width'] });
+  }
+
+  if (slider) slider.addEventListener('input', function() { applyZoom(parseInt(this.value)); });
+  if (zoomIn) zoomIn.addEventListener('click', function() { applyZoom(zoom + 25); });
+  if (zoomOut) zoomOut.addEventListener('click', function() { applyZoom(zoom - 25); });
+  if (zoomReset) zoomReset.addEventListener('click', function() { applyZoom(100); });
+  applyZoom(parseInt(localStorage.getItem('ms_zoom')) || 100);
+})();
