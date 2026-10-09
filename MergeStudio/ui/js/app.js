@@ -428,6 +428,7 @@
           img.onload = function () {
             if (gen !== self._frameGen) return;
             self.setPanelLoading('loading-detection', false);
+            if (window.MSFaceFocus) window.MSFaceFocus.setFrameSize([img.naturalWidth, img.naturalHeight]);
             Preview._drawImage(Preview.canvasDetection, img, []);
           };
           img.onerror = function () { setTimeout(pollDet, 50); };
@@ -443,7 +444,15 @@
             if (data.face_count === 0) {
               self.setPanelLoading('loading-detection', false);
               Preview.updateDetection(url, []);
+            } else {
+              // pollDet draws the image but never sets the badge — do it here,
+              // and tell the user which geometry source was used
+              var fc = document.getElementById('face-count');
+              if (fc) fc.textContent = data.face_count + ' faces' +
+                (data.detect_source === 'dfl' ? ' · DFL' : '');
             }
+            // 聚焦人脸：按本帧的人脸数据自动放大居中
+            if (window.MSFaceFocus) window.MSFaceFocus.setFaces(data.faces || []);
             var t = Date.now();
             if (data.debug_urls && data.debug_urls.length > 0) {
               Preview.showDebugGrid(data.debug_urls);
@@ -887,10 +896,30 @@
       var si = document.getElementById('status-indicator');
       var attempts = 0, MAX = 150; // ~3min @1.2s（阶段推进会重置；超时不终止，降频续轮询）
       var lastStage = null;
+      var syncedOnce = false;                     // 已同步成功一次（用于检测后端重启）
+      var handoverTimer = null;
       function poll() {
-        if (self.state.projectPath) return; // 用户已手动接管
+        // 已同步过：低频监听后端健康。后端重启（video/model 变空）→ 自动重新同步，
+        // 旧标签页不再永久失联（2026-10-09 修复：重启服务后旧页面一直空白）。
+        if (self.state.projectPath && syncedOnce) {
+          if (handoverTimer) return;
+          handoverTimer = setTimeout(function () {
+            handoverTimer = null;
+            if (!self.state.projectPath) return;
+            API.getStatus().then(function (st) {
+              if (st && st.video && st.model && st.model.loaded &&
+                  st.video.path === self.state.videoPath) return;  // 同一视频仍在：后端正常
+              syncedOnce = false;                                  // 后端重启/换片：重新接管
+              self.state.projectPath = '';
+              if (si) si.textContent = '\u25cf 后端重启，重新同步…';
+              poll();
+            }).catch(function () {});           // 暂时性错误：下轮再测
+          }, 5000);
+          return;
+        }
+        if (self.state.projectPath) return; // 用户已手动接管（未同步过 = 真手动，不干扰）
         API.getStatus().then(function (st) {
-          if (self.state.projectPath) return;
+          if (self.state.projectPath && !syncedOnce) return;
           var al = st.autoload || {};
           var video = st.video, model = st.model;
           // 自动加载流程：隐藏左侧文件栏（顶栏「文件栏」按钮可再展开）
@@ -930,7 +959,9 @@
               Timeline.updateZoom(self.state.zoom, video.total_frames, 0);
               if (si) si.textContent = '\u2713 ' + model.name + ' + ' + video.name +
                 ' (' + Number(video.total_frames).toLocaleString() + '\u5e27)';
+              syncedOnce = true;
               self.seekFrame(0);
+              self._seekFirstVisibleFrame();       // 片头黑帧 → 跳到首个有画面的帧
               self._startCachePoll();
             }).catch(function () { setTimeout(poll, 1500); }); // 就绪瞬间的瞬时错误：重试，不让轮询静默死亡
             return;
@@ -955,6 +986,40 @@
         });
       }
       poll();
+    },
+
+    _seekFirstVisibleFrame: function () {
+      // 片头黑帧检测：autoload 定位到 frame 0 后，若开头是黑屏（JAV 片头带黑场很常见），
+      // 逐步探测后续帧直到找到第一个非黑帧再定位过去，避免"预览区一片黑"的观感。
+      var self = this;
+      var candidates = [30, 60, 120, 240, 480, 960];   // 探测点递增
+      var probe = 0;
+      function next() {
+        if (probe >= candidates.length) return;        // 全黑：停在 frame 0（真全黑片）
+        var idx = Math.min(candidates[probe], Math.max(0, self.state.totalFrames - 1));
+        probe++;
+        var img = new Image();
+        img.onload = function () {
+          try {
+            var c = document.createElement('canvas');
+            c.width = 32; c.height = 18;
+            var ctx = c.getContext('2d');
+            ctx.drawImage(img, 0, 0, 32, 18);
+            var d = ctx.getImageData(0, 0, 32, 18).data;
+            var sum = 0;
+            for (var i = 0; i < d.length; i += 4) sum += (d[i] + d[i+1] + d[i+2]) / 3;
+            var mean = sum / (d.length / 4);
+            if (mean > 20) {                           // 有画面：定位过去
+              self.seekFrame(idx);
+              return;
+            }
+            next();                                   // 还是黑：继续探测
+          } catch (e) { /* 异常：放弃，停在当前帧 */ }
+        };
+        img.onerror = function () { /* 读不到：放弃 */ };
+        img.src = '/api/preview/frame/' + idx + '?q=85&_=' + Date.now();
+      }
+      next();
     },
 
     _loadSavedConfig: function () {
@@ -1163,30 +1228,32 @@
   for (var k = 0; k < panels.length; k++) if (panels[k].el.id === 'preview-swapped') swp = panels[k];
   if (!swp) swp = panels[panels.length - 1];
 
-  // 小地图：整帧的缩略投影（画在换脸画布上）+ 标记当前视野的小框
-  var MM_MAX = 120;                     // 最长边 120px，不占画面
+  // 小地图 = 卡片（面板）的等比缩略：画面按它在卡片中的真实位置/大小画进去，
+  // 画面外的空白也照实呈现；蓝色小框 = 画面此刻在卡片中占据的区域（自由拖动它）
+  var MM_MAX = 120;                     // 缩略图最长边
   var mmThumbKey = null;
   function updateRegion() {
     if (!mm || !swp || !mmBox || !mmThumb) return;
     var fit = swp.canvas._fit;
-    if (pz.scale <= 1 || !swp.canvas.width || !fit || fit.w < 4 || fit.h < 4) {
+    if (!swp.canvas.width || !fit || fit.w < 4 || fit.h < 4) {
       mm.style.display = 'none';
       return;
     }
+    var rng = panRanges();
+    if (!rng.show) { mm.style.display = 'none'; return; }   // 卡片与画面完全重合时无需小地图
+
+    var pw = swp.el.clientWidth, ph = swp.el.clientHeight;
     var ex = swp.canvas.offsetLeft, ey = swp.canvas.offsetTop;
     var s = pz.scale;
-    var vw = swp.el.clientWidth / s, vh = swp.el.clientHeight / s;
-    var x0 = -pz.ox - ex / s, y0 = -pz.oy - ey / s;      // 可视窗口左上（元素本地 px）
 
-    // minimap 尺寸：保持画面宽高比，最长边 MM_MAX
-    var mmW, mmH;
-    if (fit.w >= fit.h) { mmW = MM_MAX; mmH = Math.max(28, Math.round(MM_MAX * fit.h / fit.w)); }
-    else { mmH = MM_MAX; mmW = Math.max(28, Math.round(MM_MAX * fit.w / fit.h)); }
+    // 卡片比例 = 面板比例（严格对应，绝不拉伸）
+    var sc = MM_MAX / Math.max(pw, ph, 1);
+    var mmW = Math.max(14, Math.round(pw * sc)), mmH = Math.max(14, Math.round(ph * sc));
     if (mm.style.display !== 'block') mm.style.display = 'block';
     mm.style.width = mmW + 'px';
     mm.style.height = mmH + 'px';
 
-    // 缩略图仅在帧变化/画布重建时重画（drawImage 忽略 CSS transform）
+    // 缩略图 = 整块画布（画面 + 空白），仅在帧变化/画布重建时重画
     var key = (swp.canvas._lastImg && swp.canvas._lastImg.src || '') + '|' + swp.canvas.width + 'x' + swp.canvas.height;
     if (key !== mmThumbKey) {
       mmThumbKey = key;
@@ -1194,25 +1261,28 @@
         mmThumb.width = mmW; mmThumb.height = mmH;
         var tctx = mmThumb.getContext('2d');
         tctx.clearRect(0, 0, mmW, mmH);
-        tctx.drawImage(swp.canvas, 0, 0, mmW, mmH);
+        tctx.drawImage(swp.canvas, 0, 0, swp.canvas.width, swp.canvas.height, 0, 0, mmW, mmH);
       } catch (e) { /* 跨域或未初始化时静默 */ }
     }
 
-    // 视野小框：图片坐标 → 小地图坐标（相对比例）
-    var bx = (Math.max(fit.x, x0) - fit.x) / fit.w;
-    var by = (Math.max(fit.y, y0) - fit.y) / fit.h;
-    var bw = Math.min(vw, fit.w) / fit.w;
-    var bh = Math.min(vh, fit.h) / fit.h;
-    mmBox.style.left = (bx * mmW) + 'px';
-    mmBox.style.top = (by * mmH) + 'px';
-    mmBox.style.width = Math.max(6, bw * mmW) + 'px';
-    mmBox.style.height = Math.max(6, bh * mmH) + 'px';
+    // 画面在卡片里的屏幕范围 ∩ 卡片 → 小框（超出卡片的部分=被裁掉，框就贴边）
+    var fsx = ex + s * (fit.x + pz.ox), fsy = ey + s * (fit.y + pz.oy);
+    var fsw = s * fit.w, fsh = s * fit.h;
+    var l = Math.max(0, fsx), t = Math.max(0, fsy);
+    var rr = Math.min(pw, fsx + fsw), bb = Math.min(ph, fsy + fsh);
+    if (rr - l < 2 || bb - t < 2) { mm.style.display = 'none'; return; }
+    mmBox.style.left = (l / pw * mmW) + 'px';
+    mmBox.style.top = (t / ph * mmH) + 'px';
+    mmBox.style.width = ((rr - l) / pw * mmW) + 'px';
+    mmBox.style.height = ((bb - t) / ph * mmH) + 'px';
   }
 
   function apply() {
     var t = 'scale(' + pz.scale + ') translate(' + pz.ox + 'px,' + pz.oy + 'px)';
     panels.forEach(function(p) {
-      p.canvas.style.transform = t;
+      // 聚焦人脸模式下每个面板有自己的变换（各自几何独立居中）；
+      // 其他情况共享手动缩放/平移状态。
+      p.canvas.style.transform = (faceMode && p._faceT) ? p._faceT : t;
       p.canvas.style.transformOrigin = '0 0';
     });
     pa.classList.toggle('pz-panning', isPanning && pz.scale > 1);
@@ -1224,6 +1294,7 @@
     var oldS = pz.scale;
     var newS = Math.max(1, Math.min(8, oldS * factor));
     if (newS === oldS) return;
+    clearFaceT();                          // 手动缩放接管，退出本帧的人脸聚焦构图
     var ratio = newS / oldS;
     pz.ox = cx - (cx - pz.ox) * ratio;
     pz.oy = cy - (cy - pz.oy) * ratio;
@@ -1236,39 +1307,59 @@
   // Auto-fit (re-drawing the canvases at the panel's current size) is allowed only while
   // the view is NOT zoomed in. Once zoomed the framed view is kept until the user hits FIT.
   function refitIfFit() {
-    if (pz.scale > 1) return;
+    if (pz.scale > 1 && !faceMode) return;      // zoomed manual view is kept as-is
     if (window.Preview && typeof Preview.refit === 'function') Preview.refit();
+    if (faceMode) maybeApplyFaceFocus();        // face mode re-centres for the new panel size
   }
 
-  // Keep the visible window inside the real image rect (_fit) of the swapped panel.
-  // Axis whose image is smaller than the window gets locked, so the view cannot drift
-  // into letterbox and dragging works on both axes.
-  function clampPan() {
-    if (!swp) return;
-    var s = pz.scale;
-    if (s <= 1) { pz.ox = 0; pz.oy = 0; return; }
+  // Per-axis pan limits of the swapped panel.
+  //   fit  : the picture's rect inside the panel (element px, unscaled)
+  //   mode : 'slide'  — picture smaller than the panel: it may be moved anywhere inside,
+  //                     from flush-top/left to flush-bottom/right (free positioning)
+  //          'window' — picture larger than the panel: the view window stays over the
+  //                     picture (no drifting into empty space)
+  // Both modes share the same two bounds, only their order differs, so one formula each.
+  function panRanges() {
+    var out = { x: { min: 0, max: 0, slide: false }, y: { min: 0, max: 0, slide: false }, show: false };
+    if (!swp || !swp.canvas._fit) return out;
     var fit = swp.canvas._fit;
-    var pw = swp.el.clientWidth, ph = swp.el.clientHeight;
+    var s = pz.scale, pw = swp.el.clientWidth, ph = swp.el.clientHeight;
     var ex = swp.canvas.offsetLeft, ey = swp.canvas.offsetTop;
-    var vw = pw / s, vh = ph / s;                    // visible window in element px
-    var fx = fit ? fit.x : 0, fy = fit ? fit.y : 0;
-    var fw = fit ? fit.w : swp.canvas.width, fh = fit ? fit.h : swp.canvas.height;
-    if (fw > vw) {
-      pz.ox = Math.min(-(fx + ex / s), Math.max(-(fx + fw - vw + ex / s), pz.ox));
-    } else {
-      pz.ox = -(fx + (fw - vw) / 2 + ex / s);
+    if (faceMode) {
+      // 人脸聚焦模式：以"人脸居中"为先，允许画面外留白，
+      // 但至少保证 20% 的窗口仍被画面覆盖（不会把画面推出视野）
+      var W = pw / s, H = ph / s;
+      var loX = fit.x - 0.8 * W, hiX = fit.x + fit.w - 0.2 * W;
+      var loY = fit.y - 0.8 * H, hiY = fit.y + fit.h - 0.2 * H;
+      out.x = { min: -(hiX + ex / s), max: -(loX + ex / s), slide: true };
+      out.y = { min: -(hiY + ey / s), max: -(loY + ey / s), slide: true };
+      out.show = (out.x.max - out.x.min > 1) || (out.y.max - out.y.min > 1);
+      return out;
     }
-    if (fh > vh) {
-      pz.oy = Math.min(-(fy + ey / s), Math.max(-(fy + fh - vh + ey / s), pz.oy));
-    } else {
-      pz.oy = -(fy + (fh - vh) / 2 + ey / s);
-    }
+    var aX = -(fit.x + ex / s), bX = (pw - ex) / s - fit.x - fit.w;
+    var aY = -(fit.y + ey / s), bY = (ph - ey) / s - fit.y - fit.h;
+    if (fit.w * s <= pw) { out.x = { min: aX, max: bX, slide: true }; }
+    else { out.x = { min: bX, max: aX, slide: false }; }
+    if (fit.h * s <= ph) { out.y = { min: aY, max: bY, slide: true }; }
+    else { out.y = { min: bY, max: aY, slide: false }; }
+    out.show = (out.x.max - out.x.min > 1) || (out.y.max - out.y.min > 1);
+    return out;
+  }
+
+  function clampPan() {
+    if (!swp || !swp.canvas._fit) return;
+    var r = panRanges();
+    pz.ox = Math.min(r.x.max, Math.max(r.x.min, pz.ox));
+    pz.oy = Math.min(r.y.max, Math.max(r.y.min, pz.oy));
   }
 
   function reset() {
     // FIT = manual re-enable of auto-fit (the panel may have changed size while zoomed)
+    // and it leaves 聚焦人脸 mode (the two are alternative display modes)
     if (window.Preview && typeof Preview.refit === 'function') Preview.refit();
-    pz.scale = 1; pz.ox = 0; pz.oy = 0; apply();
+    pz.scale = 1; pz.ox = 0; pz.oy = 0;
+    setFaceMode(false);
+    apply();
   }
 
   panels.forEach(function(p) {
@@ -1282,6 +1373,7 @@
     p.el.addEventListener('mousedown', function(e) {
       if (pz.scale <= 1) return;
       e.preventDefault(); isPanning = true;
+      clearFaceT();                        // 手动拖动接管
       panStart = { mx: e.clientX, my: e.clientY, ox: pz.ox, oy: pz.oy };
       pa.classList.add('pz-panning');
     });
@@ -1297,51 +1389,54 @@
   });
   document.addEventListener('mouseup', function() { isPanning = false; });
 
-  // 小地图交互：按住小框拖动 = 平移视野；点小地图任意处 = 视野跳到该处
+  // 小地图交互（卡片缩略语义）：
+  //   画面比卡片小 → 小框就是画面本身，拖动它=在卡片里自由摆放画面（框随指针走）
+  //   画面比卡片大 → 小框是卡片可视窗口，拖动它=平移视野（相机式，框贴边不动）
+  // 点小框外任意处 = 把画面该处移到卡片中心
   if (mm) {
-    var mmDrag = null;
+    var mmDrag = null, mmBase = null;
     function mmPoint(e) {
       var r = mm.getBoundingClientRect();
       return { px: e.clientX - r.left, py: e.clientY - r.top, w: r.width, h: r.height };
     }
-    // 小地图坐标 → 设定视野左上（含钳制），直接写 pz.ox/oy
-    function mmApplyView(p, x0, y0) {
-      var fit = swp.canvas._fit, s = pz.scale;
-      var vw = swp.el.clientWidth / s, vh = swp.el.clientHeight / s;
-      var nx = x0 + (p.px - mmDrag.px) / p.w * fit.w;
-      var ny = y0 + (p.py - mmDrag.py) / p.h * fit.h;
-      nx = Math.max(fit.x, Math.min(fit.x + Math.max(0, fit.w - vw), nx));
-      ny = Math.max(fit.y, Math.min(fit.y + Math.max(0, fit.h - vh), ny));
-      pz.ox = -(nx + swp.canvas.offsetLeft / s);
-      pz.oy = -(ny + swp.canvas.offsetTop / s);
-      apply();
+    function viewTopLeft() {
+      var s = pz.scale;
+      return { x: -pz.ox - swp.canvas.offsetLeft / s, y: -pz.oy - swp.canvas.offsetTop / s };
+    }
+    function applyFromDrag(p) {
+      var s = pz.scale;
+      var dxEl = (p.px - mmBase.px) / p.w * swp.el.clientWidth / s;    // 卡片位移 → 元素位移
+      var dyEl = (p.py - mmBase.py) / p.h * swp.el.clientHeight / s;
+      var rng = panRanges();
+      // slide 模式：画面跟着指针走（直接摆放）；window 模式：相机式平移
+      // dxEl/dyEl 已是元素单位（= 屏幕位移 / s），ox/oy 与元素位移 1:1，
+      // 之前这里又除了一次 s，导致放大后拖动位移只有应有的 1/s
+      pz.ox = rng.x.slide ? (mmBase.ox + dxEl) : (mmBase.ox - dxEl);
+      pz.oy = rng.y.slide ? (mmBase.oy + dyEl) : (mmBase.oy - dyEl);
+      clampPan(); apply();
     }
     mm.addEventListener('mousedown', function(e) {
-      if (pz.scale <= 1 || !swp || !swp.canvas._fit) return;
+      if (!swp || !swp.canvas._fit) return;
       e.preventDefault(); e.stopPropagation();
-      var p = mmPoint(e);
-      var ex = swp.canvas.offsetLeft, ey = swp.canvas.offsetTop, s = pz.scale;
-      var x0 = -pz.ox - ex / s, y0 = -pz.oy - ey / s;
-      // 点击在小框外：先把视野中心跳到点击处，再从那里开始拖
-      var fit = swp.canvas._fit;
-      var vw = swp.el.clientWidth / s, vh = swp.el.clientHeight / s;
-      var bx = (x0 - fit.x) / fit.w * p.w, by = (y0 - fit.y) / fit.h * p.h;
-      var bw = Math.min(vw, fit.w) / fit.w * p.w, bh = Math.min(vh, fit.h) / fit.h * p.h;
-      if (p.px < bx || p.px > bx + bw || p.py < by || p.py > by + bh) {
-        var cx = fit.x + (p.px / p.w) * fit.w - vw / 2;
-        var cy = fit.y + (p.py / p.h) * fit.h - vh / 2;
-        x0 = Math.max(fit.x, Math.min(fit.x + Math.max(0, fit.w - vw), cx));
-        y0 = Math.max(fit.y, Math.min(fit.y + Math.max(0, fit.h - vh), cy));
-        pz.ox = -(x0 + ex / s);
-        pz.oy = -(y0 + ey / s);
-        apply();
+      clearFaceT();                        // 小地图拖动接管
+      var p = mmPoint(e), s = pz.scale, cur = viewTopLeft();
+      var bl = parseFloat(mmBox.style.left) || 0, bt = parseFloat(mmBox.style.top) || 0;
+      var bw = parseFloat(mmBox.style.width) || 0, bh = parseFloat(mmBox.style.height) || 0;
+      var insideBox = (p.px >= bl && p.px <= bl + bw && p.py >= bt && p.py <= bt + bh);
+      if (!insideBox) {                    // 点小框外：先把该处移到卡片中心
+        var dx = (p.px / p.w - 0.5) * swp.el.clientWidth / s;
+        var dy = (p.py / p.h - 0.5) * swp.el.clientHeight / s;
+        pz.ox = -(cur.x + dx + swp.canvas.offsetLeft / s);
+        pz.oy = -(cur.y + dy + swp.canvas.offsetTop / s);
+        clampPan(); apply();
+        cur = viewTopLeft();
       }
-      mmDrag = { px: p.px, py: p.py };
-      mm._x0 = x0; mm._y0 = y0;
+      mmDrag = true;
+      mmBase = { px: p.px, py: p.py, x0: cur.x, y0: cur.y, ox: pz.ox, oy: pz.oy };
     });
     document.addEventListener('mousemove', function(e) {
       if (!mmDrag) return;
-      mmApplyView(mmPoint(e), mm._x0, mm._y0);
+      applyFromDrag(mmPoint(e));
     });
     document.addEventListener('mouseup', function() { mmDrag = null; });
     var rzT = null;
@@ -1357,7 +1452,130 @@
       new MutationObserver(function() { updateRegion(); })
         .observe(swp.canvas, { attributes: true, attributeFilter: ['width', 'height', 'style'] });
     }
+    // 画布重绘（新帧图/_drawImage）后 _fit 会变：聚焦需重算。
+    // 用签名对比防止与 apply() 的 style 写入形成回环。
+    var _lastFitSig = null;
+    function fitSig() {
+      return panels.map(function (p) {
+        var f = p.canvas._fit;
+        return f ? (p.canvas.width + 'x' + p.canvas.height + ':' +
+                    [f.x, f.y, f.w, f.h].join(',')) : '0';
+      }).join('|');
+    }
+    window.MSFaceFocusNoteFit = function () {
+      var sig = fitSig();
+      if (sig === _lastFitSig) return;
+      _lastFitSig = sig;
+      if (faceMode && faceFaces && faceFrameSize) focusWhenCanvasReady();
+    };
+    if (window.MutationObserver) {
+      panels.forEach(function (p) {
+        new MutationObserver(function () {
+          if (window.MSFaceFocusNoteFit) window.MSFaceFocusNoteFit();
+        }).observe(p.canvas, { attributes: true, attributeFilter: ['width', 'height'] });
+      });
+    }
   }
+
+  // ── 聚焦人脸模式：主脸的换脸区域（对齐框）放大到约占卡片 80% 并居中，逐帧自动跟随 ──
+  // 后端从 2026-10-09 起在每张脸里附带 align_rect（whole-face 对齐框，帧像素坐标，
+  // = 换脸实际覆盖的区域）。实测 200 个样本：对齐框是检测框的 ~2.05x 宽 / ~1.42x 高。
+  // 旧逻辑按检测框取 80% 缩放，实际换脸区域被放大到约 1.6x 卡片 → "脸大到显示不下"。
+  // 现在以对齐框为基准：它完整可见，且观感尺寸依旧饱满。
+  // 旧代码只有一套 ox/oy 被三个尺寸不同的面板共享（swap 面板居中 → detection/original
+  // 面板中心被甩出 300px+）。现在每个面板按自身几何独立居中，存在 p._faceT；
+  // 手动缩放/拖动/小地图接管时清除，下一帧 analyze 自动恢复聚焦。
+  var FACE_FILL = 0.8;                                   // 对齐框占卡片受限边的比例
+  var faceMode = true;
+  try { faceMode = (localStorage.getItem('ms_face_focus') || 'on') !== 'off'; } catch (e) {}
+  var faceFaces = null, faceFrameSize = null;
+  var faceBtn = document.getElementById('pz-face');
+
+  function clearFaceT() {
+    panels.forEach(function (p) { p._faceT = null; });
+  }
+
+  // 找主脸（面积最大）的聚焦目标框：优先 align_rect，否则回退检测框
+  function faceFocusBox(f) {
+    if (f && f.align_rect && f.align_rect.length === 4) {
+      var a = f.align_rect;
+      var aw = a[2] - a[0], ah = a[3] - a[1];
+      if (aw > 8 && ah > 8) return { x: a[0], y: a[1], w: aw, h: ah };
+    }
+    return f && f.w > 4 && f.h > 4 ? { x: f.x, y: f.y, w: f.w, h: f.h } : null;
+  }
+
+  function maybeApplyFaceFocus() {
+    if (!faceMode) return false;
+    var list = (faceFaces || []).map(faceFocusBox).filter(function (b) { return b; });
+    if (!list.length || !faceFrameSize) {       // 无人脸或缺帧尺寸 → 回到整幅
+      pz.scale = 1; pz.ox = 0; pz.oy = 0; clearFaceT(); clampPan(); apply();
+      return false;
+    }
+    var fw = faceFrameSize[0], fh = faceFrameSize[1];
+    if (!fw || !fh) return false;
+    var best = list[0];                       // 面积最大的脸 = 主脸
+    for (var i = 1; i < list.length; i++) {
+      if (list[i].w * list[i].h > best.w * best.h) best = list[i];
+    }
+    // 每个面板独立计算：缩放倍数一致（都基于同一帧、同一目标框），
+    // 但平移量按各自画布的 fit 与面板尺寸求出，人脸在每个卡片里都居中。
+    // 平移同样做旧版的"至少 20% 窗口被画面覆盖"保护（脸在画面边缘时不把卡片整片推出画面）。
+    var any = false;
+    panels.forEach(function (p) {
+      var fit = p.canvas._fit;
+      var pw = p.el.clientWidth, ph = p.el.clientHeight;
+      if (!fit || !pw || !ph) return;
+      var k = fit.w / fw;                     // 帧像素 → 元素像素
+      var fdw = best.w * k, fdh = best.h * k;
+      // 按卡片的"受限边"取 80%：竖长卡片以宽度为准，横条卡片以高度为准
+      var byW = pw / Math.max(1, fdw), byH = ph / Math.max(1, fdh);
+      var target = Math.min(8, Math.max(1, FACE_FILL * Math.min(byW, byH)));
+      var fcx = fit.x + (best.x + best.w / 2) * k;
+      var fcy = fit.y + (best.y + best.h / 2) * k;
+      var tx = pw / (2 * target) - fcx, ty = ph / (2 * target) - fcy;
+      // 20% 覆盖保护（与 panRanges 的 faceMode 分支同公式）
+      var ex = p.canvas.offsetLeft / target, ey = p.canvas.offsetTop / target;
+      var W = pw / target, H = ph / target;
+      var loX = fit.x - 0.8 * W, hiX = fit.x + fit.w - 0.2 * W;
+      var loY = fit.y - 0.8 * H, hiY = fit.y + fit.h - 0.2 * H;
+      tx = Math.min(-(loX + ex), Math.max(-(hiX + ex), tx));
+      ty = Math.min(-(loY + ey), Math.max(-(hiY + ey), ty));
+      p._faceT = 'scale(' + target + ') translate(' + tx + 'px,' + ty + 'px)';
+      if (p === swp) {                        // 主面板状态同步给小地图/HUD/手动缩放
+        pz.scale = target; pz.ox = tx; pz.oy = ty;
+      }
+      any = true;
+    });
+    if (!any) { clearFaceT(); return false; }
+    clampPan();                               // 已按同公式预算过，此处通常为空操作
+    apply();
+    return true;
+  }
+
+  function setFaceMode(on) {
+    faceMode = !!on;
+    try { localStorage.setItem('ms_face_focus', faceMode ? 'on' : 'off'); } catch (e) {}
+    if (faceBtn) faceBtn.classList.toggle('active', faceMode);
+    if (!faceMode) {                         // 关闭聚焦：回到整幅适配
+      clearFaceT();
+      pz.scale = 1; pz.ox = 0; pz.oy = 0;
+      if (window.Preview && typeof Preview.refit === 'function') Preview.refit();
+      clampPan(); apply();
+      return;
+    }
+    focusWhenCanvasReady();
+  }
+
+  window.MSFaceFocus = {
+    setFaces: function (f) { faceFaces = f || []; if (faceMode) focusWhenCanvasReady(); },
+    setFrameSize: function (s) { faceFrameSize = s || null; if (faceMode) focusWhenCanvasReady(); },
+    enabled: function () { return faceMode; },
+    apply: maybeApplyFaceFocus,
+    applyAsync: focusWhenCanvasReady,
+    info: function () { return { faces: faceFaces, frameSize: faceFrameSize, mode: faceMode }; }
+  };
+  if (faceBtn) faceBtn.addEventListener('click', function () { setFaceMode(!faceMode); });
 
   var fitBtn = document.getElementById('pz-fit');
   var zin = document.getElementById('pz-zin');
@@ -1365,6 +1583,29 @@
   if (fitBtn) fitBtn.addEventListener('click', reset);
   if (zin) zin.addEventListener('click', function() { zoomAt(1.25, pa.clientWidth / 2, pa.clientHeight / 2); });
   if (zout) zout.addEventListener('click', function() { zoomAt(1 / 1.25, pa.clientWidth / 2, pa.clientHeight / 2); });
+  setFaceMode(faceMode);                     // 默认开启
+  // 首帧场景：analyze 返回时 swapped 画布可能还未绘制（无 _fit），此时聚焦不生效；
+  // 画布就绪后由 MutationObserver 触发 updateRegion，但没人重算聚焦。
+  // 轮询到 _fit 就绪即补算一次聚焦（也会等 faces 数据到位）。
+  var ffTick = 0;
+  function focusWhenCanvasReady() {
+    if (!faceMode) return;
+    if (!faceFaces || !faceFrameSize) return;   // 数据未到，等下个回调
+    ffTick = 0;                                // 外部入口重置放弃计数
+    pollCanvasReady();
+  }
+  function pollCanvasReady() {
+    if (!faceMode) return;
+    // 只等可见面板（双栏布局下 Original 隐藏，clientWidth=0，永远不会有 _fit）
+    var vis = panels.filter(function (p) { return p.el.clientWidth > 0 && p.el.clientHeight > 0; });
+    if (!vis.length) return;
+    var ready = vis.every(function (p) { return p.canvas._fit; });
+    if (ready) { ffTick = 0; maybeApplyFaceFocus(); return; }
+    if (++ffTick > 200) return;               // ~10s 后放弃
+    setTimeout(pollCanvasReady, 50);
+  }
+  window.MSFaceFocus.applyAsync = focusWhenCanvasReady;
+  if (faceMode && faceFaces && faceFrameSize) focusWhenCanvasReady();
   window.MSZoomApply = function() { refitIfFit(); clampPan(); apply(); };
 })();
 

@@ -354,22 +354,47 @@ def _get_cache_dir():
     return _cache_dir
 
 
+# ── DFL aligned index: one listing per aligned dir (mtime-invalidated) ──
+# Frames are keyed by their *integer* frame number and face index, so zero-padding
+# variations and gaps (filtered aligned sets keep their original face indices)
+# are handled without any per-probe directory scans.
+_aligned_index = {}
+
+
+def _aligned_index_for(aligned_dir):
+    d = str(aligned_dir)
+    try:
+        mtime = os.path.getmtime(d)
+    except OSError:
+        mtime = None
+    e = _aligned_index.get(d)
+    if e is None or e.get('mtime') != mtime:
+        by_frame = {}
+        try:
+            for name in os.listdir(d):
+                if not name.lower().endswith('.jpg'):
+                    continue
+                parts = name[:-4].split('_')
+                if len(parts) < 2 or not parts[0].isdigit() or not parts[1].isdigit():
+                    continue
+                by_frame.setdefault(int(parts[0]), {})[int(parts[1])] = name
+        except OSError:
+            by_frame = {}
+        e = {'mtime': mtime, 'by_frame': by_frame}
+        _aligned_index[d] = e
+    return e
+
+
+def _aligned_face_ids(aligned_dir, idx: int):
+    """Face indices that actually exist for this frame (any order, gaps allowed)."""
+    return sorted(_aligned_index_for(aligned_dir)['by_frame'].get(idx, {}).keys())
+
+
 def _dfl_aligned_path(aligned_dir, idx: int, face_idx: int = 0) -> str:
-    """Find aligned face file for given frame, trying all zero-pad lengths."""
-    d = Path(aligned_dir)
-    if not d.exists():
-        return ""
-    for pad in range(1, 9):
-        fname = f"{idx:0{pad}d}_{face_idx}.jpg"
-        fp = d / fname
-        if fp.exists():
-            return str(fp)
-    # Fallback: scan directory for any file starting with idx (any padding)
-    for fp in d.glob("*.jpg"):
-        stem = fp.stem
-        parts = stem.split("_")
-        if parts and (parts[0].lstrip('0') == str(idx) or (parts[0].lstrip('0') == '' and idx == 0)) and (len(parts) < 2 or parts[1] == str(face_idx)):
-            return str(fp)
+    """Aligned face file for (frame, face) via the index; empty string if absent."""
+    name = _aligned_index_for(aligned_dir)['by_frame'].get(idx, {}).get(face_idx)
+    if name:
+        return str(Path(aligned_dir) / name)
     return ""
 
 
@@ -500,15 +525,18 @@ async def analyze_frame(req: AnalyzeRequest):
 
     # Detect faces (skip for DFL standard projects if detect_mode=skip_dfl)
     face_list = []
+    _detect_source = 'detector'
     detect_mode = req.config.get('detect_mode', 'always')
     if detect_mode == 'skip_dfl' and _current_video:
         dfl_info = _check_dfl(_current_video)
         if dfl_info["is_dfl"]:
             aligned_dir = Path(dfl_info["aligned_dir"])
-            for fi in range(10):
+            # filtered aligned sets keep their original face indices (e.g. only _1) —
+            # iterate the ids that exist instead of bailing at the first gap
+            for fi in _aligned_face_ids(dfl_info["aligned_dir"], idx)[:16]:
                 aligned_path = _dfl_aligned_path(aligned_dir, idx, fi)
                 if not aligned_path:
-                    break
+                    continue
                 aligned_img = cv2.imread(aligned_path)
                 if aligned_img is None:
                     break
@@ -574,6 +602,9 @@ async def analyze_frame(req: AnalyzeRequest):
             traceback.print_exc()
             print("Detection error:", e)
 
+    if detect_mode == 'skip_dfl' and face_list and all(f.get('_dfl') for f in face_list):
+        _detect_source = 'dfl'
+
     # Scale face coords back to original resolution (skip for DFL — already in frame coords)
     if res_scale < 1.0 and face_list:
         s = 1.0 / res_scale
@@ -617,6 +648,7 @@ async def analyze_frame(req: AnalyzeRequest):
             cv2.circle(detection_img, (int(lx), int(ly)), 4, (75, 45, 175), -1)
 
         # Draw alignment rectangle (warp target area)
+        align_rect = None
         mat = face.get('transform_mat')
         if mat is not None:
             out_size = face.get('out_size', 256)
@@ -626,6 +658,14 @@ async def analyze_frame(req: AnalyzeRequest):
             # Scale corners back to original resolution if detection was scaled (skip DFL)
             if res_scale < 1.0 and not face.get('_dfl'):
                 orig_corners = orig_corners * (1.0 / res_scale)
+            # Aligned crop region in original frame coords (l, t, r, b): the area the
+            # swap actually covers. Sent to the web UI — its face-focus mode frames on
+            # this box (the detection rect alone is ~2x narrower / ~1.4x shorter than
+            # the warped region, which made the focused face overflow the panel).
+            align_rect = (int(round(float(orig_corners[:, 0].min()))),
+                          int(round(float(orig_corners[:, 1].min()))),
+                          int(round(float(orig_corners[:, 0].max()))),
+                          int(round(float(orig_corners[:, 1].max()))))
             pts = orig_corners.astype(np.int32)
             cv2.polylines(detection_img, [pts], True, (160, 80, 220), 2)  # purple
             # Alignment up arrow (at top-left corner, shows aligned face up direction)
@@ -671,6 +711,7 @@ async def analyze_frame(req: AnalyzeRequest):
 
         faces_json.append({
             'x': x, 'y': y, 'w': r - x, 'h': b - y,
+            'align_rect': align_rect,
             'landmarks': lm_list,
             'thumb_url': "/api/preview/face-thumb/" + str(idx) + "/" + str(len(faces_json)),
         })
@@ -772,6 +813,7 @@ async def analyze_frame(req: AnalyzeRequest):
         "faces": faces_json,
         "detection_url": "/api/preview/detection/" + str(idx),
         "swapped_url": "/api/preview/swapped/" + str(idx) if (_current_predictor is not None and face_list) else None,
+        "detect_source": _detect_source,
         "debug_urls": debug_urls,
     }
 
@@ -1040,8 +1082,19 @@ async def select_video(req: SelectVideoRequest):
 
 def set_current_video(video_path: str, total_frames: int = 0, fps: float = 0.0):
     global _current_video, _frame_cache, _prediction_cache, _last_detection, _current_fps
-    global _preview_source, _preview_source_video, _cache_epoch
-    _cache_epoch += 1  # invalidate in-flight predecode/read-ahead for the previous video
+    global _preview_source, _preview_source_video
+    if video_path and not os.path.isabs(video_path):
+        # listings may hand out workspace-relative paths; pin them to the server's
+        # real workspace so nothing depends on the process working directory
+        _base = Path(__file__).resolve().parent.parent
+        _roots = [os.getcwd(), str(_base / "workspace"), str(_base)]
+        _abs = None
+        for _r in _roots:
+            _c = os.path.join(_r, video_path)
+            if os.path.exists(_c):
+                _abs = os.path.abspath(_c)
+                break
+        video_path = _abs or os.path.abspath(os.path.join(os.getcwd(), video_path))
     if not _same_file(video_path, _current_video):
         # frames cached from the previous source must not be reused
         try:
