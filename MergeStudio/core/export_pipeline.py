@@ -846,7 +846,7 @@ def _stage4_swap_faces_mp(frames_dir, db_path, work_dir, config, face_model_map,
     model_size = shape[2] if is_nchw else shape[1]
 
     xseg_path = None
-    _xc = Path(__file__).parent.parent.parent / "workspace" / "model" / "XSegLite" / "xseglite.onnx"
+    _xc = Path(os.environ.get("DFL_XSEG_DIR", str(Path(__file__).parent.parent.parent / "workspace" / "model"))) / "XSegLite" / "xseglite.onnx"
     if _xc.exists(): xseg_path = str(_xc)
 
     global _phase_swap_dir, _phase_mask_dir, _phase_frames_dir, _phase_db_path

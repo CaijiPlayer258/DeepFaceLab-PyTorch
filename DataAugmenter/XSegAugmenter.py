@@ -10,6 +10,7 @@ XSegAugmenter — XSeg / XSegLite ONNX 批量遮罩生成器
 from __future__ import annotations
 
 import concurrent.futures
+import os
 import pickle
 import struct
 import sys
@@ -219,10 +220,18 @@ class XSegAugmenter:
         workers: 线程/进程数，默认 CPU 核心数。
     """
 
-    MODEL_PATHS = {
-        'XSeg':     ('workspace', 'model', 'XSeg'),
-        'XSegLite': ('workspace', 'model', 'XSegLite'),
-    }
+    # XSeg 项目模型目录：默认 workspace/model/<名>；设 DFL_XSEG_DIR 则整个改指到该目录下（项目模型与身份模型分离）
+    _xseg_root = os.environ.get('DFL_XSEG_DIR')
+    if _xseg_root:
+        MODEL_PATHS = {
+            'XSeg':     (Path(_xseg_root), 'XSeg'),
+            'XSegLite': (Path(_xseg_root), 'XSegLite'),
+        }
+    else:
+        MODEL_PATHS = {
+            'XSeg':     ('workspace', 'model', 'XSeg'),
+            'XSegLite': ('workspace', 'model', 'XSegLite'),
+        }
 
     MODEL_FILES = {
         'XSeg':     ['XSeg.onnx'],

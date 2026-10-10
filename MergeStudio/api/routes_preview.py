@@ -1119,7 +1119,7 @@ def set_current_video(video_path: str, total_frames: int = 0, fps: float = 0.0):
 # Load XSeg models for mask extraction
 try:
     _xseg_session = onnxruntime.InferenceSession(
-        str(Path(__file__).parent.parent.parent / "workspace" / "model" / "XSeg" / "XSeg.onnx"),
+        str((Path(os.environ.get("DFL_XSEG_DIR", Path(__file__).parent.parent.parent / "workspace" / "model")) / "XSeg" / "XSeg.onnx")),
         providers=['CPUExecutionProvider'])
     _xseg_input = _xseg_session.get_inputs()[0].name
     print("[MergeStudio] XSeg model loaded")
@@ -1129,7 +1129,7 @@ except Exception as e:
 
 try:
     _xseglite_session = onnxruntime.InferenceSession(
-        str(Path(__file__).parent.parent.parent / "workspace" / "model" / "XSegLite" / "xseglite.onnx"),
+        str((Path(os.environ.get("DFL_XSEG_DIR", Path(__file__).parent.parent.parent / "workspace" / "model")) / "XSegLite" / "xseglite.onnx")),
         providers=['CPUExecutionProvider'])
     _xseglite_input = _xseglite_session.get_inputs()[0].name
     print("[MergeStudio] XSegLite model loaded")
