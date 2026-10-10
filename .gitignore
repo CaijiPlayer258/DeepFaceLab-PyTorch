@@ -143,3 +143,8 @@ _trash/
 _chrome_direct/
 _chrome_local/
 _fix_backup_20260930/
+
+# 本地工作目录（skill 暂存/归档/日志）
+_archive/
+_public_shenbian/
+logs/
