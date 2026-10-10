@@ -1323,10 +1323,16 @@ class SAEHDModel(ModelBase):
                 random_ct_samples_path = training_data_dst_path if ct_mode is not None and not self.pretrain else None
 
                 cpu_count = multiprocessing.cpu_count()
-                src_generators_count = cpu_count // 2
-                dst_generators_count = cpu_count // 2
+                # 生成器 worker 封顶（env DFL_GENERATORS_CAP，默认 4）：
+                # 每个 worker 是独立 torch 进程（1.5-2GB commit），16 核机器
+                # cpu//2 * 2(src+dst) * 1.5(ct) 可到 24 个，32GB 内存会在
+                # ct_samples 二次加载阶段耗尽提交内存（WinError 1455/6）。
+                # 与 MergeStudio export worker 封顶（MERGESTUDIO_EXPORT_WORKERS）同款策略。
+                _cap = int(os.environ.get('DFL_GENERATORS_CAP', '4'))
+                src_generators_count = max(1, min(cpu_count // 2, _cap))
+                dst_generators_count = max(1, min(cpu_count // 2, _cap))
                 if ct_mode is not None:
-                    src_generators_count = int(src_generators_count * 1.5)
+                    src_generators_count = max(1, int(src_generators_count * 1.5))
 
                 self.set_training_data_generators(
                     [
