@@ -62,39 +62,50 @@ var Heat = {
     return false;
   },
 
-  // ── 慢放引擎：热区内逐帧步进，三面板同步 ──
+  // ── 慢放引擎：链式驱动（上一帧渲染完成才进下一帧，杜绝 _frameGen 互相作废） ──
   startSlow: function () {
     var self = this;
     if (this.slowTimer) return;
     this.playing = true;
     App._setPlayButtonIcon(true);
-    var fps = Math.max(1, App.state.fps || 30);
-    var stepMs = this._adaptiveDelay();
-    var run = function () {
+    this._advance();
+  },
+  _advance: function () {
+    var self = this;
+    if (!this.playing) return;
+    var next = App.state.currentFrame + 1;
+    if (next >= App.state.totalFrames) { this.stopSlow(); return; }
+
+    // 热区维护：接近边缘/出区 → 预声明后续段（预取追着播放跑）
+    var rg = this._regionOf(next);
+    if ((rg && next > rg.end - 30) || !rg) {
+      var s = rg ? rg.end + 1 : next;
+      fetch('/api/preview/declare-heat', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ start: s, end: Math.min(s + 200, App.state.totalFrames - 1) })
+      }).catch(function () {});
+    }
+
+    // 时间线先行（便宜），帧渲染等完成再续
+    try { App.seekFrame(next, true); } catch (e) {}
+
+    App.loadFrame(next);
+    // 轮询等这一帧渲染完成（_frameGen 不再变化且 loading 全灭），
+    // 再按节奏推进——链式，永不互相作废
+    var t0 = Date.now();
+    var wait = function () {
       if (!self.playing) return;
-      var next = App.state.currentFrame + 1;
-      if (next >= App.state.totalFrames) { self.stopSlow(); return; }
-      // 接近热区边缘：先补声明（预取跟上），越界则自然降速
-      var rg = self._regionOf(next);
-      if (rg && next > rg.end - 30) {
-        fetch('/api/preview/declare-heat', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ start: rg.end + 1, end: Math.min(rg.end + 201, App.state.totalFrames - 1) })
-        }).catch(function () {});
+      // 判定：Swapped 面板 loading 消失（链路末端，或 opacity 过渡中）=整帧完成
+      var ls = document.getElementById('loading-swapped');
+      var done = !ls || ls.style.display === 'none' || ls.style.opacity === '0';
+      if (done || Date.now() - t0 > 4000) {        // 完成或超时兜底
+        self.slowTimer = setTimeout(function () { self._advance(); },
+                                    self._adaptiveDelay());
+      } else {
+        self.slowTimer = setTimeout(wait, 60);
       }
-      if (!rg && !self.inHeat(next, 0)) {
-        // 完全出热区：声明新区间并继续（体验=预取追着播放跑）
-        fetch('/api/preview/declare-heat', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ start: next, end: Math.min(next + 200, App.state.totalFrames - 1) })
-        }).catch(function () {});
-      }
-      App.seekFrame(next, true);
-      App.loadFrame(next);           // canvas 渲染 + Swapped/Detection 链路
-      document.getElementById('frame-input').value = next;
-      self.slowTimer = setTimeout(run, self._adaptiveDelay());
     };
-    this.slowTimer = setTimeout(run, stepMs);
+    this.slowTimer = setTimeout(wait, 80);
   },
   stopSlow: function () {
     this.playing = false;
