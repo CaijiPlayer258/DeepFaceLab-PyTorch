@@ -12,8 +12,146 @@ from concurrent.futures import ThreadPoolExecutor
 import threading
 
 _FFMPEG_DIR = Path(__file__).parent.parent.parent / "ffmpeg"
+
+# DFL project mode: frames are NOT deleted on cut; this is the set of frame
+# indices (0-based stems) to keep. None = no filtering (non-DFL or no cut).
+_cut_keep_set = None
+
+
+def _compute_cut_keep_set(frame_files, valid_segs, zero_based):
+    """P0-2: frame inclusion math for cut segments.
+
+    offset 0 for DFL project frames (0-based stems),
+    offset 1 for FFmpeg-extracted frames (%08d starts at 1).
+    Returns (keep_index_set, removed_count).
+    """
+    offset = 0 if zero_based else 1
+    keep, removed = set(), 0
+    for fp in frame_files:
+        try:
+            idx = int(fp.stem)
+        except ValueError:
+            removed += 1
+            continue
+        if any(s + offset <= idx <= e + offset for s, e in
+               [(x['start'], x['end']) for x in valid_segs]):
+            keep.add(idx)
+        else:
+            removed += 1
+    return keep, removed
 _FFMPEG = str(_FFMPEG_DIR / "ffmpeg.exe")
 _FFPROBE = str(_FFMPEG_DIR / "ffprobe.exe")
+
+# --- 活动 ffmpeg 子进程登记（供 cancel/reset 杀掉残留抽帧、编码进程）-------------
+CHILD_PROCS = {}   # name -> subprocess.Popen
+
+
+def register_child(name, proc):
+    try:
+        CHILD_PROCS[name] = proc
+    except Exception:
+        pass
+
+
+def unregister_child(name, proc=None):
+    try:
+        cur = CHILD_PROCS.get(name)
+        if proc is None or cur is proc:
+            CHILD_PROCS.pop(name, None)
+    except Exception:
+        pass
+
+
+def kill_children():
+    """杀掉所有仍在运行的 ffmpeg 子进程，返回被杀的 pid 列表。"""
+    killed = []
+    for name, proc in list(CHILD_PROCS.items()):
+        try:
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+                killed.append(proc.pid)
+        except Exception:
+            pass
+        finally:
+            CHILD_PROCS.pop(name, None)
+    return killed
+
+
+def probe_frame_count(video_path):
+    """读容器里的总帧数（不解码，仅用于抽帧进度百分比）；失败返回 0。
+
+    注意：AV1/mkv 常没有 nb_frames 字段，必须用 JSON 按键取值后回退到
+    duration × fps —— 早期用 nk=1 行解析会把 duration 当帧数（2026-09-30 实测踩到）。
+    """
+    import json as _json
+    try:
+        out = subprocess.run(
+            [_FFPROBE, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=nb_frames,duration,r_frame_rate",
+             "-of", "json", video_path],
+            capture_output=True, text=True, timeout=60)
+        st = (_json.loads(out.stdout or "{}").get("streams") or [{}])[0]
+        try:
+            n = int(st.get("nb_frames") or 0)
+        except Exception:
+            n = 0
+        if n > 1:
+            return n
+        # P1-10: some containers (AV1/mkv) only expose duration in the format
+        # section - retry with a second probe before giving up.
+        dur = 0.0
+        try:
+            dur = float(st.get("duration") or 0.0)
+        except Exception:
+            dur = 0.0
+        if not dur:
+            try:
+                out2 = subprocess.run(
+                    [_FFPROBE, "-v", "error", "-show_entries", "format=duration",
+                     "-of", "json", video_path],
+                    capture_output=True, text=True, timeout=60)
+                fmt_obj = _json.loads(out2.stdout or "{}").get("format") or {}
+                dur = float(fmt_obj.get("duration") or 0.0)
+            except Exception:
+                dur = 0.0
+        fps = 0.0
+        try:
+            a, b = str(st.get("r_frame_rate") or "0/0").split("/")
+            fps = float(a) / float(b) if float(b) else 0.0
+        except Exception:
+            fps = 0.0
+        if dur and fps:
+            return int(dur * fps)
+    except Exception:
+        pass
+    return 0
+_FFPROBE = str(_FFMPEG_DIR / "ffprobe.exe")
+
+# P1-3: single config sanitizer for ALL entry paths (export start + workers).
+# Frontend sends color_transfer_mode as string ("lct"...) and MergerConfigMasked
+# historically accepted ints only in merger's ct_functions lookup.
+def _sanitize_config(config_dict):
+    """Return a cleaned copy of the UI config dict safe for MergerConfigMasked."""
+    from MergeStudio.core.config import MergerConfigMasked, ctm_str_dict
+    d = dict(config_dict or {})
+    if 'color_transfer_mode' in d:
+        v = d['color_transfer_mode']
+        if isinstance(v, str):
+            d['color_transfer_mode'] = (ctm_str_dict.get(v)
+                                        or ctm_str_dict.get(v.lower())
+                                        or ctm_str_dict.get(v.capitalize(), 1))
+        else:
+            try:
+                d['color_transfer_mode'] = int(v)
+            except (TypeError, ValueError):
+                d['color_transfer_mode'] = 1
+    valid_keys = set(MergerConfigMasked.__init__.__code__.co_varnames)
+    return {k: v for k, v in d.items() if k in valid_keys and k != 'self'}
+
 
 class StopRequested(Exception):
     """Raised when the user cancels the export."""
@@ -46,6 +184,18 @@ def _find_frame(dir_path, frame_idx):
         m = sorted(p.glob(f"{pad}.*"))
         if m: return m[0]
     return None
+
+
+def _build_frame_index(dir_path):
+    """P2-13: int(stem) -> Path index, built once per directory.
+    Workers should call this in their init instead of re-globbing per face."""
+    idx = {}
+    for f in Path(dir_path).glob("*.[jp][pn]g"):
+        try:
+            idx.setdefault(int(f.stem), f)
+        except ValueError:
+            pass
+    return idx
 
 
 # ---------------------------------------------------------------------------
@@ -188,193 +338,11 @@ def _worker_mp_init(all_model_paths, model_size, is_nchw, xseg_path, xseg_is_nch
         except Exception as e:
             print(f"[Export] Worker XSeg FAILED: {e}")
 
-    _valid_keys = {'face_type','default_mode','mode','masked_hist_match','hist_match_threshold',
-                   'mask_mode','seg_mode','erode_mask_modifier','blur_mask_modifier',
-                   'motion_blur_power','output_face_scale','super_resolution_power',
-                   'color_transfer_mode','image_denoise_power','bicubic_degrade_power',
-                   'color_degrade_power','show_debug'}
-    _mp_cfg = MergerConfigMasked(**{k: v for k, v in config_dict.items() if k in _valid_keys})
+    cfg = _sanitize_config(config_dict)
     _mp_db_path = db_path
     print(f"[Export] Worker ready: {len(_mp_predictors)} models ({list(_mp_predictors.keys())})" +
           (f" + XSeg" if _mp_xseg else ""))
 
-
-def _worker_mp_fn(args):
-    """Process a frame chunk. args tuple: (chunk_strs,). Returns frame count."""
-    chunk_strs = args[0]
-    import sqlite3, json, cv2, numpy as np
-    from pathlib import Path
-    from MergeStudio.core.merger import MergeMaskedFace
-
-    conn = sqlite3.connect(str(_mp_db_path), timeout=60)
-    conn.execute("PRAGMA journal_mode=WAL")
-
-    for fp_str in chunk_strs:
-        fp = Path(fp_str)
-        frame = cv2.imread(str(fp))
-        if frame is None: continue
-        idx = int(fp.stem)
-        cur = conn.execute("SELECT face_idx, landmarks, model FROM face_data WHERE frame_idx=? ORDER BY face_idx", (idx,))
-        rows = cur.fetchall()
-        if not rows:
-            continue
-
-        swapped = frame.astype(np.float32)
-        for row in rows:
-            fi, lm_json, model_name = row
-            lm = json.loads(lm_json)
-            if len(lm) < 4: continue
-            sess_info = None
-            if model_name and model_name in _mp_predictors:
-                sess_info = _mp_predictors[model_name]
-            elif model_name:
-                for k, v in _mp_predictors.items():
-                    if k.startswith(model_name) or model_name.startswith(k):
-                        sess_info = v; break
-            if not sess_info and _mp_predictors:
-                sess_info = next(iter(_mp_predictors.values()))
-            if not sess_info: continue
-            sess, inp_name, sz, nchw = sess_info
-
-            def _pred(face_img):
-                hh, ww = face_img.shape[:2]
-                if hh != sz or ww != sz:
-                    face_img = cv2.resize(face_img, (sz, sz), interpolation=cv2.INTER_LANCZOS4)
-                img = face_img.astype(np.float32)
-                inp = np.transpose(img, (2,0,1))[None,:,:,:] if nchw else img[None,:,:,:]
-                outputs = sess.run(None, {inp_name: inp})
-                fo = None
-                for o in outputs:
-                    if o.ndim == 4 and o.shape[-1] == 3: fo = o; break
-                if fo is None: fo = outputs[0]
-                if fo.shape[-1] == 1: fo = np.repeat(fo, 3, axis=-1)
-                pm, dm = None, None
-                if len(outputs) >= 3:
-                    m0 = np.squeeze(outputs[0])
-                    if m0.ndim == 3: m0 = m0[:,:,0]
-                    pm = cv2.resize(m0.astype(np.float32), (sz,sz))
-                    m2 = np.squeeze(outputs[2])
-                    if m2.ndim == 3: m2 = m2[:,:,0]
-                    dm = cv2.resize(m2.astype(np.float32), (sz,sz))
-                while fo.ndim >= 5: fo = fo[0]
-                if fo.ndim == 4: fo = fo[0] if not nchw else np.transpose(fo[0], (1,2,0))
-                if fo.ndim == 2: fo = np.stack([fo]*3, axis=-1)
-                if fo.shape[-1] > 3: fo = fo[:,:,:3]
-                elif fo.shape[-1] == 1: fo = np.repeat(fo,3,axis=-1)
-                if fo.shape[:2] != (sz,sz): fo = cv2.resize(fo,(sz,sz),interpolation=cv2.INTER_LANCZOS4)
-                return (fo, pm, dm)
-
-            try:
-                lmk = np.array(lm, dtype=np.float32)
-                fo, fo_mask = MergeMaskedFace(frame, lmk, _mp_cfg, _pred, xseg_256_extract_func=_mp_xseg)
-                if fo.shape[:2] == swapped.shape[:2]:
-                    if fo_mask is not None:
-                        m = fo_mask.astype(np.float32) / 255.0
-                        if m.ndim == 2: m = m[..., None]
-                        swapped = swapped * (1 - m) + fo.astype(np.float32) * m
-                    else:
-                        swapped = fo.astype(np.float32)
-                        if np.array_equal(fo, frame):
-                            print(f"[Worker] MergeMaskedFace returned ORIGINAL", flush=True)
-            except Exception:
-                pass
-        cv2.imwrite(str(fp), np.clip(swapped, 0, 255).astype(np.uint8))
-
-    conn.close()
-    return len(chunk_strs)
-
-def _worker_swap_chunk(args):
-    """Worker for Stage 4: swap faces in a chunk of frames using local predictor."""
-    chunk, db_path, config_dict = args
-    from MergeStudio.core.merger import MergeMaskedFace
-    from MergeStudio.core.config import MergerConfigMasked
-
-    _valid_keys = {'face_type','default_mode','mode','masked_hist_match','hist_match_threshold',
-                   'mask_mode','seg_mode','erode_mask_modifier','blur_mask_modifier',
-                   'motion_blur_power','output_face_scale','super_resolution_power',
-                   'color_transfer_mode','image_denoise_power','bicubic_degrade_power',
-                   'color_degrade_power','show_debug'}
-    cfg = MergerConfigMasked(**{k: v for k, v in config_dict.items() if k in _valid_keys})
-
-    # Build local predictor closure using the pre-loaded session
-    def _predictor(face_img):
-        hh, ww = face_img.shape[:2]
-        if hh != _worker_size or ww != _worker_size:
-            face_img = cv2.resize(face_img, (_worker_size, _worker_size), interpolation=cv2.INTER_LANCZOS4)
-        img = face_img.astype(np.float32)
-        if _worker_nchw:
-            inp = np.transpose(img, (2, 0, 1))[None, :, :, :]
-        else:
-            inp = img[None, :, :, :]
-        outputs = _worker_session.run(None, {_worker_input_name: inp})
-        face_out = None
-        for o in outputs:
-            if o.ndim == 4 and o.shape[-1] == 3:
-                face_out = o; break
-        if face_out is None:
-            face_out = outputs[0]
-            if face_out.shape[-1] == 1:
-                face_out = np.repeat(face_out, 3, axis=-1)
-        pm, dm = None, None
-        if len(outputs) >= 3:
-            m0 = np.squeeze(outputs[0])
-            if m0.ndim == 3: m0 = m0[:,:,0]
-            pm = cv2.resize(m0.astype(np.float32), (_worker_size, _worker_size)) if m0.shape[:2]!=(_worker_size,_worker_size) else m0.astype(np.float32)
-            m2 = np.squeeze(outputs[2])
-            if m2.ndim == 3: m2 = m2[:,:,0]
-            dm = cv2.resize(m2.astype(np.float32), (_worker_size, _worker_size)) if m2.shape[:2]!=(_worker_size,_worker_size) else m2.astype(np.float32)
-        while face_out.ndim >= 5: face_out = face_out[0]
-        if face_out.ndim == 4:
-            face_out = face_out[0] if not _worker_nchw else np.transpose(face_out[0], (1,2,0))
-        if face_out.ndim == 2:
-            face_out = np.stack([face_out]*3, axis=-1)
-        if face_out.shape[-1] > 3: face_out = face_out[:,:,:3]
-        elif face_out.shape[-1] == 1: face_out = np.repeat(face_out, 3, axis=-1)
-        if face_out.shape[:2] != (_worker_size, _worker_size):
-            face_out = cv2.resize(face_out, (_worker_size, _worker_size), interpolation=cv2.INTER_LANCZOS4)
-        return (face_out, pm, dm)
-
-    conn = sqlite3.connect(str(db_path), timeout=60)
-    conn.execute("PRAGMA journal_mode=WAL")
-    done = 0
-    for fp_str in chunk:
-        fp = Path(fp_str)
-        frame = cv2.imread(str(fp))
-        if frame is None:
-            done += 1; continue
-        idx = int(fp.stem)
-        cur = conn.execute(
-            "SELECT face_idx, landmarks, model FROM face_data WHERE frame_idx=? ORDER BY face_idx",
-            (idx,)
-        )
-        rows = cur.fetchall()
-        if not rows:
-            # No faces — keep original frame (no copy needed, stays in place)
-            done += 1; continue
-        swapped = frame.astype(np.float32)
-        for row in rows:
-            _, lm_json, model_name = row
-            lm = json.loads(lm_json)
-            if len(lm) < 4: continue
-            lmk = np.array(lm, dtype=np.float32)
-            try:
-                fo, _ = MergeMaskedFace(frame, lmk, cfg, _predictor,
-                                        xseg_256_extract_func=_worker_xseg_func)
-                if fo.shape[:2] == swapped.shape[:2]:
-                    swapped = fo.astype(np.float32)
-            except Exception:
-                pass
-        out = np.clip(swapped, 0, 255).astype(np.uint8)
-        # Overwrite the original frame in-place
-        cv2.imwrite(str(fp), out)
-        done += 1
-    conn.close()
-    return done
-
-
-# ---------------------------------------------------------------------------
-# Multiprocessing coordinators
-# ---------------------------------------------------------------------------
 
 def _run_pool_shared(pool, tasks, worker_fn, progress, total_frames, stop_event, stage):
     """Submit tasks, workers push frame completions onto a Queue for smooth progress."""
@@ -512,119 +480,6 @@ def _worker_detect_chunk_wrapped(args):
     return len(chunk)
 
 
-def _worker_swap_chunk_wrapped(args):
-    """Wrapper that unpacks progress queue and calls the real worker."""
-    task, progress_queue, started_flag = args
-    started_flag.value = True
-    chunk, db_path, config_dict = task
-
-    from MergeStudio.core.merger import MergeMaskedFace
-    from MergeStudio.core.config import MergerConfigMasked
-    _valid_keys = {'face_type','default_mode','mode','masked_hist_match','hist_match_threshold',
-                   'mask_mode','seg_mode','erode_mask_modifier','blur_mask_modifier',
-                   'motion_blur_power','output_face_scale','super_resolution_power',
-                   'color_transfer_mode','image_denoise_power','bicubic_degrade_power',
-                   'color_degrade_power','show_debug'}
-    cfg = MergerConfigMasked(**{k: v for k, v in config_dict.items() if k in _valid_keys})
-
-    def _make_predictor(session, inp_name):
-        """Create a predictor closure bound to a specific ONNX session."""
-        def _pred(face_img):
-            hh, ww = face_img.shape[:2]
-            if hh != _worker_size or ww != _worker_size:
-                face_img = cv2.resize(face_img, (_worker_size, _worker_size), interpolation=cv2.INTER_LANCZOS4)
-            img = face_img.astype(np.float32)
-            if _worker_nchw:
-                inp = np.transpose(img, (2, 0, 1))[None, :, :, :]
-            else:
-                inp = img[None, :, :, :]
-            outputs = session.run(None, {inp_name: inp})
-            face_out = None
-            for o in outputs:
-                if o.ndim == 4 and o.shape[-1] == 3:
-                    face_out = o; break
-            if face_out is None:
-                face_out = outputs[0]
-                if face_out.shape[-1] == 1: face_out = np.repeat(face_out, 3, axis=-1)
-            pm, dm = None, None
-            if len(outputs) >= 3:
-                m0 = np.squeeze(outputs[0])
-                if m0.ndim == 3: m0 = m0[:,:,0]
-                pm = cv2.resize(m0.astype(np.float32), (_worker_size, _worker_size)) if m0.shape[:2]!=(_worker_size,_worker_size) else m0.astype(np.float32)
-                m2 = np.squeeze(outputs[2])
-                if m2.ndim == 3: m2 = m2[:,:,0]
-                dm = cv2.resize(m2.astype(np.float32), (_worker_size, _worker_size)) if m2.shape[:2]!=(_worker_size,_worker_size) else m2.astype(np.float32)
-            while face_out.ndim >= 5: face_out = face_out[0]
-            if face_out.ndim == 4:
-                face_out = face_out[0] if not _worker_nchw else np.transpose(face_out[0], (1,2,0))
-            if face_out.ndim == 2: face_out = np.stack([face_out]*3, axis=-1)
-            if face_out.shape[-1] > 3: face_out = face_out[:,:,:3]
-            elif face_out.shape[-1] == 1: face_out = np.repeat(face_out, 3, axis=-1)
-            if face_out.shape[:2] != (_worker_size, _worker_size):
-                face_out = cv2.resize(face_out, (_worker_size, _worker_size), interpolation=cv2.INTER_LANCZOS4)
-            return (face_out, pm, dm)
-        return _pred
-
-    def _get_pred_for_model(model_name):
-        """Find the right session + predictor for a model name (with prefix fallback)."""
-        if not model_name:
-            return _make_predictor(*next(iter(_worker_predictors.values()))) if _worker_predictors else None
-        if model_name in _worker_predictors:
-            return _make_predictor(*_worker_predictors[model_name])
-        for key, (sess, inp) in _worker_predictors.items():
-            if key.startswith(model_name) or model_name.startswith(key):
-                return _make_predictor(sess, inp)
-        # Fallback to first model
-        return _make_predictor(*next(iter(_worker_predictors.values()))) if _worker_predictors else None
-
-    conn = sqlite3.connect(str(db_path), timeout=60)
-    conn.execute("PRAGMA journal_mode=WAL")
-    # Pre-build predictors for known model keys
-    _pred_cache = {mk: _make_predictor(*vp) for mk, vp in _worker_predictors.items()}
-    def _resolve_pred(mn):
-        if not mn and _pred_cache:
-            return next(iter(_pred_cache.values()))
-        if mn in _pred_cache:
-            return _pred_cache[mn]
-        for k, p in _pred_cache.items():
-            if k.startswith(mn) or mn.startswith(k):
-                return p
-        return next(iter(_pred_cache.values())) if _pred_cache else None
-
-    for fp_str in chunk:
-        fp = Path(fp_str)
-        frame = cv2.imread(str(fp))
-        if frame is None:
-            try: progress_queue.put('done', block=False)
-            except: pass
-            continue
-        idx = int(fp.stem)
-        cur = conn.execute("SELECT face_idx, landmarks, model FROM face_data WHERE frame_idx=? ORDER BY face_idx", (idx,))
-        rows = cur.fetchall()
-        if rows:
-            swapped = frame.astype(np.float32)
-            for row in rows:
-                _, lm_json, model_name = row
-                lm = json.loads(lm_json)
-                if len(lm) < 4: continue
-                lmk = np.array(lm, dtype=np.float32)
-                pred = _resolve_pred(model_name)
-                if pred is None: continue
-                try:
-                    fo, _ = MergeMaskedFace(frame, lmk, cfg, pred, xseg_256_extract_func=_worker_xseg_func)
-                    if fo.shape[:2] == swapped.shape[:2]:
-                        swapped = fo.astype(np.float32)
-                except Exception:
-                    try: progress_queue.put(('err', 1), block=False)
-                    except: pass
-            out = np.clip(swapped, 0, 255).astype(np.uint8)
-            cv2.imwrite(str(fp), out)
-        try: progress_queue.put('done', block=False)
-        except: pass
-    conn.close()
-    return len(chunk)
-
-
 def _stage2_detect_frames_mp(frames_dir, db_path, detector_str, landmarker_str, res_scale, face_margin, progress, stop_event, num_workers, angle_segments=None):
     """Stage 2 using multiprocessing Pool with shared progress."""
     frames = sorted(frames_dir.glob("*.[jp][pn]g"))
@@ -655,11 +510,14 @@ _phase_model_size = 416
 _phase_is_nchw = False
 _phase_merge_cfg = None  # MergerConfigMasked for merge workers
 _phase_merge_out_dir = None  # output dir for DFL merged frames
+_phase_frame_index = None  # P2-13: int(stem)->Path, per-worker
 
 def _phase_init_all(mp, sz, nchw, xp, sd, md, fd, dp, af):
     print(f"[SwapInit] loading {mp}", flush=True)
     global _phase_swap_sess, _phase_swap_inp, _phase_swap_sz, _phase_swap_nchw
     global _phase_xseg_path, _phase_swap_dir, _phase_mask_dir, _phase_frames_dir, _phase_db_path, _phase_all_faces
+    global _phase_frame_index
+    _phase_frame_index = _build_frame_index(fd)  # P2-13: one scan per worker
     _setup_dll_paths()
     # Import torch first so it loads its own cuDNN before onnxruntime loads cuDNN
     import torch as _torch
@@ -681,7 +539,7 @@ def _phase_swap_worker(tasks):
     if not tasks: return 0
     res = 0
     for idx, fi, lmj in tasks:
-        fp = _find_frame(_phase_frames_dir, idx)
+        fp = _phase_frame_index.get(idx)  # P2-13
         if fp is None: continue
         frame = cv2.imread(str(fp))
         if frame is None: continue
@@ -721,7 +579,8 @@ def _phase_swap_worker(tasks):
 
 def _phase_mask_init(xp, sd, md, fd, dp, af):
     global _phase_xseg_path, _phase_swap_dir, _phase_mask_dir, _phase_frames_dir, _phase_db_path, _phase_all_faces
-    global _phase_mask_sess, _phase_mask_inp
+    global _phase_mask_sess, _phase_mask_inp, _phase_frame_index
+    _phase_frame_index = _build_frame_index(fd)  # P2-13
     _phase_xseg_path = xp; _phase_swap_dir = sd; _phase_mask_dir = md
     _phase_frames_dir = fd; _phase_db_path = dp; _phase_all_faces = af
     _setup_dll_paths()
@@ -747,7 +606,7 @@ def _phase_mask_worker(tasks):
         if swap_path.exists():
             fo = cv2.imread(str(swap_path)).astype(np.float32) / 255.0
         else:
-            fp = _find_frame(_phase_frames_dir, idx)
+            fp = _phase_frame_index.get(idx)  # P2-13
             if fp is None: continue
             frame = cv2.imread(str(fp))
             if frame is None: continue
@@ -764,7 +623,7 @@ def _phase_mask_worker(tasks):
         xseg_prd = _run_xseg(fo)
         cv2.imwrite(str(Path(_phase_mask_dir) / f"{idx:08d}_{fi}_xseg_prd.png"), np.clip(xseg_prd * 255, 0, 255).astype(np.uint8))
         # ---- XSeg-dst: run XSeg on the aligned dst face from original frame ----
-        fp = _find_frame(_phase_frames_dir, idx)
+        fp = _phase_frame_index.get(idx)  # P2-13
         if fp:
             frame = cv2.imread(str(fp))
             if frame is not None:
@@ -778,6 +637,8 @@ def _phase_mask_worker(tasks):
 def _phase_merge_init(sd, md, fd, dp, af, cfg, od, sz=None):
     print(f"[MergeW] init", flush=True)
     global _phase_swap_dir, _phase_mask_dir, _phase_frames_dir, _phase_db_path, _phase_all_faces, _phase_merge_cfg, _phase_merge_out_dir, _phase_swap_sz
+    global _phase_frame_index
+    _phase_frame_index = _build_frame_index(fd)  # P2-13
     _phase_swap_dir = sd; _phase_mask_dir = md; _phase_frames_dir = fd; _phase_db_path = dp; _phase_all_faces = af
     _phase_merge_cfg = cfg; _phase_merge_out_dir = od; _phase_swap_sz = sz
     _setup_dll_paths()
@@ -957,6 +818,9 @@ def _stage4_swap_faces_mp(frames_dir, db_path, work_dir, config, face_model_map,
     import multiprocessing as _mp, time
     from pathlib import Path
     frames = sorted(frames_dir.glob("*.[jp][pn]g"))
+    if _cut_keep_set is not None:  # P0-1: DFL mode keep-set filtering
+        frames = [_f for _f in frames if int(_f.stem) in _cut_keep_set]
+        print(f"[Export] Stage4: {_cut_keep_set.__len__()} frames in keep-set, {len(frames)} matched on disk", flush=True)
     total = len(frames)
     if total == 0: return
     from MergeStudio.core.model_loader import model_loader
@@ -1004,6 +868,10 @@ def _stage4_swap_faces_mp(frames_dir, db_path, work_dir, config, face_model_map,
     _phase_all_faces = cur.fetchall()
     conn.close()
     _phase_all_faces = [f for f in _phase_all_faces if f[3]]  # only faces with model assigned
+    if _cut_keep_set is not None:  # P0-1: skip faces on cut frames (DFL mode)
+        _before = len(_phase_all_faces)
+        _phase_all_faces = [f for f in _phase_all_faces if f[0] in _cut_keep_set]
+        print(f"[Export] keep-set: {_before - len(_phase_all_faces)} faces on cut frames skipped", flush=True)
 
     # If no faces assigned by ArcFace, default to all faces → first model
     if not _phase_all_faces and all_model_paths:
@@ -1168,27 +1036,45 @@ def run_export_pipeline(
             _stage1_extract_frames(video_path, frames_dir, image_format, progress, stop_event=stop_event, hwaccel=_hw)
             progress(0, 1.0, "Frames extracted")
 
-        # Keep only frames within cut segments (inclusion logic)
+        # Keep only frames within cut segments (inclusion logic).
+        # 2026-10-09 P0 fix: in DFL project mode frames_dir IS the user's project
+        # directory - never unlink user source frames there. Instead compute a
+        # keep-set and let Stage4/5 filter by it (_cut_keep_set).
+        # +1 offset only applies to FFmpeg-extracted frames (1-based, %08d starting
+        # at 1); DFL project frames are 0-based (aligned source stems).
         _cut_count = 0
+        global _cut_keep_set
+        _cut_keep_set = None
         _valid_segs = [s for s in (cut_segments or []) if s.get('start') is not None and s.get('end') is not None]
         print(f"[Export] raw cut_segments from frontend: {cut_segments}", flush=True)
         print(f"[Export] valid keep segments: {_valid_segs}", flush=True)
         if _valid_segs:
             _all_frames = sorted(frames_dir.glob("*.[jp][pn]g"))
             print(f"[Export] Total extracted frames before cut: {len(_all_frames)}", flush=True)
-            for _fp in _all_frames:
-                _idx = int(_fp.stem)  # 1-based file index
-                _keep = any(_s + 1 <= _idx <= _e + 1 for _s, _e in
-                            [(s['start'], s['end']) for s in _valid_segs])
-                if not _keep:
-                    _fp.unlink(); _cut_count += 1
-            print(f"[Export] Removed {_cut_count} frames outside selected segments", flush=True)
+            if _is_dfl:
+                _cut_keep_set, _cut_count = _compute_cut_keep_set(_all_frames, _valid_segs, zero_based=True)
+                print(f"[Export] DFL mode: {_cut_count} frames excluded via keep-set (source frames untouched)", flush=True)
+            else:
+                for _fp in _all_frames:
+                    _idx = int(_fp.stem)  # 1-based file index
+                    _keep = any(_s + 1 <= _idx <= _e + 1 for _s, _e in
+                                [(s['start'], s['end']) for s in _valid_segs])
+                    if not _keep:
+                        _fp.unlink(); _cut_count += 1
+                print(f"[Export] Removed {_cut_count} frames outside selected segments", flush=True)
             _remaining = sorted(frames_dir.glob("*.[jp][pn]g"))
             if _remaining:
                 print(f"[Export] First kept frame file: {_remaining[0].name} (stem={_remaining[0].stem})", flush=True)
                 print(f"[Export] Last kept frame file: {_remaining[-1].name} (stem={_remaining[-1].stem})", flush=True)
         else:
             print(f"[Export] No valid segments, keeping ALL frames", flush=True)
+
+        if _is_dfl and angle_segments:
+            # P0-3: angle detection is a Stage2 feature; DFL mode skips Stage2
+            # entirely (landmarks come from aligned metadata), so multi-angle
+            # detection segments cannot apply. Warn instead of failing silently.
+            print(f"[Export] [WARN] DFL project mode: {len(angle_segments)} angle_segments ignored "
+f"(landmarks come from aligned metadata; re-run detection for multi-angle)", flush=True)
 
         # Stage 2: Face detection → SQLite (skip in DFL mode — use aligned DFLJPG data)
         progress(1, 0.0, "Loading faces..." if _is_dfl else "Detecting faces...")
@@ -1278,24 +1164,46 @@ def _stage1_extract_frames(video_path, out_dir, fmt, progress, stop_event=None, 
         cmd += ["-i", video_path, "-pix_fmt", "rgb24", *quality_args, out_pattern]
         print(f"[Export] Stage1: {' '.join(cmd)}", flush=True)
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        register_child('stage1_extract', proc)
         last_done = 0
+        total_fr = probe_frame_count(video_path)
+        print(f"[Export] Stage1 expected frames: {total_fr}", flush=True)
         while proc.poll() is None:
             if stop_event and stop_event.is_set():
                 proc.terminate()
                 try: proc.wait(timeout=5)
                 except: proc.kill(); proc.wait()
+                unregister_child('stage1_extract', proc)
                 raise StopRequested("Export cancelled")
             if out_dir.exists():
                 done = len([f for f in out_dir.iterdir() if f.suffix in ('.jpg', '.png')])
                 if done != last_done:
                     last_done = done
                     print(f"[Export] Extracting frames: {done}", flush=True)
+                    # 旧版这里完全不回报进度，UI 全程停在 0% 像死机（2026-09-30 修）
+                    try:
+                        if total_fr > 0:
+                            progress(0, min(0.98, done / float(total_fr)),
+                                     f"Extracting frames {done}/{total_fr}")
+                        else:
+                            progress(0, 0.0, f"Extracting frames {done}")
+                    except StopRequested:
+                        proc.terminate()
+                        try: proc.wait(timeout=5)
+                        except: proc.kill(); proc.wait()
+                        unregister_child('stage1_extract', proc)
+                        raise
             time.sleep(0.5)
+        unregister_child('stage1_extract', proc)
         return proc.returncode, last_done
 
     rc, _last_done = _run(hwaccel)
     if rc != 0 and hwaccel:
         print(f"[Export] GPU 硬解码失败（exit={rc}），自动回退软解码", flush=True)
+        try:
+            progress(0, 0.0, "GPU 解码失败，已回退软件解码（10bit AV1 会明显更慢）")
+        except StopRequested:
+            raise
         rc, _last_done = _run(None)
     if rc != 0:
         raise RuntimeError(f"FFmpeg extract failed (exit={rc})")
@@ -1606,7 +1514,16 @@ def _stage2_read_dfl_aligned(aligned_dir, frames_dir, db_path, progress, stop_ev
         try:
             frame_idx = int(src_stem)
         except ValueError:
-            continue
+            # 视频直切脸产物把视频文件名存进 source_filename（如 "TENN-052-....mp4"），
+            # int() 必然失败 → 回退用 aligned 文件名自身的数字前缀（"00123_0.jpg" → 123）。
+            # 2026-10-09：不修这里的话 DFL 导出模式会静默跳过全部 17,560 张脸。
+            _stem = jpg.stem
+            if '_' in _stem:
+                _stem = _stem.rsplit('_', 1)[0]
+            try:
+                frame_idx = int(_stem)
+            except ValueError:
+                continue
         # Determine face index: filename like "00003_0.jpg" or "00003.jpg"
         fname_stem = jpg.stem
         face_idx = 0
@@ -1649,35 +1566,6 @@ def _stage2_read_dfl_aligned(aligned_dir, frames_dir, db_path, progress, stop_ev
     progress(1, 1.0, f"{done} faces loaded from DFL aligned")
 
 
-def _stage2_assign_models_dfl(db_path, face_model_map, progress):
-    """Direct model assignment for DFL projects — no ArcFace matching needed."""
-    import sqlite3
-    conn = sqlite3.connect(str(db_path), timeout=60)
-    conn.execute("PRAGMA journal_mode=WAL")
-    cur = conn.execute("SELECT frame_idx, face_idx FROM face_data ORDER BY frame_idx, face_idx")
-    rows = cur.fetchall()
-    assigned = 0
-    for frame_idx, face_idx in rows:
-        model_name = None
-        for off in (0, -1, 1):
-            ck = f"{frame_idx + off}_{face_idx}"
-            if ck in face_model_map:
-                model_name = face_model_map[ck]
-                break
-        if model_name:
-            conn.execute("UPDATE face_data SET model=? WHERE frame_idx=? AND face_idx=?",
-                         (model_name, frame_idx, face_idx))
-            assigned += 1
-    conn.commit()
-    conn.close()
-    print(f"[Export] DFL model assign: {assigned}/{len(rows)} faces", flush=True)
-    progress(2, 1.0, f"{assigned} faces assigned")
-
-
-
-# ---------------------------------------------------------------------------
-# Stage 5: FFmpeg encode
-# ---------------------------------------------------------------------------
 def _stage5_encode_video(frames_dir, output_path, source_video, encoder, fmt, progress, stop_event=None, cut_segments=None):
     ext = "png" if fmt == "png" else "jpg"
 
@@ -1704,14 +1592,22 @@ def _stage5_encode_video(frames_dir, output_path, source_video, encoder, fmt, pr
 
     # Renumber remaining frames sequentially for gap-free encoding
     _frames = sorted(frames_dir.glob(f"*.{ext}"))
+    if _cut_keep_set is not None:  # P0-1: DFL mode keep-set filtering
+        _frames = [_f for _f in _frames if int(_f.stem) in _cut_keep_set]
+        print(f"[Export] Stage5: filtered to {len(_frames)} frames by keep-set", flush=True)
     if not _frames:
         print(f"[Export] Stage5: no frames found in {frames_dir}", flush=True)
         return
     if _valid_segs:
+        # P1-9 fix: two-pass rename (temp suffix first) so an existing target
+        # frame from a previous interrupted run can never collide/raise.
         for _i, _f in enumerate(_frames):
+            _f.rename(frames_dir / (_f.name + ".renum"))
+        for _i, _f in enumerate(_frames):
+            _tmp = frames_dir / (_f.name + ".renum")
             _new = frames_dir / f"{_i + 1:08d}{_f.suffix}"
-            if _new != _f:
-                _f.rename(_new)
+            if _tmp != _new:
+                os.replace(str(_tmp), str(_new))  # replace semantics, no collision
         _pad = 8
         print(f"[Export] Renumbered {len(_frames)} frames for encoding", flush=True)
 

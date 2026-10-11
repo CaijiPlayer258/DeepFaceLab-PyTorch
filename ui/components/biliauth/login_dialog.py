@@ -24,12 +24,12 @@ from core.biliauth.user_info import fetch_user_info
 from core.biliauth.follow import follow_user
 
 # Theme colors matching the main window
-_BG = "#1C191F"
-_BG_CARD = "#2a2733"
-_BUTTON = "#2a2733"
+_BG = "#1B1B1D"
+_BG_CARD = "#29292b"
+_BUTTON = "#29292b"
 _TEXT = "#FFFFFF"
 _TEXT_DIM = "#999999"
-_THEME = "#855198"
+_THEME = "#6F8F90"
 _SUCCESS = "#4CAF50"
 
 

@@ -256,7 +256,21 @@ def detect_and_align(detector, landmarker, image: np.ndarray,
         try:
             landmark_results = landmarker.extract(face_img)
             if landmark_results is not None and len(landmark_results) > 0:
-                pts = landmark_results[0].copy()
+                _raw = landmark_results
+                if isinstance(_raw, np.ndarray) and _raw.ndim == 1 and _raw.size >= 204:
+                    # InsightFace3D68：返回一维 (3309,) = 1103x3 展平，**最后 68 行**才是
+                    # 标记点（前 68 行为 0），坐标为归一化 [-1,1]。必须先换算成 face_img
+                    # 像素坐标，后面的反向旋转与裁剪偏移才能照常生效。
+                    # 2026-09-30 修复：原实现直接 pts = landmark_results[0].copy()，对一维
+                    # 输出会取到 0 维标量 → pts.shape[0] 抛 IndexError → 被 except 吞掉，
+                    # 结果每张脸都被静默跳过。
+                    _p = np.asarray(_raw).reshape(-1, 3)[-68:, :2].astype(np.float32).copy()
+                    _fh, _fw = face_img.shape[:2]
+                    _p[:, 0] = (_p[:, 0] + 1.0) * (_fw / 2.0)
+                    _p[:, 1] = (_p[:, 1] + 1.0) * (_fh / 2.0)
+                    pts = _p
+                else:
+                    pts = _raw[0].copy()
                 if abs(rot_angle) > 30.0:
                     h_f2, w_f2 = face_img.shape[:2]
                     center2 = (w_f2 // 2, h_f2 // 2)
@@ -277,7 +291,9 @@ def detect_and_align(detector, landmarker, image: np.ndarray,
         if len(lmks) == 106:
             lmks = landmark106to68(lmks)
         elif len(lmks) > 68 and not is_facemesh:
-            # InsightFace3D68 (3309 pts): first 68 are standard landmarks
+            # 兜底：未知的多点标记器按前 68 点截断。
+            # 注意 InsightFace3D68 已由上方专门分支处理（它的标记点在**最后** 68 行，
+            # 不是前 68 行——原来的注释是错的）。
             lmks = lmks[:68]
 
         lmks_orig = lmks.copy()

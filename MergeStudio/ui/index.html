@@ -22,6 +22,14 @@
       <button id="btn-change-workspace" class="title-bar__change-btn">Change</button>
     </div>
     <div class="title-bar__right">
+      <div class="top-switch" id="sw-cols" title="切换 双栏 / 三栏">
+        <span class="top-switch__label">双栏</span>
+        <span class="top-switch__track"><span class="top-switch__knob"></span></span>
+      </div>
+      <div class="top-switch" id="sw-orient" title="切换 左右 / 上下排列">
+        <span class="top-switch__label">左右</span>
+        <span class="top-switch__track"><span class="top-switch__knob"></span></span>
+      </div>
       <span id="status-indicator" class="title-bar__status">● idle</span>
     </div>
   </header>
@@ -30,6 +38,7 @@
   <div id="main-content">
     <!-- Left Sidebar -->
     <aside id="sidebar">
+      <button id="sidebar-toggle" class="sidebar-toggle-btn" title="隐藏左侧文件栏">✕</button>
       <section id="model-section">
         <div class="section-header">Models</div>
         <div id="model-list"></div>
@@ -42,8 +51,8 @@
 
     <!-- Center: Preview Panels -->
     <div id="preview-area">
-      <div id="preview-original" class="preview-panel">
-        <span class="preview-panel__label">Original</span>
+      <button id="sidebar-show" class="sidebar-toggle-btn" title="显示左侧文件栏">☰</button>
+      <div id="preview-original" class="preview-panel">      <span class="preview-panel__label">Original</span>
         <video id="video-original" class="preview-video" muted playsinline preload="auto" style="display:none;"></video>
         <canvas id="canvas-original"></canvas>
         <span class="preview-panel__info" id="frame-info"></span>
@@ -55,11 +64,24 @@
         <span class="preview-panel__info" id="face-count"></span>
         <div class="panel-loading" id="loading-detection" style="display:none;"><div class="panel-spinner"></div><div class="panel-loading-label">Loading...</div></div>
       </div>
+      <div id="preview-splitter"></div>
       <div id="preview-swapped" class="preview-panel">
         <span class="preview-panel__label">Swapped <button id="btn-download-swapped" class="preview-download-btn" title="Download full resolution">⬇</button></span>
         <canvas id="canvas-swapped"></canvas>
+        <div id="pz-minimap" title="放大区小地图：拖动小框或点击任意位置移动视野">
+        <canvas id="pz-mini-thumb"></canvas>
+        <div id="pz-mini-box"></div>
+      </div>
+        <div id="pz-hud">
+          <button id="pz-fit" title="适配窗口（退出人脸聚焦）">FIT</button>
+          <button id="pz-face" title="聚焦人脸：自动跟随主脸并放大居中">FACE</button>
+          <span id="pz-pct">100%</span>
+          <button id="pz-zin" title="放大">+</button>
+          <button id="pz-zout" title="缩小">−</button>
+        </div>
         <div class="debug-grid" id="debug-grid" style="display:none;flex-wrap:wrap;gap:6px;justify-content:center;align-items:center;width:100%;height:100%;overflow-y:auto;padding:6px;"></div>
-        <div class="panel-loading" id="loading-swapped" style="display:none;"><div class="panel-spinner"></div><div class="panel-loading-label">Loading...</div></div>
+        
+      <div class="panel-loading" id="loading-swapped" style="display:none;"><div class="panel-spinner"></div><div class="panel-loading-label">Loading...</div></div>
       </div>
     </div>
 
@@ -122,8 +144,8 @@
     <!-- Frame Jumper -->
     <div id="frame-jumper">
       <div class="frame-jumper__left">
-        <span class="frame-jumper__label" style="font-size:9px;color:#555;margin-right:4px;">Res</span>
-        <select id="res-select" style="background:#1a1a1e;border:1px solid #2a2a2e;border-radius:3px;padding:2px 4px;color:#e0e0e0;font:10px Inter,sans-serif;outline:none;cursor:pointer;">
+        <span class="frame-jumper__label" style="font-size:9px;color:#6b6c70;margin-right:4px;">Res</span>
+        <select id="res-select" style="background:#1a1a1e;border:1px solid #222329;border-radius:3px;padding:2px 4px;color:#c9cacd;font:10px Inter,sans-serif;outline:none;cursor:pointer;">
           <option value="1">1:1</option>
           <option value="0.5" selected>1/2</option>
           <option value="0.25">1/4</option>
@@ -141,17 +163,18 @@
       </div>
       <div class="frame-jumper__right">
         <span id="timecode">00:00.00</span>
-        <button id="zoom-out" class="icon-btn">
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#555" stroke-width="1"/><line x1="8" y1="8" x2="10" y2="10" stroke="#555" stroke-width="1" stroke-linecap="round"/><line x1="3.5" y1="5" x2="6.5" y2="5" stroke="#555" stroke-width="0.8"/></svg>
+        <button id="zoom-out" class="icon-btn" title="缩小时间轴">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#6b6c70" stroke-width="1"/><line x1="8" y1="8" x2="10" y2="10" stroke="#6b6c70" stroke-width="1" stroke-linecap="round"/><line x1="3.5" y1="5" x2="6.5" y2="5" stroke="#6b6c70" stroke-width="0.8"/></svg>
         </button>
-        <button id="zoom-in" class="icon-btn">
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#555" stroke-width="1"/><line x1="8" y1="8" x2="10" y2="10" stroke="#555" stroke-width="1" stroke-linecap="round"/><line x1="3.5" y1="5" x2="6.5" y2="5" stroke="#555" stroke-width="0.8"/><line x1="5" y1="3.5" x2="5" y2="6.5" stroke="#555" stroke-width="0.8"/></svg>
+        <button id="zoom-in" class="icon-btn" title="放大时间轴">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#6b6c70" stroke-width="1"/><line x1="8" y1="8" x2="10" y2="10" stroke="#6b6c70" stroke-width="1" stroke-linecap="round"/><line x1="3.5" y1="5" x2="6.5" y2="5" stroke="#6b6c70" stroke-width="0.8"/><line x1="5" y1="3.5" x2="5" y2="6.5" stroke="#6b6c70" stroke-width="0.8"/></svg>
         </button>
       </div>
     </div>
 
     <!-- Ruler -->
     <div id="timeline-ruler">
+      <button id="tl-collapse" class="layout-toggle-btn" style="position:absolute;top:-4px;right:8px;z-index:5;font-size:8px;padding:1px 6px;">▾ 轨道</button>
       <div class="track-label"></div>
       <div class="track-content" id="ruler-numbers"></div>
     </div>
@@ -165,19 +188,19 @@
     </div>
 
     <!-- Track 2: Faces -->
-    <div class="track track--faces">
+    <div class="track track--faces tl-collapsed">
       <div class="track-label">Faces</div>
       <div class="track-content" id="track-faces"></div>
     </div>
 
     <!-- Track 3: Cut -->
-    <div class="track track--cut">
+    <div class="track track--cut tl-collapsed">
       <div class="track-label">Cut<button id="btn-add-cut" class="btn-cut-add">+</button></div>
       <div class="track-content" id="track-cut"></div>
     </div>
 
     <!-- Track 4: Detection Angle -->
-    <div class="track track--angle">
+    <div class="track track--angle tl-collapsed">
       <div class="track-label">角度<button id="btn-add-angle" class="btn-angle-add">+</button></div>
       <div class="track-content" id="track-angle"></div>
     </div>
@@ -199,9 +222,9 @@
     <div class="card-scroll">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
         <h2 style="font-size:16px;font-weight:600;">Face Database</h2>
-        <span id="facedb-count" style="font-size:11px;color:#555;"></span>
+        <span id="facedb-count" style="font-size:11px;color:#6b6c70;"></span>
       </div>
-      <button id="btn-compute-embeddings" class="export-fixed-btn" style="background:linear-gradient(135deg,#5b5bd6,#7c3aed);border:none;border-radius:8px;color:#fff;padding:10px 24px;cursor:pointer;font-size:13px;margin-bottom:16px;">Compute Face Embeddings</button>
+      <button id="btn-compute-embeddings" class="export-fixed-btn" style="background:linear-gradient(135deg,#6f8f90,#67878a);border:none;border-radius:8px;color:#d2d3d5;padding:10px 24px;cursor:pointer;font-size:13px;margin-bottom:16px;">Compute Face Embeddings</button>
       <div id="facedb-list"></div>
     </div>
   </div>
@@ -225,11 +248,11 @@
       </div>
       <div class="form-group">
         <label class="form-label">Output Path</label>
-        <input id="export-path" class="form-input" type="text" placeholder="Default: source_result.mp4" style="background:#121214;border:1px solid #2a2a2e;border-radius:6px;padding:10px;color:#e0e0e0;width:100%;font-size:13px;">
+        <input id="export-path" class="form-input" type="text" placeholder="Default: source_result.mp4" style="background:#121214;border:1px solid #222329;border-radius:6px;padding:10px;color:#c9cacd;width:100%;font-size:13px;">
       </div>
       <div class="form-group">
         <label class="form-label">Swap Workers (0=auto)</label>
-        <input id="export-workers" class="form-input" type="number" min="0" max="16" value="0" style="background:#121214;border:1px solid #2a2a2e;border-radius:6px;padding:10px;color:#e0e0e0;width:100%;font-size:13px;">
+        <input id="export-workers" class="form-input" type="number" min="0" max="16" value="0" style="background:#121214;border:1px solid #222329;border-radius:6px;padding:10px;color:#c9cacd;width:100%;font-size:13px;">
       </div>
     </div>
   </div>
@@ -270,6 +293,6 @@
 <script src="js/preview.js"></script>
 <script src="js/timeline.js"></script>
 <script src="js/params.js"></script>
-<script src="js/app.js"></script>
+<script src="js/app.js?v=20261009c"></script>
 </body>
 </html>

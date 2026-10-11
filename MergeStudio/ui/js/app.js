@@ -33,15 +33,16 @@
       this.initDragDrop();
       this.initSliders();
       this._loadSavedConfig();
+      this._syncFromBackend();
     },
 
     initTransportSVG: function () {
       var svgs = [
-        '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 2V14" stroke="#888" stroke-width="1.2"/><path d="M12 4L7 8L12 12Z" fill="#888" stroke="#888" stroke-width="0.5"/></svg>',
+        '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 2V14" stroke="#9a9b9e" stroke-width="1.2"/><path d="M12 4L7 8L12 12Z" fill="#9a9b9e" stroke="#9a9b9e" stroke-width="0.5"/></svg>',
         '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 2V14" stroke="#ccc" stroke-width="1.2"/><path d="M12 5L8 8L12 11" stroke="#ccc" stroke-width="1.8" stroke-linecap="round"/></svg>',
         this._playSVG,
         '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 5L8 8L4 11" stroke="#ccc" stroke-width="1.8" stroke-linecap="round"/><path d="M12 2V14" stroke="#ccc" stroke-width="1.2"/></svg>',
-        '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 4L9 8L4 12Z" fill="#888" stroke="#888" stroke-width="0.5"/><path d="M12 2V14" stroke="#888" stroke-width="1.2"/></svg>',
+        '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M4 4L9 8L4 12Z" fill="#9a9b9e" stroke="#9a9b9e" stroke-width="0.5"/><path d="M12 2V14" stroke="#9a9b9e" stroke-width="1.2"/></svg>',
       ];
       document.getElementById('transport-controls').innerHTML = svgs.join('');
     },
@@ -71,11 +72,13 @@
         else if (idx === 3) self.seekFrame(self.state.currentFrame + 1);
         else if (idx === 4) self.seekFrame(Math.min(self.state.totalFrames - 1, self.state.currentFrame + 30));
       });
-      document.getElementById('zoom-out').addEventListener('click', function () {
+      var tlZoomOut = document.getElementById('zoom-out');
+      if (tlZoomOut) tlZoomOut.addEventListener('click', function () {
         self.state.zoom = Math.max(0.25, self.state.zoom / 2);
         Timeline.updateZoom(self.state.zoom, self.state.totalFrames, self.state.currentFrame);
       });
-      document.getElementById('zoom-in').addEventListener('click', function () {
+      var tlZoomIn = document.getElementById('zoom-in');
+      if (tlZoomIn) tlZoomIn.addEventListener('click', function () {
         self.state.zoom = Math.min(8, self.state.zoom * 2);
         Timeline.updateZoom(self.state.zoom, self.state.totalFrames, self.state.currentFrame);
       });
@@ -425,6 +428,7 @@
           img.onload = function () {
             if (gen !== self._frameGen) return;
             self.setPanelLoading('loading-detection', false);
+            if (window.MSFaceFocus) window.MSFaceFocus.setFrameSize([img.naturalWidth, img.naturalHeight]);
             Preview._drawImage(Preview.canvasDetection, img, []);
           };
           img.onerror = function () { setTimeout(pollDet, 50); };
@@ -440,7 +444,15 @@
             if (data.face_count === 0) {
               self.setPanelLoading('loading-detection', false);
               Preview.updateDetection(url, []);
+            } else {
+              // pollDet draws the image but never sets the badge — do it here,
+              // and tell the user which geometry source was used
+              var fc = document.getElementById('face-count');
+              if (fc) fc.textContent = data.face_count + ' faces' +
+                (data.detect_source === 'dfl' ? ' · DFL' : '');
             }
+            // 聚焦人脸：按本帧的人脸数据自动放大居中
+            if (window.MSFaceFocus) window.MSFaceFocus.setFaces(data.faces || []);
             var t = Date.now();
             if (data.debug_urls && data.debug_urls.length > 0) {
               Preview.showDebugGrid(data.debug_urls);
@@ -599,7 +611,7 @@
       }
 
       if (!hasCurrent && dbKeys.length === 0) {
-        container.innerHTML = '<div style="font-size:10px;color:#555;padding:4px 0;">No faces detected</div>';
+        container.innerHTML = '<div style="font-size:10px;color:#6b6c70;padding:4px 0;">No faces detected</div>';
       }
       if (countEl) countEl.textContent = dbKeys.length + ' in DB';
     },
@@ -611,14 +623,14 @@
       div.className = 'face-db-item ' + (isChecked ? 'face-db-item--checked' : 'face-db-item--unchecked');
 
       var cbHtml = isChecked
-        ? '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" stroke="#5b5bd6" stroke-width="1.5"/><circle cx="8" cy="8" r="4" fill="#5b5bd6"/></svg>'
+        ? '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" stroke="#6f8f90" stroke-width="1.5"/><circle cx="8" cy="8" r="4" fill="#6f8f90"/></svg>'
         : '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" stroke="#3a3a3e" stroke-width="1.5"/></svg>';
 
       var modelOpts = Object.keys(self.state.selectedModels);
       var currentModel = self.state.faceModelMap[item.key] || (modelOpts.length > 0 ? modelOpts[modelOpts.length - 1] : '');
       var modelSelectHtml = '';
       if (modelOpts.length > 1) {
-        modelSelectHtml = '<select class="face-model-select" style="font-size:9px;background:#1a1a1e;border:1px solid #2a2a2e;border-radius:3px;padding:1px 4px;color:#ccc;margin-left:4px;" data-face="' + item.faceIdx + '">' +
+        modelSelectHtml = '<select class="face-model-select" style="font-size:9px;background:#1a1a1e;border:1px solid #222329;border-radius:3px;padding:1px 4px;color:#ccc;margin-left:4px;" data-face="' + item.faceIdx + '">' +
           modelOpts.map(function (mn) {
             return '<option value="' + mn + '"' + (mn === currentModel ? ' selected' : '') + '>' + mn + '</option>';
           }).join('') + '</select>';
@@ -817,7 +829,7 @@
       if (!container) return;
       container.innerHTML = '';
       if (!models || models.length === 0) {
-        container.innerHTML = '<div class="list-item list-item--disabled"><span class="list-item__name" style="color:#555">No models found</span></div>';
+        container.innerHTML = '<div class="list-item list-item--disabled"><span class="list-item__name" style="color:#6b6c70">No models found</span></div>';
         return;
       }
       models.forEach(function (m) {
@@ -878,6 +890,138 @@
       });
     },
 
+    // ── 自动加载：页面打开时同步后端已就绪的 workspace/模型/视频 (autoload-sync) ──
+    _syncFromBackend: function () {
+      var self = this;
+      var si = document.getElementById('status-indicator');
+      var attempts = 0, MAX = 150; // ~3min @1.2s（阶段推进会重置；超时不终止，降频续轮询）
+      var lastStage = null;
+      var syncedOnce = false;                     // 已同步成功一次（用于检测后端重启）
+      var handoverTimer = null;
+      function poll() {
+        // 已同步过：低频监听后端健康。后端重启（video/model 变空）→ 自动重新同步，
+        // 旧标签页不再永久失联（2026-10-09 修复：重启服务后旧页面一直空白）。
+        if (self.state.projectPath && syncedOnce) {
+          if (handoverTimer) return;
+          handoverTimer = setTimeout(function () {
+            handoverTimer = null;
+            if (!self.state.projectPath) return;
+            API.getStatus().then(function (st) {
+              if (st && st.video && st.model && st.model.loaded &&
+                  st.video.path === self.state.videoPath) return;  // 同一视频仍在：后端正常
+              syncedOnce = false;                                  // 后端重启/换片：重新接管
+              self.state.projectPath = '';
+              if (si) si.textContent = '\u25cf 后端重启，重新同步…';
+              poll();
+            }).catch(function () {});           // 暂时性错误：下轮再测
+          }, 5000);
+          return;
+        }
+        if (self.state.projectPath) return; // 用户已手动接管（未同步过 = 真手动，不干扰）
+        API.getStatus().then(function (st) {
+          if (self.state.projectPath && !syncedOnce) return;
+          var al = st.autoload || {};
+          var video = st.video, model = st.model;
+          // 自动加载流程：隐藏左侧文件栏（顶栏「文件栏」按钮可再展开）
+          if (((al && al.configured) || video || model) && window.MSSidebar &&
+              localStorage.getItem('ms_sidebar') !== 'hidden') {
+            window.MSSidebar('hidden');
+          }
+          if (video && model && model.loaded) {
+            // 就绪：拉取列表，完整填充页面（等价于手动 open→选视频→选模型的最终态）
+            API.getStatus(true).then(function (st2) {
+              if (self.state.projectPath) return;
+              if (!st.workspace) { setTimeout(poll, 1500); return; } // 状态不完整：等下一轮，不半初始化
+              self.state.projectPath = st.workspace;
+              document.getElementById('workspace-path').value = st.workspace || '';
+              self.state.models = st2.models || [];
+              self.state.videos = st2.videos || [];
+              self.state.videoDflMap = {};
+              self.state.cutSegments = [];
+              self.state.angleSegments = [];
+              self.state.videoPath = video.path;
+              self.state.totalFrames = video.total_frames;
+              self.state.fps = video.fps || 0;
+              self.state.faceDensityData = [];
+              self.state.faceDatabase = {};
+              self.state.selectedModels = {};
+              self.state.selectedModels[model.name] = true;
+              self.state.loadedModel = model.name;
+              self.state.config.detect_mode = video.has_aligned_dir ? 'skip_dfl' : 'always';
+              var dm = document.getElementById('detect-mode-select');
+              if (dm) dm.value = self.state.config.detect_mode;
+              var vid = document.getElementById('video-original');
+              if (vid) { vid.removeAttribute('src'); vid.load(); }
+              document.getElementById('frame-total').textContent = video.total_frames;
+              self.renderModelList(self.state.models);
+              self.renderVideoList(self.state.videos);
+              self.renderFaceSection();
+              Timeline.updateZoom(self.state.zoom, video.total_frames, 0);
+              if (si) si.textContent = '\u2713 ' + model.name + ' + ' + video.name +
+                ' (' + Number(video.total_frames).toLocaleString() + '\u5e27)';
+              syncedOnce = true;
+              self.seekFrame(0);
+              self._seekFirstVisibleFrame();       // 片头黑帧 → 跳到首个有画面的帧
+              self._startCachePoll();
+            }).catch(function () { setTimeout(poll, 1500); }); // 就绪瞬间的瞬时错误：重试，不让轮询静默死亡
+            return;
+          }
+          // 未就绪：显示进度并继续轮询
+          if (!al.configured && !video && !model) return; // 无自动加载配置，不打扰手动流程
+          if (al.stage && al.stage !== lastStage) { lastStage = al.stage; attempts = 0; } // 阶段有推进：重置预算，慢加载不误判超时
+          var slow = ++attempts > MAX; // 超预算不终止：降频续轮询，后端晚就绪仍能接上
+          var stageTxt = {
+            'idle': '\u7b49\u5f85\u542f\u52a8\u2026',
+            'opening-workspace': '\u6253\u5f00 workspace\u2026',
+            'loading-model': '\u52a0\u8f7d\u6a21\u578b ' + (al.detail || '') + '\u2026',
+            'selecting-video': '\u52a0\u8f7d\u89c6\u9891 ' + (al.detail || '') + '\u2026',
+            'error': '\u5931\u8d25: ' + (al.detail || '')
+          }[al.stage] || '\u81ea\u52a8\u52a0\u8f7d\u4e2d\u2026';
+          if (si) si.textContent = '\u25cf \u81ea\u52a8\u52a0\u8f7d' + (slow ? '\u8d85\u65f6\u2026' : ': ' + stageTxt);
+          setTimeout(poll, slow ? 5000 : 1200);
+        }).catch(function () {
+          var slow = ++attempts > MAX;
+          if (si && slow) si.textContent = '\u25cf \u670d\u52a1\u672a\u54cd\u5e94';
+          setTimeout(poll, slow ? 5000 : 1500);
+        });
+      }
+      poll();
+    },
+
+    _seekFirstVisibleFrame: function () {
+      // 片头黑帧检测：autoload 定位到 frame 0 后，若开头是黑屏（JAV 片头带黑场很常见），
+      // 逐步探测后续帧直到找到第一个非黑帧再定位过去，避免"预览区一片黑"的观感。
+      var self = this;
+      var candidates = [30, 60, 120, 240, 480, 960];   // 探测点递增
+      var probe = 0;
+      function next() {
+        if (probe >= candidates.length) return;        // 全黑：停在 frame 0（真全黑片）
+        var idx = Math.min(candidates[probe], Math.max(0, self.state.totalFrames - 1));
+        probe++;
+        var img = new Image();
+        img.onload = function () {
+          try {
+            var c = document.createElement('canvas');
+            c.width = 32; c.height = 18;
+            var ctx = c.getContext('2d');
+            ctx.drawImage(img, 0, 0, 32, 18);
+            var d = ctx.getImageData(0, 0, 32, 18).data;
+            var sum = 0;
+            for (var i = 0; i < d.length; i += 4) sum += (d[i] + d[i+1] + d[i+2]) / 3;
+            var mean = sum / (d.length / 4);
+            if (mean > 20) {                           // 有画面：定位过去
+              self.seekFrame(idx);
+              return;
+            }
+            next();                                   // 还是黑：继续探测
+          } catch (e) { /* 异常：放弃，停在当前帧 */ }
+        };
+        img.onerror = function () { /* 读不到：放弃 */ };
+        img.src = '/api/preview/frame/' + idx + '?q=85&_=' + Date.now();
+      }
+      next();
+    },
+
     _loadSavedConfig: function () {
       var self = this;
       API.loadConfig().then(function (saved) {
@@ -893,4 +1037,596 @@
   };
 
   document.addEventListener('DOMContentLoaded', function () { window.App.init(); });
+})();
+
+// ── Top-bar layout switches: 双栏/三栏 + 左右/上下 (ui-dark v7) ──
+(function() {
+  var pa = document.getElementById('preview-area');
+  var swCols = document.getElementById('sw-cols');
+  var swOr = document.getElementById('sw-orient');
+  if (!pa || !swCols || !swOr) return;
+  function settle() {
+    // v2 owns panel sizing: re-run it so the orientation/column change really applies
+    if (window.MSLayoutApply) window.MSLayoutApply();
+    setTimeout(function() {
+      if (window.MSZoomApply) window.MSZoomApply();
+    }, 150);
+  }
+  function applyCols(on3) {
+    pa.classList.remove('layout-3col-swap-big');
+    pa.classList.toggle('layout-2col', !on3);
+    swCols.classList.toggle('on', on3);
+    var lb = swCols.querySelector('.top-switch__label');
+    if (lb) lb.textContent = on3 ? '三栏' : '双栏';
+    localStorage.setItem('ms_layout', on3 ? '3col' : '2col');
+    settle();
+  }
+  function applyOr(vert) {
+    pa.classList.toggle('layout-vertical', vert);
+    swOr.classList.toggle('on', vert);
+    var lb = swOr.querySelector('.top-switch__label');
+    if (lb) lb.textContent = vert ? '上下' : '左右';
+    localStorage.setItem('ms_layout_mode', vert ? 'v' : 'h');
+    settle();
+  }
+  applyCols((localStorage.getItem('ms_layout') || '2col') !== '2col');
+  applyOr(localStorage.getItem('ms_layout_mode') === 'v');
+  swCols.addEventListener('click', function() { applyCols(pa.classList.contains('layout-2col')); });
+  swOr.addEventListener('click', function() { applyOr(!pa.classList.contains('layout-vertical')); });
+})();
+
+
+// ── Draggable preview layout (ui-dark v2) ──
+(function() {
+  var pa = document.getElementById('preview-area');
+  if (!pa) return;
+  var splitter = document.getElementById('preview-splitter');
+  var detP = document.getElementById('preview-detection');
+  var swpP = document.getElementById('preview-swapped');
+  if (!splitter || !detP || !swpP) return;
+
+  var isDragging = false, startPos = 0, startPct = 50;
+  var origP = document.getElementById('preview-original');
+  var mode = localStorage.getItem('ms_layout_mode') || 'h';
+  var ratio = parseFloat(localStorage.getItem('ms_layout_ratio')) || 50;
+
+  // Single source of truth for panel sizing — also driven by the top-bar switches.
+  // Sizes every visible panel along the current axis and leaves room for the 8px splitter.
+  function applyLayout() {
+    var vert = pa.classList.contains('layout-vertical');
+    var twoCol = pa.classList.contains('layout-2col');
+    // space NOT available to panels: the 8px splitter plus the 2px flex gaps between
+    // neighbouring items (each gap is charged to one side, so the sums fit exactly).
+    var GAP_EDGE = 2;                             // 3-col: gap between Original and Detection
+    var GAP_SPLIT = 6;                            // half the splitter (4) + one flex gap (2)
+    var wOrig = twoCol ? 0 : 100 / 3;             // 3-col: Original keeps one third
+    var rest = 100 - wOrig;
+    var wDet = rest * ratio / 100, wSwp = rest * (100 - ratio) / 100;
+
+    function size(p, pct, gap) {
+      if (!p || !pct) return;
+      var v = 'calc(' + pct.toFixed(3) + '% - ' + gap + 'px)';
+      if (vert) { p.style.height = v; p.style.width = ''; }
+      else { p.style.width = v; p.style.height = ''; }
+    }
+    [origP, detP, swpP].forEach(function (p) {
+      if (!p) return;
+      p.classList.add('drag-set');
+      p.style.width = '';
+      p.style.height = '';
+    });
+    size(origP, wOrig, GAP_EDGE);
+    size(detP, wDet, GAP_SPLIT);
+    size(swpP, wSwp, GAP_SPLIT);
+    localStorage.setItem('ms_layout_mode', vert ? 'v' : 'h');
+    localStorage.setItem('ms_layout_ratio', ratio);
+  }
+  window.MSLayoutApply = applyLayout;
+
+  splitter.addEventListener('mousedown', function(e) {
+    var _v = pa.classList.contains('layout-vertical');
+    e.preventDefault(); e.stopPropagation();
+    isDragging = true; startPos = _v ? e.clientY : e.clientX;
+    startPct = ratio; splitter.classList.add('dragging');
+    document.body.style.cursor = _v ? 'row-resize' : 'col-resize';
+    document.body.style.userSelect = 'none';
+  });
+  document.addEventListener('mousemove', function(e) {
+    if (!isDragging) return;
+    var rect = pa.getBoundingClientRect();
+    var _vert = pa.classList.contains('layout-vertical');
+    var pct;
+    if (!_vert) pct = ((e.clientX - rect.left) / rect.width) * 100;
+    else pct = ((e.clientY - rect.top) / rect.height) * 100;
+    ratio = Math.max(15, Math.min(85, pct));
+    applyLayout();
+  });
+  document.addEventListener('mouseup', function() {
+    if (!isDragging) return;
+    isDragging = false; splitter.classList.remove('dragging');
+    document.body.style.cursor = ''; document.body.style.userSelect = '';
+    localStorage.setItem('ms_layout_ratio', ratio);
+  });
+
+  applyLayout();
+})();
+
+
+// ── Sidebar collapse (ui-dark v3) ──
+(function() {
+  var btn = document.getElementById('sidebar-toggle');
+  var mc = document.getElementById('main-content');
+  if (!btn || !mc) return;
+  var saved = localStorage.getItem('ms_sidebar') || 'shown';
+  var showBtn = document.getElementById('sidebar-show');
+  function apply(v) {
+    mc.classList.toggle('sidebar-hidden', v === 'hidden');
+    localStorage.setItem('ms_sidebar', v);
+  }
+  window.MSSidebar = apply;
+  apply(saved);
+  btn.addEventListener('click', function() {
+    var cur = localStorage.getItem('ms_sidebar') || 'shown';
+    apply(cur === 'shown' ? 'hidden' : 'shown');
+  });
+  if (showBtn) showBtn.addEventListener('click', function() { apply('shown'); });
+})();
+
+// ── Preview zoom (ui-dark v3) ──
+(function() {
+  var slider = document.getElementById('zoom-slider');
+  var label = document.getElementById('zoom-label');
+  var canvas = document.getElementById('canvas-swapped');
+  var zoomIn = document.getElementById('zoom-in');
+  var zoomOut = document.getElementById('zoom-out');
+  var zoomReset = document.getElementById('zoom-reset');
+  var controls = document.getElementById('zoom-controls');
+  if (!slider || !canvas) return;
+
+  var zoom = 100;
+  function applyZoom(z) {
+    zoom = Math.max(100, Math.min(500, z));
+    canvas.style.transform = 'scale(' + (zoom / 100) + ')';
+    canvas.style.transformOrigin = 'center center';
+    if (label) label.textContent = zoom + '%';
+    if (slider) slider.value = zoom;
+    localStorage.setItem('ms_zoom', zoom);
+  }
+  // 交换面板有图时显示缩放控制
+  var swpPanel = document.getElementById('preview-swapped');
+  if (swpPanel) {
+    var obs = new MutationObserver(function() {
+      var hasImg = canvas.width > 0;
+      controls.style.display = hasImg ? 'flex' : 'none';
+    });
+    obs.observe(canvas, { attributes: true, attributeFilter: ['width'] });
+  }
+
+  if (slider) slider.addEventListener('input', function() { applyZoom(parseInt(this.value)); });
+  if (zoomIn) zoomIn.addEventListener('click', function() { applyZoom(zoom + 25); });
+  if (zoomOut) zoomOut.addEventListener('click', function() { applyZoom(zoom - 25); });
+  if (zoomReset) zoomReset.addEventListener('click', function() { applyZoom(100); });
+  applyZoom(parseInt(localStorage.getItem('ms_zoom')) || 100);
+})();
+
+// ── Synchronized Preview Zoom/Pan (ui-dark v4) ──
+(function() {
+  var pa = document.getElementById('preview-area');
+  if (!pa) return;
+  var panels = [].slice.call(pa.querySelectorAll('.preview-panel')).map(function(el) {
+    return { el: el, canvas: el.querySelector('canvas') };
+  }).filter(function(p) { return p.canvas; });
+  if (panels.length === 0) return;
+
+  var pz = { scale: 1, ox: 0, oy: 0 };
+  var isPanning = false, panStart = { mx: 0, my: 0, ox: 0, oy: 0 };
+  var pctEl = document.getElementById('pz-pct');
+  var mm = document.getElementById('pz-minimap');
+  var mmThumb = document.getElementById('pz-mini-thumb');
+  var mmBox = document.getElementById('pz-mini-box');
+  var swp = null;
+  for (var k = 0; k < panels.length; k++) if (panels[k].el.id === 'preview-swapped') swp = panels[k];
+  if (!swp) swp = panels[panels.length - 1];
+
+  // 小地图 = 卡片（面板）的等比缩略：画面按它在卡片中的真实位置/大小画进去，
+  // 画面外的空白也照实呈现；蓝色小框 = 画面此刻在卡片中占据的区域（自由拖动它）
+  var MM_MAX = 120;                     // 缩略图最长边
+  var mmThumbKey = null;
+  function updateRegion() {
+    if (!mm || !swp || !mmBox || !mmThumb) return;
+    var fit = swp.canvas._fit;
+    if (!swp.canvas.width || !fit || fit.w < 4 || fit.h < 4) {
+      mm.style.display = 'none';
+      return;
+    }
+    var rng = panRanges();
+    if (!rng.show) { mm.style.display = 'none'; return; }   // 卡片与画面完全重合时无需小地图
+
+    var pw = swp.el.clientWidth, ph = swp.el.clientHeight;
+    var ex = swp.canvas.offsetLeft, ey = swp.canvas.offsetTop;
+    var s = pz.scale;
+
+    // 卡片比例 = 面板比例（严格对应，绝不拉伸）
+    var sc = MM_MAX / Math.max(pw, ph, 1);
+    var mmW = Math.max(14, Math.round(pw * sc)), mmH = Math.max(14, Math.round(ph * sc));
+    if (mm.style.display !== 'block') mm.style.display = 'block';
+    mm.style.width = mmW + 'px';
+    mm.style.height = mmH + 'px';
+
+    // 缩略图 = 整块画布（画面 + 空白），仅在帧变化/画布重建时重画
+    var key = (swp.canvas._lastImg && swp.canvas._lastImg.src || '') + '|' + swp.canvas.width + 'x' + swp.canvas.height;
+    if (key !== mmThumbKey) {
+      mmThumbKey = key;
+      try {
+        mmThumb.width = mmW; mmThumb.height = mmH;
+        var tctx = mmThumb.getContext('2d');
+        tctx.clearRect(0, 0, mmW, mmH);
+        tctx.drawImage(swp.canvas, 0, 0, swp.canvas.width, swp.canvas.height, 0, 0, mmW, mmH);
+      } catch (e) { /* 跨域或未初始化时静默 */ }
+    }
+
+    // 画面在卡片里的屏幕范围 ∩ 卡片 → 小框（超出卡片的部分=被裁掉，框就贴边）
+    var fsx = ex + s * (fit.x + pz.ox), fsy = ey + s * (fit.y + pz.oy);
+    var fsw = s * fit.w, fsh = s * fit.h;
+    var l = Math.max(0, fsx), t = Math.max(0, fsy);
+    var rr = Math.min(pw, fsx + fsw), bb = Math.min(ph, fsy + fsh);
+    if (rr - l < 2 || bb - t < 2) { mm.style.display = 'none'; return; }
+    mmBox.style.left = (l / pw * mmW) + 'px';
+    mmBox.style.top = (t / ph * mmH) + 'px';
+    mmBox.style.width = ((rr - l) / pw * mmW) + 'px';
+    mmBox.style.height = ((bb - t) / ph * mmH) + 'px';
+  }
+
+  function apply() {
+    var t = 'scale(' + pz.scale + ') translate(' + pz.ox + 'px,' + pz.oy + 'px)';
+    panels.forEach(function(p) {
+      // 聚焦人脸模式下每个面板有自己的变换（各自几何独立居中）；
+      // 其他情况共享手动缩放/平移状态。
+      p.canvas.style.transform = (faceMode && p._faceT) ? p._faceT : t;
+      p.canvas.style.transformOrigin = '0 0';
+    });
+    pa.classList.toggle('pz-panning', isPanning && pz.scale > 1);
+    if (pctEl) pctEl.textContent = Math.round(pz.scale * 100) + '%';
+    updateRegion();
+  }
+
+  function zoomAt(factor, cx, cy) {
+    var oldS = pz.scale;
+    var newS = Math.max(1, Math.min(8, oldS * factor));
+    if (newS === oldS) return;
+    clearFaceT();                          // 手动缩放接管，退出本帧的人脸聚焦构图
+    var ratio = newS / oldS;
+    pz.ox = cx - (cx - pz.ox) * ratio;
+    pz.oy = cy - (cy - pz.oy) * ratio;
+    pz.scale = newS;
+    if (newS === 1 && window.Preview && typeof Preview.refit === 'function') Preview.refit();
+    clampPan();
+    apply();
+  }
+
+  // Auto-fit (re-drawing the canvases at the panel's current size) is allowed only while
+  // the view is NOT zoomed in. Once zoomed the framed view is kept until the user hits FIT.
+  function refitIfFit() {
+    if (pz.scale > 1 && !faceMode) return;      // zoomed manual view is kept as-is
+    if (window.Preview && typeof Preview.refit === 'function') Preview.refit();
+    if (faceMode) maybeApplyFaceFocus();        // face mode re-centres for the new panel size
+  }
+
+  // Per-axis pan limits of the swapped panel.
+  //   fit  : the picture's rect inside the panel (element px, unscaled)
+  //   mode : 'slide'  — picture smaller than the panel: it may be moved anywhere inside,
+  //                     from flush-top/left to flush-bottom/right (free positioning)
+  //          'window' — picture larger than the panel: the view window stays over the
+  //                     picture (no drifting into empty space)
+  // Both modes share the same two bounds, only their order differs, so one formula each.
+  function panRanges() {
+    var out = { x: { min: 0, max: 0, slide: false }, y: { min: 0, max: 0, slide: false }, show: false };
+    if (!swp || !swp.canvas._fit) return out;
+    var fit = swp.canvas._fit;
+    var s = pz.scale, pw = swp.el.clientWidth, ph = swp.el.clientHeight;
+    var ex = swp.canvas.offsetLeft, ey = swp.canvas.offsetTop;
+    if (faceMode) {
+      // 人脸聚焦模式：以"人脸居中"为先，允许画面外留白，
+      // 但至少保证 20% 的窗口仍被画面覆盖（不会把画面推出视野）
+      var W = pw / s, H = ph / s;
+      var loX = fit.x - 0.8 * W, hiX = fit.x + fit.w - 0.2 * W;
+      var loY = fit.y - 0.8 * H, hiY = fit.y + fit.h - 0.2 * H;
+      out.x = { min: -(hiX + ex / s), max: -(loX + ex / s), slide: true };
+      out.y = { min: -(hiY + ey / s), max: -(loY + ey / s), slide: true };
+      out.show = (out.x.max - out.x.min > 1) || (out.y.max - out.y.min > 1);
+      return out;
+    }
+    var aX = -(fit.x + ex / s), bX = (pw - ex) / s - fit.x - fit.w;
+    var aY = -(fit.y + ey / s), bY = (ph - ey) / s - fit.y - fit.h;
+    if (fit.w * s <= pw) { out.x = { min: aX, max: bX, slide: true }; }
+    else { out.x = { min: bX, max: aX, slide: false }; }
+    if (fit.h * s <= ph) { out.y = { min: aY, max: bY, slide: true }; }
+    else { out.y = { min: bY, max: aY, slide: false }; }
+    out.show = (out.x.max - out.x.min > 1) || (out.y.max - out.y.min > 1);
+    return out;
+  }
+
+  function clampPan() {
+    if (!swp || !swp.canvas._fit) return;
+    var r = panRanges();
+    pz.ox = Math.min(r.x.max, Math.max(r.x.min, pz.ox));
+    pz.oy = Math.min(r.y.max, Math.max(r.y.min, pz.oy));
+  }
+
+  function reset() {
+    // FIT = manual re-enable of auto-fit (the panel may have changed size while zoomed)
+    // and it leaves 聚焦人脸 mode (the two are alternative display modes)
+    if (window.Preview && typeof Preview.refit === 'function') Preview.refit();
+    pz.scale = 1; pz.ox = 0; pz.oy = 0;
+    setFaceMode(false);
+    apply();
+  }
+
+  panels.forEach(function(p) {
+    p.el.addEventListener('wheel', function(e) {
+      e.preventDefault();
+      var rect = p.el.getBoundingClientRect();
+      var cx = (e.clientX - rect.left) / pz.scale;
+      var cy = (e.clientY - rect.top) / pz.scale;
+      zoomAt(e.deltaY < 0 ? 1.15 : 1 / 1.15, cx, cy);
+    }, { passive: false });
+    p.el.addEventListener('mousedown', function(e) {
+      if (pz.scale <= 1) return;
+      e.preventDefault(); isPanning = true;
+      clearFaceT();                        // 手动拖动接管
+      panStart = { mx: e.clientX, my: e.clientY, ox: pz.ox, oy: pz.oy };
+      pa.classList.add('pz-panning');
+    });
+    p.el.addEventListener('dblclick', function(e) { e.preventDefault(); reset(); });
+    p.canvas.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+  });
+
+  document.addEventListener('mousemove', function(e) {
+    if (!isPanning) return;
+    pz.ox = panStart.ox + (e.clientX - panStart.mx) / pz.scale;
+    pz.oy = panStart.oy + (e.clientY - panStart.my) / pz.scale;
+    clampPan(); apply();
+  });
+  document.addEventListener('mouseup', function() { isPanning = false; });
+
+  // 小地图交互（卡片缩略语义）：
+  //   画面比卡片小 → 小框就是画面本身，拖动它=在卡片里自由摆放画面（框随指针走）
+  //   画面比卡片大 → 小框是卡片可视窗口，拖动它=平移视野（相机式，框贴边不动）
+  // 点小框外任意处 = 把画面该处移到卡片中心
+  if (mm) {
+    var mmDrag = null, mmBase = null;
+    function mmPoint(e) {
+      var r = mm.getBoundingClientRect();
+      return { px: e.clientX - r.left, py: e.clientY - r.top, w: r.width, h: r.height };
+    }
+    function viewTopLeft() {
+      var s = pz.scale;
+      return { x: -pz.ox - swp.canvas.offsetLeft / s, y: -pz.oy - swp.canvas.offsetTop / s };
+    }
+    function applyFromDrag(p) {
+      var s = pz.scale;
+      var dxEl = (p.px - mmBase.px) / p.w * swp.el.clientWidth / s;    // 卡片位移 → 元素位移
+      var dyEl = (p.py - mmBase.py) / p.h * swp.el.clientHeight / s;
+      var rng = panRanges();
+      // slide 模式：画面跟着指针走（直接摆放）；window 模式：相机式平移
+      // dxEl/dyEl 已是元素单位（= 屏幕位移 / s），ox/oy 与元素位移 1:1，
+      // 之前这里又除了一次 s，导致放大后拖动位移只有应有的 1/s
+      pz.ox = rng.x.slide ? (mmBase.ox + dxEl) : (mmBase.ox - dxEl);
+      pz.oy = rng.y.slide ? (mmBase.oy + dyEl) : (mmBase.oy - dyEl);
+      clampPan(); apply();
+    }
+    mm.addEventListener('mousedown', function(e) {
+      if (!swp || !swp.canvas._fit) return;
+      e.preventDefault(); e.stopPropagation();
+      clearFaceT();                        // 小地图拖动接管
+      var p = mmPoint(e), s = pz.scale, cur = viewTopLeft();
+      var bl = parseFloat(mmBox.style.left) || 0, bt = parseFloat(mmBox.style.top) || 0;
+      var bw = parseFloat(mmBox.style.width) || 0, bh = parseFloat(mmBox.style.height) || 0;
+      var insideBox = (p.px >= bl && p.px <= bl + bw && p.py >= bt && p.py <= bt + bh);
+      if (!insideBox) {                    // 点小框外：先把该处移到卡片中心
+        var dx = (p.px / p.w - 0.5) * swp.el.clientWidth / s;
+        var dy = (p.py / p.h - 0.5) * swp.el.clientHeight / s;
+        pz.ox = -(cur.x + dx + swp.canvas.offsetLeft / s);
+        pz.oy = -(cur.y + dy + swp.canvas.offsetTop / s);
+        clampPan(); apply();
+        cur = viewTopLeft();
+      }
+      mmDrag = true;
+      mmBase = { px: p.px, py: p.py, x0: cur.x, y0: cur.y, ox: pz.ox, oy: pz.oy };
+    });
+    document.addEventListener('mousemove', function(e) {
+      if (!mmDrag) return;
+      applyFromDrag(mmPoint(e));
+    });
+    document.addEventListener('mouseup', function() { mmDrag = null; });
+    var rzT = null;
+    if (window.ResizeObserver) {
+      var onPanelResize = function() {
+        updateRegion();
+        if (rzT) clearTimeout(rzT);
+        rzT = setTimeout(function() { refitIfFit(); clampPan(); apply(); }, 120);
+      };
+      panels.forEach(function(p) { new ResizeObserver(onPanelResize).observe(p.el); });
+    }
+    if (window.MutationObserver && swp) {
+      new MutationObserver(function() { updateRegion(); })
+        .observe(swp.canvas, { attributes: true, attributeFilter: ['width', 'height', 'style'] });
+    }
+    // 画布重绘（新帧图/_drawImage）后 _fit 会变：聚焦需重算。
+    // 用签名对比防止与 apply() 的 style 写入形成回环。
+    var _lastFitSig = null;
+    function fitSig() {
+      return panels.map(function (p) {
+        var f = p.canvas._fit;
+        return f ? (p.canvas.width + 'x' + p.canvas.height + ':' +
+                    [f.x, f.y, f.w, f.h].join(',')) : '0';
+      }).join('|');
+    }
+    window.MSFaceFocusNoteFit = function () {
+      var sig = fitSig();
+      if (sig === _lastFitSig) return;
+      _lastFitSig = sig;
+      if (faceMode && faceFaces && faceFrameSize) focusWhenCanvasReady();
+    };
+    if (window.MutationObserver) {
+      panels.forEach(function (p) {
+        new MutationObserver(function () {
+          if (window.MSFaceFocusNoteFit) window.MSFaceFocusNoteFit();
+        }).observe(p.canvas, { attributes: true, attributeFilter: ['width', 'height'] });
+      });
+    }
+  }
+
+  // ── 聚焦人脸模式：主脸的换脸区域（对齐框）放大到约占卡片 80% 并居中，逐帧自动跟随 ──
+  // 后端从 2026-10-09 起在每张脸里附带 align_rect（whole-face 对齐框，帧像素坐标，
+  // = 换脸实际覆盖的区域）。实测 200 个样本：对齐框是检测框的 ~2.05x 宽 / ~1.42x 高。
+  // 旧逻辑按检测框取 80% 缩放，实际换脸区域被放大到约 1.6x 卡片 → "脸大到显示不下"。
+  // 现在以对齐框为基准：它完整可见，且观感尺寸依旧饱满。
+  // 旧代码只有一套 ox/oy 被三个尺寸不同的面板共享（swap 面板居中 → detection/original
+  // 面板中心被甩出 300px+）。现在每个面板按自身几何独立居中，存在 p._faceT；
+  // 手动缩放/拖动/小地图接管时清除，下一帧 analyze 自动恢复聚焦。
+  var FACE_FILL = 0.8;                                   // 对齐框占卡片受限边的比例
+  // 默认强制开启（用户指定 2026-10-09）：不记忆“关闭”状态，每次打开页面都自动聚焦。
+  // FACE 按钮仍可临时关闭看全幅，但刷新/重开页面后恢复默认开启。
+  var faceMode = true;
+  var faceFaces = null, faceFrameSize = null;
+  var faceBtn = document.getElementById('pz-face');
+
+  function clearFaceT() {
+    panels.forEach(function (p) { p._faceT = null; });
+  }
+
+  // 找主脸（面积最大）的聚焦目标框：优先 align_rect，否则回退检测框
+  function faceFocusBox(f) {
+    if (f && f.align_rect && f.align_rect.length === 4) {
+      var a = f.align_rect;
+      var aw = a[2] - a[0], ah = a[3] - a[1];
+      if (aw > 8 && ah > 8) return { x: a[0], y: a[1], w: aw, h: ah };
+    }
+    return f && f.w > 4 && f.h > 4 ? { x: f.x, y: f.y, w: f.w, h: f.h } : null;
+  }
+
+  function maybeApplyFaceFocus() {
+    if (!faceMode) return false;
+    var list = (faceFaces || []).map(faceFocusBox).filter(function (b) { return b; });
+    if (!list.length || !faceFrameSize) {       // 无人脸或缺帧尺寸 → 回到整幅
+      pz.scale = 1; pz.ox = 0; pz.oy = 0; clearFaceT(); clampPan(); apply();
+      return false;
+    }
+    var fw = faceFrameSize[0], fh = faceFrameSize[1];
+    if (!fw || !fh) return false;
+    var best = list[0];                       // 面积最大的脸 = 主脸
+    for (var i = 1; i < list.length; i++) {
+      if (list[i].w * list[i].h > best.w * best.h) best = list[i];
+    }
+    // 每个面板独立计算：缩放倍数一致（都基于同一帧、同一目标框），
+    // 但平移量按各自画布的 fit 与面板尺寸求出，人脸在每个卡片里都居中。
+    // 平移同样做旧版的"至少 20% 窗口被画面覆盖"保护（脸在画面边缘时不把卡片整片推出画面）。
+    var any = false;
+    panels.forEach(function (p) {
+      var fit = p.canvas._fit;
+      var pw = p.el.clientWidth, ph = p.el.clientHeight;
+      if (!fit || !pw || !ph) return;
+      var k = fit.w / fw;                     // 帧像素 → 元素像素
+      var fdw = best.w * k, fdh = best.h * k;
+      // 按卡片的"受限边"取 80%：竖长卡片以宽度为准，横条卡片以高度为准
+      var byW = pw / Math.max(1, fdw), byH = ph / Math.max(1, fdh);
+      var target = Math.min(8, Math.max(1, FACE_FILL * Math.min(byW, byH)));
+      var fcx = fit.x + (best.x + best.w / 2) * k;
+      var fcy = fit.y + (best.y + best.h / 2) * k;
+      var tx = pw / (2 * target) - fcx, ty = ph / (2 * target) - fcy;
+      // 20% 覆盖保护（与 panRanges 的 faceMode 分支同公式）
+      var ex = p.canvas.offsetLeft / target, ey = p.canvas.offsetTop / target;
+      var W = pw / target, H = ph / target;
+      var loX = fit.x - 0.8 * W, hiX = fit.x + fit.w - 0.2 * W;
+      var loY = fit.y - 0.8 * H, hiY = fit.y + fit.h - 0.2 * H;
+      tx = Math.min(-(loX + ex), Math.max(-(hiX + ex), tx));
+      ty = Math.min(-(loY + ey), Math.max(-(hiY + ey), ty));
+      p._faceT = 'scale(' + target + ') translate(' + tx + 'px,' + ty + 'px)';
+      if (p === swp) {                        // 主面板状态同步给小地图/HUD/手动缩放
+        pz.scale = target; pz.ox = tx; pz.oy = ty;
+      }
+      any = true;
+    });
+    if (!any) { clearFaceT(); return false; }
+    clampPan();                               // 已按同公式预算过，此处通常为空操作
+    apply();
+    return true;
+  }
+
+  function setFaceMode(on) {
+    faceMode = !!on;
+    try { localStorage.setItem('ms_face_focus', faceMode ? 'on' : 'off'); } catch (e) {}  // 仅诊断用，加载时不再读取
+    if (faceBtn) faceBtn.classList.toggle('active', faceMode);
+    if (!faceMode) {                         // 关闭聚焦：回到整幅适配
+      clearFaceT();
+      pz.scale = 1; pz.ox = 0; pz.oy = 0;
+      if (window.Preview && typeof Preview.refit === 'function') Preview.refit();
+      clampPan(); apply();
+      return;
+    }
+    focusWhenCanvasReady();
+  }
+
+  window.MSFaceFocus = {
+    setFaces: function (f) { faceFaces = f || []; if (faceMode) focusWhenCanvasReady(); },
+    setFrameSize: function (s) { faceFrameSize = s || null; if (faceMode) focusWhenCanvasReady(); },
+    enabled: function () { return faceMode; },
+    apply: maybeApplyFaceFocus,
+    applyAsync: focusWhenCanvasReady,
+    info: function () { return { faces: faceFaces, frameSize: faceFrameSize, mode: faceMode }; }
+  };
+  if (faceBtn) faceBtn.addEventListener('click', function () { setFaceMode(!faceMode); });
+
+  var fitBtn = document.getElementById('pz-fit');
+  var zin = document.getElementById('pz-zin');
+  var zout = document.getElementById('pz-zout');
+  if (fitBtn) fitBtn.addEventListener('click', reset);
+  if (zin) zin.addEventListener('click', function() { zoomAt(1.25, pa.clientWidth / 2, pa.clientHeight / 2); });
+  if (zout) zout.addEventListener('click', function() { zoomAt(1 / 1.25, pa.clientWidth / 2, pa.clientHeight / 2); });
+  setFaceMode(faceMode);                     // 默认开启
+  // 首帧场景：analyze 返回时 swapped 画布可能还未绘制（无 _fit），此时聚焦不生效；
+  // 画布就绪后由 MutationObserver 触发 updateRegion，但没人重算聚焦。
+  // 轮询到 _fit 就绪即补算一次聚焦（也会等 faces 数据到位）。
+  var ffTick = 0;
+  function focusWhenCanvasReady() {
+    if (!faceMode) return;
+    if (!faceFaces || !faceFrameSize) return;   // 数据未到，等下个回调
+    ffTick = 0;                                // 外部入口重置放弃计数
+    pollCanvasReady();
+  }
+  function pollCanvasReady() {
+    if (!faceMode) return;
+    // 只等可见面板（双栏布局下 Original 隐藏，clientWidth=0，永远不会有 _fit）
+    var vis = panels.filter(function (p) { return p.el.clientWidth > 0 && p.el.clientHeight > 0; });
+    if (!vis.length) return;
+    var ready = vis.every(function (p) { return p.canvas._fit; });
+    if (ready) { ffTick = 0; maybeApplyFaceFocus(); return; }
+    if (++ffTick > 200) return;               // ~10s 后放弃
+    setTimeout(pollCanvasReady, 50);
+  }
+  window.MSFaceFocus.applyAsync = focusWhenCanvasReady;
+  if (faceMode && faceFaces && faceFrameSize) focusWhenCanvasReady();
+  window.MSZoomApply = function() { refitIfFit(); clampPan(); apply(); };
+})();
+
+// ── Timeline track collapse toggle (ui-dark v5) ──
+(function() {
+  var btn = document.getElementById('tl-collapse');
+  if (!btn) return;
+  var tracks = ['track--faces', 'track--cut', 'track--angle'];
+  var saved = localStorage.getItem('ms_tracks') || 'collapsed';
+  function apply(v) {
+    tracks.forEach(function(t) {
+      var el = document.querySelector('.' + t);
+      if (el) el.classList.toggle('tl-collapsed', v === 'collapsed');
+    });
+    btn.textContent = v === 'collapsed' ? '▸ 轨道' : '▾ 轨道';
+    localStorage.setItem('ms_tracks', v);
+  }
+  apply(saved);
+  btn.addEventListener('click', function() {
+    var cur = localStorage.getItem('ms_tracks') || 'collapsed';
+    apply(cur === 'collapsed' ? 'expanded' : 'collapsed');
+  });
 })();

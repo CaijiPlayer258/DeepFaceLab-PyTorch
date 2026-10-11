@@ -105,8 +105,8 @@ class ArcFaceONNXExtractor:
                 raise FileNotFoundError(f"No recognition model found in {self.model_dir}")
         
         self.rec_session = _ort().InferenceSession(
-            str(rec_model_path), 
-            providers=['CPUExecutionProvider']
+            str(rec_model_path),
+            providers=['CUDAExecutionProvider', 'CPUExecutionProvider']  # GPU 优先，失败自动回退 CPU（ui-dark 补丁）
         )
         self.rec_input_name = self.rec_session.get_inputs()[0].name
         

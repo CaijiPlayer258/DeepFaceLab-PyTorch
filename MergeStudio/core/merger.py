@@ -74,8 +74,8 @@ def MergeMaskedFace(frame_img, face_landmarks, cfg, predictor_func=None,
 
         input_size = _model_input_size
         output_size = input_size
-        if cfg.super_resolution_power != 0:
-            output_size *= 4
+        if cfg.super_resolution_power != 0 and face_enhancer_func is not None:
+            output_size *= 4  # 仅在 face_enhancer 可用时才放大（否则预测脸与蒙版尺寸不匹配导致黑脸）
 
         # Normalize frame to 0-1
         img_bgr = frame_img.astype(np.float32) / 255.0
@@ -387,7 +387,9 @@ def MergeMaskedFace(frame_img, face_landmarks, cfg, predictor_func=None,
 
             out_merging_mask_a = img_face_mask_full
 
-        if out_img is None:
+        if 'out_img' not in dir() or out_img is None:
+            # P1-8: mask_mode=0 with degenerate maxregion leaves out_img unbound;
+            # fall back to the original frame instead of raising NameError.
             out_img = img_bgr.copy()
 
         # Debug visualization (replaces normal output)
@@ -403,76 +405,3 @@ def MergeMaskedFace(frame_img, face_landmarks, cfg, predictor_func=None,
     except Exception as e:
         traceback.print_exc()
         return frame_img, np.zeros(frame_img.shape[:2], dtype=np.uint8)
-
-
-def MergeMasked(frame_info, cfg, predictor_func=None, face_enhancer_func=None,
-                xseg_256_extract_func=None):
-    """Merge all faces in a frame. Returns RGBA."""
-    frame_img = cv2.imread(str(frame_info.filepath))
-    if frame_img is None:
-        return None
-    out_img = None
-    full_mask = np.zeros(frame_img.shape[:2], dtype=np.float32)
-    for landmarks in frame_info.landmarks_list:
-        face_img, face_mask = MergeMaskedFace(
-            frame_img, landmarks, cfg, predictor_func,
-            face_enhancer_func, xseg_256_extract_func)
-        if out_img is None:
-            out_img = face_img.astype(np.float32)
-            full_mask = face_mask.astype(np.float32)
-        else:
-            m = (face_mask.astype(np.float32) / 255.0) * (1.0 - full_mask / 255.0)
-            m3 = np.stack([m, m, m], axis=-1)
-            out_img = out_img * (1 - m3) + face_img.astype(np.float32) * m3
-            full_mask = np.maximum(full_mask, face_mask.astype(np.float32))
-    if out_img is None:
-        out_img = frame_img.astype(np.float32)
-    rgba = np.concatenate([
-        np.clip(out_img, 0, 255).astype(np.uint8),
-        np.clip(full_mask, 0, 255).astype(np.uint8)[:, :, None]
-    ], axis=-1)
-    return rgba
-
-
-def MergeFaceAvatar(predictor_func, predictor_input_shape, cfg,
-                    prev_temporal_frame_infos, frame_info, next_temporal_frame_infos):
-    """FaceAvatar merge with temporal context."""
-    try:
-        frame_img = cv2.imread(str(frame_info.filepath))
-        if frame_img is None:
-            return None
-        prev_imgs = []
-        for fi in prev_temporal_frame_infos:
-            img = cv2.imread(str(fi.filepath))
-            if img is not None:
-                prev_imgs.append(img)
-        next_imgs = []
-        for fi in next_temporal_frame_infos:
-            img = cv2.imread(str(fi.filepath))
-            if img is not None:
-                next_imgs.append(img)
-        if not frame_info.landmarks_list:
-            return frame_img
-        landmarks = frame_info.landmarks_list[0]
-        mat = LandmarksProcessor.get_transform_mat(landmarks, 256, FaceType.FULL)
-        face_img = cv2.warpAffine(frame_img, mat, (256, 256), flags=cv2.INTER_LANCZOS4)
-        pred = predictor_func(face_img)
-        out_img = pred.astype(np.float32) if pred is not None else face_img.astype(np.float32)
-        if cfg.sharpen_mode != 0 and cfg.blursharpen_amount != 0:
-            amount = cfg.blursharpen_amount / 100.0
-            if cfg.sharpen_mode == 1:
-                blurred = cv2.blur(out_img, (3, 3))
-            else:
-                blurred = cv2.GaussianBlur(out_img, (0, 0), 1.0)
-            out_img = cv2.addWeighted(out_img, 1.0 + amount, blurred, -amount, 0)
-            out_img = np.clip(out_img, 0, 255)
-        if cfg.add_source_image:
-            h, w = frame_img.shape[:2]
-            out_img = np.concatenate([frame_img.astype(np.float32), out_img], axis=1)
-            out_img = cv2.resize(out_img, (w, h))
-        return np.clip(out_img, 0, 255).astype(np.uint8)
-    except Exception as e:
-        traceback.print_exc()
-        if frame_info.filepath:
-            return cv2.imread(str(frame_info.filepath))
-        return None

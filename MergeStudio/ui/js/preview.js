@@ -65,11 +65,14 @@
 
       var iw = img.naturalWidth || img.width;
       var ih = img.naturalHeight || img.height;
-      var scale = Math.min(cw / iw, ch / ih, 1);
+      var scale = Math.min(cw / iw, ch / ih);
       var dw = iw * scale;
       var dh = ih * scale;
       var dx = (cw - dw) / 2;
       var dy = (ch - dh) / 2;
+      canvas._fit = { x: dx, y: dy, w: dw, h: dh };
+      canvas._lastImg = img;          // per-canvas registration: refit() covers every path
+      canvas._lastFaces = faces || [];
 
       ctx.clearRect(0, 0, cw, ch);
       ctx.drawImage(img, dx, dy, dw, dh);
@@ -78,7 +81,7 @@
         var sx = dw / iw;
         var sy = dh / ih;
         faces.forEach(function (face) {
-          ctx.strokeStyle = '#5b5bd6';
+          ctx.strokeStyle = '#6f8f90';
           ctx.lineWidth = 1.5;
           ctx.strokeRect(dx + face.x * sx, dy + face.y * sy, face.w * sx, face.h * sy);
 
@@ -97,7 +100,7 @@
     updateOriginal: function (imageUrl) {
       var img = new Image();
       var self = this;
-      img.onload = function () { self._drawImage(self.canvasOriginal, img, null); };
+      img.onload = function () { self._lastOriginal = img; self._drawImage(self.canvasOriginal, img, null); };
       img.src = imageUrl;
     },
 
@@ -105,6 +108,7 @@
       var img = new Image();
       var self = this;
       img.onload = function () {
+        self._lastDetection = { img: img, faces: faces || [] };
         self._drawImage(self.canvasDetection, img, faces || []);
         var countEl = document.getElementById('face-count');
         countEl.textContent = faces && faces.length > 0 ? faces.length + ' faces' : '';
@@ -116,14 +120,26 @@
       this._lastSwappedUrl = imageUrl;
       var img = new Image();
       var self = this;
-      img.onload = function () { self._drawImage(self.canvasSwapped, img, null); };
+      img.onload = function () { self._lastSwapped = img; self._drawImage(self.canvasSwapped, img, null); };
       img.src = imageUrl;
     },
 
+    refit: function () {
+      var canvases = [this.canvasOriginal, this.canvasDetection, this.canvasSwapped];
+      for (var i = 0; i < canvases.length; i++) {
+        var c = canvases[i];
+        if (c && c._lastImg) this._drawImage(c, c._lastImg, c._lastFaces || []);
+      }
+    },
+
     clearAll: function () {
+      this._lastOriginal = null;
+      this._lastDetection = null;
+      this._lastSwapped = null;
       ['canvas-original', 'canvas-detection', 'canvas-swapped'].forEach(function (id) {
         var c = document.getElementById(id);
         if (c) {
+          c._lastImg = null; c._lastFaces = null;
           var ctx = c.getContext('2d');
           if (ctx) ctx.clearRect(0, 0, c.width, c.height);
         }

@@ -7,7 +7,7 @@ from siui.core import Si
 class ThemedOptionCardPlane(SiOptionCardPlane):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.my_theme_color = "#855198"
+        self.my_theme_color = "#6F8F90"
         self.setSpacing(32)
         # 标题边的指示器
         self.title_indicator = SiLabel(self)
