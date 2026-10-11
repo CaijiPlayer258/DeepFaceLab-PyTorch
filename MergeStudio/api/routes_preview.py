@@ -153,6 +153,8 @@ def _predecode_worker(start: int, count: int = 80):
     """Background sequential predecode: fills both disk cache and memory LRU.
     Runs in a thread executor so it doesn't block the API."""
     global _predecode_task
+    import time as _time
+    _yield_ctr = 0
     try:
         if _current_video is None:
             return
@@ -179,6 +181,11 @@ def _predecode_worker(start: int, count: int = 80):
                 cap.grab()
                 continue
 
+            # 让出：每 8 帧歇 20ms，避免预解码顶满软解器拖慢交互帧（尤其 AV1 软解源）
+            _yield_ctr += 1
+            if _yield_ctr >= 8:
+                _time.sleep(0.02)
+                _yield_ctr = 0
             ret, frame = cap.read()
             if not ret:
                 break
