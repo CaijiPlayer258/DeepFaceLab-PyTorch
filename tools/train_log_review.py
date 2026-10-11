@@ -26,7 +26,7 @@ def main():
     ch = Counter()
     for r in rows:
         for c in r.get("changes", []):
-            raw = str(c.get("raw", ""))
+            raw = json.dumps(c, ensure_ascii=False)   # 兼容 {raw:...} 与 {at,lr,...} 两种格式
             for key in ("lr", "random_occlusion", "random_noise", "random_warp", "edge_enhance"):
                 if key in raw:
                     ch[key] += 1
