@@ -67,6 +67,7 @@ var Heat = {
     var self = this;
     if (this.slowTimer) return;
     this.playing = true;
+    window.__HEAT_SLOW__ = true;      // 静默模式：不弹每帧 loading 遮罩
     App._setPlayButtonIcon(true);
     this._advance();
   },
@@ -89,26 +90,30 @@ var Heat = {
     // 时间线先行（便宜），帧渲染等完成再续
     try { App.seekFrame(next, true); } catch (e) {}
 
+    var genBefore = App._frameGen;
     App.loadFrame(next);
-    // 轮询等这一帧渲染完成（_frameGen 不再变化且 loading 全灭），
-    // 再按节奏推进——链式，永不互相作废
+    // 轮询等这一帧渲染完成再进下一帧——链式，永不互相作废。
+    // 完成信号：_frameGen 稳定 150ms（渲染链路收尾）。
     var t0 = Date.now();
+    var lastGen = genBefore;
+    var stableSince = Date.now();
     var wait = function () {
       if (!self.playing) return;
-      // 判定：Swapped 面板 loading 消失（链路末端，或 opacity 过渡中）=整帧完成
-      var ls = document.getElementById('loading-swapped');
-      var done = !ls || ls.style.display === 'none' || ls.style.opacity === '0';
-      if (done || Date.now() - t0 > 4000) {        // 完成或超时兜底
+      var g = App._frameGen;
+      if (g !== lastGen) { lastGen = g; stableSince = Date.now(); }
+      var genStable = Date.now() - stableSince >= 150;
+      if (genStable || Date.now() - t0 > 4000) {
         self.slowTimer = setTimeout(function () { self._advance(); },
                                     self._adaptiveDelay());
       } else {
         self.slowTimer = setTimeout(wait, 60);
       }
     };
-    this.slowTimer = setTimeout(wait, 80);
+    this.slowTimer = setTimeout(wait, 120);
   },
   stopSlow: function () {
     this.playing = false;
+    window.__HEAT_SLOW__ = false;     // 恢复 loading 提示（单帧操作时有用）
     if (this.slowTimer) { clearTimeout(this.slowTimer); this.slowTimer = null; }
     App._setPlayButtonIcon(false);
   },

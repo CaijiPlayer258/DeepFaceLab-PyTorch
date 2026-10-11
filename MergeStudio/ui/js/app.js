@@ -796,6 +796,8 @@
     setPanelLoading: function (panelId, show, label) {
       var el = document.getElementById(panelId);
       if (!el) return;
+      // 慢放/连续预览中：不弹 loading 遮罩（画面自己会更新，遮罩只会每帧闪烁）
+      if (show && window.__HEAT_SLOW__) return;
       if (show) {
         el.style.display = 'flex';
         var lbl = el.querySelector('.panel-loading-label');
