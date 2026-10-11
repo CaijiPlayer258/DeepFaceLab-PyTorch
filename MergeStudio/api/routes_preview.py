@@ -19,6 +19,8 @@ from MergeStudio.core.detector.factory import DetectorFactory, LandmarkFactory, 
 
 router = APIRouter()
 
+from MergeStudio.api import heat_scheduler
+
 _onnx_cache = {}
 _current_video = None
 _current_model_path = None
@@ -239,7 +241,7 @@ def _get_cached_frame(idx: int) -> bytes:
     if idx in _frame_cache:
         _frame_cache.move_to_end(idx)
         # Trigger background predecode from this position (non-blocking)
-        _trigger_predecode(idx + 1)
+        heat_scheduler.heat_report(idx)
         _jb = _frame_cache[idx]
         try:
             _remember_frame(idx, cv2.imdecode(np.frombuffer(_jb, np.uint8), cv2.IMREAD_COLOR))
@@ -261,7 +263,7 @@ def _get_cached_frame(idx: int) -> bytes:
             _remember_frame(idx, cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR))
         except Exception:
             pass
-        _trigger_predecode(idx + 1)
+        heat_scheduler.heat_report(idx)
         return jpeg_bytes
 
     # Tier 3: live decode
@@ -326,20 +328,33 @@ def _get_cached_frame(idx: int) -> bytes:
         cap.release()
 
     # Fire background predecode for further frames
-    _trigger_predecode(idx + 31)
+    heat_scheduler.heat_report(idx + 30)
 
     return jpeg_bytes
 
 
 @router.get("/preview/cache-status")
 async def cache_status():
-    """Return cache fill status (for progress display)."""
+    """Return cache fill status + heat regions (for timeline heat overlay)."""
     total = _total_frames_for_cache
     if total <= 0:
-        return {"cached": 0, "total": 0, "pct": 0}
+        return {"cached": 0, "total": 0, "pct": 0, "regions": []}
     disk_dir = _get_frames_cache_dir()
     cached = len(list(disk_dir.glob("*.jpg"))) if disk_dir.exists() else 0
-    return {"cached": cached, "total": total, "pct": round(cached / total * 100, 1)}
+    return {"cached": cached, "total": total, "pct": round(cached / total * 100, 1),
+            "regions": heat_scheduler.heat_status()}
+
+
+class DeclareHeatRequest(BaseModel):
+    start: int
+    end: int
+
+
+@router.post("/preview/declare-heat")
+async def declare_heat(req: DeclareHeatRequest):
+    """前端显式声明热区（框选区间 / 慢放目标段），预取立即排队。"""
+    heat_scheduler.heat_declare(req.start, req.end)
+    return {"ok": True, "regions": heat_scheduler.heat_status()}
 
 
 class SelectVideoRequest(BaseModel):
@@ -1114,6 +1129,7 @@ def set_current_video(video_path: str, total_frames: int = 0, fps: float = 0.0):
             pass
     _current_video = video_path
     _current_fps = float(fps or 0.0)
+    heat_scheduler.reset(_get_frames_cache_dir(), total_frames)
     _frame_cache.clear()
     _recent_frames.clear()
     _preview_source, _preview_source_video = None, None  # re-resolve (sibling proxy?)

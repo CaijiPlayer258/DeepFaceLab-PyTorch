@@ -34,6 +34,7 @@
       this.initSliders();
       this._loadSavedConfig();
       this._syncFromBackend();
+      Heat.startPolling();
     },
 
     initTransportSVG: function () {
@@ -682,6 +683,19 @@
     togglePlay: function () {
       var vid = document.getElementById('video-original');
       if (!vid) return;
+
+      // ---- 慢放引擎（热区）与原生播放（冷区）上下文路由 ----
+      if (Heat.playing) {                     // 慢放中再点=停止慢放
+        Heat.stopSlow();
+        return;
+      }
+      if (this._playInterval) {               // 原生播放中=暂停（原逻辑）
+        this.togglePlay._native_pause = true;
+      } else if (!this._playInterval && Heat.inHeat(this.state.currentFrame)) {
+        // 冷启动且当前帧在热区：走慢放（三面板逐帧）
+        Heat.startSlow();
+        return;
+      }
 
       // ---- PAUSE: cancel everything ----
       if (this._playInterval) {
