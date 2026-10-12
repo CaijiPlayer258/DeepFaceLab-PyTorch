@@ -14,7 +14,7 @@ from MergeStudio.core.merger import MergeMaskedFace
 import MergeStudio.core.merger as merger_mod
 from MergeStudio.core.config import MergerConfigMasked
 from facelib import FaceType
-from DFLIMG import DFLPNG
+from DFLIMG import DFLPNG, DFLIMG
 
 IMG_EXT = {'.png', '.jpg', '.jpeg', '.webp'}
 
@@ -112,14 +112,36 @@ def main():
 
     ok = skipped = 0
     for i, f in enumerate(frames, 1):
-        lmk_file = aligned_dir / f'{f.stem}_0.npy'
-        if lmk_file.exists():
-            lmk = np.load(lmk_file)
-        else:
-            # PNG 脸图直读：从内嵌 dFLd 块取 landmark（需 DFLPNG 支持）
-            aligned_png = aligned_dir / f'{f.stem}_0.png'
-            dfl = DFLPNG.load(str(aligned_png)) if aligned_png.exists() else None
-            lmk = dfl.get_source_landmarks() if dfl is not None and dfl.has_data() else None
+        # 帧名与 aligned 名的编号宽度可能不同（深变帧 %08d vs 老工作流 aligned %05d）
+        # 2026-10-13 修：TENN-052 全 [skip] landmark 为空的根因之一
+        stems = [f.stem]
+        if f.stem.isdigit():
+            for _w in (5, 6, 7):
+                _alt = f'{int(f.stem):0{_w}d}'
+                if _alt != f.stem:
+                    stems.append(_alt)
+        lmk = None
+        for _stem in stems:
+            lmk_file = aligned_dir / f'{_stem}_0.npy'
+            if lmk_file.exists():
+                lmk = np.load(lmk_file)
+                break
+        if lmk is None:
+            # 脸图直读：PNG(dFLd 块)/JPG(APP15)/webp 按扩展分流
+            for _stem in stems:
+                for _ext in ('.png', '.jpg', '.jpeg', '.webp'):
+                    _cand = aligned_dir / f'{_stem}_0{_ext}'
+                    if _cand.exists():
+                        _dfl = DFLIMG.load(str(_cand))
+                        if _dfl is not None and _dfl.has_data():
+                            try:
+                                lmk = _dfl.get_source_landmarks()
+                            except Exception:
+                                lmk = _dfl.get_landmarks()
+                        if lmk is not None:
+                            break
+                if lmk is not None:
+                    break
         if lmk is None or len(lmk) == 0:
             print(f'[skip] {f.name}: landmark 为空', flush=True)
             skipped += 1
