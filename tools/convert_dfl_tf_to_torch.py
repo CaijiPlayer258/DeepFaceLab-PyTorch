@@ -972,7 +972,8 @@ def _discover_models(src_dir: Path) -> List[Tuple[str, Optional[str]]]:
 
 
 def _convert_one_model(*, src_dir: Path, dst_dir: Path, model_name: str, model_class: str,
-                       strict: bool = False) -> None:
+                       strict: bool = False,
+                       no_opt: bool = False) -> None:
     src_data = src_dir / f"{model_name}_data.dat"
     if not src_data.exists():
         raise FileNotFoundError(src_data)
@@ -1033,6 +1034,10 @@ def _convert_one_model(*, src_dir: Path, dst_dir: Path, model_name: str, model_c
 
     # 2) Convert optimizer states (best-effort).
     for opt_spec in optimizers:
+        if no_opt:
+            print(f"[no-opt] 跳过优化器状态转换: {model_name}_{opt_spec.filename} "
+                  f"（训练加载时会重建全新 m/v，首个 step 为有界小步）")
+            continue
         src_file = src_dir / f"{model_name}_{opt_spec.filename}"
         src_existing = _find_existing_weight_file(src_file)
 
@@ -1086,6 +1091,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                    help="权重名字没全部对上时直接报错退出（默认只打印警告并继续）。"
                         "怀疑转出来的模型有问题时加这个，能立刻定位到哪些键对不上。")
 
+    p.add_argument("--no-opt", action="store_true", dest="no_opt",
+                   help="只转网络权重，跳过优化器状态转换（训练时重建全新 m/v）。"
+                        "跨框架搬运的优化器状态对位是隐式的，错位无报错但会让首个训练 step 打飞权重"
+                        "——2026-10-12 Anna 实测：第1步 loss 0.22->1.16 再不回落。修复转换必加。")
+
     args = p.parse_args(argv)
 
     src_dir: Path = args.src
@@ -1102,7 +1112,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if model_class is None:
                 continue
             _convert_one_model(src_dir=src_dir, dst_dir=dst_dir, model_name=model_name,
-                               model_class=model_class, strict=bool(args.strict))
+                               model_class=model_class, strict=bool(args.strict),
+                               no_opt=bool(args.no_opt))
         return 0
 
     # single
@@ -1111,7 +1122,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise ValueError("--name is required when using --model")
     model_name = str(args.name)
     _convert_one_model(src_dir=src_dir, dst_dir=dst_dir, model_name=model_name,
-                       model_class=model_class, strict=bool(args.strict))
+                       model_class=model_class, strict=bool(args.strict),
+                       no_opt=bool(args.no_opt))
     return 0
 
 

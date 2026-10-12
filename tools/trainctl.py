@@ -219,7 +219,7 @@ def cmd_preview(args):
     if Image is None:
         _die('需要 Pillow（深变自带 python 里有）')
     base = args.base
-    _http(base, 'POST', '/request-preview')          # 先请求刷新
+    _http(base, 'GET', '/request-preview')           # 先请求刷新（该端点只注册在 do_GET，POST 会 404——10-12 实测）
     deadline = time.time() + 300
     data = None
     printed = False
