@@ -907,14 +907,23 @@ class SAEHDModel(ModelBase):
             # factor >= 1.0 视为关闭。patience<=0 时自动按 lr_cos 推导（lr_cos 也没设就给 2000）。
             lr_plateau_factor     = float(self.options.get('lr_plateau_factor', 1.0) or 1.0)
             lr_plateau_patience   = int(self.options.get('lr_plateau_patience', 0) or 0)
+            # 2026-10-13 批次归一：patience 是"步数"，不同 batch 下单步不等价（batch6 的 2000 步
+            # 只看 1.2 万样本，batch24 是 4.8 万；小 batch 梯度噪声也更大）。以 batch=24 为基准
+            # （主力工作流长期值，归一后 batch-24 行为不变）换算成等数据量窗口。dat 存原始值，
+            # 这里构建时按当前 batch 生效，换 batch 续训自动重算。
+            _p_raw = lr_plateau_patience or (lr_cos if lr_cos > 0 else 2000)
+            _batch = int(self.options.get('batch_size', 24) or 24)
+            if _batch > 0 and _batch != 24:
+                lr_plateau_patience = max(200, int(round(_p_raw * 24.0 / _batch)))
             lr_plateau_delta      = float(self.options.get('lr_plateau_delta', 1e-4) or 0.0)
             lr_plateau_min_ratio  = float(self.options.get('lr_plateau_min_ratio', 0.1) or 0.0)
             lr_plateau_partitions = int(self.options.get('lr_plateau_partitions', 1) or 1)
             if lr_plateau_factor < 1.0:
                 io.log_info(
                     "[LR] 平台期自动降 lr 已开启：连续 %d 步无改善则 lr x%.2f，下限为初始的 %.0f%%"
-                    % (lr_plateau_patience or (lr_cos if lr_cos > 0 else 2000),
-                       lr_plateau_factor, lr_plateau_min_ratio * 100))
+                    % (lr_plateau_patience or _p_raw,
+                       lr_plateau_factor, lr_plateau_min_ratio * 100)
+                    + ("（batch=%d，已按 24 基准归一：原始 %d 步）" % (_batch, _p_raw) if _batch != 24 else ""))
 
             optimizer_map = {'adam': nn.Adam, 'adabelief': nn.AdaBelief, 'lion': nn.Lion}
             OptimizerClass = optimizer_map.get(optimizer_name, nn.AdaBelief)

@@ -53,6 +53,8 @@ DEAD_KEYS = [
     "auto_lr", "mean_src_loss", "mean_dst_loss", "save_time",
     "retraining_samples", "sample_ratio", "lr_d_ratio", "gan_smoothing",
     "preview_samples", "force_full_preview", "mouth_prio",
+    # 2026-10-13 补：流通丹 dat 里的卖家信息/会话杂键（杨幂416 实见）
+    "QQ", "专业模型制作", "模型制作", "session_name",
 ]
 
 # 主动清除：torch 版代码里会 pop 的遗留键（eyes_prio 见 Model_pytorch.py:678）
