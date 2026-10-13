@@ -1031,25 +1031,18 @@ loadModelInfo();
 
 // ── 右键跳转：预览图上右键 → 定位样本行 → 复制路径 / 打开所在文件夹（2026-10-14）──
 (function() {
-  var wrap = document.querySelector('.preview-img-wrap');
-  if (!wrap) return;
   var menu = null;
   function closeMenu() { if (menu) { menu.remove(); menu = null; } }
   document.addEventListener('click', closeMenu);
   window.addEventListener('blur', closeMenu);
-  wrap.addEventListener('contextmenu', function(e) {
-    e.preventDefault();
-    var img = document.getElementById('preview-img');
-    if (!img || img.style.display === 'none') return;
+
+  function buildMenu(e, img, row) {
     var F = _previewLabels || {};
     var srcF = F.src_fnames || [], dstF = F.dst_fnames || [];
     if (!srcF.length && !dstF.length) return;
-    var nCols = F.n_cols || 5;
-    var nRows = F.n_samples || Math.round(img.naturalHeight / (img.naturalWidth / nCols));
+    var nRows = F.n_samples || 4;
     if (!nRows || nRows <= 0) return;
-    var rect = img.getBoundingClientRect();
-    var cellH = rect.height / nRows;
-    var row = Math.max(0, Math.min(nRows - 1, Math.floor((e.clientY - rect.top) / cellH)));
+    row = Math.max(0, Math.min(nRows - 1, row));
     var sPath = row < srcF.length ? String(srcF[row]) : '';
     var dPath = row < dstF.length ? String(dstF[row]) : '';
     closeMenu();
@@ -1091,7 +1084,46 @@ loadModelInfo();
       });
     }
     document.body.appendChild(menu);
-  });
+  }
+
+  // 原图（内嵌预览）：直接按行高换算
+  var wrap = document.querySelector('.preview-img-wrap');
+  if (wrap) {
+    wrap.addEventListener('contextmenu', function(e) {
+      e.preventDefault();
+      var img = document.getElementById('preview-img');
+      if (!img || img.style.display === 'none') return;
+      var F = _previewLabels || {};
+      var nCols = F.n_cols || 5;
+      var nRows = F.n_samples || Math.round(img.naturalHeight / (img.naturalWidth / nCols));
+      if (!nRows || nRows <= 0) return;
+      var rect = img.getBoundingClientRect();
+      var cellH = rect.height / nRows;
+      buildMenu(e, img, Math.floor((e.clientY - rect.top) / cellH));
+    });
+  }
+
+  // 放大层（lightbox）：object-fit:contain 需要先把点击坐标映射回图片实际显示区
+  var lb = document.getElementById('lightbox');
+  if (lb) {
+    lb.addEventListener('contextmenu', function(e) {
+      e.preventDefault();
+      var img = document.getElementById('lb-img');
+      if (!img || !img.naturalWidth) return;
+      var F = _previewLabels || {};
+      var nCols = F.n_cols || 5;
+      var nRows = F.n_samples || Math.round(img.naturalHeight / (img.naturalWidth / nCols));
+      if (!nRows || nRows <= 0) return;
+      var rect = img.getBoundingClientRect();
+      // contain 的实际显示尺寸
+      var scale = Math.min(rect.width / img.naturalWidth, rect.height / img.naturalHeight);
+      var dispW = img.naturalWidth * scale, dispH = img.naturalHeight * scale;
+      var offX = (rect.width - dispW) / 2, offY = (rect.height - dispH) / 2;
+      var y = e.clientY - rect.top - offY;
+      if (y < 0 || y > dispH) return;
+      buildMenu(e, img, Math.floor(y / (dispH / nRows)));
+    });
+  }
 })();
 
 window.addEventListener('resize', function() {
