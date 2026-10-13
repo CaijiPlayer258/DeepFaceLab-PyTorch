@@ -148,11 +148,11 @@ _settings_lock = threading.Lock()
 _model_pending = None
 _model_lock = threading.Lock()
 
-SETTINGS_PASSWORD = "caiji"
+WEBUI_AUTH = os.environ.get('DFL_WEBUI_PASSWORD', '')
 
 def set_password(pwd: str):
-    global SETTINGS_PASSWORD
-    SETTINGS_PASSWORD = pwd
+    global WEBUI_AUTH
+    WEBUI_AUTH = pwd
 
 def get_settings_update():
     global _settings_pending
@@ -364,7 +364,6 @@ HTML = """<!DOCTYPE html>
 	.preview-img-wrap{position:relative;display:inline-block;width:100%;line-height:0}
 	#preview-img{width:100%;height:auto;border-radius:5px;border:1px solid rgba(255,255,255,.04);cursor:zoom-in;display:block;box-shadow:0 4px 12px rgba(0,0,0,.3)}
 	#preview-labels{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:hidden}
-	@keyframes gradShift{0%{background-position:0% 50%}100%{background-position:200% 50%}}
 	#prev-hint{font-size:11px;color:rgba(255,255,255,.2);margin-top:6px}
 	#log{font-size:12px;color:rgba(255,255,255,.3);font-family:'SF Pro Display', 'Segoe UI Variable', 'Segoe UI',monospace;max-height:80px;overflow-y:auto;line-height:1.6;background:rgba(0,0,0,.15);border-radius:5px;padding:8px 10px;border:1px solid rgba(255,255,255,.04)}
 	#log div:last-child{color:rgba(255,255,255,.65)}
@@ -606,7 +605,6 @@ function switchView(idx) {
   const labelsEl = document.getElementById('preview-labels');
   labelsEl.innerHTML = '';
   _labelRects = [];
-  if (_labelAnimId) { cancelAnimationFrame(_labelAnimId); _labelAnimId = null; }
   if (_allPreviews[idx]) {
     img.style.display = 'block';
     document.getElementById('prev-hint').textContent = _allPreviews[idx].name + ' — ' + new Date().toLocaleTimeString();
@@ -618,15 +616,53 @@ function switchView(idx) {
   }
 }
 
-let _labelAnimId = null;
 let _labelRects = [];
+
+// —— 背景自适应文字颜色 ——
+// 预览图是 data: URL，canvas 不会被污染，可以离屏读像素：
+// 每个标签按自己脚下那块区域的平均亮度决定用白字还是黑字（深背景→白字，浅背景→黑字）。
+var _lumCanvas = null, _lumCtx = null, _lumData = null, _lumSrc = null;
+
+function _buildLumMap(img) {
+  try {
+    if (!_lumCanvas) {
+      _lumCanvas = document.createElement('canvas');
+      _lumCtx = _lumCanvas.getContext('2d', { willReadFrequently: true });
+    }
+    if (_lumSrc === img && _lumData) return;
+    _lumCanvas.width = img.naturalWidth;
+    _lumCanvas.height = img.naturalHeight;
+    _lumCtx.drawImage(img, 0, 0);
+    _lumData = _lumCtx.getImageData(0, 0, _lumCanvas.width, _lumCanvas.height);
+    _lumSrc = img;
+  } catch (e) { _lumData = null; _lumSrc = null; }
+}
+
+// 图像坐标 (x0,y0,w,h) 区域的平均亮度（Rec.709 加权，0-255）；读不到返回 null
+function _regionLum(x0, y0, w, h) {
+  if (!_lumData) return null;
+  x0 = Math.max(0, Math.floor(x0)); y0 = Math.max(0, Math.floor(y0));
+  var x1 = Math.min(_lumCanvas.width - 1, Math.floor(x0 + w));
+  var y1 = Math.min(_lumCanvas.height - 1, Math.floor(y0 + h));
+  if (x1 <= x0 || y1 <= y0) return null;
+  var d = _lumData.data, sum = 0, n = 0;
+  var stepX = Math.max(1, ((x1 - x0) / 48) | 0);
+  var stepY = Math.max(1, ((y1 - y0) / 16) | 0);
+  for (var y = y0; y <= y1; y += stepY) {
+    for (var x = x0; x <= x1; x += stepX) {
+      var i = (y * _lumCanvas.width + x) * 4;
+      sum += 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+      n++;
+    }
+  }
+  return n ? sum / n : null;
+}
 
 function renderLabels() {
   const img = document.getElementById('preview-img');
   const container = document.getElementById('preview-labels');
   container.innerHTML = '';
   _labelRects = [];
-  if (_labelAnimId) { cancelAnimationFrame(_labelAnimId); _labelAnimId = null; }
   if (!_previewLabels) return;
   var tabName = (_allPreviews[_currentView] || {}).name || '';
   var isMorph = tabName.indexOf('morph') !== -1;
@@ -651,7 +687,9 @@ function renderLabels() {
   const dLossVec = _previewLabels.dst_loss_vec || null;
   const pad = Math.max(4, cellW / 50);
   const fs = Math.max(10, cellW / 22);
-  const baseStyle = 'position:absolute;font-size:' + (fs * sx) + 'px;font-family:sans-serif;font-weight:700;white-space:nowrap;pointer-events:none;line-height:1;bottom:auto;color:rgba(255,255,255,.9);background-image:linear-gradient(90deg,#6f8f90,#67878a);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;filter:drop-shadow(0 0 6px rgba(0,0,0,.9)) drop-shadow(0 0 12px rgba(0,0,0,.7))';
+  _buildLumMap(img);
+  if (_lumCtx) _lumCtx.font = '700 ' + fs + 'px sans-serif';
+  const baseStyle = 'position:absolute;font-size:' + (fs * sx) + 'px;font-family:sans-serif;font-weight:700;white-space:nowrap;pointer-events:none;line-height:1;bottom:auto;';
 
   function fmtLoss(v) {
     return (v !== undefined && v !== 0) ? v.toFixed(4) : '';
@@ -709,29 +747,22 @@ function renderLabels() {
     for (var col = 0; col < nCols; col++) {
       var txt = rowLabel(col);
       if (!txt) continue;
+      // 标签在图像坐标系里的占位，用来采样它背后那块背景的亮度
+      var bx = col * cellW + pad;
+      var by = (r * cellH + cellH - pad) - fs;
+      var bw = _lumCtx ? _lumCtx.measureText(txt).width : txt.length * fs * 0.6;
+      var lum = _regionLum(bx - 2, by - 2, bw + 4, fs + 4);
+      var lightBg = lum !== null && lum > 140;
       var el = document.createElement('span');
       el.textContent = txt;
-      el.style.cssText = baseStyle + ';left:' + ((col * cellW + pad) * sx) + 'px;top:' + (cellTop - fs * sx) + 'px';
+      el.style.cssText = baseStyle
+        + ';left:' + ((col * cellW + pad) * sx) + 'px;top:' + (cellTop - fs * sx) + 'px;'
+        + (lightBg
+          ? 'color:#101013;text-shadow:0 1px 2px rgba(255,255,255,.85),0 0 6px rgba(255,255,255,.7)'
+          : 'color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.85),0 0 6px rgba(0,0,0,.7)');
       container.appendChild(el);
       _labelRects.push(el);
     }
-  }
-  if (_labelRects.length) animateLabels();
-}
-
-var _lastLabelFrame = 0;
-function animateLabels(now) {
-  _labelAnimId = requestAnimationFrame(animateLabels);
-  if (now - _lastLabelFrame < 33) return;
-  _lastLabelFrame = now;
-  var t = now * 0.005;
-  for (var i = 0; i < _labelRects.length; i++) {
-    var el = _labelRects[i];
-    var hueL = (240 + Math.sin(t) * 15).toFixed(1);
-    var hueR = (275 + Math.sin(t * 0.7) * 12).toFixed(1);
-    var sat = (70 + Math.sin(t * 0.5) * 12).toFixed(1);
-    var lit = (58 + Math.sin(t * 0.4) * 6).toFixed(1);
-    el.style.backgroundImage = 'linear-gradient(90deg,hsl(' + hueL + ',' + sat + '%,' + lit + '%),hsl(' + hueR + ',' + sat + '%,' + lit + '%))';
   }
 }
 
@@ -749,7 +780,7 @@ function requestPreview() {
 
 function _pollPreview() {
   let _retryCount = 0;
-  const MAX_RETRIES = 30;
+  const MAX_RETRIES = 600; // 500ms x 600 = 300s，覆盖长 iter（100s+）的预览渲染等待，与 trainctl 窗口一致
   const _try = () => {
     fetch('/preview').then(r => r.json()).then(resp => {
       const previews = resp.previews || resp;
@@ -812,7 +843,7 @@ function _doSave(pwd) {
   fetch('/request-save', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({password: pwd}),
+    body: JSON.stringify({auth: pwd}),
   }).then(() => {
     addLog('已发送保存请求...');
     setTimeout(() => { btn.disabled = false; btn.textContent = '保存'; }, 3000);
@@ -836,7 +867,7 @@ function _doQuit(pwd) {
   fetch('/request-quit', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({password: pwd}),
+    body: JSON.stringify({auth: pwd}),
   }).then(function(){addLog('已发送退出请求，正在保存并退出...');});
 }
 
@@ -871,10 +902,10 @@ async function confirmPwd() {
   const pwd = document.getElementById('pwd-input').value;
   const err = document.getElementById('pwd-err');
   try {
-    const r = await fetch('/check-password', {
+    const r = await fetch('/check-auth', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({password: pwd}),
+      body: JSON.stringify({auth: pwd}),
     });
     const res = await r.json();
     if (res.ok) { const action = _pendingAction;
@@ -998,6 +1029,71 @@ async function loadModelInfo() {
 }
 loadModelInfo();
 
+// ── 右键跳转：预览图上右键 → 定位样本行 → 复制路径 / 打开所在文件夹（2026-10-14）──
+(function() {
+  var wrap = document.querySelector('.preview-img-wrap');
+  if (!wrap) return;
+  var menu = null;
+  function closeMenu() { if (menu) { menu.remove(); menu = null; } }
+  document.addEventListener('click', closeMenu);
+  window.addEventListener('blur', closeMenu);
+  wrap.addEventListener('contextmenu', function(e) {
+    e.preventDefault();
+    var img = document.getElementById('preview-img');
+    if (!img || img.style.display === 'none') return;
+    var F = _previewLabels || {};
+    var srcF = F.src_fnames || [], dstF = F.dst_fnames || [];
+    if (!srcF.length && !dstF.length) return;
+    var nCols = F.n_cols || 5;
+    var nRows = F.n_samples || Math.round(img.naturalHeight / (img.naturalWidth / nCols));
+    if (!nRows || nRows <= 0) return;
+    var rect = img.getBoundingClientRect();
+    var cellH = rect.height / nRows;
+    var row = Math.max(0, Math.min(nRows - 1, Math.floor((e.clientY - rect.top) / cellH)));
+    var sPath = row < srcF.length ? String(srcF[row]) : '';
+    var dPath = row < dstF.length ? String(dstF[row]) : '';
+    closeMenu();
+    menu = document.createElement('div');
+    menu.style.cssText = 'position:fixed;z-index:99999;background:#17171b;border:1px solid #34343c;'
+      + 'border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:6px 0;min-width:260px;font-size:12px;';
+    menu.style.left = Math.min(e.clientX, window.innerWidth - 290) + 'px';
+    menu.style.top = Math.min(e.clientY, window.innerHeight - 160) + 'px';
+    function item(label, sub, onClick) {
+      var it = document.createElement('div');
+      it.style.cssText = 'padding:7px 14px;cursor:pointer;color:#d5d6da;display:flex;flex-direction:column;gap:2px;';
+      it.onmouseenter = function() { it.style.background = '#26262e'; };
+      it.onmouseleave = function() { it.style.background = ''; };
+      var l1 = document.createElement('div'); l1.textContent = label; l1.style.fontWeight = '600';
+      it.appendChild(l1);
+      if (sub) { var l2 = document.createElement('div'); l2.textContent = sub; l2.style.cssText = 'color:#8a8b93;font-size:10px;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'; it.appendChild(l2); }
+      it.onclick = function(ev) { ev.stopPropagation(); onClick(); closeMenu(); };
+      menu.appendChild(it);
+      return it;
+    }
+    function copyText(txt) {
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt);
+      else { var ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
+    }
+    var header = document.createElement('div');
+    header.textContent = '\u7b2c ' + (row + 1) + ' \u884c\u6837\u672c';
+    header.style.cssText = 'padding:6px 14px 4px;color:#6f7076;font-size:10px;border-bottom:1px solid #26262e;margin-bottom:4px;';
+    menu.appendChild(header);
+    if (sPath) {
+      item('\u590d\u5236 SRC \u8def\u5f84', sPath, function() { copyText(sPath); });
+      item('\u6253\u5f00 SRC \u6240\u5728\u6587\u4ef6\u5939', '', function() {
+        fetch('/reveal-path', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: sPath }) });
+      });
+    }
+    if (dPath) {
+      item('\u590d\u5236 DST \u8def\u5f84', dPath, function() { copyText(dPath); });
+      item('\u6253\u5f00 DST \u6240\u5728\u6587\u4ef6\u5939', '', function() {
+        fetch('/reveal-path', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path: dPath }) });
+      });
+    }
+    document.body.appendChild(menu);
+  });
+})();
+
 window.addEventListener('resize', function() {
   var img = document.getElementById('preview-img');
   if (img.style.display !== 'none') renderLabels();
@@ -1009,7 +1105,7 @@ window.addEventListener('resize', function() {
 
 class Handler(BaseHTTPRequestHandler):
     def _check_pwd(self, pwd):
-        return pwd == SETTINGS_PASSWORD
+        return pwd == WEBUI_AUTH
 
     def _read_json_body(self):
         """读取并解析 JSON body，返回 dict 或 None。"""
@@ -1021,8 +1117,8 @@ class Handler(BaseHTTPRequestHandler):
             return None
 
     def _require_pwd(self, data):
-        """检查 data['password'] 是否匹配，不匹配时发 401。"""
-        if data and data.get('password', '') == SETTINGS_PASSWORD:
+        """检查 data['auth'] 是否匹配，不匹配时发 401。"""
+        if data and data.get('auth', '') == WEBUI_AUTH:
             return True
         self._send_json({'ok': False, 'error': '密码错误'}, 401)
         return False
@@ -1087,6 +1183,27 @@ class Handler(BaseHTTPRequestHandler):
         # --- 训练监控器 API ---
         if path == '/events':
             self._sse()
+        elif path == '/reveal-path':
+            data = self._read_json_body()
+            if not data:
+                self._send_json({'ok': False}, 400)
+                return
+            import subprocess, os
+            p = str(data.get('path', ''))
+            # 安全面：只允许定位已训练素材常见根下的路径，防任意 explorer 调用
+            allowed = any(p.lower().startswith(r.lower()) for r in (
+                'd:\\deepfake', 'f:\\dfl-pytorch', 'f:\\dfl', 'c:\\tools') if r)
+            if not (p and os.path.exists(p) and allowed):
+                self._send_json({'ok': False, 'error': 'path not allowed'}, 403)
+                return
+            try:
+                if os.path.isfile(p):
+                    subprocess.Popen(['explorer', '/select,', os.path.normpath(p)])
+                else:
+                    subprocess.Popen(['explorer', os.path.normpath(p)])
+                self._send_json({'ok': True})
+            except Exception as e:
+                self._send_json({'ok': False, 'error': str(e)}, 500)
         elif path == '/request-preview':
             _preview_requested.set()
             self._ok()
@@ -1350,10 +1467,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({'moved': moved})
             except Exception as e:
                 self._send_json({'error': str(e)}, 400)
-        elif path == '/check-password':
+        elif path == '/check-auth':
             try:
                 data = self._read_json_body() or {}
-                ok = data.get('password', '') == SETTINGS_PASSWORD
+                ok = data.get('auth', '') == WEBUI_AUTH
                 self._send_json({'ok': ok})
             except Exception as e:
                 self._send_json({'ok': False, 'error': str(e)}, 400)
@@ -1636,7 +1753,7 @@ class Handler(BaseHTTPRequestHandler):
                 data = self._read_json_body()
                 if not self._require_pwd(data):
                     return
-                data.pop('password', None)
+                data.pop('auth', None)
                 print(f'[WebUI-Trace] /update-model-options 收到: {data}')
                 global _model_pending
                 with _model_lock:
@@ -1650,7 +1767,7 @@ class Handler(BaseHTTPRequestHandler):
                 data = self._read_json_body()
                 if not self._require_pwd(data):
                     return
-                data.pop('password', None)
+                data.pop('auth', None)
                 # Apply same settings to both SRC and DST generators
                 payload = {'src': data, 'dst': data}
                 global _settings_pending
@@ -1704,21 +1821,21 @@ class Handler(BaseHTTPRequestHandler):
             print(f'[WebUI]{ip}（{port}）（{loc}）disconnected')
 
 
-def start_webui_server(port=8080, model_dir='.', poll_interval=2, password=None, host='127.0.0.1'):
+def start_webui_server(port=8080, model_dir='.', poll_interval=2, auth=None, host='127.0.0.1'):
     """在后台线程中启动 WebUI HTTP 服务器并立即返回。
 
     Args:
         port: HTTP 监听端口 (默认 8080)。
         model_dir: 模型保存目录路径（saved_models_path），用于扫描已有模型实例。
         poll_interval: SSE 轮询间隔秒数 (默认 2)。
-        password: WebUI 访问和保存/退出密码。None 表示使用默认密码 "caiji"。
+        auth: WebUI 访问和保存/退出密码。None 时使用环境变量 DFL_WEBUI_PASSWORD（未设置则为空）。
         host: 监听地址 (默认 127.0.0.1，仅本地访问)。
     Returns:
         ThreadingHTTPServer 实例 (调用方可在退出时 shutdown())。
     """
-    global MODEL_DIR, POLL_INTERVAL, SETTINGS_PASSWORD
-    if password is not None:
-        SETTINGS_PASSWORD = password
+    global MODEL_DIR, POLL_INTERVAL, WEBUI_AUTH
+    if auth is not None:
+        WEBUI_AUTH = auth
     # Normalize to absolute path
     MODEL_DIR = str(Path(model_dir).resolve())
     POLL_INTERVAL = poll_interval
