@@ -9,8 +9,8 @@
   trainctl loss --hours 6 --chart l.jpg # loss 文字摘要 +（可选）matplotlib 图
 
 控制：
-  trainctl set lr=0.00005               # 热改参（可多个：lr=.. random_occlusion=y）
-  trainctl set lr_dropout=y eyes_mouth_prio=n
+  trainctl set lr=0.00005               # 热改参（可多个：lr=.. masked_training=n）
+  trainctl set lr_dropout=y eyes_mouth_prio=n   # 注意：random_occlusion/random_color 等增强类不在白名单，需种 dat+重启
   trainctl save                         # 请求保存（不退出）
   trainctl quit                         # 保存并结束训练（优雅退出）
 
