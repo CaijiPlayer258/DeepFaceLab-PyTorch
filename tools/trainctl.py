@@ -149,7 +149,7 @@ def cmd_options(args):
 
 def cmd_set(args):
     base = args.base
-    payload = {'password': args.password}
+    payload = {'password': args.password, 'auth': args.password}
     pairs = []
     for kv in args.kv:
         if '=' not in kv:
