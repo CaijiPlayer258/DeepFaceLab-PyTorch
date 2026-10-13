@@ -173,13 +173,13 @@ def cmd_set(args):
 
 
 def cmd_save(args):
-    res = _http(args.base, 'POST', '/request-save', {'password': args.password})
+    res = _http(args.base, 'POST', '/request-save', {'password': args.password, 'auth': args.password})
     _ok(res)
     print('[trainctl] 已请求保存（训练继续）')
 
 
 def cmd_quit(args):
-    res = _http(args.base, 'POST', '/request-quit', {'password': args.password})
+    res = _http(args.base, 'POST', '/request-quit', {'password': args.password, 'auth': args.password})
     _ok(res)
     print('[trainctl] 已请求 保存+结束（优雅退出，等效点页面 Quit）')
 
