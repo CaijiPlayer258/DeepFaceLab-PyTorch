@@ -95,6 +95,7 @@ def main():
     out_dir = Path(sys.argv[4])
     erode = int(sys.argv[5]) if len(sys.argv) > 5 else 20
     blur = int(sys.argv[6]) if len(sys.argv) > 6 else 80
+    mask_mode = int(sys.argv[7]) if len(sys.argv) > 7 else 4   # 4=learned交集 8=XSeg-prd*XSeg-dst
     morph = float(sys.argv[7]) if len(sys.argv) > 7 else 1.0
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -102,8 +103,9 @@ def main():
     if not self_check():
         sys.exit(2)
 
-    cfg = MergerConfigMasked(face_type=FaceType.FULL, mode='overlay', mask_mode=4,
-                             seg_mode='model', erode_mask_modifier=erode,
+    cfg = MergerConfigMasked(face_type=FaceType.FULL, mode='overlay', mask_mode=mask_mode,
+                             seg_mode='xseg' if mask_mode >= 6 else 'model',
+                             erode_mask_modifier=erode,
                              blur_mask_modifier=blur, color_transfer_mode=1)
 
     frames = sorted(p for p in frames_dir.iterdir()
@@ -152,7 +154,32 @@ def main():
             skipped += 1
             continue
         try:
-            out, _mask_out = MergeMaskedFace(img, lmk, cfg, predictor_func=predictor)
+            xseg_fn = None
+            if mask_mode >= 6:
+                # XSeg onnx：优先 环境变量 DFMCMP_XSEG，其次 dfm 同目录 ../XSeg/XSeg.onnx（身份夹布局）
+                import os as _os
+                cand = [_os.environ.get("DFMCMP_XSEG", ""),
+                        str(dfm_path.parent / "XSeg" / "XSeg.onnx"),
+                        str(Path(__file__).resolve().parent.parent / "workspace" / "model" / "XSeg" / "XSeg.onnx")]
+                xp = next((c for c in cand if c and Path(c).exists()), None)
+                if xp is None:
+                    print(f"[warn] XSeg onnx 未找到（mode={mask_mode}），回退 mask_mode=4", flush=True)
+                    cfg.mask_mode = 4
+                else:
+                    import onnxruntime as _ort
+                    from MergeStudio.core.export_pipeline import _setup_dll_paths
+                    _setup_dll_paths()
+                    _xs = _ort.InferenceSession(str(xp), providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+                    _xi = _xs.get_inputs()[0].name
+
+                    def xseg_fn(face_img):
+                        x = cv2.resize(face_img, (256, 256)).astype(np.float32) / 255.0
+                        x = np.transpose(x, (2, 0, 1))[None]
+                        m = _xs.run(None, {_xi: x})[0][0]
+                        m = np.clip(m, 0, 1)
+                        return (m * 255).astype(np.uint8)
+            out, _mask_out = MergeMaskedFace(img, lmk, cfg, predictor_func=predictor,
+                                             xseg_256_extract_func=xseg_fn)
         except Exception as ex:
             print(f'[fail] {f.name}: {ex}', flush=True)
             skipped += 1
