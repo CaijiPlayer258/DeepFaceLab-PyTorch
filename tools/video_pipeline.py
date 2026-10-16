@@ -9,7 +9,7 @@
   - 多视频流水重叠：切视频 N 的脸时，预启动视频 N+1 的 ffmpeg 切帧
     （参考老脚本 pending_frame_jobs 模式；ffmpeg 解码占 CPU，Extractor 占 GPU，互不抢）。
   - 切完 → 可选 --dedup（Filter.py --mode repeated，phash 查重移 repeated\\；放聚类前，
-    避免相邻秒的重复脸灌爆 faceid 簇）→ faceid 聚类 → 出组快照 → 自动打开 faceid_browser 人工筛。
+    避免相邻秒的重复脸灌爆 faceid 簇）→ faceid 聚类 → 自动打开 faceid_browser 人工筛（组预览拼图已退役，browser 每组封面即预览）。
 
 用法：
   python tools\\video_pipeline.py --videos a.mp4 b.mp4 --out "C:\\SRC\\<人物>"
@@ -35,7 +35,6 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = os.path.join(ROOT, "python", "python.exe")
 EXTRACTOR = os.path.join(ROOT, "Extractor", "Extractor.py")
 FILTER = os.path.join(ROOT, "FacesetProcessor", "Filter.py")
-SNAPSHOTS = os.path.join(ROOT, "tools", "make_group_snapshots.py")
 BROWSER = os.path.join(ROOT, "tools", "faceid_browser.py")
 
 FFMPEG_CANDIDATES = (r"F:\dfl\_internal\ffmpeg\ffmpeg.exe",)
@@ -234,8 +233,6 @@ def main():
     run_checked([PY, FILTER, "-i", out, "--mode", "faceid", "--eps", str(args.eps)],
                 fail_msg="[video_pipeline] faceid 聚类失败")
     print("[video_pipeline] 出组快照 ...", flush=True)
-    subprocess.run([PY, SNAPSHOTS, "--work", out, "--cell", "200", "--cols", "8"])
-    print(f"[video_pipeline] 出组快照 ...", flush=True)
     subprocess.run([PY, SNAPSHOTS, "--work", out, "--cell", "200", "--cols", "8"])
     # faceid_browser 固定 8104 + 启动自动杀旧实例接管（全局单实例，用户约定）
     print(f"[video_pipeline] 打开人工筛 UI: http://127.0.0.1:8104  root={out}", flush=True)
