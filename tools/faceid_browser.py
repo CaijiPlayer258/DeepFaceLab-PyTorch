@@ -58,6 +58,7 @@ body { background:#111; color:#ddd; font-family:-apple-system,BlinkMacSystemFont
   <button id="btn-back" onclick="goBack()">← 返回</button>
   <h1 id="title">FaceID Groups</h1>
   <span id="sel-count"></span>
+  <button id="btn-merge" onclick="mergeSelected()" style="display:none;background:#2a6a2a;border:none;color:#fff;padding:6px 16px;border-radius:6px;cursor:pointer;font-size:13px;">⇄ 合并到主簇</button>
   <button id="btn-del" onclick="deleteSelected()">🗑 删除选中</button>
 </div>
 <div id="grid" class="groups"></div>
@@ -97,6 +98,9 @@ async function loadGroups() {
     grid.appendChild(card);
   }
   document.getElementById('status').textContent = `${groups.length} 组`;
+  // 首页不显示合并按钮（合并只在线组内视图有）
+  const bm = document.getElementById('btn-merge');
+  if (bm) bm.style.display = 'none';
 }
 
 // ── 组内视图：全部脸图 ──
@@ -155,6 +159,24 @@ function updateSelUI() {
   sc.textContent = n > 0 ? `已选 ${n} 张` : '';
   sc.style.display = n > 0 ? 'block' : 'none';
   document.getElementById('btn-del').style.display = (currentGroup && n > 0) ? 'block' : 'none';
+  // 合并按钮：在组内视图始终显示（选中的图可以从当前组合并到主簇）
+  const bm = document.getElementById('btn-merge');
+  if (bm) bm.style.display = (currentGroup && !currentGroup.includes('merged') && !currentGroup.startsWith('.')) ? 'block' : 'none';
+}
+
+async function mergeSelected() {
+  if (!currentGroup || selected.size === 0) return;
+  const names = Array.from(selected).map(i => allFaces[i]);
+  const target = 'merged';
+  if (!confirm(`将 ${names.length} 张从 ${currentGroup} 合并到 ${target}/ ？`)) return;
+  const r = await api('/api/merge', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ groups: [currentGroup], target: target })
+  });
+  if (r.moved !== undefined) {
+    console.log(`合并 ${r.moved} 张`);
+    openGroup(currentGroup); // 刷新当前视图
+  }
 }
 
 async function deleteSelected() {
@@ -276,11 +298,40 @@ class Handler(BaseHTTPRequestHandler):
             for f in faces:
                 src = os.path.join(self.server.root, group, f)
                 if os.path.isfile(src):
-                    shutil.move(src, os.path.join(trash, f))
+                    dst = os.path.join(trash, f)
+                    if os.path.exists(dst):
+                        stem, ext = os.path.splitext(f)
+                        dst = os.path.join(trash, f"{stem}_{n}{ext}")
+                    shutil.move(src, dst)
                     n += 1
             self._j({'deleted': n})
-        else:
-            self._j({'error': 'not found'}, 404)
+        elif p == '/api/merge':
+            cl = int(self.headers.get('Content-Length', 0))
+            data = json.loads(self.rfile.read(cl))
+            src_groups = data.get('groups', [])
+            target = data.get('target', '')
+            # 合并：把 src_groups 的全部图片移到 target 目录
+            moved = 0
+            for sg in src_groups:
+                sd = os.path.join(self.server.root, sg)
+                if not os.path.isdir(sd):
+                    continue
+                td = os.path.join(self.server.root, target)
+                os.makedirs(td, exist_ok=True)
+                for f in os.listdir(sd):
+                    src = os.path.join(sd, f)
+                    dst = os.path.join(td, f)
+                    if os.path.exists(dst):
+                        stem, ext = os.path.splitext(f)
+                        dst = os.path.join(td, f"{stem}_{sg[:8]}{ext}")
+                    shutil.move(src, dst)
+                    moved += 1
+                # 删空源夹
+                try:
+                    os.rmdir(sd)
+                except OSError:
+                    pass
+            self._j({'moved': moved, 'target': target})
 
 
 import shutil
