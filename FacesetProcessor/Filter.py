@@ -309,6 +309,20 @@ def face_sharpness_score(image, mask=None, train_res=_DEFAULT_TRAIN_RES,
     return _band_energy_ratio(gray, mask, noise_compensate)
 
 
+def _imread_unicode(path, flags=cv2.IMREAD_COLOR):
+    """cv2.imread 在 Windows 不支持非 ASCII 路径（中文/emoji 文件名静默返回 None）。
+    改走 np.fromfile + cv2.imdecode 字节流，路径兼容性与 Python 原生 open 一致。
+    （2026-10-17 Giselle：3454 张中文/emoji 名脸图 blur 判 Failed to read image 的根因修复）
+    """
+    try:
+        data = np.fromfile(str(path), dtype=np.uint8)
+    except Exception:
+        return None
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, flags)
+
+
 def _load_face_mask(image_path, image, landmarks=None):
     """遮罩优先级：XSeg → hull(landmarks) → None（全图）。
 
@@ -343,7 +357,7 @@ def _calculate_sharpness_worker(args):
     image_path_str, landmarks, _ = args[0], args[1], args[2]
     train_res = args[3] if len(args) > 3 else _DEFAULT_TRAIN_RES
     try:
-        image = cv2.imread(image_path_str)
+        image = _imread_unicode(image_path_str)
         if image is None:
             return (Path(image_path_str).name, 0.0, "Failed to read image")
 
@@ -374,7 +388,7 @@ def _calibrate_sharp_thresholds(image_files, train_res=_DEFAULT_TRAIN_RES, sampl
     # 先读样本（原图 + 与 worker 一致的遮罩 + 缩放比）
     samples = []
     for i in idx:
-        img = cv2.imread(str(image_files[int(i)]))
+        img = _imread_unicode(image_files[int(i)])
         if img is None:
             continue
         mask = _load_face_mask(str(image_files[int(i)]), img)
@@ -828,7 +842,7 @@ class FaceIDFilter(FacesetBaseProcessor):
         """
         try:
             # 读取图像
-            img = cv2.imread(str(image_path))
+            img = _imread_unicode(image_path)
             if img is None:
                 print(S('FILTER_IMAGE_READ_ERROR', image_path.name))
                 return None
@@ -1745,7 +1759,7 @@ def _calculate_phash_worker(args):
     
     try:
         # 读取图像
-        img = cv2.imread(image_path_str)
+        img = _imread_unicode(image_path_str)
         if img is None:
             return (Path(image_path_str).name, None, "Failed to read image")
         

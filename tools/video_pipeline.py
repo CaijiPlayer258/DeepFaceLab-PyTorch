@@ -27,7 +27,6 @@ import argparse
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -84,18 +83,6 @@ def frame_command(ffmpeg, video, frames_dir, fps, tonemap_mode):
         "-vf", vf, "-start_number", "0", str(frames_dir / "%08d.png"),
     ]
     return cmd
-
-
-def free_port(start=8100):
-    """faceid_browser 可能已有别的实例占着 8100，往后找空闲端口。"""
-    p = start
-    while True:
-        with socket.socket() as s:
-            try:
-                s.bind(("127.0.0.1", p))
-                return p
-            except OSError:
-                p += 1
 
 
 def extract_frames(ffmpeg, video, frames, fps, tonemap):
@@ -248,13 +235,13 @@ def main():
                 fail_msg="[video_pipeline] faceid 聚类失败")
     print("[video_pipeline] 出组快照 ...", flush=True)
     subprocess.run([PY, SNAPSHOTS, "--work", out, "--cell", "200", "--cols", "8"])
-    port = free_port(8100)
     print(f"[video_pipeline] 出组快照 ...", flush=True)
     subprocess.run([PY, SNAPSHOTS, "--work", out, "--cell", "200", "--cols", "8"])
-    print(f"[video_pipeline] 打开人工筛 UI: http://127.0.0.1:{port}  root={out}", flush=True)
-    # 关键：句柄全部脱钩（DEVNULL+DETACHED），否则上层 shell 会等 browser 的 stdout 关闭→假死
+    # faceid_browser 固定 8104 + 启动自动杀旧实例接管（全局单实例，用户约定）
+    print(f"[video_pipeline] 打开人工筛 UI: http://127.0.0.1:8104  root={out}", flush=True)
+    # 关键：stdio 全脱钩（DEVNULL+DETACHED），否则上层 shell 会等 browser 的 stdout 关闭→假死
     detach = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    subprocess.Popen([PY, BROWSER, "--root", out, "--port", str(port)], cwd=ROOT,
+    subprocess.Popen([PY, BROWSER, "--root", out], cwd=ROOT,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      creationflags=detach)
     print(f"[video_pipeline] 完成：脸图 {total_faces} 张 @ {out}")
