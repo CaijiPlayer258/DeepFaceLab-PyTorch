@@ -1062,10 +1062,26 @@ async function applySort(by) {
     return;
   }
   flashStatus(by === 'blur' ? '正在按模糊度排序…' : '正在按直方图相似度排序…');
-  const r = await api('/api/sort', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ group: currentGroup, by: by }) });
-  if (!r.faces) { flashStatus('排序失败'); return; }
-  sortState = { group: currentGroup, by: by, faces: r.faces };
-  await openGroup(currentGroup);
+  const g = currentGroup;
+  let r = await api('/api/sort', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ group: g, by: by }) });
+  if (r && r.running) {
+    while (true) {
+      await new Promise(res => setTimeout(res, 600));
+      if (currentGroup !== g) return;              // 排序期间用户已离开该组
+      const st = await api('/api/sort-status');
+      if (st.running) {
+        const pct = st.total ? Math.round(100 * st.done / st.total) : 0;
+        flashStatus(`排序中… ${pct}%（${st.done}/${st.total}）`);
+        continue;
+      }
+      if (st.error) { flashStatus('排序失败：' + st.error); return; }
+      r = st;
+      break;
+    }
+  }
+  if (!r || !r.faces || !r.faces.length) { flashStatus('排序失败'); return; }
+  sortState = { group: g, by: by, faces: r.faces };
+  await openGroup(g);
   flashStatus(by === 'blur' ? '已按模糊度排序（最糊在前，共 ' + r.faces.length + ' 张）' : '已按直方图相似度排序（最离群在前）');
 }
 
@@ -1406,6 +1422,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._j({'ok': True, 'landmarks': res[0], 'w': res[1], 'h': res[2], 'source': src})
         elif p == '/api/refcheck-status':
             self._j(dict(_ref_state))
+        elif p == '/api/sort-status':
+            self._j(dict(_sort_state))
         elif p == '/api/dedupe-status':
             st = dict(_dedupe_state)
             if not st.get('running') and st.get('result') is None:
@@ -1547,45 +1565,22 @@ class Handler(BaseHTTPRequestHandler):
             group = data.get('group', '')
             by = data.get('by', 'blur')
             gd = resolve_group(self.server.root, group)
-            faces = sorted(f for f in os.listdir(gd) if f.lower().endswith(('.png', '.jpg', '.jpeg'))) if os.path.isdir(gd) else []
-            import numpy as _np
-            import cv2 as _cv2
-            vals = []
-            if by == 'hist':
-                hists = []
-                for f in faces:
-                    try:
-                        img = _cv2.imdecode(_np.fromfile(os.path.join(gd, f), dtype=_np.uint8), _cv2.IMREAD_GRAYSCALE)
-                    except Exception:
-                        img = None
-                    if img is None:
-                        hists.append((f, None))
-                        continue
-                    hh = _cv2.calcHist([img], [0], None, [64], [0, 256]).flatten()
-                    hh = hh / (hh.sum() + 1e-8)
-                    hists.append((f, hh))
-                valid = [hh for _, hh in hists if hh is not None]
-                if valid:
-                    mean = _np.mean(_np.array(valid), 0)
-                    for f, hh in hists:
-                        if hh is None:
-                            vals.append((f, 0.0))
-                            continue
-                        c = _np.corrcoef(hh, mean)[0, 1]
-                        vals.append((f, float(c) if not _np.isnan(c) else 0.0))
-                vals.sort(key=lambda t: t[1])
-            else:
-                for f in faces:
-                    try:
-                        img = _cv2.imdecode(_np.fromfile(os.path.join(gd, f), dtype=_np.uint8), _cv2.IMREAD_GRAYSCALE)
-                    except Exception:
-                        img = None
-                    if img is None:
-                        vals.append((f, 0.0))
-                        continue
-                    vals.append((f, float(_cv2.Laplacian(img, _cv2.CV_64F).var())))
-                vals.sort(key=lambda t: t[1])
-            self._j({'faces': [f for f, _ in vals], 'by': by, 'metrics': [round(v, 4) for _, v in vals]})
+            sig = _group_sig(gd)
+            cached = _sort_cache.get((group, by))
+            if cached and cached['sig'] == sig:
+                self._j({'faces': cached['faces'], 'metrics': cached['metrics'],
+                         'by': by, 'cached': True})
+                return
+            if _sort_state.get('running') and _sort_state.get('group') == group and _sort_state.get('by') == by:
+                self._j({'running': True, 'by': by})
+                return
+            _sort_state.update(running=True, group=group, by=by, done=0, total=sig[0],
+                               faces=[], metrics=[], error=None)
+            threading.Thread(target=_sort_worker, args=(self.server.root, group, by), daemon=True).start()
+            self._j({'running': True, 'by': by, 'total': sig[0]})
+        elif p == '/api/sort-status':
+            st = dict(_sort_state)
+            self._j(st)
         elif p == '/api/invalidate':
             cl = int(self.headers.get('Content-Length', 0))
             data = json.loads(self.rfile.read(cl))
@@ -1718,6 +1713,67 @@ def _remember_deleted(group, face, fp):
 
 
 _dedupe_state = {'running': False, 'phase': '', 'done': 0, 'total': 0, 'result': None}
+
+_sort_state = {'running': False, 'group': '', 'by': '', 'done': 0, 'total': 0,
+               'faces': [], 'metrics': [], 'error': None}
+_sort_cache = {}   # (group, by) -> {'sig': ..., 'faces': [...], 'metrics': [...]}
+
+
+def _group_sig(gd):
+    """组内容签名：文件数 + 目录 mtime（增删文件即失效）"""
+    try:
+        st = os.stat(gd)
+        n = sum(1 for x in os.listdir(gd) if x.lower().endswith(('.png', '.jpg', '.jpeg')))
+        return (n, st.st_mtime_ns)
+    except OSError:
+        return (0, 0)
+
+
+def _sort_worker(root, group, by):
+    import numpy as _np
+    import cv2 as _cv2
+    gd = resolve_group(root, group)
+    faces = sorted(x for x in os.listdir(gd) if x.lower().endswith(('.png', '.jpg', '.jpeg')))
+    _sort_state.update(group=group, by=by, total=len(faces))
+    try:
+        vals = []
+        if by == 'hist':
+            hists = []
+            for i, fn in enumerate(faces):
+                try:
+                    img = _cv2.imdecode(_np.fromfile(os.path.join(gd, fn), dtype=_np.uint8), _cv2.IMREAD_GRAYSCALE)
+                except Exception:
+                    img = None
+                if img is None:
+                    hists.append((fn, None))
+                else:
+                    hh = _cv2.calcHist([img], [0], None, [64], [0, 256]).flatten()
+                    hists.append((fn, hh / (hh.sum() + 1e-8)))
+                _sort_state['done'] = i + 1
+            valid = [hh for _, hh in hists if hh is not None]
+            mean = _np.mean(_np.array(valid), 0) if valid else None
+            for fn, hh in hists:
+                if hh is None or mean is None:
+                    vals.append((fn, 0.0))
+                    continue
+                c = float(_np.corrcoef(hh, mean)[0, 1])
+                vals.append((fn, 0.0 if _np.isnan(c) else c))
+        else:
+            for i, fn in enumerate(faces):
+                try:
+                    img = _cv2.imdecode(_np.fromfile(os.path.join(gd, fn), dtype=_np.uint8), _cv2.IMREAD_GRAYSCALE)
+                except Exception:
+                    img = None
+                vals.append((fn, 0.0 if img is None else float(_cv2.Laplacian(img, _cv2.CV_64F).var())))
+                _sort_state['done'] = i + 1
+        vals.sort(key=lambda x: x[1])
+        faces_out = [x for x, _ in vals]
+        metrics_out = [round(v, 4) for _, v in vals]
+        _sort_cache[(group, by)] = {'sig': _group_sig(gd), 'faces': faces_out, 'metrics': metrics_out}
+        _sort_state.update(running=False, faces=faces_out, metrics=metrics_out)
+    except Exception as e:
+        _sort_state.update(running=False, error=str(e))
+
 
 
 _ref_state = {'running': False, 'phase': '', 'done': 0, 'total': 0, 'result': None}
@@ -1940,7 +1996,7 @@ def _read_dfld_landmarks(fp):
     return None
 
 
-def thumb_bytes(fp, root, key, size=400):
+def thumb_bytes(fp, root, key, size=320):
     """读取或生成 320px JPEG 缩略图，原子缓存到 <root>/.thumbs/<key>.jpg"""
     cache_dir = os.path.join(root, '.thumbs')
     cp = os.path.join(cache_dir, key + '.jpg')
@@ -1957,7 +2013,7 @@ def thumb_bytes(fp, root, key, size=400):
         im = im.convert('RGB')
         im.thumbnail((size, size))
         buf = io.BytesIO()
-        im.save(buf, 'JPEG', quality=88)
+        im.save(buf, 'JPEG', quality=82)
         data = buf.getvalue()
     os.makedirs(cache_dir, exist_ok=True)
     tmp = cp + f'.{os.getpid()}.tmp'
@@ -2023,6 +2079,56 @@ def _start_thumbs_maintenance(root):
     threading.Thread(target=_loop, daemon=True).start()
 
 
+def _prebuild_one(args):
+    fp, root, key = args
+    try:
+        thumb_bytes(fp, root, key)
+        return 1
+    except Exception:
+        return 0
+
+
+def prebuild_thumbs(root, workers=None):
+    """批量生成 .thumbs 缓存（key 与 /api/face|thumb 完全一致）。"""
+    import hashlib
+    from multiprocessing import Pool
+    jobs = []
+    groups = []
+    for name in sorted(os.listdir(root)):
+        gd = os.path.join(root, name)
+        if os.path.isdir(gd) and not name.startswith('.'):
+            groups.append((name, gd))
+    root_imgs = [x for x in os.listdir(root)
+                 if x.lower().endswith(('.png', '.jpg', '.jpeg')) and os.path.isfile(os.path.join(root, x))]
+    if root_imgs:
+        groups.insert(0, ('.', root))
+    for gname, gd in groups:
+        imgs = sorted(x for x in os.listdir(gd) if x.lower().endswith(('.png', '.jpg', '.jpeg')))
+        if not imgs:
+            continue
+        jobs.append((os.path.join(gd, imgs[0]), root, 'thumb_' + gname))
+        for fn in imgs:
+            key = 'face_' + hashlib.md5((gname + '/' + fn).encode('utf-8', 'surrogatepass')).hexdigest()
+            jobs.append((os.path.join(gd, fn), root, key))
+    if not jobs:
+        print('[prebuild] 没有图片')
+        return 0
+    workers = workers or max(2, (os.cpu_count() or 4) - 1)
+    print(f'[prebuild] {len(jobs)} 张缩略图，{workers} 进程 …', flush=True)
+    import time as _time
+    t0 = _time.time()
+    done = 0
+    with Pool(processes=workers) as pool:
+        for i, n in enumerate(pool.imap_unordered(_prebuild_one, jobs, chunksize=32), 1):
+            done += n
+            if i % 500 == 0 or i == len(jobs):
+                el = _time.time() - t0
+                rate = i / el if el else 0
+                print(f'[prebuild] {i}/{len(jobs)}  成功 {done}  {rate:.0f} 张/s  剩余约 {max(0,(len(jobs)-i)/rate):.0f}s', flush=True)
+    print(f'[prebuild] 完成，用时 {_time.time()-t0:.1f}s', flush=True)
+    return done
+
+
 def _kill_existing_instances():
     """杀掉已存在的 faceid_browser 实例（固定单实例，防多服务并存）"""
     import subprocess as _sp
@@ -2053,12 +2159,16 @@ def main():
     ap = argparse.ArgumentParser(description='FaceID 分组浏览器')
     ap.add_argument('--root', required=True, help='含 faceid_group_xxx 子夹的目录')
     ap.add_argument('--port', type=int, default=8104)
+    ap.add_argument('--prebuild-thumbs', action='store_true', help='启动前批量预热缩略图缓存（大库首刷更快）')
+    ap.add_argument('--workers', type=int, default=None, help='预热进程数（默认 CPU-1）')
     a = ap.parse_args()
 
     root = os.path.abspath(a.root)
     if not os.path.isdir(root):
         sys.exit(f'目录不存在: {root}')
 
+    if getattr(a, 'prebuild_thumbs', False):
+        prebuild_thumbs(root, a.workers)
     _kill_existing_instances()
 
     server = ThreadingHTTPServer(('127.0.0.1', a.port), Handler)
