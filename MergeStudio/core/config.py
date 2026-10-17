@@ -66,12 +66,18 @@ class MergerConfigMasked(MergerConfig):
                  super_resolution_power=0, color_transfer_mode=1,
                  image_denoise_power=0, bicubic_degrade_power=0,
                  color_degrade_power=0, show_debug=False, **kwargs):
+        # P1-2b: swallow unknown keys (UI adds fields independently of the two
+        # whitelists) into .extra instead of raising TypeError.
+        self.extra = {k: v for k, v in kwargs.items()
+                      if k not in ('type', 'sharpen_mode', 'blursharpen_amount')}
+        kwargs = {k: v for k, v in kwargs.items() if k not in self.extra}
         super().__init__(type=MergerConfig.TYPE_MASKED, **kwargs)
         self.face_type = face_type
         self.default_mode = default_mode
         self.mode = mode if mode in mode_str_dict else mode_dict[1]
         self.show_debug = show_debug
-        self.masked_hist_match = True
+        # P1-2: respect the caller; default stays True (matches 3d68 original).
+        self.masked_hist_match = masked_hist_match
         self.hist_match_threshold = hist_match_threshold
         self.mask_mode = mask_mode
         self.seg_mode = seg_mode

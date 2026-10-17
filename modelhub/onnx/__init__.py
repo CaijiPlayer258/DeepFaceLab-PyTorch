@@ -29,6 +29,7 @@ _MODELS = [
     ('ULFD',             'modelhub.onnx.ULFD.ULFD',                          'ULFD'),
     ('YoloV5Face',       'modelhub.onnx.YoloV5Face.YoloV5Face',              'YoloV5Face'),
     ('YoloV8Face',       'modelhub.onnx.YoloV8Face.YoloV8Face',              'YoloV8Face'),
+    ('YoloV11nFace',     'modelhub.onnx.YoloV11nFace.YoloV11nFace',          'YoloV11nFace'),
     ('FaceParser',       'modelhub.onnx.FaceParser.FaceParser',              'FaceParser'),
 ]
 

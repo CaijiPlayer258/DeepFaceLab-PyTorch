@@ -108,55 +108,55 @@ HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>DFL 样本筛选</title>
 	<style>
-		@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;550;600&display=swap');
+		/* font: system geometric stack (minimalist, no remote fetch) */
 		*{box-sizing:border-box;margin:0;padding:0}
 		::-webkit-scrollbar{width:6px;height:6px}
 		::-webkit-scrollbar-track{background:transparent}
-		::-webkit-scrollbar-thumb{background:rgba(255,255,255,.08);border-radius:3px;transition:background .15s}
+		::-webkit-scrollbar-thumb{background:rgba(255,255,255,.055);border-radius:3px;transition:background .15s}
 		::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.14)}
-		*{scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.08) transparent}
-		::selection{background:rgba(91,91,214,.35);color:#fff}
-		body{background:#0a0a0b;color:rgba(255,255,255,.8);font-family:'Inter',-apple-system,sans-serif;font-size:13px;font-weight:450;height:100vh;overflow:hidden;display:flex;flex-direction:column;-webkit-font-smoothing:antialiased}
-		header{display:flex;align-items:center;gap:10px;height:40px;padding:0 14px;background:#0d0d0e;border-bottom:1px solid rgba(255,255,255,.06);flex-shrink:0}
+		*{scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.055) transparent}
+		::selection{background:rgba(122,158,159,.35);color:#d2d3d5}
+		body{background:#101013;color:rgba(255,255,255,.8);font-family:'SF Pro Display', 'Segoe UI Variable', 'Segoe UI',-apple-system,sans-serif;font-size:13px;font-weight:450;height:100vh;overflow:hidden;display:flex;flex-direction:column;-webkit-font-smoothing:antialiased}
+		header{display:flex;align-items:center;gap:10px;height:40px;padding:0 14px;background:#16171a;border-bottom:1px solid rgba(255,255,255,.04);flex-shrink:0}
 		header select,header input,header button{font-size:11px;font-family:inherit}
 		header label{display:flex;align-items:center;gap:4px;font-size:11px;color:rgba(255,255,255,.35)}
-		.back-btn{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.06);border-radius:5px;color:rgba(255,255,255,.45);text-decoration:none;font-size:11px;font-weight:500;transition:all .12s}
+		.back-btn{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.04);border-radius:5px;color:rgba(255,255,255,.45);text-decoration:none;font-size:11px;font-weight:500;transition:all .12s}
 		.back-btn:hover{background:rgba(255,255,255,.07);color:rgba(255,255,255,.65)}
-		select{padding:3px 8px;background:#0d0d0e;border:1px solid rgba(255,255,255,.08);border-radius:5px;color:rgba(255,255,255,.65);font-size:12px;font-family:inherit;outline:none;transition:border-color .12s}
-		select:focus{border-color:rgba(91,91,214,.4)}
-		input[type=number]{padding:3px 6px;width:56px;background:#0d0d0e;border:1px solid rgba(255,255,255,.08);border-radius:5px;color:rgba(255,255,255,.65);font-size:12px;font-family:inherit;outline:none;transition:border-color .12s;text-align:center}
-		input[type=number]:focus{border-color:rgba(91,91,214,.4)}
-		button{padding:4px 10px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:5px;color:rgba(255,255,255,.55);cursor:pointer;font-size:11px;font-family:inherit;font-weight:500;transition:all .12s}
+		select{padding:3px 8px;background:#16171a;border:1px solid rgba(255,255,255,.055);border-radius:5px;color:rgba(255,255,255,.65);font-size:12px;font-family:inherit;outline:none;transition:border-color .12s}
+		select:focus{border-color:rgba(122,158,159,.4)}
+		input[type=number]{padding:3px 6px;width:56px;background:#16171a;border:1px solid rgba(255,255,255,.055);border-radius:5px;color:rgba(255,255,255,.65);font-size:12px;font-family:inherit;outline:none;transition:border-color .12s;text-align:center}
+		input[type=number]:focus{border-color:rgba(122,158,159,.4)}
+		button{padding:4px 10px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.055);border-radius:5px;color:rgba(255,255,255,.55);cursor:pointer;font-size:11px;font-family:inherit;font-weight:500;transition:all .12s}
 		button:hover{background:rgba(255,255,255,.07);color:rgba(255,255,255,.75)}
 		button:disabled{opacity:.3;cursor:default;background:rgba(255,255,255,.02)}
 		#gallery{flex:1;overflow-y:auto;display:flex;flex-wrap:wrap;gap:10px;padding:14px;align-content:flex-start}
-		.img-card{position:relative;width:calc(50% - 5px);border-radius:8px;overflow:hidden;border:2px solid transparent;cursor:pointer;transition:all .15s;background:#0d0d0e}
-		.img-card:hover{border-color:rgba(255,255,255,.08)}
-		.img-card.marked{border-color:#5b5bd6;box-shadow:0 0 12px rgba(91,91,214,.15)}
+		.img-card{position:relative;width:calc(50% - 5px);border-radius:8px;overflow:hidden;border:2px solid transparent;cursor:pointer;transition:all .15s;background:#16171a}
+		.img-card:hover{border-color:rgba(255,255,255,.055)}
+		.img-card.marked{border-color:#6f8f90;box-shadow:0 0 12px rgba(122,158,159,.15)}
 		.img-card img{width:100%;height:auto;display:block}
-		.img-card .overlay{position:absolute;inset:0;background:rgba(91,91,214,.25);backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);display:none;align-items:center;justify-content:center}
+		.img-card .overlay{position:absolute;inset:0;background:rgba(122,158,159,.25);backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);display:none;align-items:center;justify-content:center}
 		.img-card.marked .overlay{display:flex}
-		.img-card .overlay span{color:#fff;font-size:13px;font-weight:500;background:rgba(0,0,0,.5);padding:4px 12px;border-radius:5px}
+		.img-card .overlay span{color:#d2d3d5;font-size:13px;font-weight:500;background:rgba(0,0,0,.5);padding:4px 12px;border-radius:5px}
 		.img-card .label{position:absolute;bottom:0;left:0;right:0;padding:4px 8px;background:linear-gradient(transparent,rgba(0,0,0,.7));color:rgba(255,255,255,.7);font-size:10px;font-weight:500;pointer-events:none}
 		.empty-msg{width:100%;text-align:center;padding:40px 20px;color:rgba(255,255,255,.2);font-size:13px}
-		#footer{display:flex;align-items:center;gap:12px;height:36px;padding:0 14px;background:#0d0d0e;border-top:1px solid rgba(255,255,255,.06);flex-shrink:0}
+		#footer{display:flex;align-items:center;gap:12px;height:36px;padding:0 14px;background:#16171a;border-top:1px solid rgba(255,255,255,.04);flex-shrink:0}
 		#stats{display:flex;gap:16px;font-size:11px;color:rgba(255,255,255,.35)}
 		#stats b{color:rgba(255,255,255,.6);font-weight:500}
-		#settle-btn{padding:5px 14px;background:linear-gradient(135deg,#5b5bd6,#8b5cf6);border:none;border-radius:5px;color:#fff;font-size:11px;font-weight:500;cursor:pointer;margin-left:auto;transition:opacity .12s}
-		#settle-btn:hover{opacity:.9;box-shadow:0 2px 8px rgba(91,91,214,.25)}
+		#settle-btn{padding:5px 14px;background:linear-gradient(135deg,#6f8f90,#67878a);border:none;border-radius:5px;color:#d2d3d5;font-size:11px;font-weight:500;cursor:pointer;margin-left:auto;transition:opacity .12s}
+		#settle-btn:hover{opacity:.9;box-shadow:0 2px 8px rgba(122,158,159,.25)}
 		#settle-btn:disabled{opacity:.3;cursor:default;box-shadow:none}
 		.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);z-index:1000;display:none;align-items:center;justify-content:center}
 		.modal-overlay.open{display:flex}
-		.modal-box{min-width:320px;max-width:420px;background:#0d0d0e;border:1px solid rgba(255,255,255,.08);border-radius:10px;box-shadow:0 16px 48px rgba(0,0,0,.5);padding:20px;text-align:center}
+		.modal-box{min-width:320px;max-width:420px;background:#16171a;border:1px solid rgba(255,255,255,.055);border-radius:10px;box-shadow:0 16px 48px rgba(0,0,0,.5);padding:20px;text-align:center}
 		.modal-box h2{font-size:14px;font-weight:550;color:rgba(255,255,255,.8);margin-bottom:8px}
 		.modal-box p{font-size:12px;color:rgba(255,255,255,.45);margin-bottom:16px}
-		.modal-box input{width:100%;padding:8px 12px;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.08);border-radius:6px;color:rgba(255,255,255,.75);font-size:13px;font-family:inherit;text-align:center;outline:none;transition:border-color .12s}
-		.modal-box input:focus{border-color:rgba(91,91,214,.4);box-shadow:0 0 0 2px rgba(91,91,214,.08)}
-		.modal-box .modal-err{font-size:12px;color:#ef4444;margin-top:8px;display:none}
+		.modal-box input{width:100%;padding:8px 12px;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.055);border-radius:6px;color:rgba(255,255,255,.75);font-size:13px;font-family:inherit;text-align:center;outline:none;transition:border-color .12s}
+		.modal-box input:focus{border-color:rgba(122,158,159,.4);box-shadow:0 0 0 2px rgba(122,158,159,.08)}
+		.modal-box .modal-err{font-size:12px;color:#a65d5d;margin-top:8px;display:none}
 		.modal-box .modal-actions{display:flex;gap:8px;margin-top:16px}
 		.modal-box .modal-actions button{flex:1;padding:7px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:500;font-family:inherit;border:none;transition:opacity .12s}
-		.btn-apply{background:linear-gradient(135deg,#5b5bd6,#8b5cf6)!important;color:#fff!important}
-		.btn-apply:hover{opacity:.9!important;box-shadow:0 2px 8px rgba(91,91,214,.25)!important}
+		.btn-apply{background:linear-gradient(135deg,#6f8f90,#67878a)!important;color:#d2d3d5!important}
+		.btn-apply:hover{opacity:.9!important;box-shadow:0 2px 8px rgba(122,158,159,.25)!important}
 		.btn-reset{background:rgba(255,255,255,.04)!important;color:rgba(255,255,255,.45)!important}
 		.btn-reset:hover{background:rgba(255,255,255,.07)!important;color:rgba(255,255,255,.65)!important}
 		@media(max-width:600px){header{padding:0 10px;gap:6px}}
@@ -231,7 +231,7 @@ document.getElementById('dir-select').addEventListener('change', function(){
     document.getElementById('pwd-modal-desc').textContent = '选择目录需要输入密码';
     document.getElementById('pwd-confirm-btn').style.background = '#2a5a3a';
     document.getElementById('pwd-confirm-btn').style.borderColor = '#3a7a5a';
-    document.getElementById('pwd-confirm-btn').style.color = '#fff';
+    document.getElementById('pwd-confirm-btn').style.color = '#d2d3d5';
     document.getElementById('pwd-cancel-btn').style.display = 'block';
     document.getElementById('pwd-modal').classList.add('open');
     document.getElementById('pwd-input').value = '';
@@ -349,7 +349,7 @@ function openPwdModal() {
   document.getElementById('pwd-modal-desc').textContent = '输入密码将标记的图片移入回收站';
   document.getElementById('pwd-confirm-btn').style.background = '#2a5a3a';
   document.getElementById('pwd-confirm-btn').style.borderColor = '#3a7a5a';
-  document.getElementById('pwd-confirm-btn').style.color = '#fff';
+  document.getElementById('pwd-confirm-btn').style.color = '#d2d3d5';
   document.getElementById('pwd-cancel-btn').style.display = 'block';
   document.getElementById('pwd-modal').classList.add('open');
   document.getElementById('pwd-input').value = '';

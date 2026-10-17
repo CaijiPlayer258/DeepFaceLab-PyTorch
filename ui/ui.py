@@ -10,7 +10,7 @@ from components.page_mergestudio.page_mergestudio import MergeStudioPage
 from components.page_maskprocessor.page_maskprocessor import MaskProcessorPage
 from components.page_trtcompile.page_trtcompile import TRTCompilePage
 from components.page_trainer import TrainerPage
-from PyQt5.QtCore import QObject, pyqtSignal, QTimer
+from PyQt5.QtCore import QObject, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QDesktopWidget, QApplication
 
@@ -49,11 +49,9 @@ siui.core.globals.SiGlobal.siui.loadIcons(
 
 
 class MySiliconApp(SiliconApplication):
-    update_result = pyqtSignal(object, object)  # (has_update, info) 跨线程信号
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.update_result.connect(self._show_update_dlg)
 
         screen_geo = QDesktopWidget().screenGeometry()
         self.setMinimumSize(1024, 380)
@@ -99,66 +97,6 @@ class MySiliconApp(SiliconApplication):
 
         # 注册所有页面到侧边栏
         self._setup_pages()
-
-        # 延迟启动更新检查
-        from PyQt5.QtCore import QTimer
-        QTimer.singleShot(3000, self._check_update)
-
-    def _check_update(self):
-        """启动后检查更新（后台线程运行，不阻塞 UI）"""
-        from ui.update_checker import _FORCE_UPDATE_TEST
-        from ui.update_checker import show_update_dialog
-        if _FORCE_UPDATE_TEST:
-            show_update_dialog(self, "发现更新",
-                "当前 v1.0.0 -> 最新 v1.1.0" + chr(10) +
-                chr(10) +
-                "【v1.1.0】" + chr(10) +
-                "  - 新增 HDR 色调映射" + chr(10) +
-                "  - 优化显存占用" + chr(10) +
-                "  - 修复导出崩溃",
-                "立即更新", lambda: None)
-            return
-        import threading
-        def _bg_check():
-            try:
-                from ui.update_checker import check_for_updates, pull_updates, ensure_git_installed
-                def _on_result(has_update, info):
-                    # pyqtSignal 线程安全地回到主线程
-                    self.update_result.emit(has_update, info)
-                check_for_updates(callback=_on_result)
-            except Exception as e:
-                print(f"[Update] 后台检查异常: {e}")
-        threading.Thread(target=_bg_check, daemon=True).start()
-
-    def _show_update_dlg(self, has_update, info):
-        """在主线程中显示更新对话框"""
-        try:
-            from ui.update_checker import show_update_dialog, pull_updates, _reflow_notes
-            if has_update and isinstance(info, dict):
-                _lines = ["当前 v%s -> 最新 v%s" % (info.get("local_ver", "?"), info.get("remote_ver", "?"))]
-                _changelog = info.get("changelog", [])
-                if _changelog:
-                    _lines.append("")
-                    # 只显示最新版本的更新信息（更新信息过长会把更新按钮挤出屏幕，
-                    # 照顾长时间未更新、突然想更新的用户）
-                    for _ver, _notes in _changelog[:1]:
-                        _lines.append("【v%s】" % _ver)
-                        # 按 version.txt 的缩进还原层级：主条目之间空一行，子条目缩进两格。
-                        # 旧版是「每行统一加两个空格」，于是 · 子条目和 - 主条目同层，
-                        # 折行、层级、条目间隔全部丢失，看起来就是一段没分行的文字。
-                        _first = True
-                        for _lvl, _txt in _reflow_notes(_notes):
-                            if _lvl == 0:
-                                if not _first:
-                                    _lines.append("")
-                                _lines.append("· " + _txt)
-                                _first = False
-                            else:
-                                _lines.append("    · " + _txt)
-                        _lines.append("")
-                show_update_dialog(self, "发现更新", chr(10).join(_lines), "立即更新", pull_updates)
-        except Exception as e:
-            print(f"[Update] 显示更新对话框异常: {e}")
 
     def _setup_pages(self):
         """注册所有页面到侧边栏"""

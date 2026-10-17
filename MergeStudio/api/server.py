@@ -23,11 +23,13 @@ def create_app() -> FastAPI:
     from MergeStudio.api.routes_preview import router as preview_router
     from MergeStudio.api.routes_timeline import router as timeline_router
     from MergeStudio.api.routes_export import router as export_router
+    from MergeStudio.api.routes_reveal import router as reveal_router
 
     app.include_router(project_router, prefix="/api")
     app.include_router(preview_router, prefix="/api")
     app.include_router(timeline_router, prefix="/api")
     app.include_router(export_router, prefix="/api")
+    app.include_router(reveal_router, prefix="/api")
 
     # Serve static UI files (catch-all for non-API paths)
     ui_dir = Path(__file__).parent.parent / "ui"

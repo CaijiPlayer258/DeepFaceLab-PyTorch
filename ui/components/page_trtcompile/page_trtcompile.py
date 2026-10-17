@@ -13,10 +13,10 @@ from siui.components.button import SiPushButtonRefactor
 from siui.components.progress_bar import SiProgressBar
 from siui.core import SiGlobal, SiColor
 
-_BG = "#1C191F"
+_BG = "#1B1B1D"
 _TEXT = "#FFFFFF"
 _TEXT_DIM = "#999999"
-_ACCENT = "#7C6FF7"
+_ACCENT = "#6F8F90"
 
 
 class _CompileSignals(QObject):
@@ -134,8 +134,8 @@ class TRTCompilePage(SiPage):
                 f"  font-family: 'Consolas', 'Courier New', monospace;"
                 f"}}"
                 f"QScrollBar:vertical {{ background: transparent; width: 6px; border: none; }}"
-                f"QScrollBar::handle:vertical {{ background: #3a3a52; border-radius: 3px; min-height: 30px; }}"
-                f"QScrollBar::handle:vertical:hover {{ background: #5a5a72; }}"
+                f"QScrollBar::handle:vertical {{ background: #3a3a3e; border-radius: 3px; min-height: 30px; }}"
+                f"QScrollBar::handle:vertical:hover {{ background: #5a5a5e; }}"
                 f"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}"
                 f"QScrollBar:horizontal {{ height: 0; }}"
             )

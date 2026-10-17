@@ -42,8 +42,8 @@ class ChangelogPage(SiPage):
                 "  font-family: 'Inter', 'Consolas', monospace;"
                 "}"
                 "QScrollBar:vertical { background: transparent; width: 6px; border: none; }"
-                "QScrollBar::handle:vertical { background: #3a3a52; border-radius: 3px; min-height: 30px; }"
-                "QScrollBar::handle:vertical:hover { background: #5a5a72; }"
+                "QScrollBar::handle:vertical { background: #3a3a3e; border-radius: 3px; min-height: 30px; }"
+                "QScrollBar::handle:vertical:hover { background: #5a5a5e; }"
                 "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
                 "QScrollBar:horizontal { height: 0; }"
             )

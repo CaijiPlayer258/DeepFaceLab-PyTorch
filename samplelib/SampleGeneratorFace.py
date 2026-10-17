@@ -139,12 +139,19 @@ class SampleGeneratorFace(SampleGeneratorBase):
         generator = self.generators[self.generator_counter % len(self.generators) ]
         return next(generator)
 
+    def get_last_filenames(self):
+        """最近一批样本的完整路径（预览标签/右键跳转用）。
+        多 worker 时是本生成器视角；ModelBase 取 generators[0] 的记录，
+        与 get_previews() 使用的样本一致。"""
+        return getattr(self, '_last_filenames', [])
+
     def batch_func(self, param ):
         samples, index_host, ct_samples, ct_index_host = param
  
         bs = self.batch_size
         while True:
             batches = None
+            batch_filenames = []
 
             indexes = index_host.multi_get(bs)
             ct_indexes = ct_index_host.multi_get(bs) if ct_samples is not None else None
@@ -153,6 +160,7 @@ class SampleGeneratorFace(SampleGeneratorBase):
             for n_batch in range(bs):
                 sample_idx = indexes[n_batch]
                 sample = samples[sample_idx]
+                batch_filenames.append(getattr(sample, 'filename', ''))
 
                 ct_sample = None
                 if ct_samples is not None:
@@ -169,4 +177,5 @@ class SampleGeneratorFace(SampleGeneratorBase):
                 for i in range(len(x)):
                     batches[i].append ( x[i] )
 
+            self._last_filenames = batch_filenames
             yield [ np.array(batch) for batch in batches]

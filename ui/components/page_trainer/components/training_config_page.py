@@ -319,7 +319,7 @@ class TrainingConfigChildPage(SiChildPage):
                 cb.setChecked(dev['type'] == 'gpu')
                 cb.toggled.connect(lambda checked, d=dev: self._on_device_toggled(d, checked))
                 # 强制复选框颜色为紫色，覆盖 siui 默认颜色
-                purple = "#9c65ae"
+                purple = "#7A9E9F"
                 cb.toggled.connect(lambda checked, c=cb: c.indicator_label.setStyleSheet(
                     f"background-color: {purple}; border-radius: 4px;" if checked
                     else f"border: 1px solid #555555; border-radius: 4px;"
@@ -1625,7 +1625,7 @@ class TrainingConfigChildPage(SiChildPage):
         _cancel_btn = SiSimpleButton(_dlg.buttonContainer())
         _cancel_btn.attachment().setText("取消")
         _cancel_btn.setBorderRadius(6)
-        _cancel_btn.setIdleColor("#4C4554")
+        _cancel_btn.setIdleColor("#4A4A4E")
         _cancel_btn.reloadStyleSheet()
         _cancel_btn.resize(400, 40)
         _dlg.buttonContainer().addWidget(_cancel_btn)

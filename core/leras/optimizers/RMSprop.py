@@ -157,7 +157,10 @@ class RMSprop(nn.OptimizerBase):
         if len(recent) < pat:
             return float(self.lr_cur)      # 历史还没攒够一个完整窗口，别下结论
 
-        cur_best = min(recent)
+        # 2026-10-13 窗口统计 min -> mean：min 对 batch 噪声有偏（越抖的 loss 串、
+        # min 越容易被幸运批刷低 → 假"还在改善"→ 砍得更晚；且步数归一后小 batch 窗口
+        # 更长、min 抽样更多，偏差进一步放大）。均值对 batch 噪声免疫，判平台更稳。
+        cur_best = float(sum(recent) / len(recent))
         base = getattr(self, '_lr_best_base', None)
         self._lr_last_check = t
         if base is None:

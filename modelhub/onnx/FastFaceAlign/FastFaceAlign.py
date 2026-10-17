@@ -59,29 +59,36 @@ class FastFaceAlign:
     def _sigmoid(x: np.ndarray) -> np.ndarray:
         return 1.0 / (1.0 + np.exp(-x))
 
-    def _pick_top1(self, conf: np.ndarray, reg: np.ndarray):
-        """取全局最高置信度的格子（Top-1，无 NMS 无阈值，对应原项目 pick_primary）。
+    def _decode(self, conf: np.ndarray, reg: np.ndarray, threshold: float):
+        """
+        Decode one batch item's raw outputs to rotated boxes.
 
         Args:
             conf: (1, Hf, Wf) raw logits
             reg : (4, Hf, Wf) (cx_offset, cy_offset, s, θ) raw logits
+            threshold: confidence threshold
 
         Returns:
-            [(conf, cx, cy, w, h, θ)] 单元素列表（192×192 输入空间）；恒有结果。
+            list of (conf, cx, cy, w, h, θ) in 192×192 input space, conf descending.
         """
+        Hf, Wf = conf.shape[1], conf.shape[2]
         conf_s = self._sigmoid(conf[0])                      # (Hf, Wf)
-        idx = int(np.argmax(conf_s))
-        row, col = np.unravel_index(idx, conf_s.shape)
+        cx_off = self._sigmoid(reg[0])                       # (Hf, Wf)
+        cy_off = self._sigmoid(reg[1])
+        side = np.exp(reg[2]) * self.STRIDE                  # square side in px
+        theta = np.tanh(reg[3]) * np.pi                      # [-π, π]
 
-        cx_off = self._sigmoid(reg[0, row, col])
-        cy_off = self._sigmoid(reg[1, row, col])
-        side = np.exp(reg[2, row, col]) * self.STRIDE        # square side in px
-        theta = np.tanh(reg[3, row, col]) * np.pi            # [-π, π]
+        rows, cols = np.meshgrid(np.arange(Hf), np.arange(Wf), indexing='ij')
+        cx = (cols + cx_off) * self.STRIDE                   # (Hf, Wf)
+        cy = (rows + cy_off) * self.STRIDE
 
-        cx = (col + cx_off) * self.STRIDE
-        cy = (row + cy_off) * self.STRIDE
-        return [(float(conf_s[row, col]), float(cx), float(cy),
-                 float(side), float(side), float(theta))]
+        ys, xs = np.where(conf_s > threshold)
+        items = []
+        for y, x in zip(ys, xs):
+            items.append((float(conf_s[y, x]), float(cx[y, x]), float(cy[y, x]),
+                          float(side[y, x]), float(side[y, x]), float(theta[y, x])))
+        items.sort(key=lambda t: t[0], reverse=True)
+        return items
 
     # ------------------------------------------------------------------
     #  Standard bbox interface (compatible with DetectorFactory)
@@ -90,14 +97,14 @@ class FastFaceAlign:
                 input_mode='one_stage', resize_mode='letterbox', input_size=None):
         """
         Standard detector interface — returns axis-aligned [l,t,r,b] per batch item.
-        (bbox of the Top-1 rotated square's circumscribed axis-aligned rect)
+        (bbox = rotated square's circumscribed axis-aligned rect)
 
         arguments
          img    np.ndarray      ndim 2,3,4  (BGR)
-         threshold(0.5)         ignored — FastFaceAlign 不设阈值，默认取 Top-1
+         threshold(0.5)         confidence threshold
          min_face_size(40)      minimum face side in original image pixels
 
-        returns a list of [l,t,r,b] for every batch dimension of img (0 or 1 box)
+        returns a list of [l,t,r,b] for every batch dimension of img
         """
         from xlib.image import ImageProcessor
         ip = ImageProcessor(img)
@@ -112,7 +119,7 @@ class FastFaceAlign:
         faces_per_batch = []
         for b in range(N):
             faces = []
-            for c, cx, cy, w, h, th in self._pick_top1(conf[b], reg[b]):
+            for c, cx, cy, w, h, th in self._decode(conf[b], reg[b], threshold):
                 if img_scale != 1.0:
                     cx, cy, w, h = cx / img_scale, cy / img_scale, w / img_scale, h / img_scale
                 l, t, r, btm = cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2
@@ -133,11 +140,10 @@ class FastFaceAlign:
     def extract_rotated(self, img, threshold: float = 0.5, min_face_size=40,
                         input_mode='one_stage', resize_mode='letterbox', input_size=None):
         """
-        Detect the Top-1 rotated face box, mapped back to original image space.
-        FastFaceAlign 不设阈值：直接取全局最高置信度的格子（pick_primary）。
+        Detect rotated face boxes, mapped back to original image space.
 
         Returns a list per batch item, each a list of
-        (conf, cx, cy, w, h, θ) — 0 or 1 rotated square box.
+        (conf, cx, cy, w, h, θ) — rotated square box, conf descending.
         θ in radians, positive = counter-clockwise (OpenCV convention).
         """
         from xlib.image import ImageProcessor
@@ -153,7 +159,7 @@ class FastFaceAlign:
         faces_per_batch = []
         for b in range(N):
             faces = []
-            for c, cx, cy, w, h, th in self._pick_top1(conf[b], reg[b]):
+            for c, cx, cy, w, h, th in self._decode(conf[b], reg[b], threshold):
                 if img_scale != 1.0:
                     cx, cy, w, h = cx / img_scale, cy / img_scale, w / img_scale, h / img_scale
                 if min(w, h) < min_face_size:

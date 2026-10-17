@@ -411,7 +411,7 @@
         sy = pt.y * this.scale + this.offsetY;
 
         isFG  = pt.label === 1;
-        color = isFG ? '#22c55e' : '#ef4444';
+        color = isFG ? '#22c55e' : '#a65d5d';
 
         // Circle
         ctx.beginPath();
@@ -468,7 +468,7 @@
       var sx, sy, i;
 
       ctx.save();
-      ctx.strokeStyle = 'rgba(91, 91, 214, 0.7)';
+      ctx.strokeStyle = 'rgba(122, 158, 159, 0.7)';
       ctx.lineWidth   = 2;
       ctx.setLineDash([5, 4]);
 
@@ -504,7 +504,7 @@
 
         ctx.beginPath();
         ctx.arc(sx, sy, 4, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(91, 91, 214, 0.9)';
+        ctx.fillStyle = 'rgba(122, 158, 159, 0.9)';
         ctx.fill();
       }
 
@@ -531,13 +531,13 @@
       var h = Math.abs(ey - sy);
 
       ctx.save();
-      ctx.strokeStyle = 'rgba(91, 91, 214, 0.8)';
+      ctx.strokeStyle = 'rgba(122, 158, 159, 0.8)';
       ctx.lineWidth   = 2;
       ctx.setLineDash([4, 3]);
       ctx.strokeRect(x, y, w, h);
       ctx.setLineDash([]);
 
-      ctx.fillStyle = 'rgba(91, 91, 214, 0.08)';
+      ctx.fillStyle = 'rgba(122, 158, 159, 0.08)';
       ctx.fillRect(x, y, w, h);
       ctx.restore();
     }
@@ -634,7 +634,7 @@
         // Track circle (faint)
         ctx.beginPath();
         ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
         ctx.lineWidth = 2;
         ctx.stroke();
 
@@ -652,7 +652,7 @@
 
         // Main bright arc
         ctx.save();
-        ctx.shadowColor = '#8b8be6';
+        ctx.shadowColor = '#8faeaf';
         ctx.shadowBlur = 16;
         ctx.beginPath();
         ctx.arc(cx, cy, radius, angle - arcLen / 2, angle + arcLen / 2);

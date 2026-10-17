@@ -10,21 +10,21 @@ HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>DFL 参数设置</title>
 	<style>
-		@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;550;600&display=swap');
+		/* font: system geometric stack (minimalist, no remote fetch) */
 		*{box-sizing:border-box;margin:0;padding:0}
 		::-webkit-scrollbar{width:6px;height:6px}
 		::-webkit-scrollbar-track{background:transparent}
-		::-webkit-scrollbar-thumb{background:rgba(255,255,255,.08);border-radius:3px;transition:background .15s}
+		::-webkit-scrollbar-thumb{background:rgba(255,255,255,.055);border-radius:3px;transition:background .15s}
 		::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.14)}
-		*{scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.08) transparent}
-		::selection{background:rgba(91,91,214,.35);color:#fff}
-		body{background:#0a0a0b;color:rgba(255,255,255,.8);font-family:'Inter',-apple-system,sans-serif;font-size:13px;font-weight:450;min-height:100vh;padding:20px;-webkit-font-smoothing:antialiased}
-		header{display:flex;align-items:center;gap:10px;height:40px;padding:0 14px;background:#0d0d0e;border-bottom:1px solid rgba(255,255,255,.06);flex-shrink:0;margin:-20px -20px 16px}
+		*{scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.055) transparent}
+		::selection{background:rgba(122,158,159,.35);color:#d2d3d5}
+		body{background:#101013;color:rgba(255,255,255,.8);font-family:'SF Pro Display', 'Segoe UI Variable', 'Segoe UI',-apple-system,sans-serif;font-size:13px;font-weight:450;min-height:100vh;padding:20px;-webkit-font-smoothing:antialiased}
+		header{display:flex;align-items:center;gap:10px;height:40px;padding:0 14px;background:#16171a;border-bottom:1px solid rgba(255,255,255,.04);flex-shrink:0;margin:-20px -20px 16px}
 		header h1{font-size:13px;font-weight:550;color:rgba(255,255,255,.8);letter-spacing:-.01em}
-		.back-btn{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.06);border-radius:5px;color:rgba(255,255,255,.45);text-decoration:none;font-size:11px;font-weight:500;transition:all .12s}
+		.back-btn{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.04);border-radius:5px;color:rgba(255,255,255,.45);text-decoration:none;font-size:11px;font-weight:500;transition:all .12s}
 		.back-btn:hover{background:rgba(255,255,255,.07);color:rgba(255,255,255,.65)}
 		main{max-width:720px;margin:0 auto}
-		.card{background:#0d0d0e;border:1px solid rgba(255,255,255,.06);border-radius:8px;padding:14px;margin-bottom:12px}
+		.card{background:#16171a;border:1px solid rgba(255,255,255,.04);border-radius:8px;padding:14px;margin-bottom:12px}
 		.card h2{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:rgba(255,255,255,.25);margin-bottom:10px}
 		.note{font-size:11px;color:rgba(255,255,255,.25);margin:-6px 0 10px}
 		.row{display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.03)}
@@ -32,43 +32,43 @@ HTML = r"""<!DOCTYPE html>
 		.lbl{font-size:12px;color:rgba(255,255,255,.55)}
 		.val{font-size:12px;color:rgba(255,255,255,.75);font-weight:500}
 		.ctrl{display:flex;align-items:center;gap:6px}
-		.ctrl input[type=text]{width:72px;padding:3px 6px;background:#0d0d0e;border:1px solid rgba(255,255,255,.08);border-radius:5px;color:rgba(255,255,255,.65);font-size:11px;font-family:inherit;text-align:center;outline:none;transition:border-color .12s}
-		.ctrl input[type=text]:focus{border-color:rgba(91,91,214,.4)}
-		.ctrl select{padding:3px 6px;background:#0d0d0e;border:1px solid rgba(255,255,255,.08);border-radius:5px;color:rgba(255,255,255,.65);font-size:11px;font-family:inherit;outline:none;transition:border-color .12s}
-		.ctrl select:focus{border-color:rgba(91,91,214,.4)}
+		.ctrl input[type=text]{width:72px;padding:3px 6px;background:#16171a;border:1px solid rgba(255,255,255,.055);border-radius:5px;color:rgba(255,255,255,.65);font-size:11px;font-family:inherit;text-align:center;outline:none;transition:border-color .12s}
+		.ctrl input[type=text]:focus{border-color:rgba(122,158,159,.4)}
+		.ctrl select{padding:3px 6px;background:#16171a;border:1px solid rgba(255,255,255,.055);border-radius:5px;color:rgba(255,255,255,.65);font-size:11px;font-family:inherit;outline:none;transition:border-color .12s}
+		.ctrl select:focus{border-color:rgba(122,158,159,.4)}
 		.range-ctrl{display:flex;align-items:center;gap:4px}
 		.range-ctrl input{width:48px!important}
 		.range-ctrl .sep{color:rgba(255,255,255,.2);font-size:11px}
 		.toggle{position:relative;display:inline-block;width:30px;height:18px;cursor:pointer}
 		.toggle input{opacity:0;width:0;height:0}
-		.slider{position:absolute;inset:0;background:rgba(255,255,255,.08);border-radius:9px;transition:background .2s}
+		.slider{position:absolute;inset:0;background:rgba(255,255,255,.055);border-radius:9px;transition:background .2s}
 		.slider:before{content:'';position:absolute;left:2px;bottom:2px;width:14px;height:14px;background:rgba(255,255,255,.3);border-radius:50%;transition:all .2s}
-		.toggle input:checked+.slider{background:rgba(91,91,214,.5)}
-		.toggle input:checked+.slider:before{transform:translateX(12px);background:#8b8be6}
-		select{padding:3px 8px;background:#0d0d0e;border:1px solid rgba(255,255,255,.08);border-radius:5px;color:rgba(255,255,255,.65);font-size:12px;font-family:inherit;outline:none;transition:border-color .12s}
-		select:focus{border-color:rgba(91,91,214,.4)}
+		.toggle input:checked+.slider{background:rgba(122,158,159,.5)}
+		.toggle input:checked+.slider:before{transform:translateX(12px);background:#8faeaf}
+		select{padding:3px 8px;background:#16171a;border:1px solid rgba(255,255,255,.055);border-radius:5px;color:rgba(255,255,255,.65);font-size:12px;font-family:inherit;outline:none;transition:border-color .12s}
+		select:focus{border-color:rgba(122,158,159,.4)}
 		.actions{display:flex;gap:8px;justify-content:center;margin:16px 0}
-		button{padding:5px 14px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:6px;color:rgba(255,255,255,.55);cursor:pointer;font-size:11px;font-family:inherit;font-weight:500;transition:all .12s}
+		button{padding:5px 14px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.055);border-radius:6px;color:rgba(255,255,255,.55);cursor:pointer;font-size:11px;font-family:inherit;font-weight:500;transition:all .12s}
 		button:hover{background:rgba(255,255,255,.07);color:rgba(255,255,255,.75)}
 		button:disabled{opacity:.3;cursor:default}
-		.btn-apply{background:linear-gradient(135deg,#5b5bd6,#8b5cf6)!important;color:#fff!important;border:none!important}
-		.btn-apply:hover{opacity:.9!important;box-shadow:0 2px 8px rgba(91,91,214,.25)!important}
+		.btn-apply{background:linear-gradient(135deg,#6f8f90,#67878a)!important;color:#d2d3d5!important;border:none!important}
+		.btn-apply:hover{opacity:.9!important;box-shadow:0 2px 8px rgba(122,158,159,.25)!important}
 		.btn-reset{background:rgba(255,255,255,.04)!important;color:rgba(255,255,255,.45)!important}
 		.btn-reset:hover{background:rgba(255,255,255,.07)!important;color:rgba(255,255,255,.65)!important}
 		.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);z-index:1000;display:none;align-items:center;justify-content:center}
 		.modal-overlay.open{display:flex}
-		.modal-box{min-width:320px;max-width:420px;background:#0d0d0e;border:1px solid rgba(255,255,255,.08);border-radius:10px;box-shadow:0 16px 48px rgba(0,0,0,.5);padding:20px;text-align:center}
+		.modal-box{min-width:320px;max-width:420px;background:#16171a;border:1px solid rgba(255,255,255,.055);border-radius:10px;box-shadow:0 16px 48px rgba(0,0,0,.5);padding:20px;text-align:center}
 		.modal-box h2{font-size:14px;font-weight:550;color:rgba(255,255,255,.8);margin-bottom:8px}
 		.modal-box p{font-size:12px;color:rgba(255,255,255,.45);margin-bottom:16px}
-		.modal-box input{width:100%;padding:8px 12px;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.08);border-radius:6px;color:rgba(255,255,255,.75);font-size:13px;font-family:inherit;text-align:center;outline:none;transition:border-color .12s}
-		.modal-box input:focus{border-color:rgba(91,91,214,.4);box-shadow:0 0 0 2px rgba(91,91,214,.08)}
-		.modal-box .modal-err{font-size:12px;color:#ef4444;margin-top:8px;display:none}
+		.modal-box input{width:100%;padding:8px 12px;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.055);border-radius:6px;color:rgba(255,255,255,.75);font-size:13px;font-family:inherit;text-align:center;outline:none;transition:border-color .12s}
+		.modal-box input:focus{border-color:rgba(122,158,159,.4);box-shadow:0 0 0 2px rgba(122,158,159,.08)}
+		.modal-box .modal-err{font-size:12px;color:#a65d5d;margin-top:8px;display:none}
 		.modal-box .modal-actions{display:flex;gap:8px;margin-top:16px}
 		.modal-box .modal-actions button{flex:1;padding:7px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:500;font-family:inherit;border:none;transition:opacity .12s}
 		#toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);padding:8px 20px;border-radius:6px;font-size:12px;font-weight:500;z-index:2000;opacity:0;transition:opacity .3s;pointer-events:none}
 		#toast.show{opacity:1}
-		#toast.ok{background:rgba(91,91,214,.2);color:#8b8be6;border:1px solid rgba(91,91,214,.25)}
-		#toast.err{background:rgba(239,68,68,.15);color:#ef4444;border:1px solid rgba(239,68,68,.2)}
+		#toast.ok{background:rgba(122,158,159,.2);color:#8faeaf;border:1px solid rgba(122,158,159,.25)}
+		#toast.err{background:rgba(239,68,68,.15);color:#a65d5d;border:1px solid rgba(239,68,68,.2)}
 		@media(max-width:600px){body{padding:12px}header{margin:-12px -12px 12px}}
 	</style>
 </head>
@@ -93,7 +93,7 @@ HTML = r"""<!DOCTYPE html>
 </div>
 
 <main>
-  <div id="loading" style="color:#888;font-size:13px;padding:40px;text-align:center">正在加载设置…</div>
+  <div id="loading" style="color:#9a9b9e;font-size:13px;padding:40px;text-align:center">正在加载设置…</div>
   <div id="content" style="display:none">
     <div class="card">
       <h2>模型架构</h2>
@@ -349,7 +349,7 @@ function formatVal(v, fmt) {
   if (fmt) return fmt(v);
   if (v === true) return '&#10003;';
   if (v === false) return '&#10007;';
-  if (v == null) return '<span style="color:#555">&#8212;</span>';
+  if (v == null) return '<span style="color:#6b6c70">&#8212;</span>';
   return String(v);
 }
 

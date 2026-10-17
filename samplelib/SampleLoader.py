@@ -71,10 +71,10 @@ class SampleLoader:
 
     @staticmethod
     def load_face_samples ( image_paths):
-        # DFL 的关键数据（landmarks、xseg_mask 等）存储在 JPG APP15 块中，
-        # PNG 文件无法携带这些元数据，扫描时直接排除，避免后续报错。
+        # DFL 的关键数据（landmarks、xseg_mask 等）：JPG 存 APP15，PNG 存 dFLd 块（DFLPNG）。
+        # 两者 DFLIMG.load() 均可解析（按扩展名分流）；无元数据的普通图在 Cli 端被 has_data() 拒绝。
         image_paths = [p for p in image_paths
-                       if Path(p).suffix.lower() in ('.jpg', '.jpeg')]
+                       if Path(p).suffix.lower() in ('.jpg', '.jpeg', '.png')]
         if not image_paths:
             return []
         result = FaceSamplesLoaderSubprocessor(image_paths).run()

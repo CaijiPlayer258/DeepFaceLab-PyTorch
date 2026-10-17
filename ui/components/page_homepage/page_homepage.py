@@ -83,14 +83,14 @@ class ExampleHomepage(SiPage):
         self.option_card_project = ThemedOptionCardPlane(self)
         self.option_card_project.setTitle("GitHub page")
         self.option_card_project.setFixedSize(218, 270)
-        self.option_card_project.setThemeColor("#855198")
+        self.option_card_project.setThemeColor("#6F8F90")
         self.option_card_project.setDescription(
             "本项目GitHub页面，欢迎前往查看源码、提交Issue")
         self.option_card_project.setURL("https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch")
         self.option_card_example = ThemedOptionCardPlane(self)
         self.option_card_example.setTitle("菜级玩家")
         self.option_card_example.setFixedSize(218, 270)
-        self.option_card_example.setThemeColor("#7573aa")
+        self.option_card_example.setThemeColor("#6F8F90")
         self.option_card_example.setDescription("菜级玩家是深变项目的作者，只在B站发布视频和软件，欢迎前往空间观看、收藏相关教学视频")  # noqa: E501
         self.option_card_example.setURL("https://space.bilibili.com/500398541")
         # 添加到水平容器
