@@ -541,7 +541,7 @@ function updateSelUI() {
   const bmRoot = document.getElementById('btn-merge');
   if (bmRoot && currentGroup === '.') {
     bmRoot.classList.add('dim');
-    bmRoot.setAttribute('data-tip', '单夹模式：无需合并主簇');
+    bmRoot.setAttribute('data-tip', '直审：无需合并主簇');
   }
   const blm = document.getElementById('btn-landmarks');
   if (blm) blm.classList.toggle('dim', !currentGroup);
