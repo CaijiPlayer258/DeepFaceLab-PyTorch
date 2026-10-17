@@ -31,6 +31,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from dflmeta import jpg_with_meta_to_png
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = os.path.join(ROOT, "python", "python.exe")
 EXTRACTOR = os.path.join(ROOT, "Extractor", "Extractor.py")
@@ -117,12 +119,13 @@ def collect_faces(stage_out, out, label):
         suffix = ""
         if "_" in stem and stem.rsplit("_", 1)[-1].isdigit():
             stem, suffix = stem.rsplit("_", 1)[0], "_" + stem.rsplit("_", 1)[-1]
-        img = cv2.imdecode(np.fromfile(os.path.join(stage_out, f), dtype=np.uint8), cv2.IMREAD_COLOR)
+        srcp = os.path.join(stage_out, f)
+        img = cv2.imdecode(np.fromfile(srcp, dtype=np.uint8), cv2.IMREAD_COLOR)
         if img is None:
             continue
         px = min(img.shape[0], img.shape[1])
         dst = os.path.join(out, f"px{px:04d}__{label}__{stem}{suffix}.png")
-        cv2.imencode(".png", img)[1].tofile(dst)
+        jpg_with_meta_to_png(srcp, dst)   # 保留 dFLd 元数据（landmarks 等）
         n += 1
     return n
 
@@ -140,6 +143,7 @@ def main():
     ap.add_argument("--dedup", action="store_true", help="聚类前先 phash 查重（重复脸移 repeated\\）")
     ap.add_argument("--del-frames", action="store_true", help="单个视频切脸成功后删除其帧目录")
     ap.add_argument("--no-cut", action="store_true", help="只切帧不切脸（调试/预热）")
+    ap.add_argument("--no-post", action="store_true", help="跳过查重/faceid/UI（修复重切用）")
     ap.add_argument("--allow-nonempty", action="store_true", help="输出目录非空时允许继续")
     ap.add_argument("-d", "--detector", default="RetinaFace_10g")
     ap.add_argument("-l", "--landmarker", default="insightface-2d106det")
@@ -224,7 +228,10 @@ def main():
         if args.del_frames:
             shutil.rmtree(frames, ignore_errors=True)
 
-    # ── 收尾：查重(可选) → faceid → 快照 → 人工筛 UI ──
+    # ── 收尾：查重(可选) → faceid → 人工筛 UI ──
+    if args.no_post:
+        print(f"[video_pipeline] --no-post：跳过查重/faceid/UI；脸图 {total_faces} 张 @ {out}")
+        return 0
     if args.dedup:
         print("[video_pipeline] 查重（phash，重复脸移 repeated\\）...", flush=True)
         run_checked([PY, FILTER, "-i", out, "--mode", "repeated"],
@@ -232,8 +239,7 @@ def main():
     print(f"[video_pipeline] faceid 聚类 eps={args.eps} ...", flush=True)
     run_checked([PY, FILTER, "-i", out, "--mode", "faceid", "--eps", str(args.eps)],
                 fail_msg="[video_pipeline] faceid 聚类失败")
-    print("[video_pipeline] 出组快照 ...", flush=True)
-    subprocess.run([PY, SNAPSHOTS, "--work", out, "--cell", "200", "--cols", "8"])
+    # 组预览拼图已退役（2026-10-17 用户指定）：faceid 后直接开 browser UI，不再出快照
     # faceid_browser 固定 8104 + 启动自动杀旧实例接管（全局单实例，用户约定）
     print(f"[video_pipeline] 打开人工筛 UI: http://127.0.0.1:8104  root={out}", flush=True)
     # 关键：stdio 全脱钩（DEVNULL+DETACHED），否则上层 shell 会等 browser 的 stdout 关闭→假死

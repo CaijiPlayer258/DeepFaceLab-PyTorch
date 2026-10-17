@@ -20,6 +20,8 @@ import os
 import shutil
 import subprocess
 import sys
+
+from dflmeta import jpg_with_meta_to_png
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -136,11 +138,10 @@ def main():
         orig_stem = os.path.splitext(orig)[0]
         dst = os.path.join(out, orig_stem + suffix + ".png")
         srcp = os.path.join(stage_out, f)
-        buf = np.fromfile(srcp, dtype=np.uint8)
-        img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-        if img is None:
+        try:
+            jpg_with_meta_to_png(srcp, dst)   # jpg(APP15 元数据) → png(dFLd)，landmarks 不丢
+        except Exception:
             continue
-        cv2.imencode(".png", img)[1].tofile(dst)   # 统一转 png 落位（元数据已丢失，脸集后续走 Filter 不依赖）
         n_out += 1
         produced_src.add(orig)
     # 未检出脸的源图也记账（避免反复重切无脸图）

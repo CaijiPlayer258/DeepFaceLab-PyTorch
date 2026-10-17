@@ -32,6 +32,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from dflmeta import jpg_with_meta_to_png
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = os.path.join(ROOT, "python", "python.exe")
 EXTRACTOR = os.path.join(ROOT, "Extractor", "Extractor.py")
@@ -150,12 +152,13 @@ def main():
         if stem not in mapping:
             continue
         src, flat_stem = mapping[stem]
-        img = cv2.imdecode(np.fromfile(os.path.join(stage_out, f), dtype=np.uint8), cv2.IMREAD_COLOR)
+        srcp = os.path.join(stage_out, f)
+        img = cv2.imdecode(np.fromfile(srcp, dtype=np.uint8), cv2.IMREAD_COLOR)
         if img is None:
             continue
         px = min(img.shape[0], img.shape[1])
         dst = os.path.join(out, f"px{px:04d}__{flat_stem}{suffix}.png")
-        cv2.imencode(".png", img)[1].tofile(dst)
+        jpg_with_meta_to_png(srcp, dst)   # 保留 dFLd 元数据（landmarks 等）
         n_out += 1
         faces_by_src[src] = faces_by_src.get(src, 0) + 1
 
