@@ -102,7 +102,7 @@ def export(model_class_name: str, saved_models_path: str, force_model_name: str 
         sys.stdout = _orig_stdout
     _t.join(0.3)
     # Strip model class suffix from name for cleaner export filename
-    for _suffix in ['_SAEHD', '_DeepFakeLarge', '_LIAELarge', '_XSeg', '_XSegLite']:
+    for _suffix in ['_SAEHD', '_PIA', '_DeepFakeLarge', '_LIAELarge', '_XSeg', '_XSegLite']:
         if model.model_name.endswith(_suffix):
             model.model_name = model.model_name[:-len(_suffix)]
             break

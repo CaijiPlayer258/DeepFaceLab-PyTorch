@@ -204,7 +204,7 @@ def _scan_all_models(model_dir):
                         base_name = raw_stem[:-len(sfx)]
                         break
                 # 未匹配到模块后缀时，尝试剥离模型类后缀（_SAEHD / _DeepFakeLarge / _LIAELarge）
-                _model_class_suffixes = ('_SAEHD', '_DeepFakeLarge', '_LIAELarge', '_DFSingle')
+                _model_class_suffixes = ('_SAEHD', '_PIA', '_DeepFakeLarge', '_LIAELarge', '_DFSingle')
                 for _cls_sfx in _model_class_suffixes:
                     if raw_stem.endswith(_cls_sfx):
                         _try_name = raw_stem[:-len(_cls_sfx)]

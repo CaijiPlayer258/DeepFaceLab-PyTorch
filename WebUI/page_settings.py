@@ -179,6 +179,7 @@ const TR_FIELDS = [
   ['tr', 'blur_out_mask', 'toggle', '羽化遮罩外围'],
   ['tr', 'eyes_mouth_prio', 'toggle', '嘴眼优先'],
   ['tr', 'eyes_scale', 'slider', '眼睛范围系数（1=原始，>1 扩大，<1 收缩）', {min: 0.25, max: 2.0, step: 0.05}],
+  ['tr', 'pia_cycle_power', 'slider', 'PIA 循环一致强度（仅 PIA 模型；0=关闭）', {min: 0.0, max: 3.0, step: 0.1}],
   ['tr', 'mouth_scale', 'slider', '嘴巴范围系数（1=原始，>1 扩大，<1 收缩）', {min: 0.25, max: 2.0, step: 0.05}],
   ['tr', 'uniform_yaw', 'toggle', 'Yaw 均匀分布'],
   ['tr', 'pretrain_single_decoder', 'toggle', '预训练单解码器'],

@@ -201,7 +201,10 @@ def _scan_models(model_dir=None):
     if not base.exists():
         return results
     seen = set()
-    for f in base.iterdir():
+    # 递归扫描：模型既可能放在顶层（SAEHD），也可能放在子目录（DFLarge / LIAELarge / PIA）。
+    # 旧实现用 iterdir() 只扫顶层，子目录里的模型在 WebUI 里根本不显示，
+    # 导致那些模型只能在 Qt 界面里训练。
+    for f in base.rglob('*'):
         if not f.is_file() or not f.name.endswith('_data.dat'):
             continue
         name = f.name[:-len('_data.dat')]

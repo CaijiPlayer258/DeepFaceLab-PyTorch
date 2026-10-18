@@ -28,8 +28,44 @@ from core.archi_names import (
     build_archi_string, default_kernel_label, kernel_desc_for, is_lite_display,
 )
 
-from .components.training_config_page import TrainingConfigChildPage
+from .components.training_config_page import TrainingConfigChildPage, resolve_model_root
 from .components.new_model_config_page import NewModelConfigChildPage, NewLargeModelConfigChildPage, XSegTrainingConfigChildPage
+
+
+def _read_model_meta(dat_path):
+    """读模型的 options / iter / 是否读到了真实数据。
+
+    优先读 <name>_data.meta_cache.json（模型保存时顺手写的，最快）。
+    没有就退回直接读 <name>_data.dat（只读小文件，避免扫描几十上百 MB 的权重包）。
+
+    ★ 为什么要这个兜底：新建的模型、或者训练从来没成功保存过时，meta 缓存并不存在。
+      老实现此时 options 是空字典，于是训练配置页只能显示一串**默认值**，
+      用户看到的就是"我明明设了参数，怎么没保存"。
+    """
+    import json, pickle
+    dat_path = Path(dat_path)
+    meta_path = dat_path.with_suffix('.meta_cache.json')
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding='utf-8'))
+            opts = meta.get('options')
+            if not isinstance(opts, dict):
+                opts = {}
+                for k in ('resolution', 'face_type', 'ae_dims', 'e_dims', 'd_dims',
+                          'd_mask_dims', 'batch_size', 'lr', 'archi', 'precision'):
+                    if k in meta:
+                        opts[k] = meta[k]
+            return opts, int(meta.get('iter', 0) or 0), True
+        except Exception:
+            pass
+    try:
+        if dat_path.exists() and dat_path.stat().st_size < 8 * 1024 * 1024:
+            data = pickle.loads(dat_path.read_bytes())
+            opts = data.get('options') or {}
+            return (opts if isinstance(opts, dict) else {}), int(data.get('iter', 0) or 0), True
+    except Exception:
+        pass
+    return {}, 0, False
 
 
 @contextmanager
@@ -73,6 +109,7 @@ class TrainerPage(SiPage):
         self.nav_bar.addItem("DFSingle")
         self.nav_bar.addItem("DFLarge")
         self.nav_bar.addItem("LIAELarge")
+        self.nav_bar.addItem("PIA")
         self.nav_bar.setCurrentIndex(0)
         self.nav_bar.indexChanged.connect(self._on_nav_changed)
         
@@ -328,6 +365,8 @@ class TrainerPage(SiPage):
             self._rebuild_dflarge_model_list(self._model_dir)
         elif index == 4:
             self._rebuild_liaelarge_model_list(self._model_dir)
+        elif index == 5:
+            self._rebuild_pia_model_list(self._model_dir)
         self.models_card.adjustSize()
         self.models_container.adjustSize()
         self.models_container.updateGeometry()
@@ -803,24 +842,8 @@ class TrainerPage(SiPage):
                 continue
             seen.add(base_name)
 
-            options = {}
-            training_iter = 0
-            meta_loaded = False
-            meta_path = f.with_suffix('.meta_cache.json')
-            if meta_path.exists():
-                try:
-                    meta = json.loads(meta_path.read_text(encoding='utf-8'))
-                    training_iter = meta.get('iter', 0)
-                    if 'options' in meta:
-                        options = meta['options']
-                    else:
-                        for k in ('resolution', 'face_type', 'ae_dims', 'e_dims', 'd_dims', 'd_mask_dims',
-                                  'batch_size', 'lr', 'archi', 'precision'):
-                            if k in meta:
-                                options[k] = meta[k]
-                    meta_loaded = True
-                except Exception:
-                    pass
+            # meta 缓存缺失就退回读 dat（新建 / 从未保存过的模型就是这种情况）
+            options, training_iter, meta_loaded = _read_model_meta(f)
 
             precision = options.get('precision', 'fp32')
             if precision == 'fp32' and options.get('use_bf16', False):
@@ -994,24 +1017,8 @@ class TrainerPage(SiPage):
                 continue
             seen.add(base_name)
 
-            options = {}
-            training_iter = 0
-            meta_loaded = False
-            meta_path = f.with_suffix('.meta_cache.json')
-            if meta_path.exists():
-                try:
-                    meta = json.loads(meta_path.read_text(encoding='utf-8'))
-                    training_iter = meta.get('iter', 0)
-                    if 'options' in meta:
-                        options = meta['options']
-                    else:
-                        for k in ('resolution', 'face_type', 'ae_dims', 'e_dims', 'd_dims', 'd_mask_dims',
-                                  'batch_size', 'lr', 'archi', 'precision'):
-                            if k in meta:
-                                options[k] = meta[k]
-                    meta_loaded = True
-                except Exception:
-                    pass
+            # meta 缓存缺失就退回读 dat（新建 / 从未保存过的模型就是这种情况）
+            options, training_iter, meta_loaded = _read_model_meta(f)
 
             precision = options.get('precision', 'fp32')
             if precision == 'fp32' and options.get('use_bf16', False):
@@ -1212,6 +1219,61 @@ class TrainerPage(SiPage):
             layout.invalidate()
             layout.activate()
 
+    # ---- PIA model list ----
+
+    def _rebuild_pia_model_list(self, model_dir):
+        """扫描并重建 PIA 模型列表（PIA 是单解码器 + 逐身份适配块，无迁移逻辑）"""
+        layout = self.models_container.layout()
+        if layout:
+            for i in range(layout.count() - 1, -1, -1):
+                w = layout.itemAt(i).widget()
+                if w and isinstance(w, (SiOptionCardLinear, QLabel, SiPushButtonRefactor)):
+                    layout.removeWidget(w)
+                    w.deleteLater()
+
+        models = self._scan_models_in_subdir(model_dir, "PIA", "PIA")
+        self._models_info = {m['name']: m for m in models}
+        for _m in self._models_info.values():
+            _m['class_name'] = 'PIA'
+
+        if not models:
+            empty = QLabel("暂无 PIA 模型\n请在 workspace/model/PIA/ 下创建，或点下方按钮新建")
+            empty.setAlignment(Qt.AlignCenter)
+            empty.setStyleSheet("color: #888; padding: 32px;")
+            self.models_container.addWidget(empty)
+        else:
+            for m in models:
+                card = self._create_large_model_option_card(m, "PIA")
+                self.models_container.addWidget(card)
+
+        self._new_pia_btn = SiPushButtonRefactor(self.models_card)
+        self._new_pia_btn.setText("新建 PIA 模型")
+        self._new_pia_btn.setSvgIcon(safe_get_icon("ic_fluent_cube_add_filled"))
+        self._new_pia_btn.adjustSize()
+        self._new_pia_btn.clicked.connect(self.on_new_pia_model_clicked)
+        self.models_container.addWidget(self._new_pia_btn)
+
+        if layout:
+            layout.invalidate()
+            layout.activate()
+
+    def on_new_pia_model_clicked(self):
+        """新建 PIA 模型按钮。
+
+        默认参数说明：PIA 的主干（encoder+decoder）是共享且冻结的，
+        真正训练的只有两个逐身份适配块，所以 d_dims / e_dims 等按常规给即可；
+        ae_dims 决定 inter 的输出通道，也是适配块的输入通道。
+        """
+        new_name = f"pia_{self.model_counter:03d}"
+        self.model_counter += 1
+        main_window = SiGlobal.siui.windows.get("MAIN_WINDOW")
+        if main_window and hasattr(main_window, 'layerChildPage'):
+            child_page = NewLargeModelConfigChildPage(
+                self, new_name, model_class="PIA",
+                default_options={'ae_dims': 256, 'e_dims': 64, 'd_dims': 64, 'd_mask_dims': 22})
+            child_page.model_created.connect(self.on_model_created)
+            main_window.layerChildPage().setChildPage(child_page)
+
     # ---- LIAELarge model list ----
 
     def _rebuild_liaelarge_model_list(self, model_dir):
@@ -1274,9 +1336,10 @@ class TrainerPage(SiPage):
         card = SiOptionCardLinear(self.models_card)
         # DFSingle: 标题显示 {name} (DFSingle-ud)
         _display_class = model_class
-        if model_class == 'DFSingle' and archi != '?':
+        if model_class in ('DFSingle', 'PIA') and archi != '?':
             _parts = str(archi).split('-')
-            _suffix = _parts[1] if len(_parts) > 1 else ''
+            # 第二段和第三段都带上：df-udt-l3 -> 'PIA-udt-l3' / 'DFSingle-udt'
+            _suffix = '-'.join(_parts[1:]) if len(_parts) > 1 else ''
             if _suffix:
                 _display_class = f'{model_class}-{_suffix}'
         card.setTitle(f"{name}  ({_display_class})", subtitle)
@@ -1370,7 +1433,14 @@ class TrainerPage(SiPage):
         # 用 archi_spec.build_archi_string 拼后端可解析的 archi 串：
         # 显示名 'DF' + '-udt' 要变成 'df-udt'，而不是 'DF-udt'；
         # 选了 Lite 架构还要带上第三段算子修饰符（'df-udt-l'）。
+        # 新建对话框（NewLargeModelConfigChildPage）现在会把「主干+子分支+算子」
+        # 拼成 archi_str 一起 emit 过来，这里直接用。
         _archi_val = config_data.get('archi_str')
+        if not _archi_val and model_class in ('PIA', 'DFSingle'):
+            # 兜底（老版对话框 / 外部调用没带 archi 字段时）：
+            # PIA 与 DF-Single 的主干只能走 DeepFakeArchi 的 df 系，
+            # 别落到下面按 SAEHD 默认值拼的那条兜底里去。
+            _archi_val = 'df-ud'
         if not _archi_val:
             _archi_val = build_archi_string(
                 config_data.get('archi', 'DF'),
@@ -1379,7 +1449,7 @@ class TrainerPage(SiPage):
             )
         info = {
             'name': model_name,
-            'type': _archi_val.split('-')[0] if model_class in ('SAEHD', 'DFSingle') else model_class.lower(),
+            'type': _archi_val.split('-')[0] if model_class in ('SAEHD', 'DFSingle', 'PIA') else model_class.lower(),
             'class_name': model_class,
             'precision': 'fp32',
             'resolution': resolution,
@@ -1388,7 +1458,7 @@ class TrainerPage(SiPage):
             'd_dims': config_data.get('d_dims', '128'),
             'face_type': 'wf',
             'iter': 0,
-            'archi': _archi_val if model_class in ('SAEHD', 'DFSingle') else model_class,
+            'archi': _archi_val if model_class in ('SAEHD', 'DFSingle', 'PIA') else model_class,
         }
 
         # 记录到 _models_info，否则点击"训练"时 model_info 为空，会回退到 SAEHD 界面
@@ -1397,11 +1467,13 @@ class TrainerPage(SiPage):
         # 写最小 _data.dat 到磁盘，否则扫描器找不到它，切换标签页后卡片会消失
         self._write_placeholder_data_dat(model_name, model_class, info)
 
-        if model_class in ('DeepFakeLarge', 'LIAELarge'):
+        if model_class in ('DeepFakeLarge', 'LIAELarge', 'PIA', 'DFSingle'):
             option_card = self._create_large_model_option_card(info, model_class)
             btn_text_map = {
                 'DeepFakeLarge': '新建 DFLarge 模型',
                 'LIAELarge': '新建 LIAELarge 模型',
+                'PIA': '新建 PIA 模型',
+                'DFSingle': '新建 DFSingle 模型',
             }
             btn_text = btn_text_map.get(model_class, '新建模型')
         else:
@@ -1447,10 +1519,10 @@ class TrainerPage(SiPage):
     def _write_placeholder_data_dat(self, model_name, model_class, info):
         """为新创建的模型写一个最小 _data.dat，使扫描器能识别它。"""
         import pickle, os
-        if model_class in ('DeepFakeLarge', 'LIAELarge'):
-            dat_dir = Path(self._model_dir) / model_class
-        else:
-            dat_dir = Path(self._model_dir)
+        # 与训练 / 删除共用同一套子目录映射（DFLarge / LIAELarge / PIA / DFSingle）。
+        # 以前 DFSingle 也掉进 else，占位 .dat 被写到 model/ 根目录 —— 而 DFSingle
+        # 页签扫的是 model/DFSingle/，切一次页签新建的卡片就"消失"，还会跑进 SAEHD 列表。
+        dat_dir = resolve_model_root(self._model_dir, model_class)
         dat_path = dat_dir / f"{model_name}_{model_class}_data.dat"
         if dat_path.exists():
             return  # 文件已存在（可能是重名），不覆盖
@@ -1462,14 +1534,25 @@ class TrainerPage(SiPage):
             'ae_dims': int(info.get('ae_dims', 256)),
             'e_dims': int(info.get('e_dims', 64)),
             'd_dims': int(info.get('d_dims', 128)),
+            # d_mask_dims 也要落盘，否则训练配置页每次都回显默认值 22，
+            # 看起来就像"建模型时设的遮罩维没保存"。
+            'd_mask_dims': int(info.get('d_mask_dims', 22)),
         }
-        if model_class in ('SAEHD', 'DFSingle'):
+        if model_class in ('SAEHD', 'DFSingle', 'PIA'):
             archi_raw = info.get('archi', 'df-ud')
             opts['archi'] = archi_raw
 
         # iter=1 而非 0：ModelBase.is_first_run() 只检查 iter==0，
         # 设为 1 可避免弹出控制台询问已经 GUI 设置好的参数
         model_data = {'options': opts, 'iter': 1}
+        # 同时写 meta 缓存：扫描器优先读它。不写的话，新建的模型在训练配置页里
+        # 只能显示一串默认值 —— 看起来就像"建模型时填的参数没保存"。
+        try:
+            import json as _json
+            dat_path.with_suffix('.meta_cache.json').write_text(
+                _json.dumps({'iter': 1, 'options': opts}, ensure_ascii=False), encoding='utf-8')
+        except Exception as _e:
+            print(f"[WARN] 写 meta_cache 失败: {_e}")
         tmp = dat_path.with_suffix('.dat.write_tmp')
         try:
             tmp.write_bytes(pickle.dumps(model_data))

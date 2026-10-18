@@ -30,6 +30,8 @@ from core.leras import nn
 from facelib import FaceType
 from models import ModelBase
 from samplelib import SampleGeneratorFace, SampleProcessor
+# archi 字符串解析：三段式（base-opts-mod）里的 mod 决定用哪个 Archi 类。
+from core.leras.archis.archi_parse import parse_archi_string, build_archi_classes, archi_is_lite
 
 class SAEHDDFSingleModel(ModelBase):
     """
@@ -104,12 +106,12 @@ class SAEHDDFSingleModel(ModelBase):
                 ).lower()
                 while True:
                     archi = io.input_str('AE 架构', self.options['archi'],
-                        help_message="df / df-d / df-ud / df-udt ...")
-                    archi_split = archi.split('-')
-                    if len(archi_split) >= 1 and archi_split[0] in ['df', 'liae']:
-                        if len(archi_split) == 1 or all(c in 'udtc' for c in archi_split[1]):
-                            self.options['archi'] = archi
-                            break
+                        help_message="df / df-ud / df-udt / df-udt-l / df-udt-l3 ...")
+                    # 统一用 parse_archi_string 校验：顺手把第三段 DFLite 修饰符
+                    # (-l/-l3/-l5/-lm/-lx...) 也一起验了，且与 GUI 走同一套规则。
+                    if parse_archi_string(archi) is not None:
+                        self.options['archi'] = str(archi).lower()
+                        break
                 self.options['ae_dims'] = int(np.clip(io.input_int('AE dims', 256, add_info='32-1024'), 32, 1024))
                 self.options['e_dims'] = int(np.clip(io.input_int('E dims', 64, add_info='16-256'), 16, 256))
                 self.options['d_dims'] = int(np.clip(io.input_int('D dims', 64, add_info='16-256'), 16, 256))
@@ -129,11 +131,29 @@ class SAEHDDFSingleModel(ModelBase):
         self.resolution = int(self.options['resolution'])
         self.face_type = {'h': FaceType.HALF, 'mf': FaceType.MID_FULL, 'f': FaceType.FULL, 'wf': FaceType.WHOLE_FACE, 'head': FaceType.HEAD}[self.options['face_type']]
         self.pretrain = bool(self.options['pretrain'])
+        # 这几个开关以前只被读进 options 就没有消费点了（界面上拨了没用）
+        self.masked_training = bool(self.options.get('masked_training', True))
+        self.blur_out_mask = bool(self.options.get('blur_out_mask', False))
+        self.edge_enhance_power = float(self.options.get('edge_enhance_power', 0.0) or 0.0)
+        _ct = str(self.options.get('ct_mode', 'none') or 'none').strip().lower()
+        self.ct_mode = None if _ct in ('none', '') else _ct
 
-        archi_split = self.options['archi'].split('-')
-        archi_type, archi_opts = archi_split[0], archi_split[1] if len(archi_split) > 1 else ''
+        # 统一走 parse_archi_string：三段式（df-udt-l / -l3 / -l5 / -lm / -lx …）
+        # 和两段式旧写法都支持；第三段 mod 交给 build_archi_classes 决定用
+        # DeepFakeArchi 还是 DFLiteArchi。以前这里只取 split[1]，会把 -l*
+        # 静默丢掉（用户以为在跑 DFLite，实际跑的是原版 5x5 稠密）。
+        _parsed = parse_archi_string(self.options['archi'])
+        if _parsed is None:
+            io.log_info(f"[archi] 无法解析 {self.options['archi']!r}，回退到 df-ud")
+            archi_type, archi_opts, archi_mod = 'df', 'ud', ''
+        else:
+            archi_type, archi_opts, archi_mod = _parsed
+        archi_opts = archi_opts or ''
+
         self.archi_type = archi_type
         self.archi_opts = archi_opts
+        self.archi_mod = archi_mod
+        self.is_lite = archi_is_lite(archi_mod)
 
         ae_dims = int(self.options['ae_dims'])
         e_dims = int(self.options['e_dims'])
@@ -142,7 +162,13 @@ class SAEHDDFSingleModel(ModelBase):
         resolution = self.resolution
         gan_power = float(self.options['gan_power'])
 
-        model_archi = nn.DeepFakeArchi(resolution, opts=archi_opts)
+        # mod 为空 -> DeepFakeArchi（与改动前完全一致）；
+        # mod 含 'l' -> DFLiteArchi。DFLite 里 ae_dims 同时决定瓶颈宽度和解码器
+        # 输入通道，必须与下面 Inter 的 ae_out_ch 一致，所以显式传进去。
+        _ArchiClass, _archi_kwargs = build_archi_classes(
+            archi_mod, {'ae_dims': ae_dims} if archi_is_lite(archi_mod) else None)
+        model_archi = _ArchiClass(resolution, opts=archi_opts, **_archi_kwargs)
+        self.archi_class_name = _ArchiClass.__name__
 
         if 'df' in archi_type:
             # ── Encoder ──
@@ -162,7 +188,7 @@ class SAEHDDFSingleModel(ModelBase):
                 [self.decoder_src, 'decoder_src.pth'],
             ]
         else:
-            raise ValueError(f'DF-Single only supports DF, got {archi_type}')
+            raise ValueError(f'DF-Single only supports the DF backbone, got {archi_type!r}')
 
         for item in [self.encoder, self.inter, self.decoder_src]:
             if item is not None:
@@ -175,9 +201,16 @@ class SAEHDDFSingleModel(ModelBase):
             _opt_name = str(self.options.get('optimizer', 'adabelief')).lower()
             _opt_map = {'adam': nn.Adam, 'adabelief': nn.AdaBelief, 'lion': nn.Lion}
             _opt_class = _opt_map.get(_opt_name, nn.AdaBelief)
+            # ★ 梯度裁剪（与 SAEHD / AMP 一致）：clipgrad → clipnorm=1.0。
+            #   这个选项以前只被读进 options 就没人用了，界面上等于装饰品。
+            _clipnorm = 1.0 if bool(self.options.get('clipgrad', False)) else 0.0
+            # 学习率与 lr_dropout 以前也是死的（lr 写死 5e-5、lr_dropout 不传）
+            _lr = float(self.options.get('lr', 5e-5) or 5e-5)
+            _lr_dropout = 0.3 if (str(self.options.get('lr_dropout', 'n')) in ('y', 'cpu')
+                                  and not self.pretrain) else 1.0
             self.src_dst_opt = _opt_class(
                 list(self.encoder.get_weights()) + list(self.inter.get_weights()) + list(self.decoder_src.get_weights()),
-                lr=5e-5, name='src_dst_opt',
+                lr=_lr, name='src_dst_opt', clipnorm=_clipnorm, lr_dropout=_lr_dropout,
             )
             self.model_filename_list += [[self.src_dst_opt, 'src_dst_opt.pth']]
 
@@ -207,18 +240,46 @@ class SAEHDDFSingleModel(ModelBase):
                 scale_range=[-0.15, 0.15],
                 random_flip=self.random_src_flip if hasattr(self, 'random_src_flip') else True,
             )
+            _aug_occlusion = bool(self.options.get('random_occlusion', False))
+            _aug_noise     = bool(self.options.get('random_noise', False))
+            _aug_colorcast = float(self.options.get('random_color_power', 0.0) or 0.0)
+            _aug_hsv       = 0.0 if self.pretrain else float(self.options.get('random_hsv_power', 0.0) or 0.0)
+            # 4 项：输入(扭曲) / 目标(干净) / 全脸遮罩 / 嘴眼遮罩
+            # onTrainOneIter 读 samples[0][0..3]、onGetPreview 解包 (ws,ts,tsm,tsme)、
+            # train_one_step(ws, ts, tsm, tsme, wd) —— 全都按这个顺序。
+            # 以前这里只声明了 2 项，于是 samples[0][2] 直接 IndexError：DFSingle 根本训不了。
             _out = [
                 {'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
-                 'warp': True, 'transform': True,
+                 # 以前 warp 写死 True，界面上的「随机形变」拨了没用
+                 'warp': bool(self.options.get('random_warp', True)),
+                 'random_occlusion': _aug_occlusion,
+                 'random_noise': _aug_noise,
+                 'random_color_cast': _aug_colorcast,
+                 'random_hsv_shift_amount': _aug_hsv,
+                 'ct_mode': self.ct_mode,
+                 'transform': True,
+                 'channel_type': SampleProcessor.ChannelType.BGR,
+                 'face_type': self.face_type, 'data_format': nn.data_format, 'resolution': resolution},
+                {'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
+                 'warp': False, 'transform': True,
                  'channel_type': SampleProcessor.ChannelType.BGR,
                  'face_type': self.face_type, 'data_format': nn.data_format, 'resolution': resolution},
                 {'sample_type': SampleProcessor.SampleType.FACE_MASK,
-                 'warp': True, 'transform': True,
+                 'warp': False, 'transform': True,
+                 'channel_type': SampleProcessor.ChannelType.G,
                  'face_mask_type': SampleProcessor.FaceMaskType.FULL_FACE,
                  'face_type': self.face_type, 'data_format': nn.data_format, 'resolution': resolution},
+                {'sample_type': SampleProcessor.SampleType.FACE_MASK,
+                 'warp': False, 'transform': True,
+                 'channel_type': SampleProcessor.ChannelType.G,
+                 'face_mask_type': SampleProcessor.FaceMaskType.EYES_MOUTH,
+                 'face_type': self.face_type, 'data_format': nn.data_format, 'resolution': resolution},
             ]
+            # 色彩迁移需要一份 dst 样本源（老生成器走 random_ct_samples_path）
+            _ct_samples_path = self.training_data_dst_path if (self.ct_mode is not None and not self.pretrain) else None
             _gen_src = SampleGeneratorFace(
                 self.training_data_src_path,
+                random_ct_samples_path=_ct_samples_path,
                 debug=self.is_debug(),
                 batch_size=self.get_batch_size(),
                 sample_process_options=_opts,
@@ -235,6 +296,34 @@ class SAEHDDFSingleModel(ModelBase):
                 generators_count=generators_count,
             )
             self.set_training_data_generators([_gen_src, _gen_dst])
+
+            # ── 快速加载器（use_fast_generator）──
+            # SampleLoaderV4 + SampleGeneratorV2：图片一次解码进内存池。
+            # 以前 DFSingle 只有老生成器这一条路，界面上这个开关拨了没反应。
+            if bool(self.options.get('use_fast_generator', False)):
+                try:
+                    from samplelib import SampleLoaderV4, SampleGeneratorV2
+                    _yaw = bool(self.options.get('uniform_yaw', False))
+                    _bs = self.get_batch_size()
+                    _src_loader = SampleLoaderV4(aligned_path=self.training_data_src_path,
+                                                 batch_size=_bs, resolution=resolution,
+                                                 use_yaw_sampling=_yaw)
+                    _dst_loader = SampleLoaderV4(aligned_path=self.training_data_dst_path,
+                                                 batch_size=_bs, resolution=resolution,
+                                                 use_yaw_sampling=_yaw)
+                    _fast_src = SampleGeneratorV2(
+                        loader=_src_loader, sample_process_options=_opts,
+                        output_sample_types=_out, resolution=resolution,
+                        debug=self.is_debug(),
+                        ct_loader=(_dst_loader if (_ct_samples_path is not None) else None))
+                    _fast_dst = SampleGeneratorV2(
+                        loader=_dst_loader,
+                        sample_process_options=SampleProcessor.Options(scale_range=[-0.15, 0.15], random_flip=True),
+                        output_sample_types=_out, resolution=resolution, debug=self.is_debug())
+                    self.set_training_data_generators([_fast_src, _fast_dst])
+                    io.log_info('[加载器] 已启用快速生成器（SampleLoaderV4 + SampleGeneratorV2）')
+                except Exception as _fe:
+                    io.log_info(f'[加载器] 快速生成器不可用，回退到 SampleGeneratorFace：{_fe}')
 
 
         # Load weights
@@ -275,30 +364,49 @@ class SAEHDDFSingleModel(ModelBase):
         return out
 
     # ========== losses ==========
+    @staticmethod
+    def _blur_out(target, mask, sigma):
+        """遮罩外区域换成模糊外推（SAEHD 的 blur_out_mask 同款）。"""
+        anti = 1.0 - mask
+        x = nn.gaussian_blur(target * anti, sigma)
+        y = 1.0 - nn.gaussian_blur(mask, sigma)
+        y = torch.where(y == 0, torch.ones_like(y), y)
+        return target * mask + (x / y) * anti
+
     def _recon_loss(self, target_src, target_srcm, target_srcm_em, fw):
         resolution = self.resolution
         pred = fw['pred_src_src']
         predm = fw['pred_src_srcm']
 
+        # 遮罩羽化：遮罩外换成"从脸内向外扩散的模糊外推"，避免硬边
+        if self.blur_out_mask:
+            target_src = self._blur_out(target_src, target_srcm, float(resolution) / 128.0)
+
         # mask blur
         k = max(1, resolution // 32)
         tm = nn.gaussian_blur(target_srcm, k)
         tm = torch.clamp(tm, 0.0, 0.5) * 2.0
-        tma = 1.0 - tm
+        # 遮罩训练：关掉时整图参与像素损失
+        _m = tm if self.masked_training else torch.ones_like(tm)
+        t_s, p_s = target_src * _m, pred * _m
 
         # DSSIM + MSE
         fs1 = max(1, int(resolution / 11.6))
         fs2 = max(1, int(resolution / 23.2))
         loss = 0
         if resolution < 256:
-            loss = loss + nn.dssim(target_src * tm, pred * tm, max_val=1.0, filter_size=fs1).mean(dim=[1,2,3]) * 10
+            loss = loss + nn.dssim(t_s, p_s, max_val=1.0, filter_size=fs1).mean(dim=[1,2,3]) * 10
         else:
-            loss = loss + nn.dssim(target_src * tm, pred * tm, max_val=1.0, filter_size=fs1).mean(dim=[1,2,3]) * 5
-            loss = loss + nn.dssim(target_src * tm, pred * tm, max_val=1.0, filter_size=fs2).mean(dim=[1,2,3]) * 5
-        loss = loss + F.mse_loss(pred * tm, target_src * tm, reduction='none').mean(dim=[1,2,3]) * 10
+            loss = loss + nn.dssim(t_s, p_s, max_val=1.0, filter_size=fs1).mean(dim=[1,2,3]) * 5
+            loss = loss + nn.dssim(t_s, p_s, max_val=1.0, filter_size=fs2).mean(dim=[1,2,3]) * 5
+        loss = loss + F.mse_loss(p_s, t_s, reduction='none').mean(dim=[1,2,3]) * 10
         if self.options.get('eyes_mouth_prio', False):
             loss = loss + F.l1_loss(pred * target_srcm_em, target_src * target_srcm_em, reduction='none').mean(dim=[1,2,3]) * 300
         loss = loss + F.mse_loss(predm, target_srcm, reduction='none').mean(dim=[1,2,3]) * 10
+        # 边缘强化：用模型自己的遮罩合成回原图再比，专门惩罚过渡带
+        if self.edge_enhance_power > 0.0:
+            _comp = pred * predm + target_src * (1.0 - predm)
+            loss = loss + F.mse_loss(_comp, target_src, reduction='none').mean(dim=[1,2,3]) * self.edge_enhance_power
         return loss
 
     def train_one_step(self, warped_src, target_src, target_srcm, target_srcm_em,

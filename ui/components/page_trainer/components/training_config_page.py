@@ -25,6 +25,22 @@ def safe_get_icon(name):
         return None
 
 
+# 哪些模型类的实例文件放在 workspace/model/<类名>/ 子目录里（其余平铺在 model/ 根）。
+# ⚠️ 这是【唯一】一处映射。以前 _on_start_training / _on_delete_model / page_trainer
+# 各写了一遍，每漏一个类就出一类"幽灵 bug"：
+#   - 删除漏了 PIA/DFSingle -> glob 在 model/ 根目录找 pia_004_PIA*，一个都找不到，
+#     "已删除 0 个文件"，卡片永远不消失；
+#   - 写占位 .dat 漏了 DFSingle -> 写进 model/ 根，而页签扫的是 model/DFSingle/，
+#     切一次页签新建的卡片就"消失"，还会跑进 SAEHD 列表。
+SUBDIR_MODEL_CLASSES = ('DeepFakeLarge', 'LIAELarge', 'PIA', 'DFSingle')
+
+
+def resolve_model_root(model_dir, class_name):
+    """模型实例文件实际所在的目录。"""
+    base = Path(model_dir)
+    return base / class_name if class_name in SUBDIR_MODEL_CLASSES else base
+
+
 def _detect_available_devices():
     """检测可用的 GPU（通过 nvidia-smi）和 CPU 设备"""
     devices = []
@@ -112,7 +128,11 @@ class TrainingConfigChildPage(SiChildPage):
             self.resolution_input.setText("256")
             self.resolution_input.setFixedHeight(48)
             self.resolution_input.resize(150, 48)
-            self.resolution_input.textChanged.connect(lambda: self.update_config('resolution'))
+            # 分辨率是建模型时定死的（权重形状跟着它），改成只读。
+            # 以前这里是可编辑的、但 resolution 既不在 _runtime_opts 里也没有专门写回，
+            # 所以"改了分辨率再开始训练"其实是静默无效的。
+            self.resolution_input.setEnabled(False)
+            self.resolution_card.setTitle("分辨率", "模型输入输出的图像分辨率（创建时确定，不可修改）")
             self.resolution_card.addWidget(self.resolution_input)
             self.resolution_card.adjustSize()
             
@@ -237,6 +257,22 @@ class TrainingConfigChildPage(SiChildPage):
             self.dst_faceset_card.addWidget(self.dst_faceset_input)
             self.dst_faceset_card.adjustSize()
             
+            # 预训练集路径（仅 PIA 显示；PIA 的预训练阶段主干解冻，需要多身份人脸集）
+            self.pretrain_dataset_card = SiOptionCardLinear(self)
+            self.pretrain_dataset_card.setTitle(
+                "预训练集路径",
+                "仅预训练模式使用：多身份人脸集目录（留空 = 用 dst 集兜底）。"
+                "支持含 faceset.pak 的目录或散装对齐人脸目录。")
+            self.pretrain_dataset_card.load(safe_get_icon("ic_fluent_folder_filled"))
+            self.pretrain_dataset_input = SiLabeledLineEdit(self.pretrain_dataset_card)
+            self.pretrain_dataset_input.setTitle("路径")
+            self.pretrain_dataset_input.setPlaceholderText("留空 = 使用 dst 人脸集...")
+            self.pretrain_dataset_input.textChanged.connect(lambda: self.update_config('pretrain_dataset_path'))
+            self.pretrain_dataset_input.setFixedHeight(48)
+            self.pretrain_dataset_input.resize(500, 48)
+            self.pretrain_dataset_card.addWidget(self.pretrain_dataset_input)
+            self.pretrain_dataset_card.adjustSize()
+
             # 人脸类型
             self.face_type_card = SiOptionCardLinear(self)
             self.face_type_card.setTitle("人脸类型", "根据选择的人脸类型对素材进行不同比例的缩放")
@@ -255,6 +291,8 @@ class TrainingConfigChildPage(SiChildPage):
             
             group.addWidget(self.src_faceset_card)
             group.addWidget(self.dst_faceset_card)
+            if self.model_info.get('class_name', 'SAEHD') == 'PIA':
+                group.addWidget(self.pretrain_dataset_card)
             group.addWidget(self.face_type_card)
         
         with self.titled_widget_group as group:
@@ -704,8 +742,29 @@ class TrainingConfigChildPage(SiChildPage):
             self.lr_policy_card.addWidget(self.lr_policy_combo)
             self.lr_policy_card.adjustSize()
 
+            # === PIA 循环一致强度（仅 PIA）===
+            # PIA 最核心的损失权重：dst→[src适配块]→dst 的循环一致，无配对自监督就靠它。
+            # 之前 GUI 里根本没有入口（只有 WebUI 有），config_data 里也没有这个 key，
+            # 结果 _runtime_opts 里那一行永远命中不了 -> 模型只能用内部默认 1.0。
+            self.pia_cycle_card = SiOptionCardLinear(self)
+            self.pia_cycle_card.setTitle(
+                "PIA 循环一致强度",
+                "PIA 专用：dst→[src]→dst 的循环一致损失权重（0=关闭）。"
+                "它是 PIA 无配对自监督的核心；关掉只剩重建项，适配块会退化成恒等。")
+            self.pia_cycle_card.load(safe_get_icon("ic_fluent_gauge_filled"))
+            self.pia_cycle_input = SiLabeledLineEdit(self.pia_cycle_card)
+            self.pia_cycle_input.setTitle("小数")
+            self.pia_cycle_input.setText("1.0")
+            self.pia_cycle_input.setFixedHeight(48)
+            self.pia_cycle_input.resize(150, 48)
+            self.pia_cycle_input.textChanged.connect(lambda: self.update_config('pia_cycle_power'))
+            self.pia_cycle_card.addWidget(self.pia_cycle_input)
+            self.pia_cycle_card.adjustSize()
+
             group.addWidget(self.optimizer_card)
             group.addWidget(self.learning_rate_card)
+            if self.model_info.get('class_name', 'SAEHD') == 'PIA':
+                group.addWidget(self.pia_cycle_card)
             _cfg_mc = self.model_info.get('class_name', 'SAEHD')
             if _cfg_mc not in ('DeepFakeLarge', 'LIAELarge'):
                 group.addWidget(self.lr_cos_card)
@@ -834,7 +893,7 @@ class TrainingConfigChildPage(SiChildPage):
             self.rotation_range_card.load(safe_get_icon("ic_fluent_arrow_rotate_clockwise_filled"))
             self.rotation_range_input = SiLabeledLineEdit(self.rotation_range_card)
             self.rotation_range_input.setTitle("整数")
-            self.rotation_range_input.setText("20")
+            self.rotation_range_input.setText("10")
             self.rotation_range_input.setFixedHeight(48)
             self.rotation_range_input.resize(150, 48)
             self.rotation_range_input.textChanged.connect(lambda: self.update_config('rotation_range'))
@@ -1209,7 +1268,7 @@ class TrainingConfigChildPage(SiChildPage):
             # 根据架构显示/隐藏不同冻结选项
             _fc_model_class = self.model_info.get('class_name', 'SAEHD')
             _fc_is_liae = _fc_model_class == 'SAEHD' and 'liae' in self.config_data.get('archi', '')
-            _fc_is_df = (_fc_model_class in ('SAEHD', 'DFSingle')) and not _fc_is_liae
+            _fc_is_df = (_fc_model_class in ('SAEHD', 'DFSingle', 'PIA')) and not _fc_is_liae
             _fc_is_dflarge = _fc_model_class == 'DeepFakeLarge'
             _fc_is_liaelarge = _fc_model_class == 'LIAELarge'
             # SAEHD / AMP 冻结组可见性
@@ -1295,26 +1354,77 @@ class TrainingConfigChildPage(SiChildPage):
 
     # ── 隐藏模型类型不适配的参数卡片 ──────────────────────────────────
     def _hide_irrelevant_cards_for_class(self):
-        """根据模型类型隐藏不适用的参数 UI。DFLarge/LIAELarge 很多 SAEHD
-        特有的选项不存在于模型定义中，展示出来只会造成困惑。"""
+        """根据模型类型隐藏不适用的参数 UI。
+
+        页面是各类模型共用的，绝大多数卡片来自 SAEHD，直接把整套摆给别的模型看
+        会出现"开关毫无作用"甚至"结构上根本不可能"的选项。这里按类裁剪。
+        """
         _mc = self.model_info.get('class_name', 'SAEHD')
+
+        def _hide(*names):
+            # 注意：使用 setParent(None) 而非 setVisible(False)，因为 SiTitledWidgetGroup
+            # 的布局对隐藏控件不会回收占位空间，导致下面出现空白。
+            # 只是解除父子关系，Python 属性仍在，其它代码读 .isChecked()/.text() 不受影响。
+            for _n in names:
+                _c = getattr(self, _n, None)
+                if _c is not None:
+                    _c.setParent(None)
+
+        # 「PIA 循环一致强度」「预训练集路径」这两张卡只对 PIA 有意义
+        if _mc != 'PIA':
+            _hide('pia_cycle_card', 'pretrain_dataset_card')
+
+        # ── 单解码器模型（PIA / DF-Single）──
+        # 它们只有一个 decoder_src，没有 decoder_dst；而且模型里
+        # self.options['pretrain'] 被强制写成 False，连 pretrain_single_decoder
+        # 这个 option 都没读。所以下面这些卡不是"当前没生效"，是结构上不可能生效。
+        if _mc in ('PIA', 'DFSingle'):
+            _hide(
+                'pretrain_single_decoder_card',   # 需要跳过 decoder_dst，而它压根不存在
+                'freeze_decoder_dst_card',        # 同上：没有 decoder_dst 可冻
+                'freeze_inter_AB_card',           # LIAE 专用（PIA/DFSingle 只有一个 inter）
+                'freeze_inter_B_card',            # LIAE 专用
+                'freeze_inter_src_card',          # AMP 专用
+                'freeze_inter_dst_card',          # AMP 专用
+                'freeze_bottleneck_card',         # DeepFakeLarge 专用
+                'freeze_decoderA_mask_card',      # DeepFakeLarge 专用
+                'freeze_decoderB_mask_card',      # DeepFakeLarge 专用
+                'freeze_bottleneck_B_card',       # LIAELarge 专用
+            )
+            if _mc == 'DFSingle':
+                # DFSingle 里 pretrain 仍是硬编码 False（模型没实现）；
+                # PIA 已经真正支持预训练了（预训练阶段主干解冻），卡片保留。
+                # 这两项 DFSingle 里也没有消费点（审计确认），藏掉。
+                _hide('pretrain_card', 'models_opt_on_gpu_card', 'true_face_power_card')
+            if _mc == 'PIA':
+                # PIA 完全不消费这些（逐项审过 dat 里 56 个 option 的消费点）：
+                #   GAN 组 / 真脸 / 风格 / VGG / 快速生成器 / 优化器放GPU /
+                #   色彩迁移 / 偏色算法 / 边缘强化 / 眼睛嘴巴范围 /
+                #   遮罩训练 / 遮罩羽化 / 旋转缩放T范围 / 预览调色 / code 统计
+                # 与其让它们"拨了没用"，不如藏掉。
+                _hide(
+                    'gan_power_card', 'gan_patch_size_card', 'gan_dims_card',
+                    'true_face_power_card', 'face_style_power_card',
+                    'bg_style_power_card', 'vgg_perceptual_power_card',
+                    'models_opt_on_gpu_card',
+                    'random_color_alg_card',
+                    'eyes_scale_card', 'mouth_scale_card',
+                    'preview_grade_card', 'log_code_stats_card',
+                )
+            return
+
         if _mc not in ('DeepFakeLarge', 'LIAELarge'):
             return  # SAEHD / AMP → 全部显示
 
         # 这些参数在 DFLarge/LIAELarge 的模型定义中不存在
-        # 注意：使用 setParent(None) 而非 setVisible(False)，因为 SiTitledWidgetGroup
-        # 的布局对隐藏控件不会回收占位空间，导致下面出现空白
-        for card_name in [
+        _hide(
             'archi_card',
             'd_mask_dims_card',
             'lr_cos_card', 'lr_plateau_card', 'lr_dropout_card',
             'gan_patch_size_card', 'gan_dims_card',
             'true_face_power_card', 'face_style_power_card', 'bg_style_power_card',
             'models_opt_on_gpu_card', 'use_fast_generator_card',
-        ]:
-            card = getattr(self, card_name, None)
-            if card is not None:
-                card.setParent(None)
+        )
 
         # e_dims / ae_dims / d_dims 在 DFLarge/LIAELarge 中是建模型时
         # 固定的参数，但仍然展示（只读）供参考，不隐藏
@@ -1370,14 +1480,9 @@ class TrainingConfigChildPage(SiChildPage):
             model_class = self.model_info.get('class_name', 'SAEHD')
             project_root = Path(__file__).parent.parent.parent.parent.parent
 
-            # Determine correct model-dir: DFLarge/LIAELarge store files in subdirs
+            # 子目录型模型（DFLarge / LIAELarge / PIA / DFSingle）走同一个映射
             _fc_model_class = self.model_info.get('class_name', 'SAEHD')
-            if _fc_model_class in ('DeepFakeLarge', 'LIAELarge'):
-                _model_dir_resolved = str(Path(self._model_dir) / _fc_model_class)
-            elif _fc_model_class == 'DFSingle':
-                _model_dir_resolved = str(Path(self._model_dir) / 'DFSingle')
-            else:
-                _model_dir_resolved = self._model_dir
+            _model_dir_resolved = str(resolve_model_root(self._model_dir, _fc_model_class))
 
             # 如果用户修改了模型名称，重命名磁盘文件
             if self._model_name != self._original_model_name:
@@ -1392,6 +1497,8 @@ class TrainingConfigChildPage(SiChildPage):
                 "--training-data-dst-dir", dst_path,
                 "--model-dir", _model_dir_resolved,
                 "--force-model-name", self._model_name,
+                *(["--pretraining-data-dir", (cfg.get('pretrain_dataset_path') or '').strip()]
+                  if str(cfg.get('pretrain_dataset_path') or '').strip() else []),
                 "--no-preview",
                 "--silent-start",
                 "--webui-port", self._webui_port,
@@ -1408,6 +1515,10 @@ class TrainingConfigChildPage(SiChildPage):
             _fc_dat_dir = Path(_model_dir_resolved)
             _fc_dat_path = _fc_dat_dir / f"{self._model_name}_{_fc_model_class}_data.dat"
 
+            if not _fc_dat_path.exists():
+                # 以前这里是静默跳过：改了半天参数、结果一个都没写进去，还看不出来。
+                print(f"[WARN] 找不到模型数据文件，本次 GUI 参数不会被保存：{_fc_dat_path}")
+                print("       （模型名/目录对不上？先在界面里确认名称，或重新建一次模型）")
             if _fc_dat_path.exists():
                 try:
                     import pickle
@@ -1426,7 +1537,7 @@ class TrainingConfigChildPage(SiChildPage):
                             _fc_data['options']['freeze_decoder_mask'] = self.freeze_decoder_mask_switch.isChecked()
                             _fc_data['options']['freeze_bottleneck_AB'] = self.freeze_bottleneck_AB_switch.isChecked()
                             _fc_data['options']['freeze_bottleneck_B'] = self.freeze_bottleneck_B_switch.isChecked()
-                        elif _fc_model_class in ('SAEHD', 'DFSingle'):
+                        elif _fc_model_class in ('SAEHD', 'DFSingle', 'PIA'):
                             _fc_data['options']['freeze_decoder_mask'] = self.freeze_decoder_mask_switch.isChecked()
                             if 'liae' in str(self.config_data.get('archi', '')):
                                 _fc_data['options']['freeze_inter_AB'] = self.freeze_inter_AB_switch.isChecked()
@@ -1452,6 +1563,7 @@ class TrainingConfigChildPage(SiChildPage):
                             ('gan_power',                 'gan_power',           float),
                             ('prioritize_mouth_eyes',     'eyes_mouth_prio',     bool),
                             ('eyes_scale',                'eyes_scale',          float),
+                            ('pia_cycle_power',           'pia_cycle_power',     float),
                             ('mouth_scale',               'mouth_scale',         float),
                             ('face_type',                 'face_type',           str),
                             ('ct_mode',                   'ct_mode',             str),
@@ -1499,8 +1611,10 @@ class TrainingConfigChildPage(SiChildPage):
                             'gan_patch_size', 'gan_dims',
                             'models_opt_on_gpu', 'use_fast_generator', 'lr_dropout',
                         } if _fc_model_class in ('DeepFakeLarge', 'LIAELarge') else set()
+                        # 按模型类过滤的 key（PIA 专用项不能污染别的模型的 _data.dat）
+                        _fc_class_irrelevant = set() if _fc_model_class == 'PIA' else {'pia_cycle_power'}
                         # 先把旧文件里残留的无关 key 删掉
-                        for _ir_key in _fc_large_irrelevant:
+                        for _ir_key in (_fc_large_irrelevant | _fc_class_irrelevant):
                             _fc_data['options'].pop(_ir_key, None)
                         # precision 转 use_bf16
                         if 'precision' in self.config_data:
@@ -1518,7 +1632,7 @@ class TrainingConfigChildPage(SiChildPage):
                                 pass
                         # 再写入 GUI 当前值（跳过关键 key）
                         for _ckey, _mkey, _cast in _runtime_opts:
-                            if _ckey in _fc_large_irrelevant:
+                            if _ckey in _fc_large_irrelevant or _ckey in _fc_class_irrelevant:
                                 continue
                             if _ckey in self.config_data:
                                 _raw = self.config_data[_ckey]
@@ -1536,6 +1650,20 @@ class TrainingConfigChildPage(SiChildPage):
                         _fc_tmp = _fc_dat_path.with_suffix('.dat.write_tmp')
                         _fc_tmp.write_bytes(pickle.dumps(_fc_data))
                         _fc_tmp.replace(_fc_dat_path)
+                        # ★ 同步刷新 meta 缓存。扫描器优先读的是 meta_cache.json，
+                        #   只写 dat 不写它的话，下次打开配置页 / 切页签看到的还是
+                        #   上一次（或默认）的旧值 —— 这就是"参数没保存"的观感来源。
+                        try:
+                            import json as _json
+                            _fc_dat_path.with_suffix('.meta_cache.json').write_text(
+                                _json.dumps({'iter': _fc_data.get('iter', 1),
+                                             'options': _fc_data.get('options', {})},
+                                            ensure_ascii=False, default=str),
+                                encoding='utf-8')
+                        except Exception as _me:
+                            print(f"[WARN] 刷新 meta_cache 失败（界面可能显示旧值）: {_me}")
+                        print(f"[CONFIG] 已写入 {_fc_dat_path.name}"
+                              f"（{len(_fc_data.get('options', {}))} 个参数，iter={_fc_data.get('iter')}）")
                 except Exception as _fc_e:
                     print(f"[ERROR] 写入配置到 _data.dat 失败: {_fc_e}")
 
@@ -1645,25 +1773,40 @@ class TrainingConfigChildPage(SiChildPage):
         _loop.exec_()
         if not _confirmed[0]:
             return
-        # 确定模型目录
+        # 确定模型目录。以前这里只判了 DFLarge/LIAELarge，漏了 PIA 和 DFSingle，
+        # 于是 glob 在 model/ 根目录里找 pia_004_PIA* —— 一个都找不到，
+        # 打印"已删除 0 个文件"，卡片自然不消失。
         _mc = self.model_info.get('class_name', 'SAEHD')
-        if _mc in ('DeepFakeLarge', 'LIAELarge'):
-            model_root = Path(self._model_dir) / _mc
-        else:
-            model_root = Path(self._model_dir)
+        model_root = resolve_model_root(self._model_dir, _mc)
         if not model_root.exists():
             print(f"[Delete] 模型目录不存在: {model_root}")
             return
+        # 同时按"打开配置页时的名字"和"输入框里当前的名字"去找：
+        # 用户在配置页改了名字但还没点过训练时，磁盘上仍是旧名字，
+        # 只按 self._model_name 删会一个都匹配不到 —— 同样是"点了删除没反应"。
+        _names = []
+        for _n in (self._original_model_name, self._model_name):
+            if _n and _n not in _names:
+                _names.append(_n)
+
         deleted = []
-        for f in model_root.glob(f"{self._model_name}_{_mc}*"):
-            f.unlink()
-            deleted.append(f.name)
-        # 删除旧备份目录
-        bak_dir = model_root / f"{self._model_name}_{_mc}_autobackups"
-        if bak_dir.exists():
-            shutil.rmtree(bak_dir)
-            deleted.append(bak_dir.name)
-        print(f"[Delete] 已删除 {len(deleted)} 个文件: {', '.join(deleted)}")
+        for _n in _names:
+            for f in sorted(model_root.glob(f"{_n}_{_mc}*")):
+                try:
+                    # 备份目录 <name>_<class>_autobackups 也会被这个 glob 匹配到，
+                    # 旧代码直接 f.unlink() 撞上目录会抛 WinError 5，整个删除中断。
+                    if f.is_dir():
+                        shutil.rmtree(f, ignore_errors=True)
+                    else:
+                        f.unlink()
+                    deleted.append(f.name)
+                except Exception as _e:
+                    print(f"[Delete] 删除失败 {f.name}: {_e}")
+        if deleted:
+            print(f"[Delete] 已删除 {len(deleted)} 个文件: {', '.join(deleted)}")
+        else:
+            print(f"[Delete] 没找到任何匹配文件！目录={model_root} "
+                  f"尝试过的前缀={['%s_%s' % (n, _mc) for n in _names]}")
         # 隐藏可能卡住的 tooltip
         _tt = SiGlobal.siui.windows.get("TOOL_TIP")
         if _tt:
@@ -1831,7 +1974,7 @@ class TrainingConfigChildPage(SiChildPage):
         except (TypeError, ValueError):
             hsv_str = '0.0'
 
-        return {
+        _cfg = {
             'model_name': _(info, 'name', self._model_name),
             'resolution': str(_(info, 'resolution', '256')),
             'archi': str(_(info, 'archi', 'df-ud')),
@@ -1848,6 +1991,12 @@ class TrainingConfigChildPage(SiChildPage):
             'auto_save_interval': str(_(info, 'backup_interval', '1000')),
             'learning_rate': lr_str,
             'lr_cos': str(_(info, 'lr_cos', '0')),
+            # 这四项以前只在 _runtime_opts 里、_build_config_data 却没给初值，
+            # 于是写回循环里 if key in self.config_data 永远不成立 —— 界面改了也存不进去。
+            'lr_total_steps': str(_(info, 'lr_total_steps', '0')),
+            'lr_plateau_factor': str(_(info, 'lr_plateau_factor', '1.0')),
+            'lr_plateau_patience': str(_(info, 'lr_plateau_patience', '0')),
+            'lr_plateau_min_ratio': str(_(info, 'lr_plateau_min_ratio', '0.1')),
             'ct_mode': str(_(info, 'ct_mode', 'rct')),
             'random_hsv_power': hsv_str,
             'optimizer': str(_(info, 'optimizer', 'adabelief')),
@@ -1862,12 +2011,17 @@ class TrainingConfigChildPage(SiChildPage):
             'random_src_flip': bool(_(info, 'random_src_flip', False)),
             'random_dst_flip': bool(_(info, 'random_dst_flip', False)),
             'uniform_yaw_distribution': bool(_(info, 'uniform_yaw', False)),
-            'rotation_range': '20',
+            'rotation_range': '10',
             'scale_range': '0.15',
             't_range': '0.05',
             'prioritize_mouth_eyes': bool(_(info, 'eyes_mouth_prio', False)),
             'eyes_scale': str(_(info, 'eyes_scale', '1.0')),
             'mouth_scale': str(_(info, 'mouth_scale', '1.0')),
+            # PIA 专用：循环一致损失权重（以前这里没有这个 key，
+            # 导致 _runtime_opts 里那一行命中不了，模型永远只能用内部默认 1.0）
+            'pia_cycle_power': str(_(info, 'pia_cycle_power', '1.0')),
+            # PIA 专用：预训练集路径（传给 main.py 的 --pretraining-data-dir）
+            'pretrain_dataset_path': str(_(info, 'pretrain_dataset_path', '')),
             # 缺失的模型参数
             'masked_training': bool(_(info, 'masked_training', True)),
             'blur_out_mask': bool(_(info, 'blur_out_mask', False)),
@@ -1907,6 +2061,14 @@ class TrainingConfigChildPage(SiChildPage):
             'freeze_bottleneck_AB': bool(_(info, 'freeze_bottleneck_AB', False)),
             'freeze_bottleneck_B': bool(_(info, 'freeze_bottleneck_B', False)),
         }
+        # PIA 专用项不能外泄给别的模型类：
+        # config_data 里的 key 会被 _runtime_opts 写进 _data.dat，
+        # 之前 'pia_cycle_power' 就是这么漏进 LIAE_SAEHD 的 _data.dat、
+        # 然后在训练摘要里冒出一行"PIA循环一致: 1.0"的。
+        if self.model_info.get('class_name', 'SAEHD') != 'PIA':
+            _cfg.pop('pia_cycle_power', None)
+            _cfg.pop('pretrain_dataset_path', None)
+        return _cfg
 
     def _populate_from_config(self):
         """用 config_data 中的值覆盖所有控件（替换硬编码默认值）"""
@@ -1925,7 +2087,7 @@ class TrainingConfigChildPage(SiChildPage):
         self.learning_rate_input.setText(str(cfg.get('learning_rate', '0.00005')))
         self.gan_power_input.setText(str(cfg.get('gan_power', '0.004')))
         self._restore_device_config(cfg.get('device', '0'))
-        self.rotation_range_input.setText(str(cfg.get('rotation_range', '20')))
+        self.rotation_range_input.setText(str(cfg.get('rotation_range', '10')))
         self.scale_range_input.setText(str(cfg.get('scale_range', '0.15')))
         self.t_range_input.setText(str(cfg.get('t_range', '0.05')))
 
@@ -1958,6 +2120,10 @@ class TrainingConfigChildPage(SiChildPage):
         self.edge_enhance_input.setText(str(cfg.get('edge_enhance_power', '0.0')))
         self.eyes_scale_input.setText(str(cfg.get('eyes_scale', '1.0')))
         self.mouth_scale_input.setText(str(cfg.get('mouth_scale', '1.0')))
+        if hasattr(self, 'pia_cycle_input'):
+            self.pia_cycle_input.setText(str(cfg.get('pia_cycle_power', '1.0')))
+        if hasattr(self, 'pretrain_dataset_input'):
+            self.pretrain_dataset_input.setText(str(cfg.get('pretrain_dataset_path', '') or ''))
         self.preview_grade_combo.setCurrentText(str(cfg.get('preview_grade_alg', 'same')))
         self.random_src_flip_switch.setChecked(bool(cfg.get('random_src_flip', False)))
         self.random_dst_flip_switch.setChecked(bool(cfg.get('random_dst_flip', False)))
@@ -2156,6 +2322,11 @@ class TrainingConfigChildPage(SiChildPage):
                     self.config_data[key] = self.freeze_bottleneck_AB_switch.isChecked()
                 elif key == 'freeze_bottleneck_B':
                     self.config_data[key] = self.freeze_bottleneck_B_switch.isChecked()
+                # PIA
+                elif key == 'pia_cycle_power':
+                    self.config_data[key] = self.pia_cycle_input.text()
+                elif key == 'pretrain_dataset_path':
+                    self.config_data[key] = self.pretrain_dataset_input.text()
 
         except Exception as e:
             print(f"[ERROR] 更新配置失败: {key}, 错误: {e}")

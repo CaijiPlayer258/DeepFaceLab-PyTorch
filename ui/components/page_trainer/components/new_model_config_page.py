@@ -15,7 +15,7 @@ from siui.core import SiGlobal
 from core.archi_names import (
     ARCHI_CHOICES, ARCHI_DESCRIPTIONS, SUBARCHI_CHOICES, SUBARCHI_DESCRIPTIONS,
     KERNEL_CHOICES, build_archi_string as _build_archi_string,
-    kernel_desc_for, is_lite_display, default_kernel_label,
+    kernel_desc_for, kernel_mod_for, default_kernel_label,
 )
 
 
@@ -300,8 +300,10 @@ class NewModelConfigChildPage(SiChildPage):
 
 class NewLargeModelConfigChildPage(SiChildPage):
     """
-    新建 Large 系列模型配置子页面（DeepFakeLarge / LIAELarge）
-    架构固定，只需设置名称和分辨率
+    新建 Large 系列模型配置子页面。
+
+    DeepFakeLarge / LIAELarge：主干写死，只需设置名称和分辨率。
+    PIA / DFSingle：多出「子分支」「算子」两张卡（它们真的读 archi 字段）。
     """
 
     model_created = pyqtSignal(dict)
@@ -326,6 +328,11 @@ class NewLargeModelConfigChildPage(SiChildPage):
             'model_name': model_name,
             'model_class': model_class,
             'resolution': '128',
+            # 这三项只有 PIA / DFSingle 会显示出来（见下面 _has_archi_choice）
+            'archi': 'DF',
+            'subarchi': '-ud',
+            'kernel': default_kernel_label(),
+            'archi_str': None,
             'ae_dims': str(ae_def),
             'e_dims': str(e_def),
             'd_dims': str(d_def),
@@ -361,6 +368,57 @@ class NewLargeModelConfigChildPage(SiChildPage):
             self.resolution_input.textChanged.connect(lambda: self._update_simple('resolution'))
             self.resolution_card.addWidget(self.resolution_input)
             self.resolution_card.adjustSize()
+
+            # ---- 子分支 / 算子 ----
+            # 只有真读 archi 字段的模型类才显示这两张卡：
+            #   PIA / DFSingle 的主干走 DeepFakeArchi 的 df 系（内部对非 df 会直接 raise）；
+            #   DFLarge / LIAELarge 压根不读 archi（它们不走 DeepFakeArchi），显示出来只会误导。
+            #
+            # 这里【不再】单独给一张「主干 DF / DF Lite」的卡：
+            # 「主干」和下面的「算子」本来就是同一个旋钮的两半，分开摆会摆出
+            # 「主干=DF Lite + 算子=原版」这种自相矛盾的组合（结果其实是 df-ud，并不 Lite）。
+            # 现在只选算子：算子里的第一项「原版 5×5 稠密」= 老主干（archi 两段式 df-ud），
+            # 其余任何算子 = DF Lite（archi 三段式 df-udt-l…）。一处选择，没有矛盾组合。
+            self._has_archi_choice = model_class in ('PIA', 'DFSingle')
+            if self._has_archi_choice:
+                # 默认仍选「原版 5×5 稠密」 -> archi 保持 df-ud，
+                # 跟 PIA / DFSingle 一直以来的默认一致（不擅自把新建模型变成 Lite）。
+                # 想默认就 Lite 的话，把下面这行换成 default_kernel_label() 即可。
+                self.config_data['kernel'] = KERNEL_CHOICES[0][0]
+
+                # 子分支：archi 第二段 opts（u = 像素归一化 / d = 可学习上采样 / t = 多一次下采样）
+                self.subarchi_card = SiOptionCardLinear(self)
+                self.subarchi_card.setTitle("子分支", SUBARCHI_DESCRIPTIONS.get('-ud', ''))
+                self.subarchi_card.load(safe_get_icon("ic_fluent_branch_compare_filled"))
+                self.subarchi_combo = SiCapsuleComboBox(self.subarchi_card)
+                self.subarchi_combo.setTitle("子分支")
+                self.subarchi_combo.setFixedWidth(200)
+                self.subarchi_combo.setMinimumHeight(32)
+                self.subarchi_combo.setMaximumHeight(32)
+                self.subarchi_combo.setEditable(False)
+                self.subarchi_combo.addItems(list(SUBARCHI_CHOICES))
+                self.subarchi_combo.setCurrentText('-ud')   # 与 PIA / DFSingle 原来的默认值一致
+                self.subarchi_combo.currentTextChanged.connect(lambda t: self._on_subarchi_changed(t))
+                self.subarchi_card.addWidget(self.subarchi_combo)
+                self.subarchi_card.adjustSize()
+
+                # 算子：第一项 = 原版主干；其余 = DFLite（archi 第三段 mod）
+                self.kernel_card = SiOptionCardLinear(self)
+                self.kernel_card.setTitle("算子", "")
+                self.kernel_card.load(safe_get_icon("ic_fluent_settings_filled"))
+                self.kernel_combo = SiCapsuleComboBox(self.kernel_card)
+                self.kernel_combo.setTitle("算子")
+                self.kernel_combo.setFixedWidth(330)
+                self.kernel_combo.setMinimumHeight(32)
+                self.kernel_combo.setMaximumHeight(32)
+                self.kernel_combo.setEditable(False)
+                self.kernel_combo.addItems([c[0] for c in KERNEL_CHOICES])
+                self.kernel_combo.setCurrentText(self.config_data['kernel'])
+                self.kernel_combo.currentTextChanged.connect(lambda t: self._on_kernel_changed(t))
+                self.kernel_card.addWidget(self.kernel_combo)
+                self.kernel_card.adjustSize()
+
+                self._apply_archi_widgets()
 
             # ae_dims
             self.ae_dims_card = SiOptionCardLinear(self)
@@ -406,6 +464,9 @@ class NewLargeModelConfigChildPage(SiChildPage):
 
             group.addWidget(self.model_name_card)
             group.addWidget(self.resolution_card)
+            if self._has_archi_choice:
+                group.addWidget(self.subarchi_card)
+                group.addWidget(self.kernel_card)
             group.addWidget(self.ae_dims_card)
             group.addWidget(self.e_dims_card)
             group.addWidget(self.d_dims_card)
@@ -441,8 +502,51 @@ class NewLargeModelConfigChildPage(SiChildPage):
         elif key == 'd_dims':
             self.config_data['d_dims'] = self.d_dims_input.text()
 
+    # ---- 子分支 / 算子 ----
+
+    def _on_subarchi_changed(self, text):
+        self.config_data['subarchi'] = text
+        self._apply_archi_widgets()
+
+    def _on_kernel_changed(self, text):
+        self.config_data['kernel'] = text
+        self._apply_archi_widgets()
+
+    def _apply_archi_widgets(self):
+        """同步两张卡的文案，并把拼好的 archi 串写进 config_data['archi_str']。
+
+        archi_str 是 page_trainer.on_model_created 直接取用的值，
+        也是唯一会被写进占位 _data.dat 的 archi。
+        「主干」不单独选，由算子反推：
+            算子 mod 为空（原版 5×5 稠密）  -> 主干 DF      -> archi 两段式 'df-ud'
+            其余算子                        -> 主干 DF Lite -> archi 三段式 'df-udt-l' / 'df-u-l3' …
+        PIA / DF-Single 的主干只能是 df，所以不用（也不能）让用户选 liae / amp。
+        """
+        if not getattr(self, '_has_archi_choice', False):
+            return
+        _s = self.config_data.get('subarchi', '-ud')
+        _k = self.config_data.get('kernel') or default_kernel_label()
+        # 算子第一项（mod=''）就是原版主干；其余都走 DFLite
+        _a = 'DF Lite' if kernel_mod_for(_k) else 'DF'
+        self.config_data['archi'] = _a
+
+        self.subarchi_card.setTitle("子分支", SUBARCHI_DESCRIPTIONS.get(_s, ''))
+        self.kernel_card.setTitle(
+            "算子",
+            kernel_desc_for(_k) if _a == 'DF Lite'
+            else "原版 5×5 稠密卷积，与 DF / DF-Single 完全一致（不启用 Lite）")
+
+        try:
+            self.config_data['archi_str'] = _build_archi_string(_a, _s, _k)
+        except Exception as e:
+            print(f"[CONFIG] build_archi_string 失败: {e}")
+            self.config_data['archi_str'] = None
+        print(f"[CONFIG] 子分支={_s} 算子={_k} -> 主干={_a} archi_str={self.config_data['archi_str']}")
+
     def _on_create_clicked(self):
         """点击创建模型按钮"""
+        if getattr(self, '_has_archi_choice', False):
+            self._apply_archi_widgets()   # 出票前再算一次，保证 archi_str 是最新的
         self.model_created.emit(self.config_data)
         self.closeParentLayer()
 

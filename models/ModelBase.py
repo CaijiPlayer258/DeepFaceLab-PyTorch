@@ -168,7 +168,21 @@ class ModelBase(object):
             if not self.model_name.endswith('_' + self.model_class_name):
                 self.model_name = self.model_name + '_' + self.model_class_name
         else:
-            self.model_name = force_model_class_name
+            # 模型类名被写死（XSeg / XSegLite / FaceRestoreLite / DFSingle / PIA 都会
+            # setdefault force_model_class_name），只有这时 model_name 才回落到类名。
+            # 但 GUI 是用 --force-model-name 传"模型实例名"的（如 pia_004 / dfs_001），
+            # 这里必须优先用它，否则同一类的所有实例都会塌缩成 <Class>_data.dat：
+            #   1) 找不到 GUI 刚建好的 <name>_<Class>_data.dat，被当成首次运行，
+            #      GUI 里设的分辨率 / 维度 / archi 全被丢掉；
+            #   2) 训练时所有同类的模型都写进同一个文件，互相覆盖。
+            # 注意保留 force_model_name == force_model_class_name 的旧行为
+            # （XSeg / XSegLite 是单实例，dat 就一直叫 XSeg_data.dat / XSegLite_data.dat）。
+            if force_model_name is not None and force_model_name != force_model_class_name:
+                self.model_name = force_model_name
+                if not self.model_name.endswith('_' + self.model_class_name):
+                    self.model_name = self.model_name + '_' + self.model_class_name
+            else:
+                self.model_name = force_model_class_name
 
         self.iter = 0
         self.options = {}
@@ -822,6 +836,7 @@ class ModelBase(object):
             ('blur_out_mask', '遮罩羽化'),
             ('eyes_mouth_prio', '嘴眼优先'),
                         ('eyes_scale', '眼睛范围'),
+            ('pia_cycle_power', 'PIA循环一致'),
             ('mouth_scale', '嘴巴范围'),
             ('uniform_yaw', '均匀偏航'),
         ]
@@ -864,10 +879,17 @@ class ModelBase(object):
             ('训练设置', train_opts),
         ]
 
+        # 只有 PIA 才有的选项：别的模型就算 options 里被塞进了这个 key 也不显示
+        # （否则 LIAE/SAEHD 的摘要里会冒出一行"PIA循环一致"）。
+        _pia_only_opts = {'pia_cycle_power'}
+        _is_pia = getattr(self, 'model_class_name', '') == 'PIA'
+
         col_contents = []
         for cat_name, opt_list in categories:
             items = []
             for key, label in opt_list:
+                if key in _pia_only_opts and not _is_pia:
+                    continue
                 if key == 'model_name':
                     val = self.get_model_name()
                 else:
