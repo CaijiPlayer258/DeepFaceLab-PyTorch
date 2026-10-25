@@ -1,0 +1,121 @@
+<!-- ============================================================
+     合成工作室 · 页内二级页：人脸库(facedb) / 导出设置(settings)
+     4.0 里这两块是浮层（#layer-facedb / #layer-settings），4.1 改成页内切换。
+     放置位置：作为 #p-merge 的直接子元素，放在 .mgbody 之后、.mgtl 之前。
+     默认隐藏（无 .on），由 MergePages.show(name) 切换。
+
+     参数出处（只读参考 4.0）：
+       MergeStudio/ui/index.html#layer-facedb / #layer-settings
+       MergeStudio/api/routes_export.py  ExportStartRequest
+       MergeStudio/ui/js/export-flow.js  startExport()
+       image_format: 'jpg' | 'png'      encoder: 'h264_nvenc' | 'libx264'
+       hwaccel: 'auto' | ''（GPU 解码加速开/关）   output_path: str
+       num_workers: int 0~16（0 = 自动 = cpu_count/2，见 routes_export.py:99）
+     ============================================================ -->
+
+<!-- ---------- 页 1：人脸库 ---------- -->
+<div class="mgpage" data-page="facedb">
+  <div class="mgp-head">
+    <div class="mgp-tt">
+      <b>Face Database</b>
+      <span class="mgp-sub">人脸库</span>
+    </div>
+    <!-- 计数：建库后由 MergePages.setFaceCount(n) 更新 -->
+    <span class="mgp-count" id="mgFaceCount">已建库 <b>0</b> 张人脸</span>
+    <!-- 动作对应 4.0 的 Compute Face Embeddings（POST /api/face/compute-embeddings） -->
+    <button class="btn mgp-btn" id="mgComputeEmb" type="button">计算人脸特征</button>
+  </div>
+
+  <!-- 页面内部滚动区：缩略图多了也不撑破容器 -->
+  <div class="mgp-scroll">
+    <div class="mgp-grid" id="mgFaceGrid">
+      <!-- 24 个棋盘格占位缩略图由 merge-pages.js 生成 -->
+    </div>
+    <div class="empty-note mgp-empty" id="mgFaceEmpty" hidden>还没有建立人脸库</div>
+  </div>
+</div>
+
+<!-- ---------- 页 2：导出设置 ---------- -->
+<div class="mgpage" data-page="settings">
+  <div class="mgp-head">
+    <div class="mgp-tt">
+      <b>Export Settings</b>
+      <span class="mgp-sub">导出设置</span>
+    </div>
+    <!-- 参数最终写入 POST /api/export/start（字段名同 4.0 ExportStartRequest） -->
+    <span class="mgp-count">输出 · 编码 · 性能</span>
+  </div>
+
+  <div class="mgp-scroll">
+    <!-- 组 1：输出 -->
+    <div class="mgp-sec">
+      <div class="mgp-hd">输出</div>
+      <div class="mgrow">
+        <span class="f">格式</span>
+        <div class="seg" data-k="image_format">
+          <b class="on" data-v="jpg" title="4.0 值 jpg（Cache Format，JPEG 100%）">JPEG</b>
+          <b data-v="png" title="4.0 值 png（PNG 帧缓存）">PNG</b>
+        </div>
+      </div>
+      <div class="mgrow">
+        <span class="f">质量</span>
+        <div class="mgnum">
+          <!-- MISSING: 4.0 后端 ExportStartRequest 没有质量字段，
+               _stage1_extract_frames 固定 -q:v 2（export_pipeline.py:1272）；
+               这里只按设计稿占位，禁用且不随导出请求提交 -->
+          <input class="mgtiny" id="mgQuality" type="number" min="1" max="100" value="95"
+                 title="4.0 固定 -q:v 2，无此参数" disabled>
+          <span class="mgunit">%</span>
+        </div>
+      </div>
+      <div class="mgrow">
+        <span class="f">输出路径</span>
+        <div class="inp mono pathinp">
+          <input class="pathval" id="mgOutPath" type="text" spellcheck="false" autocomplete="off"
+                 placeholder="留空 = 源视频名_result.mp4">
+          <span class="pill iconpill" id="mgOutPick" title="选择输出目录">
+            <svg class="ic"><use href="#i-folder"/></svg>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 组 2：编码 -->
+    <div class="mgp-sec">
+      <div class="mgp-hd">编码</div>
+      <div class="mgrow">
+        <span class="f">编码器</span>
+        <div class="seg" data-k="encoder">
+          <b class="on" data-v="h264_nvenc" title="NVENC 硬件编码（4.0 默认）">h264_nvenc</b>
+          <b data-v="libx264" title="x264 软件编码">libx264</b>
+        </div>
+      </div>
+      <div class="mgrow">
+        <span class="f">解码加速</span>
+        <div class="seg" data-k="hwaccel">
+          <b class="on" data-v="auto" title="hwaccel='auto'，无 GPU 时自动回退软解">开</b>
+          <b data-v="" title="hwaccel=''（关闭硬解）">关</b>
+        </div>
+      </div>
+    </div>
+
+    <!-- 组 3：性能 -->
+    <div class="mgp-sec">
+      <div class="mgp-hd">性能</div>
+      <div class="mgrow">
+        <span class="f">并行进程</span>
+        <div class="mgnum">
+          <input class="mgtiny" id="mgWorkers" type="number" min="0" max="16" value="0"
+                 title="num_workers · 0 = 自动 · 范围 0 ~ 16">
+          <span class="mgunit">0 = 自动</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 底部固定动作区 -->
+  <div class="mgp-foot">
+    <button class="btn mgp-btn mgp-go" id="mgStartExport" type="button">开始导出</button>
+    <div class="mgp-status" id="mgExportStatus">就绪 · JPEG · h264_nvenc · 硬解 · 自动进程</div>
+  </div>
+</div>

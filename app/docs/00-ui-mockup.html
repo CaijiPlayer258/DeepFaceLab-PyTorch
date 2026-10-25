@@ -1,0 +1,929 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<title>DeepFaceLab 4.1 — 可点原型</title>
+<style>
+:root{
+  --bg:#ececee; --panel:#ffffff; --panel-2:#f7f7f8; --line:#e7e7ea; --line-strong:#d6d6db;
+  --ink:#17171a; --ink-2:#55555f; --ink-3:#8f8f99;
+  --accent:#4f46e5; --accent-ink:#ffffff; --accent-soft:#eef0ff;
+  --surface-raised:#ffffff; --surface-hover:#f2f2f4;
+  --accent-rgb:79,70,229;
+  --ok:#0f9d58; --warn:#c2740b; --bad:#d33a3a;
+  --shadow:0 1px 2px rgba(0,0,0,.05),0 10px 30px rgba(0,0,0,.07);
+  --shadow-high:0 12px 34px rgba(20,20,40,.16);
+}
+[data-theme="dark"]{
+  --bg:#08080a; --panel:#141418; --panel-2:#1a1a1f; --line:#26262d; --line-strong:#35353f;
+  --ink:#f2f2f4; --ink-2:#a3a3ad; --ink-3:#6d6d78;
+  --accent:#8b8bff; --accent-ink:#0b0b12; --accent-soft:#1d1d2c;
+  --surface-raised:#1e1e24; --surface-hover:#232329;
+  --accent-rgb:139,139,255;
+  --ok:#3ddc84; --warn:#f0b429; --bad:#f87171;
+  --shadow:0 1px 2px rgba(0,0,0,.5),0 12px 36px rgba(0,0,0,.55);
+  --shadow-high:0 14px 40px rgba(0,0,0,.66);
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);padding:20px;
+  font:14px/1.55 "Inter","Microsoft YaHei UI","Segoe UI",system-ui,sans-serif}
+h1,h2,h3,h4{margin:0;font-weight:640;letter-spacing:-.012em}
+.app{max-width:1240px;margin:0 auto;height:calc(100vh - 40px);min-height:700px;
+  background:var(--panel);border:1px solid var(--line);border-radius:18px;
+  box-shadow:var(--shadow);display:flex;flex-direction:column;overflow:hidden}
+.chrome{height:42px;display:flex;align-items:center;gap:9px;padding:0 14px;
+  border-bottom:1px solid var(--line);background:var(--panel-2);flex:none}
+.dot{width:11px;height:11px;border-radius:50%;cursor:pointer}
+.dot.r{background:#f0665c}.dot.y{background:#f4bf4f}.dot.g{background:#61c454}
+.chrome .cap{color:var(--ink-3);font-size:12px;margin-left:8px}
+.chrome .rt{margin-left:auto;display:flex;align-items:center;gap:8px}
+.tgl{display:flex;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:3px;gap:2px}
+.tgl button{border:0;background:transparent;color:var(--ink-2);padding:4px 11px;border-radius:999px;
+  cursor:pointer;font:inherit;font-size:11.5px}
+.tgl button.on{background:var(--accent);color:var(--accent-ink)}
+.shell{display:grid;grid-template-columns:216px 1fr;flex:1;min-height:0}
+.side{border-right:1px solid var(--line);background:var(--panel-2);padding:14px 10px;
+  display:flex;flex-direction:column;gap:2px;overflow:auto}
+.brand{display:flex;align-items:center;gap:10px;padding:4px 8px 16px}
+.logo{width:28px;height:28px;border-radius:9px;background:var(--accent);color:var(--accent-ink);
+  display:grid;place-items:center;font-weight:800;font-size:14px}
+.brand b{font-size:14px;display:block;line-height:1.2}
+.brand span{font-size:10.5px;color:var(--ink-3)}
+.nav{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:9px;color:var(--ink-2);
+  cursor:pointer;font-size:13px;user-select:none;transition:background .12s}
+.nav:hover{background:var(--line)}
+.nav.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.ic{width:15px;height:15px;flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;opacity:.85}
+.pill{display:inline-flex;align-items:center;gap:5px}
+.pill .ic{width:11px;height:11px;opacity:1;stroke-width:2}
+.grp{font-size:10.5px;letter-spacing:.08em;color:var(--ink-3);padding:15px 10px 5px;text-transform:uppercase}
+.side .foot{margin-top:auto;padding-top:14px;border-top:1px solid var(--line)}
+.main{overflow:auto;padding:22px 28px 30px;position:relative}
+.page{display:none;animation:fade .18s ease}
+.page.on{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.crumb{color:var(--ink-3);font-size:12px;margin-bottom:5px}
+.title{font-size:22px;margin-bottom:3px}
+.sub{color:var(--ink-3);font-size:12.5px;margin-bottom:18px}
+.row{display:flex;gap:14px;flex-wrap:wrap}
+.grow{flex:1 1 0;min-width:0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px}
+.card.tint{background:var(--panel-2)}
+.card > .hd{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+.card > .hd b{font-size:13px}
+label.f{display:block;font-size:12px;color:var(--ink-2);margin-bottom:6px;font-weight:600}
+.inp{display:flex;align-items:center;gap:8px;border:1px solid var(--line-strong);background:var(--panel);
+  border-radius:9px;padding:9px 11px;color:var(--ink-3);font-size:12.5px;min-height:39px}
+.inp.mono{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--ink-2)}
+.pill{margin-left:auto;background:var(--accent);color:var(--accent-ink);border-radius:7px;
+  padding:3px 10px;font-size:11.5px;cursor:pointer;white-space:nowrap;font-weight:600}
+.seg{display:inline-flex;background:var(--line);border-radius:9px;padding:3px;gap:2px}
+.seg b{font-weight:600;font-size:12.5px;padding:6px 14px;border-radius:7px;color:var(--ink-2);
+  cursor:pointer;white-space:nowrap}
+.seg b.on{background:var(--panel);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.09)}
+.btn{border:0;border-radius:9px;padding:10px 18px;font:inherit;font-weight:650;cursor:pointer;
+  background:var(--accent);color:var(--accent-ink);font-size:13px}
+.btn.ghost{background:transparent;border:1px solid var(--line-strong);color:var(--ink-2)}
+.btn:disabled{background:var(--line);color:var(--ink-3);cursor:not-allowed;box-shadow:none}
+.btn.ghost:disabled{background:transparent;border-color:var(--line);color:var(--ink-3)}
+.btn:hover:not(:disabled){filter:brightness(1.06)}
+.btn:active:not(:disabled){filter:brightness(.94)}
+.btn.lg{padding:12px 26px;font-size:13.5px;border-radius:10px}
+.bar{height:7px;border-radius:999px;background:var(--line);overflow:hidden}
+.bar i{display:block;height:100%;border-radius:999px;background:var(--accent);transition:width .4s}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}
+.stat{background:var(--panel-2);border:1px solid var(--line);border-radius:9px;padding:12px 14px}
+.stat .k{font-size:11px;color:var(--ink-3);margin-bottom:1px}
+.stat .v{font-size:21px;font-weight:680;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.stat .v small{font-size:11.5px;font-weight:500;color:var(--ink-3);margin-left:3px}
+.tag{display:inline-block;font-size:10.5px;padding:2px 8px;border-radius:999px;font-weight:650;white-space:nowrap}
+.tag.ok{background:rgba(15,157,88,.13);color:var(--ok)}
+.tag.wn{background:rgba(194,116,11,.14);color:var(--warn)}
+.tag.n{background:var(--line);color:var(--ink-2)}
+.kbd{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;background:var(--line);padding:1px 6px;border-radius:5px}
+.hint{font-size:11.5px;color:var(--ink-3)}
+
+/* ===== 首页公告 ===== */
+.notice{display:flex;gap:14px;align-items:flex-start;background:var(--accent-soft);
+  border:1px solid color-mix(in srgb,var(--accent) 18%,transparent);border-radius:14px;padding:14px 16px;margin-bottom:16px}
+.notice .v{flex:none;background:var(--accent);color:var(--accent-ink);border-radius:8px;
+  padding:5px 10px;font-size:12px;font-weight:700;font-variant-numeric:tabular-nums}
+.notice .body{flex:1;min-width:0}
+.notice .h{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+.notice .h b{font-size:13.5px}
+.notice ul{margin:0;padding-left:16px}
+.notice li{font-size:12.5px;color:var(--ink-2);margin:2px 0}
+
+/* ===== 三级渐进 ===== */
+.lvl{max-height:0;opacity:0;overflow:hidden;
+  transition:max-height .34s cubic-bezier(.2,.8,.2,1), opacity .26s ease, margin .34s}
+.lvl.in{max-height:560px;opacity:1;margin-top:12px}
+.pills{display:flex;flex-wrap:wrap;gap:8px}
+.pill2{border:1px solid var(--line-strong);background:var(--panel);border-radius:999px;
+  padding:7px 15px;font-size:12.5px;font-weight:600;color:var(--ink-2);cursor:pointer;transition:.14s}
+.pill2:hover{border-color:var(--accent);color:var(--accent)}
+.pill2.on{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.pgrid{display:flex;flex-wrap:wrap;gap:22px;align-items:flex-end}
+.pblock{min-width:150px}
+.lvl3 .foot{display:flex;align-items:center;gap:10px;margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
+.sw{width:38px;height:22px;border-radius:999px;background:var(--line-strong);position:relative;cursor:pointer;transition:.18s}
+.sw::after{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#fff;transition:.18s}
+.sw.on{background:var(--accent)}
+.sw.on::after{left:19px}
+
+/* ===== 提取器：按钮位置 A/B/C ===== */
+#p-extract[data-pos="a"] #bB, #p-extract[data-pos="a"] #actionbar,
+#p-extract[data-pos="b"] #bA, #p-extract[data-pos="b"] #actionbar,
+#p-extract[data-pos="c"] #bA, #p-extract[data-pos="c"] #bB{display:none!important}
+.actionbar{position:sticky;bottom:0;margin-top:14px;display:flex;align-items:center;gap:12px;
+  background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 14px;
+  box-shadow:0 -8px 24px rgba(0,0,0,.07)}
+
+/* ===== 合成器 ===== */
+.launch{display:flex;align-items:center;gap:18px;padding:20px 22px;margin-bottom:20px}
+.svcdot{width:9px;height:9px;border-radius:50%;background:var(--line-strong);flex:none;
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--line-strong) 30%,transparent);transition:.2s}
+.svcdot.on{background:var(--ok);box-shadow:0 0 0 3px rgba(15,157,88,.18)}
+.launch .big{font-size:24px;font-weight:720;letter-spacing:-.025em;line-height:1.2}
+.launch .meta{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;color:var(--ink-3);margin-top:2px}
+.mrow{display:flex;align-items:center;gap:12px;padding:11px 14px;border:1px solid var(--line);
+  border-radius:11px;margin-bottom:8px;cursor:pointer;transition:.13s;background:var(--panel)}
+.mrow:hover{border-color:var(--accent)}
+.mrow.on{border-color:var(--accent);background:var(--accent-soft)}
+.mrow .dot2{width:13px;height:13px;border-radius:50%;border:1.6px solid var(--line-strong);flex:none;transition:.13s}
+.mrow.on .dot2{border-color:var(--accent);border-width:4px}
+.mrow .nm2{font-size:14px;font-weight:660;min-width:132px}
+.mrow .ar{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;color:var(--ink-3);flex:1;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ===== 数据处理空状态 ===== */
+.ds-empty{max-width:520px;margin:46px auto 0;text-align:center;padding:34px 24px;
+  border:1.5px dashed var(--line-strong);border-radius:16px;background:var(--panel-2);
+  transition:opacity .22s ease, transform .22s ease}
+.ds-empty.out{opacity:0;transform:translateY(-14px) scale(.97);pointer-events:none}
+.ds-plus{width:52px;height:52px;border-radius:15px;border:1.5px dashed var(--line-strong);margin:0 auto 14px;
+  display:grid;place-items:center;color:var(--ink-3);font-size:22px}
+.ds-empty h3{font-size:16px;margin-bottom:6px}
+.ds-empty p{color:var(--ink-3);font-size:12.5px;margin:0 0 16px}
+.recent{font-size:11.5px;color:var(--ink-3);margin-top:14px}
+.ds-path{max-height:0;opacity:0;overflow:hidden;
+  transition:max-height .32s cubic-bezier(.2,.8,.2,1), opacity .24s ease, margin .32s}
+.ds-path.in{max-height:88px;opacity:1;margin-bottom:14px}
+.ds-bar{display:flex;align-items:center;gap:10px;background:var(--panel-2);border:1px solid var(--line);
+  border-radius:11px;padding:9px 12px}
+.ds-bar .p{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--ink-2)}
+.ds-work{opacity:0;transform:translateY(10px);transition:opacity .3s ease, transform .3s ease}
+.ds-work.in{opacity:1;transform:none}
+.mods{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.mod{border:1px solid var(--line);border-radius:11px;padding:13px 12px;cursor:pointer;transition:.14s;background:var(--panel)}
+.mod:hover{border-color:var(--accent)}
+.mod.on{border-color:var(--accent);background:var(--accent-soft)}
+.mod .n{font-size:13px;font-weight:660;margin-bottom:2px}
+.mod.on .n{color:var(--accent)}
+.mod .d{font-size:10.5px;color:var(--ink-3)}
+.mod.on .d{color:var(--accent);opacity:.8}
+
+/* ===== 模型卡 ===== */
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.mcard{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:15px;cursor:pointer;
+  transition:.15s;display:flex;flex-direction:column;gap:9px}
+.mcard:hover{border-color:var(--accent);transform:translateY(-1px);box-shadow:var(--shadow)}
+.mcard .nm{font-size:17px;font-weight:690;letter-spacing:-.02em;display:flex;align-items:center;gap:8px}
+.mcard .meta{font-size:11.5px;color:var(--ink-3);font-family:ui-monospace,Consolas,monospace}
+.mcard .kv{display:flex;flex-wrap:wrap;gap:6px}
+.mcard .acts{display:flex;gap:7px;margin-top:auto;padding-top:3px}
+.mini{font-size:11.5px;padding:6px 11px;border-radius:7px;border:1px solid var(--line-strong);
+  background:transparent;color:var(--ink-2);cursor:pointer;font-family:inherit;font-weight:600}
+.mini.pri{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.thumb{height:72px;border-radius:9px;background:repeating-linear-gradient(45deg,var(--line) 0 8px,transparent 8px 16px)}
+.toolgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.tool{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;
+  display:flex;flex-direction:column;gap:9px}
+.tool .h{display:flex;align-items:center;gap:9px}
+.tool .ic{width:30px;height:30px;border-radius:9px;background:var(--accent-soft);color:var(--accent);
+  display:grid;place-items:center;font-size:14px;flex:none}
+.tool h4{font-size:14px}
+.tool p{margin:0;font-size:12px;color:var(--ink-3);flex:1}
+table.t{width:100%;border-collapse:collapse;font-size:12.5px}
+table.t th,table.t td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+table.t th{color:var(--ink-3);font-weight:600;font-size:11.5px}
+table.t tr:last-child td{border-bottom:0}
+.port{width:78px;border:1px solid var(--line-strong);background:var(--panel);border-radius:7px;
+  padding:6px 9px;font-size:12.5px;color:var(--ink);font-family:ui-monospace,Consolas,monospace}
+
+/* ===== 焦点态 ===== */
+:focus{outline:none}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.btn:focus-visible,.mini:focus-visible{outline-offset:2px}
+
+/* ===== 短参数横排（3 项以内） ===== */
+.prow{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:22px 26px}
+.pc{display:flex;flex-direction:column;gap:7px;min-width:0}
+.pc > .f{margin-bottom:0}
+@media (max-width:820px){ .prow{grid-template-columns:repeat(2,minmax(0,1fr))} }
+
+/* ===== 字段行（参数较多时用，≥5 项） ===== */
+.fields{display:flex;flex-direction:column;gap:2px;max-width:640px}
+.fld{display:flex;align-items:center;gap:16px;padding:7px 0;border-bottom:1px solid var(--line)}
+.fld:last-child{border-bottom:0}
+.fld > .k{font-size:12.5px;color:var(--ink-2);flex:1;min-width:0}
+.fld > .v{flex:0 0 auto;display:flex;align-items:center;gap:8px}
+.fld .unit{font-size:11.5px;color:var(--ink-3)}
+
+/* ===== 步进器 ===== */
+.num{display:inline-flex;align-items:center;gap:4px}
+.num .nb{width:22px;height:26px;display:inline-flex;align-items:center;justify-content:center;
+  background:var(--surface-raised);border:1px solid var(--border-strong);border-radius:7px;
+  color:var(--ink-2);font-size:13px;line-height:1;cursor:pointer;transition:.12s;padding:0}
+.num .nb:hover{background:var(--surface-hover);color:var(--ink);border-color:var(--accent)}
+.num .nb:active{transform:translateY(1px)}
+.num .nb:disabled{opacity:.35;cursor:not-allowed}
+.num input{width:56px;height:26px;text-align:right;background:var(--surface-raised);
+  border:1px solid var(--border-strong);border-radius:7px;color:var(--ink);
+  font:inherit;font-size:12.5px;padding:0 8px;font-variant-numeric:tabular-nums}
+.num input:focus{border-color:var(--accent)}
+
+/* ===== 芯片（单选/多选） ===== */
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{display:inline-flex;align-items:center;gap:7px;padding:7px 14px;border-radius:999px;
+  font-size:12.5px;font-weight:600;background:var(--surface-raised);border:1px solid var(--border-strong);
+  color:var(--ink-2);cursor:pointer;transition:background .16s,border-color .16s,color .16s,transform .1s;
+  font-family:inherit}
+.chip::before{content:"";width:12px;height:12px;border-radius:50%;flex:none;
+  border:1.5px solid var(--ink-3);transition:background .16s,border-color .16s,transform .18s}
+.chip:hover{border-color:var(--accent);color:var(--ink)}
+.chip:active{transform:scale(.97)}
+.chip.on{background:rgba(var(--accent-rgb),.14);border-color:rgba(var(--accent-rgb),.55);color:var(--accent)}
+.chip.on::before{background:var(--accent);border-color:var(--accent);transform:scale(1.08)}
+
+/* ===== 日志面板 ===== */
+.term{background:#0a0a0c;border:1px solid var(--border);border-radius:11px;padding:12px 14px;
+  font-family:ui-monospace,Consolas,monospace;font-size:11.5px;line-height:1.75;color:#c9c9d1;
+  max-height:150px;overflow:auto;white-space:pre-wrap}
+.term .t{color:#6d6d78}
+.term .ok{color:#3ddc84}
+.term .warn{color:#f0b429}
+.term .err{color:#f28b8b;font-weight:700}
+
+/* ===== Toast ===== */
+#toastroot{position:fixed;right:26px;bottom:26px;display:flex;flex-direction:column;gap:8px;
+  align-items:flex-end;z-index:99}
+.toast{background:var(--surface-raised);border:1px solid var(--border-strong);border-radius:12px;
+  padding:11px 14px 12px;position:relative;overflow:hidden;display:flex;align-items:flex-start;gap:10px;
+  box-shadow:var(--shadow-high);min-width:220px;max-width:360px;
+  animation:toastIn .22s cubic-bezier(.2,.8,.2,1)}
+.toast .ti{width:16px;height:16px;flex:none;margin-top:1px;color:var(--ok)}
+.toast .tt{font-size:13px;font-weight:600;color:var(--ink)}
+.toast .ts{font-size:11.5px;color:var(--ink-3);margin-top:2px}
+.toast .tx{background:none;border:0;color:var(--ink-3);font-size:15px;line-height:1;padding:0 2px;
+  margin-left:auto;cursor:pointer;align-self:center}
+.toast .tb{position:absolute;left:0;right:0;bottom:0;height:3px;background:var(--line);overflow:hidden}
+.toast .tb i{display:block;height:100%;background:var(--accent);animation:tbar 3.6s linear forwards}
+@keyframes tbar{from{width:100%}to{width:0%}}
+@keyframes toastIn{from{opacity:0;transform:translateY(12px) scale(.98)}to{opacity:1;transform:none}}
+</style>
+</head>
+<body>
+<svg id="sprite" aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden"><symbol id="i-home" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.2 12 3l9 7.2"/><path d="M5.5 9.5V20a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1V9.5"/></symbol><symbol id="i-scan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="11" r="3"/><path d="M9 16.6c.85-.9 1.85-1.35 3-1.35s2.15.45 3 1.35"/></symbol><symbol id="i-layers" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/></symbol><symbol id="i-cpu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/></symbol><symbol id="i-box" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 20 7v10l-8 4-8-4V7l8-4Z"/><path d="m4 7 8 4 8-4M12 11v10"/></symbol><symbol id="i-sliders" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h8M16 7h4M4 17h4M12 17h8"/><circle cx="14" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></symbol><symbol id="i-gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.2 5.2l2.1 2.1M16.7 16.7l2.1 2.1M18.8 5.2l-2.1 2.1M7.3 16.7l-2.1 2.1"/></symbol><symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.8h.01"/></symbol><symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></symbol><symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></symbol><symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></symbol><symbol id="i-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 5.2v13.6L20 12 8.5 5.2Z"/></symbol><symbol id="i-power" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5v8"/><path d="M7.2 6.6a7.2 7.2 0 1 0 9.6 0"/></symbol><symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol><symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6 6 18"/></symbol><symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10M8 11l4 4 4-4M5 20h14"/></symbol><symbol id="i-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L18 10l-4-4L4 16v4Z"/><path d="m13.5 6.5 4 4"/></symbol><symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5.2A1.2 1.2 0 0 1 10.2 4h3.6A1.2 1.2 0 0 1 15 5.2V7"/><path d="M6.5 7 7.4 19a2 2 0 0 0 2 1.9h5.2a2 2 0 0 0 2-1.9L17.5 7"/></symbol></svg>
+<div class="app">
+  <div class="chrome">
+    <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+    <span class="cap">DeepFaceLab 4.1</span>
+    <div class="rt"><div class="tgl">
+      <button class="on" onclick="setTheme('light',this)">浅色</button>
+      <button onclick="setTheme('dark',this)">深色</button>
+    </div></div>
+  </div>
+
+  <div class="shell">
+    <div class="side">
+      <div class="brand"><div class="logo">D</div><div><b>DeepFaceLab</b><span>4.1</span></div></div>
+      <div class="nav on" data-go="home"><svg class="ic"><use href="#i-home"/></svg>主页</div>
+      <div class="nav" data-go="extract"><svg class="ic"><use href="#i-scan"/></svg>提取器</div>
+      <div class="nav" data-go="dataset"><svg class="ic"><use href="#i-layers"/></svg>数据处理</div>
+      <div class="nav" data-go="train"><svg class="ic"><use href="#i-cpu"/></svg>训练器</div>
+      <div class="nav" data-go="merge"><svg class="ic"><use href="#i-box"/></svg>合成器</div>
+      <div class="grp">工具</div>
+      <div class="nav" data-go="tools"><svg class="ic"><use href="#i-sliders"/></svg>工具</div>
+      <div class="foot">
+        <div class="nav" data-go="settings"><svg class="ic"><use href="#i-gear"/></svg>设置</div>
+        <div class="nav" data-go="about"><svg class="ic"><use href="#i-info"/></svg>关于</div>
+      </div>
+    </div>
+
+    <div class="main">
+
+      <!-- ================= 主页 ================= -->
+      <div class="page on" id="p-home">
+        <div class="title">开始一个新工程</div>
+
+        <div class="notice">
+          <div class="v">v4.1.0</div>
+          <div class="body">
+            <div class="h"><b>界面重写</b><span class="tag n">2 天前</span></div>
+            <ul>
+              <li>页面改为侧边栏仪表盘，数据处理改成三级渐进：模块 → 模式 → 参数</li>
+              <li>提取器只剩 5 个参数，检测器固定为 RetinaFace_10g / TinyMog</li>
+              <li>所有 WebUI 端口集中到设置页，改完立即生效</li>
+            </ul>
+          </div>
+          <button class="mini">查看全部</button>
+        </div>
+
+        <div class="row" style="margin-bottom:16px">
+          <div class="card grow" style="cursor:pointer">
+            <div style="display:flex;align-items:center;gap:9px;margin-bottom:8px"><span class="tag n">01</span><b style="font-size:14px">提取</b></div>
+            <div style="font-size:12px;color:var(--ink-3)">从视频或图片目录里裁出对齐后的人脸</div>
+          </div>
+          <div class="card grow" style="cursor:pointer">
+            <div style="display:flex;align-items:center;gap:9px;margin-bottom:8px"><span class="tag n">02</span><b style="font-size:14px">训练</b></div>
+            <div style="font-size:12px;color:var(--ink-3)">让模型学会你给的那张脸</div>
+          </div>
+          <div class="card grow" style="cursor:pointer">
+            <div style="display:flex;align-items:center;gap:9px;margin-bottom:8px"><span class="tag n">03</span><b style="font-size:14px">合成</b></div>
+            <div style="font-size:12px;color:var(--ink-3)">把训练好的脸贴回原视频</div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="card grow">
+            <b style="font-size:13px">继续上次</b>
+            <div style="margin-top:10px;display:flex;align-items:center;gap:10px">
+              <div style="font-size:15px;font-weight:680">384wf</div>
+              <span class="tag ok">iter 128,400</span>
+              <div style="flex:1"></div>
+              <button class="mini pri">继续训练</button>
+            </div>
+          </div>
+          <div class="card grow">
+            <b style="font-size:13px">最近的数据集</b>
+            <div style="margin-top:10px;font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--ink-2);line-height:1.9">
+              workspace&#92;data_src&#92; <span style="color:var(--ink-3);font-family:inherit">342 张</span><br>
+              workspace&#92;data_dst&#92; <span style="color:var(--ink-3);font-family:inherit">1,208 张</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= 提取器 ================= -->
+      <div class="page" id="p-extract" data-pos="b">
+        <div style="display:flex;align-items:flex-start;gap:14px">
+          <div>
+            <div class="title">人脸提取</div>
+          </div>
+          <div style="flex:1"></div>
+          <div class="seg" id="btnpos" style="margin-top:6px"><b>A</b><b class="on">B</b><b>C</b></div>
+        </div>
+
+        <div class="card" style="margin-bottom:14px">
+          <div class="hd"><b>路径</b></div>
+          <div style="display:grid;grid-template-columns:1fr;gap:11px">
+            <div><label class="f">输入</label>
+              <div class="inp mono">D:&#92;media&#92;raw&#92;<span class="pill"><svg class="ic"><use href="#i-folder"/></svg>选择目录</span></div></div>
+            <div><label class="f">输出</label>
+              <div class="inp mono">workspace&#92;data_src&#92;<span class="pill"><svg class="ic"><use href="#i-folder"/></svg>选择目录</span></div></div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom:14px">
+          <div class="hd"><b>参数</b></div>
+          <div class="prow">
+            <div class="pc">
+              <label class="f">质量档</label>
+              <div class="seg"><b class="on">高质量</b><b>快速</b></div>
+            </div>
+            <div class="pc">
+              <label class="f">检测角度</label>
+              <div class="seg"><b class="on">0°</b><b>90°</b><b>180°</b><b>270°</b></div>
+            </div>
+            <div class="pc">
+              <label class="f">帧跳跃</label>
+              <div style="display:flex;align-items:center;gap:8px">
+                <div class="num">
+                  <button class="nb" data-d="-1">−</button>
+                  <input id="skip" value="1" readonly>
+                  <button class="nb" data-d="1">+</button>
+                </div>
+                <span class="unit">帧</span>
+              </div>
+            </div>
+          </div>
+          <div id="bA" style="display:flex;justify-content:flex-end;margin-top:24px;padding-top:14px;border-top:1px solid var(--line)">
+            <button class="btn lg">开始提取</button>
+          </div>
+          <div id="bB" style="margin-top:24px;padding-top:14px;border-top:1px solid var(--line)">
+            <button class="btn lg" style="width:100%">开始提取</button>
+          </div>
+        </div>
+
+        <div class="card tint">
+          <div style="display:flex;align-items:center;margin-bottom:9px">
+            <b style="font-size:13px">正在处理 · 视频与图片混合目录</b>
+            <div style="flex:1"></div>
+            <span class="hint" style="font-variant-numeric:tabular-nums">128 / 342 文件 · 37%</span>
+          </div>
+          <div class="bar"><i style="width:37%"></i></div>
+          <div class="stats">
+            <div class="stat"><div class="k">检测帧速度</div><div class="v">38.4<small>fps</small></div></div>
+            <div class="stat"><div class="k">输出脸速度</div><div class="v">9.7<small>张/秒</small></div></div>
+            <div class="stat"><div class="k">文件进度</div><div class="v">128<small>/ 342</small></div></div>
+          </div>
+                  </div>
+
+        <div class="actionbar" id="actionbar">
+          <span class="hint" style="font-family:ui-monospace,Consolas,monospace">D:&#92;media&#92;raw&#92; → workspace&#92;data_src&#92;</span>
+          <div style="flex:1"></div>
+          <button class="btn lg">开始提取</button>
+        </div>
+      </div>
+
+      <!-- ================= 数据处理 ================= -->
+      <div class="page" id="p-dataset">
+        <div class="title">数据处理</div>
+
+        <div class="ds-path" id="dspath">
+          <div class="ds-bar">
+            <span class="hint">当前数据集</span>
+            <span class="p">workspace&#92;data_src&#92;</span>
+            <span class="tag n">342 张</span>
+            <div style="flex:1"></div>
+            <button class="mini" onclick="dsReset()">换数据集</button>
+          </div>
+        </div>
+
+        <div class="ds-empty" id="dsempty">
+          <div class="ds-plus"><svg class="ic" style="width:22px;height:22px"><use href="#i-plus"/></svg></div>
+          <h3>打开一个文件夹以继续</h3>
+          <p>选择已对齐的人脸集目录</p>
+          <button class="btn lg" onclick="dsOpen()">打开数据集</button>
+          <div class="recent">最近：<span class="kbd">data_src</span> · <span class="kbd">data_dst</span></div>
+        </div>
+
+        <div class="ds-work" id="dswork">
+          <div class="mods" id="mods"></div>
+          <div class="lvl" id="lvl2"><div class="pills" id="pills"></div></div>
+          <div class="lvl" id="lvl3">
+            <div class="card tint">
+              <div class="pgrid" id="params"></div>
+              <div class="foot">
+                <span class="hint" id="outinfo"></span>
+                <div style="flex:1"></div>
+                <button class="btn">开始处理</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= 训练器 ================= -->
+      <div class="page" id="p-train">
+        <div class="title">模型</div>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+          <div class="seg"><b class="on">全部</b><b>训练中</b><b>已暂停</b></div>
+          <div style="flex:1"></div>
+          <div class="inp" style="width:220px"><svg class="ic" style="stroke:var(--ink-3)"><use href="#i-search"/></svg>搜索模型名…</div>
+          <button class="btn" style="display:inline-flex;align-items:center;gap:6px"><svg class="ic" style="stroke:var(--on-accent);opacity:1;stroke-width:2"><use href="#i-plus"/></svg>新建模型</button>
+        </div>
+        <div class="grid3">
+          <div class="mcard">
+            <div class="thumb"></div>
+            <div class="nm">384wf <span class="tag ok">训练中</span></div>
+            <div class="meta">liae-ud · res384 · ae352 · e102/d102</div>
+            <div class="kv"><span class="tag n">iter 128,400</span><span class="tag n">bs 2</span><span class="tag n">bf16</span></div>
+            <div class="acts"><button class="mini pri">继续训练</button><button class="mini">参数</button><button class="mini">删除</button></div>
+          </div>
+          <div class="mcard">
+            <div class="nm">model_004 <span class="tag n">已暂停</span></div>
+            <div class="meta">df-ud · res416 · ae320 · e88/d80</div>
+            <div class="kv"><span class="tag n">iter 41,200</span><span class="tag n">bs 8</span></div>
+            <div class="acts"><button class="mini pri">开始训练</button><button class="mini">参数</button><button class="mini">删除</button></div>
+          </div>
+          <div class="mcard">
+            <div class="thumb"></div>
+            <div class="nm">DFLitetest <span class="tag wn">刚新建</span></div>
+            <div class="meta">df-udt-l · res256 · ae256 · e64/d128</div>
+            <div class="kv"><span class="tag n">iter 0</span><span class="tag n">未开始</span></div>
+            <div class="acts"><button class="mini pri">开始训练</button><button class="mini">参数</button><button class="mini">删除</button></div>
+          </div>
+          <div class="mcard">
+            <div class="nm">New416 <span class="tag n">已暂停</span></div>
+            <div class="meta">df-ud · res416 · ae320 · e80/d80</div>
+            <div class="kv"><span class="tag n">iter 96,000</span></div>
+            <div class="acts"><button class="mini pri">开始训练</button><button class="mini">参数</button><button class="mini">删除</button></div>
+          </div>
+          <div class="mcard">
+            <div class="thumb"></div>
+            <div class="nm">liae256 <span class="tag ok">训练中</span></div>
+            <div class="meta">liae-ud · res256 · ae256</div>
+            <div class="kv"><span class="tag n">iter 203,900</span><span class="tag n">bs 8</span></div>
+            <div class="acts"><button class="mini pri">继续训练</button><button class="mini">参数</button><button class="mini">删除</button></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= 合成器 ================= -->
+      <div class="page" id="p-merge">
+        <div class="title">合成</div>
+
+        <div class="card launch">
+          <div style="display:flex;align-items:center;gap:12px">
+            <span class="svcdot" id="svcdot"></span>
+            <div>
+              <div style="font-size:14px;font-weight:660" id="svctitle">合成服务未启动</div>
+              <div class="hint" id="svcurl">启动后在浏览器里打开工作台，模型在网页里再选</div>
+            </div>
+          </div>
+          <div style="flex:1"></div>
+          <button class="btn lg" id="btnmerge"
+            style="display:inline-flex;align-items:center;gap:8px;padding:14px 30px;font-size:14.5px">
+            <svg class="ic" style="stroke:var(--on-accent);opacity:1"><use href="#i-play"/></svg>启动合成器
+          </button>
+        </div>
+
+        <div class="hint" style="margin:0 0 9px 3px">模型导出</div>
+        <div id="mlist"></div>
+      </div>
+
+      <!-- ================= 工具 ================= -->
+      <div class="page" id="p-tools">
+        <div class="title">工具</div>
+        <div class="toolgrid">
+          <div class="tool">
+            <div class="h"><div class="ic">✎</div><h4>遮罩绘制</h4></div>
+            <p>手工修 XSeg 遮罩。在浏览器里打开，改完直接写回数据集。</p>
+            <div style="display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--ink-3)">
+              端口 <input class="port" value="8000">
+            </div>
+            <button class="btn">打开遮罩绘制</button>
+          </div>
+          <div class="tool">
+            <div class="h"><div class="ic">↓</div><h4>B 站下载</h4></div>
+            <p>下 B 站视频当素材。登录后才能拿高码率。</p>
+            <div style="display:flex;align-items:center;gap:8px">
+              <span class="tag ok">已登录</span>
+              <span class="hint">UID 258***</span>
+            </div>
+            <button class="btn">打开下载器</button>
+          </div>
+          <div class="tool">
+            <div class="h"><div class="ic">⇄</div><h4>色域迁移</h4></div>
+            <p>杜比视界 / HDR 先转成普通色域再做提取。4.1 不再内置 HDR 提取。</p>
+            <div class="hint">基于 FFmpeg · 输出到同目录 <span class="kbd">_sdr</span></div>
+            <button class="btn ghost">选择视频</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= 设置 ================= -->
+      <div class="page" id="p-settings">
+        <div class="title">全局设置</div>
+        <div class="card" style="margin-bottom:14px">
+          <b style="font-size:13px;display:block;margin-bottom:10px">WebUI 端口</b>
+          <table class="t">
+            <tr><th style="width:170px">服务</th><th style="width:130px">端口</th><th>状态</th></tr>
+            <tr><td>遮罩绘制</td><td><input class="port" value="8000"></td><td><span class="tag ok">可用</span></td></tr>
+            <tr><td>合成器</td><td><input class="port" value="8001"></td><td><span class="tag ok">可用</span></td></tr>
+            <tr><td>角度可视化</td><td><input class="port" value="8002"></td><td><span class="tag n">未启动</span></td></tr>
+          </table>
+          <div class="hint" style="margin-top:9px">端口被占用时自动顺延到下一个空闲端口，这里显示实际生效的号。</div>
+        </div>
+        <div class="card" style="margin-bottom:14px">
+          <b style="font-size:13px;display:block;margin-bottom:10px">B 站账号</b>
+          <div style="display:flex;align-items:center;gap:10px">
+            <span class="tag ok">已登录</span>
+            <span style="font-size:12px;color:var(--ink-3)">Cookie 有效期至 2027-03</span>
+            <div style="flex:1"></div>
+            <button class="mini">清除 Cookie 并重新登录</button>
+          </div>
+        </div>
+        <div class="card">
+          <b style="font-size:13px;display:block;margin-bottom:10px">GitHub 代理</b>
+          <div class="inp mono" style="margin-bottom:9px">http://127.0.0.1:26561</div>
+          <div class="hint">自动更新走这个代理。留空则直连 —— 国内直连通常连不上，建议用 Steam++ 的系统代理并填这里。</div>
+        </div>
+      </div>
+
+      <!-- ================= 关于 ================= -->
+      <div class="page" id="p-about">
+        <div class="title">DeepFaceLab 4.1</div>
+        <div class="sub">4.0 是技术样机，4.1 是产品。</div>
+        <div class="card">
+          <table class="t">
+            <tr><td style="width:150px;color:var(--ink-3)">版本</td><td>4.1.0</td></tr>
+            <tr><td style="color:var(--ink-3)">界面</td><td>PySide6 · 自研控件</td></tr>
+            <tr><td style="color:var(--ink-3)">推理</td><td>ONNX Runtime · Torch</td></tr>
+            <tr><td style="color:var(--ink-3)">模型</td><td>TinyMog · RetinaFace_10g · InsightFace2D106</td></tr>
+            <tr><td style="color:var(--ink-3)">协议</td><td>GPL-3.0</td></tr>
+          </table>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div id="toastroot"></div>
+<script>
+var PAGE_IDS = {home:'p-home',extract:'p-extract',dataset:'p-dataset',train:'p-train',
+  merge:'p-merge',tools:'p-tools',settings:'p-settings',about:'p-about'};
+
+function go(key){
+  Object.keys(PAGE_IDS).forEach(function(k){
+    document.getElementById(PAGE_IDS[k]).classList.toggle('on', k===key);
+  });
+  document.querySelectorAll('.nav').forEach(function(n){
+    n.classList.toggle('on', n.getAttribute('data-go')===key);
+  });
+  document.querySelector('.main').scrollTop = 0;
+}
+document.querySelectorAll('.nav[data-go]').forEach(function(n){
+  n.addEventListener('click', function(){ go(n.getAttribute('data-go')); });
+});
+function setTheme(t, el){
+  document.documentElement.setAttribute('data-theme', t);
+  document.querySelectorAll('.tgl button').forEach(function(b){ b.classList.remove('on'); });
+  el.classList.add('on');
+}
+
+/* ---------- 通用分段控件 ---------- */
+function bindSeg(seg){
+  var kids = seg.querySelectorAll(':scope > b');
+  Array.prototype.forEach.call(kids, function(b){
+    b.addEventListener('click', function(){
+      Array.prototype.forEach.call(kids, function(x){ x.classList.remove('on'); });
+      b.classList.add('on');
+      if(seg.id === 'btnpos'){
+        document.getElementById('p-extract').setAttribute('data-pos', b.textContent.trim().toLowerCase());
+      }
+    });
+  });
+}
+document.querySelectorAll('.seg').forEach(bindSeg);
+
+/* ---------- 数据处理：模块 -> 模式 -> 参数 ---------- */
+var MODULES = [
+  {id:'filter', n:'过滤器', d:'模糊 · 坏图 · 重复', modes:[
+    {n:'模糊筛选', params:[
+      {k:'seg', label:'强度档位', opts:['10%','30%','60%'], on:1},
+      {k:'seg', label:'处理方式', opts:['移到 _trash','直接删除'], on:0}],
+     out:'预计筛掉 96 张，剩 246 张'},
+    {n:'重复图', params:[
+      {k:'num', label:'相似度阈值', v:'0.95'},
+      {k:'note', t:'按感知哈希聚类，每组只保留最清晰的一张。'}],
+     out:'预计找出 12 组重复'},
+    {n:'坏图', params:[
+      {k:'note', t:'删掉解码失败、尺寸异常、人脸数为 0 的图片。'}],
+     out:'预计扫出 3 张坏图'}
+  ]},
+  {id:'sort', n:'排序器', d:'清晰度 · 角度 · 时间', modes:[
+    {n:'清晰度', params:[
+      {k:'seg', label:'训练分辨率', opts:['256','384','512'], on:1},
+      {k:'note', t:'分数越高 = 越清晰 = 序号越靠前，sorted_00000 最清晰。'}],
+     out:'按清晰度重命名 342 张'},
+    {n:'角度', params:[
+      {k:'seg', label:'排序方向', opts:['偏航 小→大','偏航 大→小'], on:0}],
+     out:'按偏航角重命名 342 张'},
+    {n:'时间', params:[
+      {k:'note', t:'按文件修改时间排序，适合把连续帧排在一起。'}],
+     out:'按时间重命名 342 张'}
+  ]},
+  {id:'angle', n:'角度可视化', d:'偏航 · 俯仰', modes:[
+    {n:'散点图', params:[
+      {k:'note', t:'横轴偏航、纵轴俯仰，点密度就是数据分布。拖框可以圈选删除。'}],
+     out:'在浏览器里打开可视化'},
+    {n:'直方图', params:[
+      {k:'num', label:'分箱数', v:'36'}],
+     out:'在浏览器里打开可视化'}
+  ]},
+  {id:'mask', n:'遮罩应用', d:'XSeg 推理 · 平滑', modes:[
+    {n:'XSeg 推理', params:[
+      {k:'seg', label:'模型', opts:['XSeg','XSegLite'], on:0},
+      {k:'num', label:'阈值', v:'0.5'},
+      {k:'note', t:'在数据集目录里生成 _mask.jpg 遮罩。'}],
+     out:'为 342 张生成遮罩'},
+    {n:'遮罩平滑', params:[
+      {k:'num', label:'模糊半径', v:'2'}],
+     out:'羽化 342 张已有遮罩'}
+  ]}
+];
+
+var curMod = null, curMode = null;
+
+function renderMods(){
+  var box = document.getElementById('mods');
+  box.innerHTML = '';
+  MODULES.forEach(function(m){
+    var d = document.createElement('div');
+    d.className = 'mod';
+    d.innerHTML = '<div class="n">' + m.n + '</div><div class="d">' + m.d + '</div>';
+    d.addEventListener('click', function(){ selectMod(m.id); });
+    box.appendChild(d);
+  });
+}
+
+function selectMod(id){
+  curMod = id; curMode = null;
+  var idx = 0;
+  MODULES.forEach(function(m){ if(m.id === id) idx = MODULES.indexOf(m); });
+  var nodes = document.getElementById('mods').children;
+  for(var i=0;i<nodes.length;i++){ nodes[i].classList.toggle('on', i===idx); }
+  document.getElementById('lvl3').classList.remove('in');
+  renderPills();
+  document.getElementById('lvl2').classList.add('in');
+}
+
+function renderPills(){
+  var m = MODULES.filter(function(x){ return x.id === curMod; })[0];
+  var box = document.getElementById('pills');
+  box.innerHTML = '';
+  m.modes.forEach(function(md){
+    var b = document.createElement('div');
+    b.className = 'chip';
+    b.textContent = md.n;
+    b.addEventListener('click', function(){ selectMode(md, b); });
+    box.appendChild(b);
+  });
+}
+
+function selectMode(md, el){
+  Array.prototype.forEach.call(document.getElementById('pills').children, function(x){
+    x.classList.remove('on');
+  });
+  el.classList.add('on');
+  renderParams(md);
+  document.getElementById('lvl3').classList.add('in');
+}
+
+function renderParams(md){
+  var box = document.getElementById('params');
+  box.innerHTML = '';
+  md.params.forEach(function(p){
+    var wrap = document.createElement('div');
+    wrap.className = 'pblock';
+    if(p.k === 'seg'){
+      var lb = document.createElement('label'); lb.className='f'; lb.textContent = p.label;
+      wrap.appendChild(lb);
+      var seg = document.createElement('div'); seg.className = 'seg';
+      p.opts.forEach(function(o, i){
+        var b = document.createElement('b');
+        b.textContent = o;
+        if(i === p.on) b.className = 'on';
+        b.addEventListener('click', function(){
+          Array.prototype.forEach.call(seg.children, function(x){ x.classList.remove('on'); });
+          b.classList.add('on');
+        });
+        seg.appendChild(b);
+      });
+      wrap.appendChild(seg);
+    } else if(p.k === 'num'){
+      var lb2 = document.createElement('label'); lb2.className='f'; lb2.textContent = p.label;
+      wrap.appendChild(lb2);
+      var inp = document.createElement('div'); inp.className = 'inp mono';
+      inp.style.cssText = 'width:110px;color:var(--ink)';
+      inp.textContent = p.v;
+      wrap.appendChild(inp);
+    } else if(p.k === 'note'){
+      wrap.style.cssText = 'flex:1 1 100%;min-width:100%';
+      var h = document.createElement('div'); h.className = 'hint'; h.textContent = p.t;
+      wrap.appendChild(h);
+    }
+    box.appendChild(wrap);
+  });
+  document.getElementById('outinfo').textContent = md.out || '';
+}
+
+function dsOpen(){
+  var empty = document.getElementById('dsempty');
+  var path  = document.getElementById('dspath');
+  var work  = document.getElementById('dswork');
+  empty.classList.add('out');
+  setTimeout(function(){
+    empty.style.display = 'none';
+    path.classList.add('in');
+    requestAnimationFrame(function(){
+      work.classList.add('in');
+      selectMod('filter');
+    });
+  }, 220);
+}
+function dsReset(){
+  var empty = document.getElementById('dsempty');
+  document.getElementById('dswork').classList.remove('in');
+  document.getElementById('lvl2').classList.remove('in');
+  document.getElementById('lvl3').classList.remove('in');
+  document.getElementById('dspath').classList.remove('in');
+  setTimeout(function(){
+    empty.style.display = '';
+    requestAnimationFrame(function(){ empty.classList.remove('out'); });
+  }, 220);
+}
+/* ---------- 合成器：模型列表 ---------- */
+var MODELS = [
+  {n:'384wf',      a:'liae-ud · res384 · ae352 · iter 128,400', ex:'已导出 DFM',  cls:'ok'},
+  {n:'model_004',  a:'df-ud · res416 · ae320 · iter 41,200',    ex:'未导出',      cls:'n'},
+  {n:'New416',     a:'df-ud · res416 · ae320 · iter 96,000',    ex:'导出中 62%',  cls:'wn'},
+  {n:'DFLitetest', a:'df-udt-l · res256 · ae256 · iter 0',      ex:'未导出',      cls:'n'}
+];
+
+function renderModels(){
+  var box = document.getElementById('mlist');
+  if(!box) return;
+  MODELS.forEach(function(m, i){
+    var r = document.createElement('div');
+    r.className = 'mrow';
+    r.innerHTML = '<div class="nm2">' + m.n + '</div>'
+      + '<div class="ar">' + m.a + '</div>'
+      + '<span class="tag ' + m.cls + '">' + m.ex + '</span>'
+      + '<button class="mini">' + (m.ex.indexOf('已导出') === 0 ? '重新导出' : '导出') + '</button>';
+    box.appendChild(r);
+  });
+}
+renderModels();
+
+/* ---------- 帧跳跃步进器 ---------- */
+(function(){
+  var inp = document.getElementById('skip');
+  if(!inp) return;
+  Array.prototype.forEach.call(document.querySelectorAll('.num .nb'), function(b){
+    b.addEventListener('click', function(){
+      var v = Math.max(1, Math.min(30, parseInt(inp.value || '1', 10) + parseInt(b.getAttribute('data-d'), 10)));
+      inp.value = String(v);
+    });
+  });
+})();
+
+/* ---------- Toast ---------- */
+function toast(title, sub, kind){
+  var root = document.getElementById('toastroot');
+  if(!root) return;
+  var el = document.createElement('div');
+  el.className = 'toast';
+  el.innerHTML = '<svg class="ic ti" style="stroke:' + (kind === 'err' ? 'var(--bad)' : 'var(--ok)') + ';opacity:1">'
+    + '<use href="#i-' + (kind === 'err' ? 'close' : 'check') + '"/></svg>'
+    + '<div><div class="tt">' + title + '</div><div class="ts">' + sub + '</div></div>'
+    + '<button class="tx">×</button><div class="tb"><i></i></div>';
+  el.querySelector('.tx').addEventListener('click', function(){ el.remove(); });
+  root.appendChild(el);
+  setTimeout(function(){ el.remove(); }, 3600);
+}
+
+/* ---------- 提取：点击后进入运行态（按钮禁用 + 进度推进） ---------- */
+Array.prototype.forEach.call(document.querySelectorAll('#p-extract .btn'), function(b){
+  if(b.textContent.indexOf('开始提取') < 0) return;
+  b.addEventListener('click', function(){
+    if(b.disabled) return;
+    var bar = document.querySelector('#p-extract .bar > i');
+    var p = 37;
+    bar.style.width = p + '%';
+    b.disabled = true;
+    b.textContent = '正在提取…';
+    var t = setInterval(function(){
+      p = Math.min(100, p + 4);
+      bar.style.width = p + '%';
+      if(p >= 100){
+        clearInterval(t);
+        toast('提取完成', '342 个文件 · 输出 4,186 张脸', 'ok');
+        setTimeout(function(){
+          b.disabled = false;
+          b.textContent = '开始提取';
+          bar.style.width = '37%';
+        }, 800);
+      }
+    }, 110);
+  });
+});
+
+/* ---------- 合成服务启停 ---------- */
+(function(){
+  var b = document.getElementById('btnmerge');
+  if(!b) return;
+  var on = false;
+  b.addEventListener('click', function(){
+    on = !on;
+    var d = document.getElementById('svcdot');
+    var t = document.getElementById('svctitle');
+    var u = document.getElementById('svcurl');
+    var st = 'display:inline-flex;align-items:center;gap:8px;padding:14px 30px;font-size:14.5px;';
+    if(on){
+      d.classList.add('on');
+      t.textContent = '合成服务运行中';
+      u.textContent = 'http://127.0.0.1:8001 · 已在浏览器打开';
+      b.className = 'btn ghost lg';
+      b.style.cssText = st;
+      b.innerHTML = '<svg class="ic" style="stroke:var(--ink-2);opacity:1"><use href="#i-power"/></svg>停止服务';
+    } else {
+      d.classList.remove('on');
+      t.textContent = '合成服务未启动';
+      u.textContent = '启动后在浏览器里打开工作台，模型在网页里再选';
+      b.className = 'btn lg';
+      b.style.cssText = st;
+      b.innerHTML = '<svg class="ic" style="stroke:var(--on-accent);opacity:1"><use href="#i-play"/></svg>启动合成器';
+    }
+  });
+})();
+
+renderMods();
+</script>
+</body>
+</html>

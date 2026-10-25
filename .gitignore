@@ -1,0 +1,40 @@
+# ---- 用户数据，永不入库 ----
+/workspace/*
+!/workspace/.gitkeep
+
+# ---- 内置 Python 运行时 ----
+/_python/
+
+# 注意：不要写成 /docs/ —— 那会连本仓库根级的 docs/ 一起忽略
+
+# ---- 依赖 ----
+node_modules/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+/build/
+/dist/
+
+# ---- 本地产物 / 开发脚本 ----
+/_shots/
+/_trash/
+/_*.ps1
+/_*.txt
+/_*.err
+/_*.out
+/_shot.py
+/_dbg*.py
+/_anim_test.py
+/_run_*.log
+
+# ---- 机器相关 / 私密 ----
+workspace.txt
+.env
+*.local
+*.log
+*.tmp
+.DS_Store
+Thumbs.db

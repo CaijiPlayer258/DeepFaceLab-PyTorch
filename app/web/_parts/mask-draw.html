@@ -1,0 +1,90 @@
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     遮罩绘制（#p-tool-mask）增量补全片段
+     ───────────────────────────────────────────────────────────────────────────
+     现状：4.1\app\web\index.html 第 198–219 行的 #p-tool-mask 已有完整骨架
+           （数据集 / 遮罩模型 seg / 服务端口 / 启动遮罩编辑器 / 在浏览器打开），
+           方向与 4.0 一致，**不整块覆盖**。
+
+     对照：4.0\ui\components\page_maskprocessor\page_maskprocessor.py
+           _on_launch / _on_export_onnx / _on_apply_xseg / _refresh_xseg_file_list
+
+     用法：下面 ① ② ③ ④ 按标号局部插入或替换，四处互不影响。
+     ═══════════════════════════════════════════════════════════════════════════ -->
+
+
+<!-- ┌─────────────────────────────────────────────────────────────────────────┐
+     │ ① 插入：第一张 .card 内，「遮罩模型」那一行（.seg 所在 .dbgrow）之后、   │
+     │        「服务端口」那一行之前。                                          │
+     │ 来源：4.0 同一张卡里的 模型文件 / 分辨率 / 反转遮罩 三项控件。            │
+     └─────────────────────────────────────────────────────────────────────────┘ -->
+
+        <div class="dbgrow"><label class="f">模型文件</label>
+          <select class="mgsel" id="mdModelFile"
+                  title="4.0 扫 workspace\model\XSegLite\ 下的 .onnx / .engine，默认优先 .engine">
+            <!-- MISSING: 真实列表由 4.0 _refresh_xseg_file_list() 扫目录得到，
+                 .engine 文件名不固定，下面三项只是静态占位 -->
+            <option>（未检测到模型文件）</option>
+            <option>xseglite.onnx</option>
+            <option>xseglite.engine</option>
+          </select>
+        </div>
+
+        <div class="dbgrow"><label class="f">分辨率</label>
+          <!-- 4.0 是自由文本输入，默认 256（SiLabeledLineEdit "分辨率" placeholder 默认 256），
+               源码里没有枚举值，所以这里不做 seg -->
+          <input class="mgtiny" id="mdRes" value="256" title="默认 256">
+        </div>
+
+        <div class="dbgrow"><label class="f">反转遮罩</label>
+          <!-- 4.0: addItems(["否", "是"]), 默认「否」；选「是」→ 命令追加 --invert -->
+          <div class="seg" id="mdInvert"><b class="on">否</b><b>是</b></div>
+        </div>
+
+
+<!-- ┌─────────────────────────────────────────────────────────────────────────┐
+     │ ② 替换：第二张 .card（「操作」卡）整体 —— 只多了 id 和「应用遮罩」，      │
+     │        两个原按钮原样保留。                                              │
+     │ 来源：4.0 的「应用遮罩」按钮（_on_apply_xseg → DataAugmenter）。          │
+     └─────────────────────────────────────────────────────────────────────────┘ -->
+
+        <div class="card" style="margin-top:14px">
+          <div class="cardhd"><b>操作</b><span class="hint" id="mdState">未启动</span></div>
+          <div class="dbgacts">
+            <button class="btn pri" id="mdStart">启动遮罩编辑器</button>
+            <button class="mini" id="mdOpen">在浏览器打开</button>
+          </div>
+          <!-- 第二行单独放批处理动作，和「启动服务」分开，避免一行两个主按钮互相抢焦点 -->
+          <div class="dbgacts" style="margin-top:10px">
+            <button class="btn pri" id="mdApply">应用遮罩</button>
+            <span class="hint" style="align-self:center">写回已对齐的人脸集（DataAugmenter）</span>
+          </div>
+        </div>
+
+
+<!-- ┌─────────────────────────────────────────────────────────────────────────┐
+     │ ③ 新增：整张卡，放在 #p-tool-mask 的末尾（② 那张卡之后）。               │
+     │ 来源：4.0「ONNX 导出」分组 —— 导出 XSeg → ONNX / 导出 XSegLite → ONNX。   │
+     └─────────────────────────────────────────────────────────────────────────┘ -->
+
+        <div class="card" style="margin-top:14px">
+          <div class="cardhd"><b>导出 ONNX</b><span class="hint">导出后可给 MaskProcessor / DataAugmenter 使用</span></div>
+          <div class="dbgacts">
+            <button class="mini" id="mdExportXSeg"
+                    title="python models/Model_XSeg/export_XSeg.py">导出 XSeg → ONNX</button>
+            <button class="mini" id="mdExportLite"
+                    title="python models/Model_XSegLite/export_XSegLite.py">导出 XSegLite → ONNX</button>
+          </div>
+        </div>
+
+
+<!-- ┌─────────────────────────────────────────────────────────────────────────┐
+     │ ④ 替换：数据集路径的 value 属性（不是整行，只改 value 一处）。           │
+     │                                                                         │
+     │   改前：value="workspace&#92;data_src&#92;"                                        │
+     │   改后：value="workspace&#92;data_src&#92;aligned"                                  │
+     │                                                                         │
+     │ 理由：4.0 的「人脸集路径」默认值是 project_root/workspace/data_src/aligned │
+     │       （page_maskprocessor.py 第 148 行），而且 DataAugmenter 只处理已对齐  │
+     │       的 DFLJPG（XSegAugmenter._scan_images + _save_mask_fast 需要 APP15）， │
+     │       指到 data_src\ 会扫到未对齐的原图。                                  │
+     └─────────────────────────────────────────────────────────────────────────┘ -->

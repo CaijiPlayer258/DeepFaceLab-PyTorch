@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>主题色对比 · Linear 体系 vs Material 3</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;padding:34px 38px 70px;font-family:-apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+       background:#fff;color:#0c0d0f}
+  h1{font-size:21px;margin:0 0 6px;letter-spacing:-.02em}
+  h2{font-size:13px;margin:34px 0 12px;letter-spacing:.06em;text-transform:uppercase;opacity:.5}
+  .hint{font-size:12.5px;color:#62656c;line-height:1.7;max-width:900px}
+  .tabs{display:flex;gap:8px;margin:16px 0 6px;flex-wrap:wrap}
+  .tab{display:flex;align-items:center;gap:8px;padding:7px 13px 7px 8px;border:1px solid #e5e6e9;
+       border-radius:999px;font-size:12.5px;cursor:pointer;background:#fff}
+  .tab i{width:16px;height:16px;border-radius:50%;display:block}
+  .tab.on{outline:2px solid #0c0d0f;outline-offset:2px}
+  .mode{display:flex;gap:6px;margin-left:auto}
+  .mode button{border:1px solid #e5e6e9;background:#fff;border-radius:8px;padding:6px 12px;font:inherit;font-size:12px;cursor:pointer}
+  .mode button.on{background:#0c0d0f;color:#fff;border-color:#0c0d0f}
+
+  .duo{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:14px}
+  .col h3{font-size:12.5px;margin:0 0 8px;font-weight:650;letter-spacing:.02em}
+  .col h3 span{font-weight:400;opacity:.55;margin-left:6px;font-size:11.5px}
+  .frame{border-radius:16px;padding:22px;min-height:330px}
+
+  .app{display:grid;grid-template-columns:132px 1fr;gap:14px}
+  .side{font-size:11.5px;display:flex;flex-direction:column;gap:7px}
+  .side b{font-weight:600;font-size:12px;margin-bottom:4px}
+  .side span{padding:5px 8px;border-radius:7px}
+  .main{display:flex;flex-direction:column;gap:10px}
+  .cardx{border-radius:12px;padding:14px}
+  .cardx .t{font-size:12.5px;font-weight:650;margin-bottom:10px}
+  .rowr{display:flex;align-items:center;justify-content:space-between;font-size:11.5px;padding:6px 0}
+  .field{border-radius:8px;padding:7px 10px;font-size:11.5px;font-family:ui-monospace,Consolas,monospace}
+  .track{height:6px;border-radius:999px;overflow:hidden}
+  .track i{display:block;height:100%;width:62%;border-radius:999px}
+  .btns{display:flex;gap:8px;margin-top:10px}
+  .b{border-radius:8px;padding:7px 14px;font-size:11.5px;font-weight:600;border:0}
+  .sw{width:34px;height:19px;border-radius:10px;position:relative}
+  .sw i{position:absolute;top:2px;right:2px;width:15px;height:15px;border-radius:50%;display:block}
+
+  table{border-collapse:collapse;width:100%;font-size:11.5px;margin-top:10px}
+  td{padding:5px 8px;border-bottom:1px solid #eee}
+  td.c{width:34px}
+  td.c div{width:26px;height:18px;border-radius:5px;border:1px solid rgba(0,0,0,.12)}
+  td.k{font-family:ui-monospace,Consolas,monospace;width:210px;opacity:.75}
+  @media (prefers-color-scheme: dark){ body{background:#0b0b0d;color:#f5f5f7}
+    .hint{color:#9a9ea8} .tab,.mode button{background:#141418;border-color:#26262d;color:#f5f5f7}
+    .mode button.on{background:#f5f5f7;color:#0c0d0f} td{border-color:#22232a} }
+</style>
+</head>
+<body>
+<h1>主题色对比 · Linear 体系 vs Material 3</h1>
+<div class="hint">
+  同一套种子色，分别按两套体系生成 token，再画成同一个界面（侧栏 + 参数卡 + 输入框 + 开关 + 进度条 + 按钮）。<br>
+  <b>Linear</b>：一条中性灰阶（5 档）+ 单一强调色 + 状态色，描边细、层次靠灰阶拉开。<br>
+  <b>Material 3</b>：五条色阶（primary / secondary / tertiary / neutral / neutral-variant）× 13 阶，语义角色二十多个，
+  容器色是"带色相的表面"，层级靠色阶差。
+</div>
+
+<div class="tabs" id="tabs"></div>
+<div class="tabs" style="margin-top:2px">
+  <div class="mode" style="margin-left:0">
+    <button data-m="dark" class="on">深色</button><button data-m="light">浅色</button>
+  </div>
+</div>
+
+<div class="duo">
+  <div class="col"><h3>Linear 体系<span>单一强调色 · 中性灰阶</span></h3><div class="frame" id="linFrame"></div></div>
+  <div class="col"><h3>Material 3<span>五色阶 · 语义角色</span></h3><div class="frame" id="mdFrame"></div></div>
+</div>
+
+<h2>怎么选（就这个应用而言）</h2>
+<div class="duo" style="gap:22px">
+  <div class="col hint" style="max-width:none">
+    <b>Linear 体系</b><br>
+    · 变量少：约 15 个，中性灰阶 5 档 + 单一强调色 + 状态色<br>
+    · 强调色保持饱和（深色下按钮仍是实心靛蓝 + 白字）<br>
+    · 层次全靠灰阶和 1px 描边，信息密度大的表格/参数页不糊<br>
+    · 需要自己定 accent 的 hover / press / soft 三档
+  </div>
+  <div class="col hint" style="max-width:none">
+    <b>Material 3</b><br>
+    · 变量多：五条色阶 × 13 阶，语义角色 20 多个<br>
+    · 容器色带色相（surface-container 是"带颜色的表面"），组件有材质感<br>
+    · 深色模式 primary 取 tone 80（浅色调），按钮是浅底深字，整体更柔<br>
+    · 对比度偏低，密集列表里"哪些是可点的"不如 Linear 直观
+  </div>
+</div>
+
+<h2>Token 对照</h2>
+<div class="duo">
+  <div class="col"><table id="linTable"></table></div>
+  <div class="col"><table id="mdTable"></table></div>
+</div>
+
+<script>
+/* ---------- 色彩工具 ---------- */
+function s2l(c){c/=255;return c<=0.04045?c/12.92:Math.pow((c+0.055)/1.055,2.4)}
+function l2s(c){c=c<=0.0031308?c*12.92:1.055*Math.pow(c,1/2.4)-0.055;return Math.max(0,Math.min(255,Math.round(c*255)))}
+function hex(rgb){return "#"+rgb.map(v=>v.toString(16).padStart(2,"0")).join("")}
+function parse(h){h=h.replace("#","");return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)]}
+function rgb2ok(r,g,b){var R=s2l(r),G=s2l(g),B=s2l(b);
+  var l=Math.cbrt(.4122214708*R+.5363325363*G+.0514459929*B),
+      m=Math.cbrt(.2119034982*R+.6806995451*G+.1073969566*B),
+      s=Math.cbrt(.0883024619*R+.2817188376*G+.6299787005*B);
+  return [.2104542553*l+.7936177850*m-.0040720468*s,
+          1.9779984951*l-2.4285922050*m+.4505937099*s,
+          .0259040371*l+.7827717662*m-.8086757660*s]}
+function ok2rgb(L,a,b){var l=Math.pow(L+.3963377774*a+.2158037573*b,3),
+  m=Math.pow(L-.1055613458*a-.0638541728*b,3),s=Math.pow(L-.0894841775*a-1.2914855480*b,3);
+  return [l2s(4.0767416621*l-3.3077115913*m+.2309699292*s),
+          l2s(-1.2684380046*l+2.6097574011*m-.3413193965*s),
+          l2s(-.0041960863*l-.7034186147*m+1.7076147010*s)]}
+function toneToL(t){var Y=t<=8?t/903.3:Math.pow((t+16)/116,3);return Math.cbrt(Math.max(0,Math.min(1,Y)))}
+function toneColor(hue,C,t){
+  var L=toneToL(t);
+  C=Math.max(0,C)*Math.min(1,t/22,(100-t)/22);
+  var h=hue,rgb=null;
+  for(var iter=0;iter<3;iter++){
+    var lo=0,hi=Math.max(C,1e-4),best=null;
+    for(var i=0;i<8;i++){                       /* 二分找最大不截断的彩度，避免反馈发散 */
+      var cc=(lo+hi)/2;
+      var r=ok2rgb(L,cc*Math.cos(h),cc*Math.sin(h));
+      var bk=rgb2ok(r[0],r[1],r[2]);
+      var dh=Math.atan2(bk[2],bk[1])-h;
+      if(Math.abs(dh)<0.06){lo=cc;best=r}else{hi=cc}
+    }
+    rgb=best||ok2rgb(L,0,0);
+    var bk2=rgb2ok(rgb[0],rgb[1],rgb[2]);
+    var d=Math.atan2(bk2[2],bk2[1])-hue;
+    while(d>Math.PI)d-=2*Math.PI; while(d<-Math.PI)d+=2*Math.PI;
+    if(Math.abs(d)<0.02)break;
+    h-=d;                                        /* 只修正色相 */
+  }
+  return hex(rgb);
+}
+function oklch(h){var c=parse(h),o=rgb2ok(c[0],c[1],c[2]);
+  return {hue:Math.atan2(o[2],o[1]),C:Math.hypot(o[1],o[2])}}
+function onLight(h){var c=parse(h),L=rgb2ok(c[0],c[1],c[2])[0];return L>.55?"#0c0d0f":"#f7f8f8"}
+
+/* ---------- Linear token ---------- */
+function linearTokens(seed, dark){
+  var k=oklch(seed), hue=k.hue, C=k.C;
+  function g(t){return toneColor(hue, C*0.10, t)}      /* 中性灰阶带一丝色相（Linear 的灰是偏蓝的） */
+  var A={};
+  if(dark){
+    A["bg"]="#08090a"; A["bg-subtle"]=g(8); A["surface-1"]=g(11); A["surface-2"]=g(14); A["surface-3"]=g(18);
+    A["border"]=g(24); A["border-strong"]=g(32);
+    A["text"]="#f7f8f8"; A["text-dim"]="#9b9ea8"; A["text-mute"]="#6b6f78";
+    A["accent"]=seed; A["accent-hover"]=toneColor(hue,C,72); A["accent-press"]=toneColor(hue,C,42);
+    A["accent-soft"]=toneColor(hue,C*.8,22); A["accent-ink"]=onLight(seed);
+    A["focus"]=toneColor(hue,C,65);
+  }else{
+    A["bg"]="#ffffff"; A["bg-subtle"]=g(98); A["surface-1"]="#ffffff"; A["surface-2"]=g(97); A["surface-3"]=g(94);
+    A["border"]=g(90); A["border-strong"]=g(84);
+    A["text"]="#0c0d0f"; A["text-dim"]="#5f6269"; A["text-mute"]="#8a8f98";
+    A["accent"]=seed; A["accent-hover"]=toneColor(hue,C,52); A["accent-press"]=toneColor(hue,C,36);
+    A["accent-soft"]=toneColor(hue,C*.35,94); A["accent-ink"]="#ffffff";
+    A["focus"]=toneColor(hue,C,60);
+  }
+  return A;
+}
+
+/* ---------- Material 3 token ---------- */
+var ALL=[0,6,8,10,11,12,14,17,18,20,24,30,32,40,50,60,65,70,72,80,84,87,90,94,96,97,98,99,100];
+function m3(seed, dark){
+  var k=oklch(seed), hue=k.hue, C=k.C;
+  function row(h,c){var o={};ALL.forEach(function(t){o[t]=toneColor(h,c,t)});return o}
+  var pr=row(hue,C), se=row(hue,C*.38), te=row(hue+1.05,C*.62),
+      nu=row(hue,C*.07), nv=row(hue,C*.18);
+  var S;
+  if(dark){
+    S={"primary":pr[80],"on-primary":pr[20],"primary-container":pr[30],"on-primary-container":pr[90],
+       "secondary":se[80],"secondary-container":se[30],"on-secondary-container":se[90],
+       "surface":nu[6],"surface-container-low":nu[10],"surface-container":nu[12],
+       "surface-container-high":nu[17],"surface-container-highest":nu[22]||nu[20],
+       "on-surface":nu[90],"on-surface-variant":nv[80],
+       "outline":nv[60],"outline-variant":nv[30],"accent-ink":nu[10]};
+    S["accent"]=S["primary"]; S["border"]=S["outline-variant"]; S["border-strong"]=S["outline"];
+    S["text"]=S["on-surface"]; S["text-dim"]=S["on-surface-variant"]; S["text-mute"]=nv[60];
+    S["bg"]=S["surface"]; S["bg-subtle"]=S["surface-container-low"]; S["surface-1"]=S["surface-container"];
+    S["surface-2"]=S["surface-container-high"]; S["surface-3"]=S["surface-container-highest"];
+    S["accent-soft"]=pr[30]; S["accent-hover"]=pr[90]; S["accent-press"]=pr[70];
+  }else{
+    S={"primary":pr[40],"on-primary":pr[100],"primary-container":pr[90],"on-primary-container":pr[10],
+       "secondary":se[40],"secondary-container":se[90],"on-secondary-container":se[10],
+       "surface":nu[98],"surface-container-low":nu[96],"surface-container":nu[94],
+       "surface-container-high":nu[92]||nu[90],"surface-container-highest":nu[90],
+       "on-surface":nu[10],"on-surface-variant":nv[30],
+       "outline":nv[50],"outline-variant":nv[80],"accent-ink":pr[100]};
+    S["accent"]=S["primary"]; S["border"]=S["outline-variant"]; S["border-strong"]=S["outline"];
+    S["text"]=S["on-surface"]; S["text-dim"]=S["on-surface-variant"]; S["text-mute"]=nv[50];
+    S["bg"]=S["surface"]; S["bg-subtle"]=S["surface-container-low"]; S["surface-1"]=nu[100]||"#fff";
+    S["surface-2"]=S["surface-container-low"]; S["surface-3"]=S["surface-container"];
+    S["accent-soft"]=pr[90]; S["accent-hover"]=pr[30]; S["accent-press"]=pr[30];
+  }
+  return S;
+}
+
+/* ---------- 同一个界面 ---------- */
+function mock(T, dark){
+  var mono = "ui-monospace,Consolas,monospace";
+  return '<div class="app">' +
+    '<div class="side" style="background:' + T["bg-subtle"] + ";color:" + T["text-dim"] + ';border-radius:12px;padding:12px">' +
+      '<b style="color:' + T.text + '">DeepFaceLab</b>' +
+      '<span style="background:' + T["accent-soft"] + ";color:" + T.accent + '">提取器</span>' +
+      '<span>数据处理</span><span>训练器</span><span>合成器</span><span>设置</span>' +
+    "</div>" +
+    '<div class="main">' +
+      '<div class="cardx" style="background:' + T["surface-1"] + ";border:1px solid " + T.border + '">' +
+        '<div class="t" style="color:' + T.text + '">训练参数</div>' +
+        '<div class="rowr" style="color:' + T["text-dim"] + '">批次大小<b style="color:' + T.text + '">4</b></div>' +
+        '<div class="rowr" style="color:' + T["text-dim"] + '">训练精度<b style="color:' + T.text + '">bf16</b></div>' +
+        '<div class="field" style="background:' + T["surface-2"] + ";border:1px solid " + T.border + ";color:" + T.text + ';margin-top:4px">workspace\\data_src\\</div>' +
+        '<div class="rowr" style="color:' + T["text-dim"] + '">遮罩训练<span class="sw" style="background:' + T.accent + '"><i style="background:' + T["accent-ink"] + '"></i></span></div>' +
+        '<div class="track" style="background:' + T["surface-3"] + ';margin-top:8px"><i style="background:' + T.accent + '"></i></div>' +
+        '<div class="btns"><button class="b" style="background:' + T.accent + ";color:" + T["accent-ink"] + '">开始训练</button>' +
+        '<button class="b" style="background:' + T["surface-2"] + ";color:" + T.text + ";border:1px solid " + T["border-strong"] + '">恢复默认</button></div>' +
+      "</div>" +
+    "</div></div>";
+}
+
+/* ---------- 状态 ---------- */
+var SEEDS=[["#5D6CCF","Linear 靛蓝"],["#7C5CFF","紫罗兰"],["#4E9CF5","天蓝"],
+           ["#2FB6A8","青绿"],["#E0823D","琥珀"],["#E5484D","玫红"]];
+var cur=SEEDS[0][0], mode="dark";
+
+function render(){
+  var L=linearTokens(cur,mode==="dark"), M=m3(cur,mode==="dark");
+  var frameBgL = mode==="dark" ? "#08090a" : "#f7f7f8";
+  var frameBgM = M.surface;
+  document.getElementById("linFrame").style.cssText="background:"+frameBgL+";border:1px solid "+L.border;
+  document.getElementById("linFrame").innerHTML=mock(L, mode==="dark");
+  document.getElementById("mdFrame").style.cssText="background:"+frameBgM+";border:1px solid "+M.border;
+  document.getElementById("mdFrame").innerHTML=mock(M, mode==="dark");
+
+  function table(T, keys){
+    return keys.filter(function(k){return T[k]}).map(function(k){
+      var c=T[k];
+      return '<tr><td class="c"><div style="background:'+c+'"></div></td><td class="k">'+k+'</td>'+
+             '<td style="font-family:'+mono()+';opacity:.7">'+c+"</td></tr>";
+    }).join("");
+  }
+  function mono(){return "ui-monospace,Consolas,monospace"}
+  document.getElementById("linTable").innerHTML=table(L,
+    ["bg","bg-subtle","surface-1","surface-2","surface-3","border","border-strong",
+     "text","text-dim","text-mute","accent","accent-hover","accent-press","accent-soft","focus"]);
+  document.getElementById("mdTable").innerHTML=table(M,
+    ["primary","on-primary","primary-container","on-primary-container","secondary","secondary-container",
+     "surface","surface-container-low","surface-container","surface-container-high","surface-container-highest",
+     "on-surface","on-surface-variant","outline","outline-variant"]);
+}
+
+document.getElementById("tabs").innerHTML=SEEDS.map(function(s,i){
+  return '<div class="tab'+(i===0?" on":"")+'" data-c="'+s[0]+'"><i style="background:'+s[0]+'"></i>'+s[1]+" "+s[0]+"</div>";
+}).join("");
+document.querySelectorAll(".tab").forEach(function(el){
+  el.onclick=function(){document.querySelectorAll(".tab").forEach(function(x){x.classList.remove("on")});
+    el.classList.add("on"); cur=el.dataset.c; render();};
+});
+document.querySelectorAll(".mode button").forEach(function(b){
+  b.onclick=function(){document.querySelectorAll(".mode button").forEach(function(x){x.classList.remove("on")});
+    b.classList.add("on"); mode=b.dataset.m; render();};
+});
+render();
+</script>
+</body>
+</html>

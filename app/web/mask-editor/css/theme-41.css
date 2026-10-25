@@ -1,0 +1,613 @@
+
+/* 主题切换时的过渡：只在切换瞬间生效（由 JS 挂/摘 .theme-fade） */
+.theme-fade,
+.theme-fade *,
+.theme-fade *::before,
+.theme-fade *::after {
+  transition:
+    background-color .24s cubic-bezier(.25,.46,.45,.94),
+    color .24s cubic-bezier(.25,.46,.45,.94),
+    border-color .24s cubic-bezier(.25,.46,.45,.94),
+    box-shadow .24s cubic-bezier(.25,.46,.45,.94) !important;
+}
+
+/* ============================================================================
+   字体：iframe 是独立文档，不加载 app.css
+   —— @font-face 和 --font 变量必须在这里声明，否则 var(--font) 会落空，
+      整页退回 Times New Roman / 系统默认
+   ============================================================================ */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/fonts/inter-latin-400-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/static/fonts/inter-latin-500-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/fonts/inter-latin-600-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/static/fonts/inter-latin-700-normal.woff2") format("woff2");
+}
+
+:root {
+  --font: "Inter", "Noto Sans SC", "Source Han Sans SC", "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+}
+
+html, body, .app-shell,
+button, input, select, textarea, label, span, div, b, p, td, th {
+  font-family: var(--font);
+}
+
+/* ============================================================================
+   4.1 主题覆盖层
+   底子还是 MaskProcessor/ui 的原版布局（title-bar / toolbar / canvas / panel /
+   status-bar 一个不动），只把配色、圆角、字号换成 4.1 的 token：
+     主色 #4F46E5 · 白底内容 · 浅灰面板 · Inter + 思源黑体 · 卡片 12px / 控件 8px
+   深浅色跟随 <html data-theme="dark">（4.1 的切换会同步过来）
+   ============================================================================ */
+
+:root {
+  /* 主色退到"墨色"：按钮、滑块、选中态全走黑白 */
+  --m-accent: #17171a;
+  --m-accent-soft: rgba(0, 0, 0, 0.055);
+  --m-accent-line: rgba(0, 0, 0, 0.16);
+  /* 真正的强调色，只留给焦点环 */
+  --m-focus: #4F46E5;
+  --m-focus-soft: rgba(79, 70, 229, 0.14);
+  --m-ink-1: #17171a;
+  --m-ink-2: #55555f;
+  --m-ink-3: #8b8b96;
+  --m-line: rgba(0, 0, 0, 0.09);
+  --m-line-strong: rgba(0, 0, 0, 0.16);
+  --m-panel: #ffffff;
+  --m-panel-2: #f4f4f6;
+  --m-stage: #f7f7f9;
+  --m-hover: rgba(0, 0, 0, 0.045);
+}
+
+html[data-theme="dark"] {
+  --m-accent: #f2f2f5;
+  --m-accent-soft: rgba(255, 255, 255, 0.075);
+  --m-accent-line: rgba(255, 255, 255, 0.18);
+  --m-ink-1: #ededf0;
+  --m-ink-2: #a8a8b4;
+  --m-ink-3: #6e6e7a;
+  --m-line: rgba(255, 255, 255, 0.10);
+  --m-line-strong: rgba(255, 255, 255, 0.18);
+  --m-panel: #17171a;
+  --m-panel-2: #1e1e22;
+  --m-stage: #121214;
+  --m-hover: rgba(255, 255, 255, 0.06);
+}
+
+/* ---------- 骨架 ---------- */
+html, body { background: var(--m-stage) !important; color: var(--m-ink-1) !important; } .app-shell { background: var(--m-stage) !important; }
+
+/* ---------- 标题栏 ---------- */
+.title-bar {
+  background: var(--m-panel) !important;
+  border-bottom: 1px solid var(--m-line) !important;
+  height: 46px !important;
+  padding: 0 14px !important;
+}
+
+/* ---------- 左工具栏 ---------- */
+.toolbar {
+  background: var(--m-panel) !important;
+  border-right: 1px solid var(--m-line) !important;
+  padding: 8px 6px !important;
+}
+.tool-btn {
+  border-radius: 8px !important;
+  color: var(--m-ink-3) !important;
+  width: 34px !important; height: 34px !important;
+  margin-bottom: 4px;
+}
+.tool-btn:hover { background: var(--m-hover) !important; color: var(--m-ink-1) !important; }
+.tool-btn.active {
+  background: var(--m-accent-soft) !important;
+  color: var(--m-accent) !important;
+  box-shadow: inset 0 0 0 1px var(--m-accent-line);
+}
+.tool-btn__tooltip { background: var(--m-panel) !important; color: var(--m-ink-1) !important; border: 1px solid var(--m-line) !important; }
+
+/* ---------- 中间：模式条 + 画布 + 状态栏 ---------- */
+.mode-bar {
+  background: var(--m-panel) !important;
+  border-bottom: 1px solid var(--m-line) !important;
+  height: 44px !important;
+  padding: 0 12px !important;
+}
+.mode-toggle { background: var(--m-panel-2) !important; border-radius: 9px !important; padding: 2px !important; }
+.mode-toggle__btn {
+  border-radius: 7px !important;
+  color: var(--m-ink-3) !important;
+  font-size: 11.5px !important;
+  padding: 4px 12px !important;
+}
+.mode-toggle__btn.active {
+  background: var(--m-panel) !important;
+  color: var(--m-accent) !important;
+  font-weight: 600 !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.10) !important;
+}
+.brush-slider__label { color: var(--m-ink-2) !important; }
+.brush-slider__input { background: var(--m-line-strong) !important; }
+.brush-slider__input::-webkit-slider-thumb { background: var(--m-accent) !important; }
+.brush-slider__input::-moz-range-thumb { background: var(--m-accent) !important; }
+
+.canvas-container { background: var(--m-stage) !important; }
+
+.status-bar {
+  background: var(--m-panel) !important;
+  border-top: 1px solid var(--m-line) !important;
+  color: var(--m-ink-3) !important;
+  height: 28px !important;
+  font-size: 10.5px !important;
+}
+.status-bar__dot--success { background: var(--m-accent) !important; }
+.status-bar__dot--error { background: #ef4444 !important; }
+
+/* ---------- 右面板 ---------- */
+.right-panel {
+  background: var(--m-panel) !important;
+  border-left: 1px solid var(--m-line) !important;
+}
+.panel-section { border-bottom: 1px solid var(--m-line) !important; padding: 10px 12px !important; }
+.panel-section__header { margin-bottom: 8px !important; }
+.panel-section__title {
+  color: var(--m-ink-3) !important;
+  font-size: 10px !important;
+  letter-spacing: 0.06em !important;
+  font-weight: 600 !important;
+}
+.panel-section__action { color: var(--m-ink-3) !important; font-size: 10px !important; }
+
+/* SAM 标题右侧那个"已启用"小徽标（原来是拼错的 .mkbade，等于没有样式） */
+.mkbadge {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--m-accent) 14%, transparent);
+  color: var(--m-accent) !important;
+  font-size: 10px !important;
+  line-height: 16px;
+  letter-spacing: .2px;
+}
+/* 状态栏右侧那句操作提示：小字、灰、超长省略，不能把状态栏撑变形 */
+.ctrl-hint {
+  color: var(--m-ink-3) !important;
+  font-size: 10px !important;
+  max-width: 40vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-list { background: transparent !important; }
+.file-item {
+  border-radius: 7px !important;
+  color: var(--m-ink-2) !important;
+  font-size: 11.5px !important;
+  padding: 6px 8px !important;
+}
+.file-item:hover { background: var(--m-hover) !important; color: var(--m-ink-1) !important; }
+.file-item.active { background: var(--m-accent-soft) !important; color: var(--m-accent) !important; }
+
+.model-select { background: var(--m-panel-2) !important; border-radius: 8px !important; padding: 2px !important; }
+.model-select__btn {
+  border-radius: 6px !important;
+  color: var(--m-ink-3) !important;
+  font-size: 11px !important;
+  padding: 4px 8px !important;
+}
+.model-select__btn.active {
+  background: var(--m-panel) !important;
+  color: var(--m-accent) !important;
+  font-weight: 600 !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.10) !important;
+}
+
+.tag {
+  border-radius: 7px !important;
+  border: 1px solid var(--m-line) !important;
+  background: var(--m-panel-2) !important;
+  color: var(--m-ink-3) !important;
+  font-size: 10.5px !important;
+  padding: 4px 8px !important;
+}
+.tag.active {
+  background: var(--m-accent-soft) !important;
+  border-color: var(--m-accent-line) !important;
+  color: var(--m-accent) !important;
+}
+
+.linen-input, .panel-section input[type="text"], .panel-section input[type="number"] {
+  background: var(--m-panel-2) !important;
+  border: 1px solid var(--m-line) !important;
+  border-radius: 8px !important;
+  color: var(--m-ink-1) !important;
+  font-size: 11.5px !important;
+  height: 28px !important;
+}
+.linen-input:focus { border-color: var(--m-focus) !important; box-shadow: 0 0 0 3px var(--m-focus-soft) !important; }
+
+.btn-generate {
+  background: var(--m-accent) !important;
+  border-radius: 8px !important;
+  color: var(--m-panel) !important;
+  font-size: 11.5px !important;
+  font-weight: 500 !important;
+  height: 30px !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .10) !important;
+}
+.btn-generate:hover { opacity: .88; }
+
+/* ---------- 原版把文字色下沉到子元素，父级 color 覆盖不到，这里逐个点名 ---------- */
+.file-item__name,
+.file-item span,
+.file-item div {
+  color: var(--m-ink-2) !important;
+}
+.file-item.active .file-item__name,
+.file-item.active span,
+.file-item.active div {
+  color: var(--m-accent) !important;
+}
+.file-item.active {
+  background: var(--m-accent-soft) !important;
+}
+
+.status-bar__item,
+.status-bar__item span {
+  color: var(--m-ink-3) !important;
+}
+.status-bar {
+  background: var(--m-panel) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border-top: 1px solid var(--m-line) !important;
+}
+
+/* 右面板里所有被写死成白色的文字 */
+.right-panel,
+.right-panel * {
+  color: var(--m-ink-2);
+}
+.right-panel .panel-section__title { color: var(--m-ink-3) !important; }
+.right-panel .model-select__btn { color: var(--m-ink-3) !important; }
+.right-panel .model-select__btn.active { color: var(--m-accent) !important; }
+.right-panel .tag { color: var(--m-ink-3) !important; }
+.right-panel .tag.active { color: var(--m-accent) !important; }
+.right-panel input { color: var(--m-ink-1) !important; }
+.right-panel .btn-generate { color: #fff !important; }
+
+/* 工具栏图标 / 模式条 / 提示文字 */
+.tool-btn svg { stroke: currentColor !important; }
+.tool-hint { color: var(--m-ink-3) !important; }
+.status-bar__spacer { flex: 1; }
+
+/* ============================================================================
+   顶栏 = 合成工作室的 mgbar：一个可编辑路径框 + 张数 + 动作按钮，没有标题
+   ============================================================================ */
+.title-bar {
+  display: flex !important;
+  align-items: center !important;
+  gap: 12px !important;
+  height: 52px !important;
+  padding: 0 14px !important;
+  background: var(--m-panel) !important;
+  border-bottom: 1px solid var(--m-line) !important;
+}
+
+/* 路径框：复刻 4.1 的 .inp.pathinp（左标签 + 可编辑 + 右侧图标） */
+.mkpath {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 34px;
+  padding: 0 6px 0 0;
+  border: 1px solid var(--m-line);
+  border-radius: 9px;
+  background: var(--m-panel-2);
+  transition: border-color .14s ease, box-shadow .14s ease;
+}
+.mkpath:focus-within {
+  border-color: var(--m-focus);
+  box-shadow: 0 0 0 3px var(--m-focus-soft);
+}
+.mkpath .lb {
+  flex: 0 0 auto;
+  padding: 0 10px;
+  font-size: 11.5px;
+  color: var(--m-ink-3);
+  border-right: 1px solid var(--m-line);
+  height: 34px;
+  display: flex;
+  align-items: center;
+}
+.mkpath .pathval {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 32px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--m-ink-1);
+  font-family: var(--font);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  font-size: 12px;
+  padding: 0;
+}
+.mkpath .pill {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  color: var(--m-ink-3);
+  cursor: pointer;
+  transition: background .13s ease, color .13s ease;
+}
+.mkpath .pill:hover { background: var(--m-hover); color: var(--m-accent); }
+
+/* 动作按钮 = 4.1 的 .btn */
+.mkbtn {
+  flex: 0 0 auto;
+  height: 32px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--m-accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background .13s ease;
+}
+.mkbtn:hover { background: #4238d4; }
+
+/* ============================================================================
+   文件列表移到最左：文件和工具分开，画布更居中
+   ============================================================================ */
+.main-content {
+  display: flex !important;
+}
+.files-panel {
+  flex: 0 0 188px;
+  width: 188px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 10px 8px 10px 12px;
+  border-right: 1px solid var(--m-line);
+  background: var(--m-panel);
+  overflow: hidden;
+}
+.files-panel .panel-section__header {
+  margin-bottom: 8px;
+  padding: 0 4px;
+}
+.files-panel .file-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none !important;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+/* 白底按钮在深色主题下必须是深色字（之前被 .right-panel 的 #fff 覆盖了） */
+html[data-theme="dark"] .btn-generate,
+html[data-theme="dark"] .right-panel .btn-generate {
+  color: #121214 !important;
+}
+html[data-theme="light"] .btn-generate,
+html[data-theme="light"] .right-panel .btn-generate {
+  color: #ffffff !important;
+}
+
+/* ============================================================================
+   统一「主色底 + 反色字」：深色主题下白底必须配深字，否则整片看不见
+   ============================================================================ */
+html[data-theme="light"] { --m-accent-ink: #ffffff; }
+html[data-theme="dark"]  { --m-accent-ink: #121214; }
+
+.btn-generate,
+.mkbtn,
+.right-panel .btn-generate,
+html[data-theme="dark"] .right-panel .btn-generate,
+html[data-theme="light"] .right-panel .btn-generate {
+  color: var(--m-accent-ink) !important;
+}
+
+/* 右上角的「打开」和文件勾选也一样 */
+.mkbtn { color: var(--m-accent-ink) !important; }
+
+/* 分段/标签选中态在白底上也别用浅色字 */
+html[data-theme="dark"] .model-select__btn.active,
+html[data-theme="dark"] .tag.active,
+html[data-theme="dark"] .file-item.active {
+  color: var(--m-ink-1) !important;
+}
+
+/* ============================================================================
+   滑块统一成 shadcn Slider：4px 轨道、16px 白色圆钮 + 细边、hover 深边
+   （原来的右栏 Opacity 是行内样式，thumb 又是浏览器默认，跟周围完全不搭）
+   ============================================================================ */
+input[type="range"],
+#opacity-slider,
+.brush-slider__input {
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  height: 4px !important;
+  border-radius: 999px !important;
+  background: var(--m-line-strong) !important;
+  outline: none !important;
+  cursor: pointer;
+  padding: 0 !important;
+  border: 0 !important;
+  box-shadow: none !important;
+}
+
+/* 已滑过的部分：用一条从主色到透明渐变的伪元素做不到，改用 box-shadow 叠一次内嵌阴影 */
+input[type="range"]::-webkit-slider-runnable-track,
+#opacity-slider::-webkit-slider-runnable-track,
+.brush-slider__input::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: transparent;
+}
+
+input[type="range"]::-webkit-slider-thumb,
+#opacity-slider::-webkit-slider-thumb,
+.brush-slider__input::-webkit-slider-thumb {
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  width: 15px !important;
+  height: 15px !important;
+  margin-top: -6px;
+  border-radius: 50% !important;
+  background: var(--m-panel) !important;
+  border: 1px solid var(--m-accent) !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .12) !important;
+  transition: box-shadow .12s ease, transform .12s ease !important;
+}
+input[type="range"]::-webkit-slider-thumb:hover,
+#opacity-slider::-webkit-slider-thumb:hover,
+.brush-slider__input::-webkit-slider-thumb:hover {
+  box-shadow: 0 0 0 4px var(--m-accent-soft) !important;
+}
+input[type="range"]:active::-webkit-slider-thumb,
+#opacity-slider:active::-webkit-slider-thumb {
+  transform: scale(.95);
+  box-shadow: 0 0 0 5px var(--m-accent-soft) !important;
+}
+
+/* Firefox */
+input[type="range"]::-moz-range-track,
+#opacity-slider::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--m-line-strong);
+}
+input[type="range"]::-moz-range-thumb,
+#opacity-slider::-moz-range-thumb {
+  width: 15px; height: 15px;
+  border-radius: 50%;
+  background: var(--m-panel);
+  border: 1px solid var(--m-accent);
+  box-shadow: 0 1px 2px rgba(0,0,0,.12);
+}
+
+/* 右栏 Opacity 那一行的文字也统一一下 */
+.right-panel span[style*="Opacity"] { color: var(--m-ink-3) !important; }
+#opacity-label { color: var(--m-ink-2) !important; font-variant-numeric: tabular-nums; }
+/* Resolution 那行的白字也改掉 */
+.right-panel span[style*="Resolution"] { color: var(--m-ink-3) !important; }
+
+/* 原版把 Opacity: / Resolution: 这些小标签写死成 rgba(255,255,255,.45)，
+   浅色主题下就是白底白字 —— 统一按行内 style 里带 rgba(255 的 span 兜底 */
+.right-panel span[style*="rgba(255"],
+.panel-section span[style*="rgba(255"],
+.center-area span[style*="rgba(255"] {
+  color: var(--m-ink-3) !important;
+}
+#opacity-label { color: var(--m-ink-2) !important; }
+
+/* ============================================================================
+   右栏动作：从「四块黑砖」收成「分区标题右侧的小按钮」
+   参数在上、动作在右，视线不用在栏里来回跳
+   ============================================================================ */
+.gen-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--m-ink-3);
+  font-size: 10.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background .13s ease, color .13s ease, border-color .13s ease;
+}
+.gen-inline:hover {
+  background: var(--m-accent-soft);
+  border-color: var(--m-accent-line);
+  color: var(--m-ink-1);
+}
+.gen-inline:active { transform: scale(.97); }
+.gen-inline .gi { width: 11px; height: 11px; opacity: .8; }
+.gen-inline:disabled { opacity: .45; cursor: default; }
+
+/* 生成中：图标转圈 */
+.gen-inline.busy .gi { animation: gi-spin 900ms linear infinite; }
+@keyframes gi-spin { to { transform: rotate(360deg); } }
+
+/* XSeg 的两个变体并排，各占一半 */
+.gen-pair {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+.gen-half {
+  flex: 1 1 0;
+  height: 26px;
+  border: 1px solid var(--m-line-strong);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--m-ink-2);
+  font-size: 10.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background .13s ease, color .13s ease, border-color .13s ease;
+}
+.gen-half:hover {
+  background: var(--m-accent-soft);
+  border-color: var(--m-accent-line);
+  color: var(--m-ink-1);
+}
+.gen-half:active { transform: scale(.98); }
+
+/* 分区标题行允许按钮靠右 */
+.panel-section__header {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between;
+}
+
+/* 右栏这行只有 90px，长标签会折成两行 —— 缩短并允许压缩 */
+.right-panel span[style*="rgba(255"] {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.canvas-container,
+#mask-canvas {
+  transition: background-color .24s cubic-bezier(.25,.46,.45,.94) !important;
+}

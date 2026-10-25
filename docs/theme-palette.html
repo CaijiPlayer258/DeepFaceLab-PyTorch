@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>主题色板 · Material Theme Builder × Linear</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 40px 44px 80px;
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: #ffffff; color: #101012;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #0b0b0d; color: #f5f5f7; }
+    .card { background: #141418 !important; border-color: #26262d !important; }
+    .hint { color: #9a9aa4 !important; }
+    .hex { color: #9a9aa4 !important; }
+  }
+  h1 { font-size: 22px; margin: 0 0 6px; letter-spacing: -.02em; }
+  h2 { font-size: 14px; margin: 34px 0 12px; letter-spacing: .04em; text-transform: uppercase; opacity: .55; }
+  .hint { font-size: 12.5px; color: #6b6b74; line-height: 1.65; }
+  .card { background: #fff; border: 1px solid #e7e7ea; border-radius: 14px; padding: 16px 18px; }
+  .seedrow { display: flex; gap: 10px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
+  .seed { display: flex; align-items: center; gap: 8px; padding: 7px 12px 7px 8px;
+          border: 1px solid #e7e7ea; border-radius: 999px; font-size: 12.5px; cursor: pointer; }
+  .seed i { width: 16px; height: 16px; border-radius: 50%; display: block; }
+  .seed.on { outline: 2px solid currentColor; outline-offset: 2px; }
+
+  .pal { display: grid; grid-template-columns: 76px repeat(13, 1fr); gap: 6px; align-items: center; margin-bottom: 6px; }
+  .pal .nm { font-size: 12px; opacity: .7; }
+  .sw { height: 46px; border-radius: 8px; display: flex; align-items: flex-end; justify-content: center;
+        padding-bottom: 4px; font-size: 9.5px; font-variant-numeric: tabular-nums; }
+  .tones { display: grid; grid-template-columns: 76px repeat(13, 1fr); gap: 6px; margin-bottom: 10px; }
+  .tones span { font-size: 10px; opacity: .5; text-align: center; }
+
+  .roles { display: grid; grid-template-columns: repeat(auto-fill, minmax(184px, 1fr)); gap: 8px; }
+  .role { border-radius: 10px; padding: 10px 12px; min-height: 62px; display: flex; flex-direction: column; justify-content: space-between; }
+  .role b { font-size: 12px; font-weight: 600; }
+  .hex { font-size: 10.5px; font-family: ui-monospace, Consolas, monospace; opacity: .6; }
+
+  .demo { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .pane { border-radius: 14px; padding: 20px; }
+  .bar { height: 7px; border-radius: 999px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 62%; border-radius: 999px; }
+  .btnrow { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  .btn { border: 0; border-radius: 9px; padding: 9px 16px; font: inherit; font-weight: 650; font-size: 13px; }
+  .inp { display: flex; align-items: center; height: 38px; border-radius: 9px; padding: 0 12px; font-size: 12.5px; margin-top: 12px; }
+  .sw2 { width: 36px; height: 20px; border-radius: 10px; position: relative; margin-top: 14px; }
+  .sw2 i { position: absolute; top: 2px; width: 16px; height: 16px; border-radius: 50%; right: 2px; display: block; }
+  .chips { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+  .chip { font-size: 11.5px; padding: 5px 11px; border-radius: 999px; }
+
+  .lin { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+  .lin div { border-radius: 8px; padding: 10px; font-size: 10.5px; font-family: ui-monospace, Consolas, monospace; }
+</style>
+</head>
+<body>
+<h1>主题色板 · Material Theme Builder 规则 × Linear 色系</h1>
+<div class="hint">
+  种子取 Linear 的品牌靛蓝 <b>#5D6CCF</b>。色阶按 Material 的 HCT 思路生成：<br>
+  每个色板 13 阶（tone 0/10/20/…/100），色相固定，彩度在两端收敛；语义角色（surface / surface-container / outline …）按 M3 的映射取对应色阶。
+</div>
+<div class="seedrow" id="seeds"></div>
+
+<h2>色阶 Tonal palettes</h2>
+<div id="palettes"></div>
+
+<h2>浅色方案 Light scheme</h2>
+<div class="roles" id="light"></div>
+
+<h2>深色方案 Dark scheme</h2>
+<div class="roles" id="dark"></div>
+
+<h2>组件预览</h2>
+<div class="demo" id="demo"></div>
+
+<h2>Linear 原始色板（对照）</h2>
+<div class="lin" id="lin"></div>
+
+<script>
+/* ---------- sRGB ↔ OKLab/OKLCH ---------- */
+function srgb2lin(c){ c/=255; return c<=0.04045 ? c/12.92 : Math.pow((c+0.055)/1.055, 2.4); }
+function lin2srgb(c){ c = c<=0.0031308 ? c*12.92 : 1.055*Math.pow(c,1/2.4)-0.055; return Math.max(0, Math.min(255, Math.round(c*255))); }
+function rgb2oklab(r,g,b){
+  var R=srgb2lin(r), G=srgb2lin(g), B=srgb2lin(b);
+  var l=Math.cbrt(0.4122214708*R + 0.5363325363*G + 0.0514459929*B);
+  var m=Math.cbrt(0.2119034982*R + 0.6806995451*G + 0.1073969566*B);
+  var s=Math.cbrt(0.0883024619*R + 0.2817188376*G + 0.6299787005*B);
+  return [0.2104542553*l + 0.7936177850*m - 0.0040720468*s,
+          1.9779984951*l - 2.4285922050*m + 0.4505937099*s,
+          0.0259040371*l + 0.7827717662*m - 0.8086757660*s];
+}
+function oklab2rgb(L,a,bb){
+  var l=Math.pow(L + 0.3963377774*a + 0.2158037573*bb, 3);
+  var m=Math.pow(L - 0.1055613458*a - 0.0638541728*bb, 3);
+  var s=Math.pow(L - 0.0894841775*a - 1.2914855480*bb, 3);
+  return [lin2srgb( 4.0767416621*l - 3.3077115913*m + 0.2309699292*s),
+          lin2srgb(-1.2684380046*l + 2.6097574011*m - 0.3413193965*s),
+          lin2srgb(-0.0041960863*l - 0.7034186147*m + 1.7076147010*s)];
+}
+function hex(rgb){ return "#" + rgb.map(function(v){ return v.toString(16).padStart(2,"0"); }).join(""); }
+function parse(h){ h=h.replace("#",""); return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)]; }
+
+/* tone(L*) → OKLab L（灰阶上 L* 与 Y 有固定关系，再换算成立方根） */
+function toneToL(tone){
+  var Ls = tone, Y;
+  if (Ls <= 8) Y = Ls/903.3;
+  else Y = Math.pow((Ls+16)/116, 3);
+  return Math.cbrt(Math.max(0, Math.min(1, Y)));
+}
+/* 在 OKLCH 里给定 tone 和彩度，越界时降彩度 */
+function toneColor(hue, chroma, t){
+  var L=toneToL(t);
+  C=Math.max(0,chroma)*Math.min(1,t/22,(100-t)/22);
+  var h=hue,rgb=null;
+  for(var iter=0;iter<3;iter++){
+    var lo=0,hi=Math.max(C,1e-4),best=null;
+    for(var i=0;i<8;i++){                       /* 二分找最大不截断的彩度，避免反馈发散 */
+      var cc=(lo+hi)/2;
+      var r=ok2rgb(L,cc*Math.cos(h),cc*Math.sin(h));
+      var bk=rgb2ok(r[0],r[1],r[2]);
+      var dh=Math.atan2(bk[2],bk[1])-h;
+      if(Math.abs(dh)<0.06){lo=cc;best=r}else{hi=cc}
+    }
+    rgb=best||ok2rgb(L,0,0);
+    var bk2=rgb2ok(rgb[0],rgb[1],rgb[2]);
+    var d=Math.atan2(bk2[2],bk2[1])-hue;
+    while(d>Math.PI)d-=2*Math.PI; while(d<-Math.PI)d+=2*Math.PI;
+    if(Math.abs(d)<0.02)break;
+    h-=d;                                        /* 只修正色相 */
+  }
+  return hex(rgb);
+}
+
+/* ---------- 由种子生成五套色板 ---------- */
+var TONES = [0,10,20,30,40,50,60,70,80,90,95,99,100];
+/* 语义角色还要用到几档非标准色阶（surface 系），构建时一起算 */
+var ALL_TONES = [0,6,8,10,12,17,20,30,40,50,60,70,80,87,90,92,94,95,96,98,99,100];
+function buildPalettes(seedHex){
+  var rgb = parse(seedHex);
+  var ok = rgb2oklab(rgb[0], rgb[1], rgb[2]);
+  var hue = Math.atan2(ok[2], ok[1]);
+  var chroma = Math.hypot(ok[1], ok[2]);
+  function row(h, c){ var o = {}; ALL_TONES.forEach(function(t){ o[t] = toneColor(h, c, t); }); return o; }
+  return {
+    primary:         row(hue, chroma),
+    secondary:       row(hue, chroma * 0.38),
+    tertiary:        row(hue + 1.05, chroma * 0.62),   /* 偏约 60° */
+    neutral:         row(hue, chroma * 0.06),
+    "neutral-variant": row(hue, chroma * 0.16)
+  };
+}
+
+/* ---------- M3 语义角色 ---------- */
+function scheme(p, dark){
+  var n = p.neutral, nv = p["neutral-variant"], pr = p.primary, se = p.secondary, te = p.tertiary;
+  var P = dark ? 80 : 40, PC = dark ? 30 : 90, ONP = dark ? 20 : 100, ONPC = dark ? 90 : 10;
+  return dark ? {
+    "primary": pr[80], "on-primary": pr[20], "primary-container": pr[30], "on-primary-container": pr[90],
+    "secondary": se[80], "on-secondary": se[20], "secondary-container": se[30], "on-secondary-container": se[90],
+    "tertiary": te[80], "on-tertiary": te[20],
+    "surface": n[6] || "#0b0b0d", "surface-dim": n[6] || "#0b0b0d",
+    "surface-container-lowest": "#0a0a0c", "surface-container-low": n[10], "surface-container": n[12] || n[10],
+    "surface-container-high": n[17] || n[20], "surface-container-highest": n[20],
+    "on-surface": n[90], "on-surface-variant": nv[80],
+    "outline": nv[60], "outline-variant": nv[30],
+    "inverse-surface": n[90], "inverse-on-surface": n[20]
+  } : {
+    "primary": pr[40], "on-primary": pr[100], "primary-container": pr[90], "on-primary-container": pr[10],
+    "secondary": se[40], "on-secondary": se[100], "secondary-container": se[90], "on-secondary-container": se[10],
+    "tertiary": te[40], "on-tertiary": te[100],
+    "surface": n[98] || "#fbfbfd", "surface-dim": n[87] || n[90],
+    "surface-container-lowest": "#ffffff", "surface-container-low": n[96], "surface-container": n[94],
+    "surface-container-high": n[92], "surface-container-highest": n[90],
+    "on-surface": n[10], "on-surface-variant": nv[30],
+    "outline": nv[50], "outline-variant": nv[80],
+    "inverse-surface": n[20], "inverse-on-surface": n[95]
+  };
+}
+var palettes = buildPalettes("#5D6CCF");
+
+/* ---------- 渲染 ---------- */
+function textOn(hexStr){
+  var c = parse(hexStr); var L = rgb2oklab(c[0],c[1],c[2])[0];
+  return L > 0.55 ? "#101012" : "#ffffff";
+}
+var seedList = [["#5D6CCF","Linear 靛蓝"],["#7C5CFF","紫罗兰"],["#4E9CF5","天蓝"],["#2FB6A8","青绿"]];
+document.getElementById("seeds").innerHTML = seedList.map(function(s){
+  return '<div class="seed' + (s[0]==="#5D6CCF"?" on":"") + '" data-c="' + s[0] + '"><i style="background:' + s[0] + '"></i>' + s[1] + " " + s[0] + "</div>";
+}).join("");
+document.querySelectorAll(".seed").forEach(function(el){
+  el.addEventListener("click", function(){
+    document.querySelectorAll(".seed").forEach(function(x){ x.classList.remove("on"); });
+    el.classList.add("on");
+    palettes = buildPalettes(el.dataset.c);
+    document.getElementById("palettes").innerHTML = drawPalettes();
+    drawSchemes();
+  });
+});
+
+function drawPalettes(){
+  var keys = Object.keys(palettes);
+  var out = '<div class="tones"><span></span>' + TONES.map(function(t){ return "<span>" + t + "</span>"; }).join("") + "</div>";
+  keys.forEach(function(k){
+    out += '<div class="pal"><div class="nm">' + k + "</div>";
+    TONES.forEach(function(t){
+      var c = palettes[k][t];
+      out += '<div class="sw" style="background:' + c + ";color:" + textOn(c) + '" title="' + k + " " + t + " " + c + '">' + c.replace("#","") + "</div>";
+    });
+    out += "</div>";
+  });
+  return out;
+}
+
+function drawSchemes(){
+  ["light","dark"].forEach(function(mode){
+    var sc = scheme(palettes, mode === "dark");
+    var h = "";
+    Object.keys(sc).forEach(function(role){
+      var c = sc[role];
+      h += '<div class="role" style="background:' + c + ";color:" + textOn(c) + '">' +
+           "<b>" + role + '</b><span class="hex">' + c + "</span></div>";
+    });
+    document.getElementById(mode).innerHTML = h;
+  });
+  drawDemo();
+}
+
+function drawDemo(){
+  var l = scheme(palettes, false), d = scheme(palettes, true);
+  function pane(s, label){
+    return '<div class="pane" style="background:' + s.surface + ";color:" + s["on-surface"] + ";border:1px solid " + s["outline-variant"] + '">' +
+      '<div style="font-size:12px;opacity:.6;margin-bottom:12px">' + label + "</div>" +
+      '<div style="background:' + s["surface-container"] + ';border:1px solid ' + s["outline-variant"] + ';border-radius:12px;padding:14px">' +
+        '<div style="font-size:13px;font-weight:650;margin-bottom:10px">训练参数</div>' +
+        '<div class="bar" style="background:' + s["surface-container-highest"] + '"><i style="background:' + s.primary + '"></i></div>' +
+        '<div class="inp" style="background:' + s["surface-container-highest"] + ";border:1px solid " + s.outline + ";color:" + s["on-surface"] + '">workspace\\data_src\\</div>' +
+        '<div class="sw2" style="background:' + s.primary + '"><i style="background:' + s["on-primary"] + '"></i></div>' +
+        '<div class="btnrow">' +
+          '<button class="btn" style="background:' + s.primary + ";color:" + s["on-primary"] + '">开始训练</button>' +
+          '<button class="btn" style="background:' + s["surface-container-highest"] + ";color:" + s["on-surface"] + ';border:1px solid ' + s.outline + '">恢复默认</button>' +
+          '<button class="btn" style="background:' + s["primary-container"] + ";color:" + s["on-primary-container"] + '">secondary</button>' +
+        "</div>" +
+        '<div class="chips">' +
+          '<span class="chip" style="background:' + s["secondary-container"] + ";color:" + s["on-secondary-container"] + '">bilibili</span>' +
+          '<span class="chip" style="background:' + s["surface-container-highest"] + ";color:" + s["on-surface-variant"] + '">遮罩</span>' +
+        "</div>" +
+      "</div></div>";
+  }
+  document.getElementById("demo").innerHTML = pane(l, "Light") + pane(d, "Dark");
+}
+
+document.getElementById("palettes").innerHTML = drawPalettes();
+drawSchemes();
+
+var LINEAR = {"bg":"#08090A","surface":"#0F1011","elevated":"#16171A","border":"#23252A",
+              "text":"#F7F8F8","text-dim":"#8A8F98","accent":"#5D6CCF","accent-bright":"#8A96E8",
+              "accent-dim":"#5D6CCF / 20%"};
+document.getElementById("lin").innerHTML = Object.keys(LINEAR).map(function(k){
+  var c = LINEAR[k];
+  var bg = c.indexOf("/") > 0 ? "#5D6CCF33" : c;
+  return '<div style="background:' + bg + ";color:" + textOn(c.indexOf("/")>0?"#5D6CCF":c) + '">' + k + "<br>" + c + "</div>";
+}).join("");
+</script>
+</body>
+</html>

@@ -1,0 +1,295 @@
+/* ============================================================================
+   shadcn/ui 风格控件层
+   —— 只改「控件长什么样」，不动任何布局、尺寸、结构、交互
+   参考：https://ui.shadcn.com 的 default 主题
+     圆角 0.5rem / 边框 1px 极淡 / 字重 500 / 聚焦是 1px 细环（不是光晕）
+     按钮分 default / secondary / outline / ghost 四档
+   ============================================================================ */
+
+:root {
+  /* shadcn 的语义色槽 */
+  --sc-background: #ffffff;
+  --sc-foreground: #09090b;
+  --sc-muted: #f4f4f5;
+  --sc-muted-fg: #71717a;
+  --sc-border: #e4e4e7;
+  --sc-input: #e4e4e7;
+  --sc-ring: #a1a1aa;
+  --sc-primary: #18181b;
+  --sc-primary-fg: #fafafa;
+  --sc-secondary: #f4f4f5;
+  --sc-secondary-fg: #18181b;
+  --sc-radius: 8px;
+}
+html[data-theme="dark"] {
+  --sc-background: #17171a;   /* 跟 --panel 对齐，别用纯黑 */
+  --sc-foreground: #fafafa;
+  --sc-muted: #27272a;
+  --sc-muted-fg: #a1a1aa;
+  --sc-border: #27272a;
+  --sc-input: #3f3f46;
+  --sc-ring: #52525b;
+  --sc-primary: #fafafa;
+  --sc-primary-fg: #18181b;
+  --sc-secondary: #27272a;
+  --sc-secondary-fg: #fafafa;
+}
+
+/* ---------- 按钮 ---------- */
+.btn {
+  border-radius: var(--sc-radius) !important;
+  background: var(--sc-primary) !important;
+  color: var(--sc-primary-fg) !important;
+  border: 1px solid transparent !important;
+  font-weight: 500 !important;
+  font-size: 13px !important;
+  letter-spacing: 0 !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .06) !important;
+  transition: background .13s ease, opacity .13s ease, box-shadow .13s ease !important;
+}
+.btn:hover { background: color-mix(in srgb, var(--sc-primary) 90%, transparent) !important; }
+.btn:active { box-shadow: none !important; }
+.btn:focus-visible {
+  outline: 2px solid var(--sc-ring) !important;
+  outline-offset: 2px !important;
+  box-shadow: none !important;
+}
+
+/* 次要 / 描边 / 幽灵 —— shadcn 的四档 */
+.btn.ghost,
+.btn.sec {
+  background: var(--sc-secondary) !important;
+  color: var(--sc-secondary-fg) !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+}
+.btn.ghost:hover,
+.btn.sec:hover { background: color-mix(in srgb, var(--sc-secondary) 78%, var(--sc-foreground)) !important; }
+
+.btn.mini,
+.btn.outline {
+  background: transparent !important;
+  color: var(--sc-foreground) !important;
+  border: 1px solid var(--sc-border) !important;
+  box-shadow: none !important;
+}
+.btn.mini:hover,
+.btn.outline:hover { background: var(--sc-muted) !important; }
+
+/* ---------- 输入框 / 下拉 ---------- */
+.inp,
+.inp input,
+select,
+input[type="text"],
+input[type="number"],
+input[type="password"],
+textarea {
+  border-radius: var(--sc-radius) !important;
+  border: 1px solid var(--sc-input) !important;
+  background: var(--sc-background) !important;
+  color: var(--sc-foreground) !important;
+  box-shadow: 0 0 0 0 transparent;
+  transition: border-color .13s ease, box-shadow .13s ease;
+}
+.inp:focus-within,
+.inp input:focus,
+select:focus,
+input:focus,
+textarea:focus {
+  border-color: var(--sc-ring) !important;
+  box-shadow: 0 0 0 1px var(--sc-ring) !important;   /* 细环，不是 3px 光晕 */
+  outline: none !important;
+}
+.inp::placeholder,
+input::placeholder,
+textarea::placeholder { color: var(--sc-muted-fg) !important; }
+
+/* ---------- 卡片 ---------- */
+.card {
+  border-radius: 12px !important;
+  border: 1px solid var(--sc-border) !important;
+  background: var(--sc-background) !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .04) !important;
+}
+
+/* ---------- 分段控件（shadcn Tabs 的形态） ---------- */
+.seg {
+  background: var(--sc-muted) !important;
+  border-radius: var(--sc-radius) !important;
+  padding: 3px !important;
+}
+.seg b {
+  border-radius: calc(var(--sc-radius) - 2px) !important;
+  font-weight: 500 !important;
+  font-size: 12.5px !important;
+  color: var(--sc-muted-fg) !important;
+  box-shadow: none !important;
+  transition: background .12s ease, color .12s ease, box-shadow .12s ease;
+}
+.seg b:hover { color: var(--sc-foreground) !important; }
+.seg b.on {
+  background: var(--sc-background) !important;
+  color: var(--sc-foreground) !important;
+  font-weight: 500 !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .08) !important;
+}
+
+/* ---------- 标签 / 徽章 ---------- */
+.tag {
+  border-radius: 6px !important;
+  font-weight: 500 !important;
+  font-size: 11px !important;
+}
+.pill, .chip {
+  border-radius: 6px !important;
+  font-weight: 500 !important;
+}
+
+/* ---------- 侧边栏项 ---------- */
+.nav {
+  border-radius: 6px !important;
+  font-weight: 450 !important;
+}
+.nav.on { font-weight: 500 !important; }
+
+/* ---------- 开关 ---------- */
+.sw { border-radius: 999px !important; }
+.sw.on { background: var(--sc-primary) !important; }
+
+/* ---------- 表格 / 行 ---------- */
+.mrow, .mgrow, .cfgrow { border-radius: 6px !important; }
+
+/* .inp 是个容器，里面的 input 不该再画一层边框 */
+.inp input,
+.inp .pathval,
+.inp .lb + input {
+  border: 0 !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  padding: 0 !important;
+}
+.inp:focus-within input { box-shadow: none !important; }
+
+/* 数字步进器：– 数字 + 拼成一个 shadcn 的 input-group */
+.num,
+.mgnum {
+  border: 1px solid var(--sc-input) !important;
+  border-radius: var(--sc-radius) !important;
+  background: var(--sc-background) !important;
+  overflow: hidden;
+}
+.num input,
+.mgnum input {
+  border: 0 !important;
+  box-shadow: none !important;
+  background: transparent !important;
+}
+.num .nb,
+.mgnum .nb {
+  border: 0 !important;
+  background: transparent !important;
+  color: var(--sc-muted-fg) !important;
+  font-weight: 500 !important;
+}
+.num .nb:hover,
+.mgnum .nb:hover {
+  background: var(--sc-muted) !important;
+  color: var(--sc-foreground) !important;
+}
+
+/* 深色下输入框、下拉的底色跟面板一致，边框用 shadcn 的 input 灰 */
+html[data-theme="dark"] .inp,
+html[data-theme="dark"] select,
+html[data-theme="dark"] input[type="text"],
+html[data-theme="dark"] input[type="number"],
+html[data-theme="dark"] input[type="password"],
+html[data-theme="dark"] textarea {
+  background: #1e1e22 !important;
+  border-color: #3f3f46 !important;
+  font-family: inherit !important;
+}
+html[data-theme="dark"] .inp input,
+html[data-theme="dark"] .inp .pathval {
+  background: transparent !important;
+}
+/* 下拉里的等宽字是给路径用的，普通下拉别继承 */
+select, .mgsel, .mksel, select.mgsel {
+  font-family: inherit !important;
+}
+/* 分段控件深色底槽 */
+html[data-theme="dark"] .seg { background: #27272a !important; }
+html[data-theme="dark"] .seg b.on { background: #3f3f46 !important; color: #fafafa !important; }
+
+/* 深色下这几处的等宽字是历史遗留（本来给路径框用的），普通控件不该继承 */
+html[data-theme="dark"] #p-merge select,
+html[data-theme="dark"] #p-merge .mgrow input,
+html[data-theme="dark"] #p-merge .mgtiny,
+html[data-theme="dark"] #p-merge .mgsel,
+#p-merge select,
+#p-merge .mgrow input,
+#p-merge .mgtiny,
+#p-merge .mgsel {
+  font-family: inherit !important;
+  letter-spacing: 0 !important;
+}
+/* 保留下拉框的下拉箭头颜色 */
+#p-merge select {
+  color: var(--sc-foreground) !important;
+}
+
+/* 表单元素默认不继承字体，浏览器会给 Arial —— 全部拉回 Inter / 思源黑体 */
+input,
+select,
+textarea,
+button,
+optgroup,
+option {
+  font-family: inherit !important;
+}
+/* 只有明确标了 .mono 的（路径框、代码）才用等宽 */
+input.mono,
+.mono input,
+.mono .pathval,
+textarea.mono {
+  font-family: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, monospace !important;
+}
+
+/* 路径框里常常是中文（"还没有选择文件"、中文目录名），等宽字体对中文无效且会拉宽字距 ——
+   统一回页面字体；路径本身用 Inter 也能对齐读取 */
+.inp.mono .pathval,
+.inp.mono input,
+.pathinp .pathval,
+.pathinp input,
+.mgws2 .pathval,
+.mgws .pathval,
+.mkpath .pathval {
+  font-family: var(--font) !important;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0 !important;
+}
+
+/* 表单控件统一字号：12px（原来 11.5 / 12 / 13 三种混着） */
+.inp,
+.inp input,
+.inp .pathval,
+select,
+input[type="text"],
+input[type="number"],
+input[type="password"],
+textarea {
+  font-size: 12px !important;
+}
+
+/* ---------- 搜索条：外框由 .trsearch 自己画，里面的 input 不要再套一层 ----------
+   上面 input[type="text"] 那条用了 !important（border / background / radius），
+   把 .trsearch input { border: 0 } 压掉了 —— 结果是搜索框里还有一个小一号的
+   圆角内框，聚焦时还会多一圈 1px 光环。这里成对地撤掉。 */
+.trsearch input,
+.trsearch input:focus {
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  transition: none;
+}

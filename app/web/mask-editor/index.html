@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>Mask Processor</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/theme-41.css?v=11">
+</head>
+<body>
+  <div class="app-shell">
+
+    <!-- ====================================================================
+         Title Bar
+         ==================================================================== -->
+    <div class="title-bar">
+      <div class="mkpath">
+        <span class="lb">数据集</span>
+        <input class="pathval" id="workspace-path" type="text"
+               value="workspace\data_src\aligned"
+               placeholder="选择已对齐的人脸集目录"
+               spellcheck="false" autocomplete="off">
+        <span class="pill" id="mkPick" title="选择目录">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+            <path d="M1.5 4.5A1.5 1.5 0 0 1 3 3h3l1.5 2h5A1.5 1.5 0 0 1 14 6.5v6A1.5 1.5 0 0 1 12.5 14h-9A1.5 1.5 0 0 1 2 12.5v-8z"/>
+          </svg>
+        </span>
+      </div>
+      <button class="mkbtn" id="mkChange">打开</button>
+    </div>
+
+    <!-- ====================================================================
+         Main Content
+         ==================================================================== -->
+    <div class="main-content">
+
+      <!-- ================================================================
+           Files Panel（原在右栏，移到最左）
+           ================================================================ -->
+      <div class="files-panel">
+        <div class="panel-section__header">
+          <span class="panel-section__title">文件</span>
+          <span class="panel-section__action" id="file-count">0</span>
+        </div>
+        <div class="file-list"></div>
+      </div>
+
+      <!-- ================================================================
+           Left Toolbar
+           ================================================================ -->
+      <div class="toolbar">
+        <button class="tool-btn active" data-tool="sam" title="SAM 点选 (S)">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="8" cy="8" r="3"/>
+            <path d="M8 2v2M8 12v2M2 8h2M12 8h2"/>
+          </svg>
+          <span class="tool-btn__tooltip">SAM 点选 (S)</span>
+        </button>
+        <button class="tool-btn" data-tool="brush" title="画笔 (R)">
+          &#9998;
+          <span class="tool-btn__tooltip">画笔 (R)</span>
+        </button>
+        <button class="tool-btn" data-tool="pen" title="钢笔 (N)">
+          &#10016;
+          <span class="tool-btn__tooltip">钢笔 (N)</span>
+        </button>
+        <div style="flex:1;"></div>
+        <button class="tool-btn" onclick="app.undo()" title="撤销 (Ctrl+Z)" style="margin-top:auto;">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M4 7l3-3M4 7l3 3"/>
+            <path d="M4 7h6a3 3 0 0 1 3 3v1"/>
+          </svg>
+          <span class="tool-btn__tooltip">撤销</span>
+        </button>
+      </div>
+
+      <!-- ================================================================
+           Center Area
+           ================================================================ -->
+      <div class="center-area">
+
+        <!-- Mode Bar -->
+        <div class="mode-bar">
+          <div class="mode-toggle">
+            <button class="mode-toggle__btn active" data-mode="draw">绘制</button>
+            <button class="mode-toggle__btn" data-mode="exclude">排除</button>
+          </div>
+
+          <div class="brush-slider">
+            <span class="brush-slider__label" id="brush-size-label">16</span>
+            <input class="brush-slider__input" type="range" id="brush-size"
+                   min="4" max="100" value="16">
+          </div>
+
+          <span class="tool-hint" id="tool-hint"
+                style="margin-left:8px;font-size:10px;color:rgba(255,255,255,0.3);"></span>
+        </div>
+
+        <!-- Canvas -->
+        <div class="canvas-container">
+          <canvas id="mask-canvas"></canvas>
+        </div>
+
+        <!-- Status Bar -->
+        <div class="status-bar">
+          <span class="status-bar__item">
+            <span class="status-bar__dot status-bar__dot--success"></span>
+            <span id="fg-count">FG: 0</span>
+          </span>
+          <span class="status-bar__item">
+            <span class="status-bar__dot status-bar__dot--error"></span>
+            <span id="bg-count">BG: 0</span>
+          </span>
+          <span class="status-bar__spacer"></span>
+          <span class="status-bar__item ctrl-hint" id="status-message"></span>
+          <span class="status-bar__item" id="coord-display">x: 0 y: 0</span>
+        </div>
+      </div>
+
+      <!-- ================================================================
+           Right Panel
+           ================================================================ -->
+      <div class="right-panel">
+
+        <!-- Files -->
+        <!-- SAM Model -->
+        <div class="panel-section">
+          <div class="panel-section__header">
+            <span class="panel-section__title">SAM</span>
+            <span class="panel-section__action mkbadge">
+              已启用
+            </span>
+          </div>
+          <div class="model-select">
+            <button class="model-select__btn" data-model="vit_b">vit_b</button>
+            <button class="model-select__btn active" data-model="vit_l">vit_l</button>
+            <button class="model-select__btn" data-model="vit_h">vit_h</button>
+          </div>
+        </div>
+
+        <!-- Grounded SAM2 -->
+        <div class="panel-section">
+          <div class="panel-section__header">
+            <span class="panel-section__title">GROUNDED SAM2</span>
+            <button class="gen-inline" onclick="generateTextMask()" title="按文本提示生成遮罩"><svg class="gi" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M8 12.5V3.5M4 7.5 8 3.5l4 4"/></svg>生成
+            </button>
+          </div>
+          <input class="linen-input" id="gs-prompt" value="face."
+                 placeholder='Enter prompt (e.g. &quot;face.&quot;)'>
+        </div>
+
+        <!-- BiSeNet -->
+        <div class="panel-section">
+          <div class="panel-section__header">
+            <span class="panel-section__title">BISENET</span>
+            <button class="gen-inline" onclick="generateBiSeNet()" title="按选中的部位生成遮罩">
+              <svg class="gi" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M8 12.5V3.5M4 7.5 8 3.5l4 4"/></svg>生成
+            </button>
+          </div>
+          <div class="tag-group">
+            <button class="tag active" data-part="face">脸</button>
+            <button class="tag active" data-part="hair">头发</button>
+            <button class="tag" data-part="eyes">眼睛</button>
+            <button class="tag" data-part="mouth">嘴</button>
+            <button class="tag" data-part="skin">皮肤</button>
+            <button class="tag" data-part="nose">鼻子</button>
+          </div>
+        </div>
+
+        <!-- XSeg -->
+        <div class="panel-section">
+          <div class="panel-section__header">
+            <span class="panel-section__title">XSEG</span>
+          </div>
+          <div style="display:flex;gap:6px;margin-bottom:4px;">
+            <div class="model-select" style="flex:1;">
+              <button data-xres="256" class="model-select__btn active">256</button>
+              <button data-xres="512" class="model-select__btn">512</button>
+            </div>
+          </div>
+          <div class="gen-pair">
+            <button class="gen-half" onclick="generateXSeg()">XSeg</button>
+            <button class="gen-half" onclick="generateXSegLite()">XSegLite</button>
+          </div>
+        </div>
+
+        <!-- Load Mask & Opacity -->
+        <div class="panel-section">
+          <div class="panel-section__header">
+            <span class="panel-section__title">遮罩</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+            <span style="font-size:10px;color:rgba(255,255,255,0.45);">分辨率:</span>
+            <div class="model-select" id="mask-res-group" style="flex:1;">
+              <button data-res="256" class="model-select__btn">256</button>
+              <button data-res="512" class="model-select__btn">512</button>
+              <button data-res="1024" class="model-select__btn active">1024</button>
+            </div>
+          </div>
+          <button class="btn-generate" onclick="loadExistingMask()" style="margin-bottom:4px;">载入 DFLJPG</button>
+          <button class="btn-generate" onclick="commitMask()" style="background:linear-gradient(135deg,rgba(91,214,150,0.15),rgba(91,91,214,0.15));border-color:rgba(91,214,150,0.2);color:#5bd696;">保存</button>
+          <div style="display:flex;align-items:center;gap:6px;margin-top:6px;">
+            <span style="font-size:10px;color:rgba(255,255,255,0.45);">透明度:</span>
+            <input type="range" id="opacity-slider" min="5" max="100" value="35"
+                   style="flex:1;height:3px;-webkit-appearance:none;background:rgba(255,255,255,0.1);border-radius:2px;outline:none;">
+            <span id="opacity-label" style="font-size:10px;color:rgba(255,255,255,0.5);min-width:28px;">35%</span>
+          </div>
+        </div>
+
+        <!-- Shortcut Footer -->
+        <div class="shortcut-footer">
+          <span class="shortcut-footer__item">
+            <span class="shortcut-footer__key">S</span> SAM
+          </span>
+          <span class="shortcut-footer__item">
+            <span class="shortcut-footer__key">R</span> 画笔
+          </span>
+          <span class="shortcut-footer__item">
+            <span class="shortcut-footer__key">N</span> 钢笔
+          </span>
+          <span class="shortcut-footer__item">
+            <span class="shortcut-footer__key">D</span>/<span class="shortcut-footer__key">E</span> 模式
+          </span>
+          <span class="shortcut-footer__item">
+            <span class="shortcut-footer__key">&#8984;Z</span> 撤销
+          </span>
+          <span class="shortcut-footer__item">
+            <span class="shortcut-footer__key">&#8984;S</span> 保存
+          </span>
+          <span class="shortcut-footer__item">
+            <span class="shortcut-footer__key">&#8670;</span>/<span class="shortcut-footer__key">&#8671;</span> 上一张/下一张
+          </span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====================================================================
+       Scripts — loaded in dependency order (no modules)
+       ==================================================================== -->
+  <script src="js/api.js?v=9"></script>
+  <script src="js/canvas.js?v=9"></script>
+  <script src="js/tools/point.js?v=9"></script>
+  <script src="js/tools/brush.js?v=9"></script>
+  <script src="js/tools/pen.js?v=9"></script>
+  <script src="js/app.js?v=9"></script>
+  <script>
+    (function () {
+      'use strict';
+
+      // ====================================================================
+      // Global inline functions — referenced by onclick handlers in the HTML
+      // ====================================================================
+
+      /** Generate a mask from the Grounded SAM2 prompt. */
+      window.generateTextMask = async function () {
+        var prompt = document.getElementById('gs-prompt').value;
+        if (!prompt) return;
+
+        app.pushHistory();
+        app.canvas.setMask(null);
+        app.canvas.setLoading(50, 'GroundedSAM2...');
+        try {
+          var result = await API.textToMask(app.currentIndex, prompt);
+          app.canvas.clearLoading();
+          if (result.mask) mergeMaskB64(result.mask);
+        } catch (err) {
+          app.canvas.clearLoading();
+          app.setStatus('Error: ' + err.message);
+        }
+      };
+
+      /** Generate a mask from selected BiSeNet face parts. */
+      window.generateBiSeNet = async function () {
+        var parts = [];
+        document.querySelectorAll('.tag.active').forEach(function (el) {
+          parts.push(el.dataset.part);
+        });
+        if (parts.length === 0) return;
+
+        app.pushHistory();
+        app.canvas.setMask(null);
+        app.canvas.ensureMask();
+        app.canvas.setLoading(50, 'BiSeNet...');
+        try {
+          var result = await API.parseFace(app.currentIndex, parts);
+          app.canvas.clearLoading();
+          if (!result.masks) return;
+
+          var res = app.canvas.maskResolution || 256;
+          var fgParts = {face:1, skin:1, eyes:1, mouth:1, nose:1, brows:1};
+
+          // Merge each part into canvas mask
+          for (var key in result.masks) {
+            var b64 = result.masks[key];
+            if (!b64) continue;
+            // Decode via Image and resize to mask resolution
+            var data = await new Promise(function (resolve) {
+              var img = new Image();
+              img.onload = function () {
+                var c = document.createElement('canvas');
+                c.width = res; c.height = res;
+                var ctx = c.getContext('2d');
+                ctx.drawImage(img, 0, 0, res, res);
+                var imageData = ctx.getImageData(0, 0, res, res);
+                resolve(imageData.data);
+              };
+              img.src = 'data:image/png;base64,' + b64;
+            });
+            // Write to canvas mask
+            var isDraw = fgParts[key] === 1;
+            var maskData = app.canvas.mask.data;
+            for (var i = 0; i < res * res; i++) {
+              if (data[i * 4] > 128) {
+                if (isDraw) {
+                  maskData[i] = Math.min(1, maskData[i] + 0.5);
+                } else {
+                  maskData[i] = Math.max(-1, maskData[i] - 0.5);
+                }
+              }
+            }
+          }
+          app.canvas.renderNow();
+          app._updateCounts();
+          app.setStatus('BiSeNet mask applied');
+        } catch (err) {
+          console.error('BiSeNet error:', err);
+          app.setStatus('BiSeNet error: ' + err.message);
+        }
+      };
+
+      /** Get selected XSeg resolution. */
+      function getXSegRes() {
+        var el = document.querySelector('#mask-res-group .active') || document.querySelector('[data-xres].active');
+        if (el && el.dataset.xres) return parseInt(el.dataset.xres, 10);
+        return 256;
+      }
+
+      /** Generate XSeg mask. */
+      window.generateXSeg = async function () {
+        app.pushHistory();
+        app.canvas.setMask(null);
+        try {
+          app.canvas.setLoading(40, 'XSeg...');
+          var result = await API.xsegPredict(app.currentIndex);
+          app.canvas.clearLoading();
+          if (result.mask) app._applyMaskB64(result.mask);
+        } catch (err) {
+          app.canvas.clearLoading();
+          app.setStatus('XSeg error: ' + err.message);
+        }
+      };
+
+      /** Merge a base64 mask into the canvas (avoids overwriting user edits). */
+      function mergeMaskB64(b64) {
+        var img = new Image();
+        img.onload = function () {
+          var res = app.canvas.maskResolution || 256;
+          var c = document.createElement('canvas');
+          c.width = res; c.height = res;
+          var ctx = c.getContext('2d');
+          ctx.drawImage(img, 0, 0, res, res);
+          var pixels = ctx.getImageData(0, 0, res, res).data;
+          app.canvas.ensureMask();
+          if (app.canvas.mask && app.canvas.mask.data) {
+            var existing = app.canvas.mask.data;
+            for (var i = 0; i < res * res; i++) {
+              var v = pixels[i * 4] / 255;
+              if (v > 0.1) existing[i] = 1.0;
+            }
+            app.canvas.renderNow();
+          }
+        };
+        img.src = 'data:image/png;base64,' + b64;
+      }
+
+      /** Generate XSegLite mask. */
+      window.generateXSegLite = async function () {
+        app.pushHistory();
+        app.canvas.setMask(null);
+        try {
+          app.canvas.setLoading(40, 'XSegLite...');
+          var result = await API.xseglitePredict(app.currentIndex);
+          app.canvas.clearLoading();
+          if (result.mask) mergeMaskB64(result.mask);
+        } catch (err) {
+          app.canvas.clearLoading();
+          app.setStatus('XSegLite error: ' + err.message);
+        }
+      };
+
+      /** Commit (flatten + save) the current mask. */
+      window.commitMask = async function () {
+        if (!app.canvas.mask) {
+          app.setStatus('Nothing to commit');
+          return;
+        }
+        // Animate exclude (red) areas fading out, then save
+        app.canvas.fadeExclude();
+        // Wait for fade to complete before encoding
+        await new Promise(function (r) { setTimeout(r, 350); });
+        // Flatten negatives to 0 for the save
+        var data = app.canvas.mask.data;
+        for (var ci = 0; ci < data.length; ci++) {
+          if (data[ci] < 0) data[ci] = 0;
+        }
+        var b64 = app._maskToB64();
+        if (!b64) return;
+        try {
+          app.canvas.setLoading(60, 'Committing...');
+          var result = await API.saveMask(app.currentIndex, b64);
+          app.canvas.clearLoading();
+          if (result.success) {
+            app.canvas.flash();
+            app.canvas.renderNow();
+            app._updateCounts();
+            app.history = [];
+            app.setStatus('Mask committed & saved');
+          }
+        } catch (err) {
+          app.canvas.clearLoading();
+          app.setStatus('Commit error: ' + err.message);
+        }
+      };
+
+      /** Load existing mask from DFLJPG. */
+      window.loadExistingMask = async function () {
+        try {
+          var result = await API.loadExistingMask(app.currentIndex);
+          if (result.mask) {
+            app.canvas.setMask(null);  // clear before loading
+            app._applyMaskB64(result.mask);
+            app.setStatus('Mask loaded from DFLJPG');
+          } else {
+            app.setStatus('No mask found in DFLJPG');
+          }
+        } catch (err) {
+          app.setStatus('Load error: ' + err.message);
+        }
+      };
+
+      // ---- Opacity slider -------------------------------------------------
+      document.getElementById('opacity-slider').addEventListener('input', function () {
+        var val = parseInt(this.value, 10);
+        document.getElementById('opacity-label').textContent = val + '%';
+        app.canvas.setOpacity(val / 100);
+      });
+
+      // ====================================================================
+      // Tag toggle (BiSeNet face part chips)
+      // ====================================================================
+      document.querySelectorAll('.tag').forEach(function (el) {
+        el.addEventListener('click', function () {
+          el.classList.toggle('active');
+        });
+      });
+
+      // ====================================================================
+      // Model select (SAM variants)
+      // ====================================================================
+      document.querySelectorAll('.model-select__btn').forEach(function (el) {
+        el.addEventListener('click', function () {
+          if (!el.dataset.model && !el.dataset.res && !el.dataset.xres) return;
+          var parent = el.parentElement;
+          var active = parent.querySelector('.active');
+          if (active) active.classList.remove('active');
+          el.classList.add('active');
+        });
+      });
+
+      // ====================================================================
+      // Mask resolution
+      // ====================================================================
+      document.querySelectorAll('#mask-res-group .model-select__btn').forEach(function (el) {
+        el.addEventListener('click', async function () {
+          var res = parseInt(el.dataset.res, 10);
+          if (!res || !app.canvas) return;
+          // Commit current mask before switching resolution
+          if (app.canvas.mask && app.currentIndex >= 0) {
+            var saveData = app.canvas.mask.data;
+            for (var ci = 0; ci < saveData.length; ci++) {
+              if (saveData[ci] < 0) saveData[ci] = 0;
+            }
+            var b64 = app._maskToB64();
+            if (b64) {
+              try { await API.saveMask(app.currentIndex, b64); } catch (_) {}
+            }
+          }
+          app.canvas.maskResolution = res;
+          // Reload current image to refresh canvas with new resolution
+          if (app.files.length > 0) {
+            await app.navigateTo(app.currentIndex);
+          }
+          app.setStatus('Mask resolution: ' + res + 'x' + res);
+        });
+      });
+
+      // ====================================================================
+      // Boot
+      // ====================================================================
+
+      /** Global App instance — referenced from onclick and shortcuts. */
+      var app = new App();
+      window.app = app;
+
+      // Preload all models in background (doesn't block UI)
+      API.preloadModels();
+
+    })();
+  </script>
+<script>
+/* 4.1 注入：从 ?dir= 取工作区路径，填进标题栏并触发打开 */
+(function () {
+  var q = new URLSearchParams(location.search);
+  var dir = q.get("dir");
+  if (!dir) return;
+  var inp = document.getElementById("workspace-path");
+  if (inp) inp.value = dir;
+  /* 等 app 初始化完再调 */
+  setTimeout(function () {
+    try {
+      if (window.app && window.app.openWorkspace) window.app.openWorkspace(dir);
+      else if (window.app && window.app.changeWorkspace) {
+        var el = document.getElementById("workspace-path");
+        if (el) el.value = dir;
+        window.app.changeWorkspace();
+      }
+    } catch (e) { console.warn("auto open failed", e); }
+  }, 400);
+})();
+</script>
+
+<script>
+/* 4.1 注入：从 ?dir= 取工作区路径，等 app 起来后自动 openProject */
+(function () {
+  var q = new URLSearchParams(location.search);
+  var dir = q.get("dir");
+  var tries = 0;
+  function boot() {
+    tries++;
+    if (window.app && typeof window.app.openProject === "function") {
+      var inp = document.getElementById("workspace-path");
+      if (inp) inp.value = dir;
+      try { window.app.openProject(dir); } catch (e) { console.warn("openProject failed", e); }
+      return;
+    }
+    if (tries < 40) setTimeout(boot, 150);
+  }
+  if (dir) boot();
+})();
+</script>
+<script>
+/* 4.1 主题桥：父窗口切换深浅色时同步进来 */
+window.addEventListener("message", function (e) {
+  var d = e.data || {};
+  if (d.dflTheme) {
+    var root = document.documentElement;
+    if (root.getAttribute("data-theme") === d.dflTheme) return;
+    /* 过渡只在切换那一瞬间挂上，之后摘掉，免得影响 hover */
+    root.classList.add("theme-fade");
+    root.setAttribute("data-theme", d.dflTheme);
+    root.classList.toggle("dark", d.dflTheme === "dark");
+    clearTimeout(window.__themeFadeT);
+    window.__themeFadeT = setTimeout(function () { root.classList.remove("theme-fade"); }, 300);
+    /* canvas 是位图，CSS 过渡管不到 —— 换主题后必须重画一遍遮罩层，
+       否则它会停在旧主题的绿色/红色上 */
+    var cv = window.app && window.app.canvas;
+    if (cv && typeof cv._doRender === "function") {
+      try { cv._doRender(); } catch (e) {}
+      /* 描边/网格这类细节在下一帧才稳定，再补一次 */
+      setTimeout(function () { try { cv._doRender(); } catch (e) {} }, 60);
+    }
+  }
+});
+(function () {
+  var th = "light";
+  try { var p = new URLSearchParams(location.search); if (p.get("theme")) th = p.get("theme"); } catch (e) {}
+  document.documentElement.setAttribute("data-theme", th);
+  document.documentElement.classList.toggle("dark", th === "dark");
+})();
+</script>
+<script>
+/* 顶栏动作 */
+(function () {
+  function bind() {
+    var b = document.getElementById("mkChange");
+    var p = document.getElementById("mkPick");
+    var go = function () { if (window.app && app.changeWorkspace) app.changeWorkspace(); };
+    if (b) b.addEventListener("click", go);
+    if (p) p.addEventListener("click", go);
+    var inp = document.getElementById("workspace-path");
+    if (inp) inp.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); go(); } });
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", bind);
+  else bind();
+})();
+</script>
+<script>
+/* 遮罩编辑器的中英切换（iframe 独立文档，主站的通知进不来，只能自己做） */
+(function () {
+  var MK_I18N = {
+    "数据集": "Dataset", "打开": "Open", "文件": "Files",
+    "绘制": "Draw", "排除": "Exclude", "生成": "Generate",
+    "已启用": "Active", "脸": "Face", "头发": "Hair", "眼睛": "Eyes",
+    "嘴": "Mouth", "皮肤": "Skin", "鼻子": "Nose",
+    "遮罩": "Mask", "分辨率": "Resolution", "载入 DFLJPG": "Load DFLJPG",
+    "保存": "Save", "透明度": "Opacity",
+    "画笔": "Brush", "钢笔": "Pen", "模式": "Mode", "撤销": "Undo",
+    "上一张/下一张": "Prev/Next",
+    "SAM 点选 (S)": "SAM click (S)", "画笔 (R)": "Brush (R)", "钢笔 (N)": "Pen (N)",
+    "撤销 (Ctrl+Z)": "Undo (Ctrl+Z)",
+    "分辨率:": "Resolution:", "透明度:": "Opacity:",
+    "还没有选择文件": "No file selected"
+  };
+  var MK_PAT = [
+    [/^(\d+)\s*张$/, "$1 images"],
+    [/^(\d+)\s*\/\s*(\d+)$/, "$1 / $2"]
+  ];
+  var orig = new Map();
+
+  function walk(lang) {
+    var w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+    var n;
+    while ((n = w.nextNode())) {
+      var raw = n.nodeValue;
+      if (raw == null) continue;
+      var stored = orig.get(n);
+      if (lang !== "en") {
+        if (stored !== undefined && stored !== raw) n.nodeValue = stored;
+        continue;
+      }
+      var t = raw.trim();
+      if (!t || !/[\u4e00-\u9fa5]/.test(t)) continue;
+      if (stored === undefined) orig.set(n, raw);
+      var hit = MK_I18N[t];
+      if (!hit) {
+        /* 带冒号 / 括号尾巴的，剥掉再查一次 */
+        var bare = t.replace(/[::\s]+$/, "");
+        if (bare !== t && MK_I18N[bare]) hit = MK_I18N[bare] + t.slice(bare.length);
+      }
+      if (!hit) {
+        for (var i = 0; i < MK_PAT.length; i++) {
+          if (MK_PAT[i][0].test(t)) { hit = t.replace(MK_PAT[i][0], MK_PAT[i][1]); break; }
+        }
+      }
+      if (hit) n.nodeValue = raw.replace(t, hit);
+    }
+    /* title / placeholder */
+    document.querySelectorAll("[title],[placeholder]").forEach(function (el) {
+      ["title", "placeholder"].forEach(function (a) {
+        var cur = el.getAttribute(a);
+        if (!cur) return;
+        var key = "__mk_" + a;
+        if (!el.dataset[key]) el.dataset[key] = cur;
+        if (lang === "en" && MK_I18N[cur.trim()]) { el.setAttribute(a, MK_I18N[cur.trim()]); }
+        else if (lang !== "en" && el.dataset[key]) { el.setAttribute(a, el.dataset[key]); }
+      });
+    });
+  }
+
+  var current = "zh";
+  window.addEventListener("message", function (e) {
+    var d = e.data || {};
+    if (d.dflLang && d.dflLang !== current) {
+      current = d.dflLang;
+      walk(current);
+      /* 动态渲染会覆盖译文，过一会儿再扫一遍 */
+      setTimeout(function () { walk(current); }, 250);
+      setTimeout(function () { walk(current); }, 900);
+    }
+  });
+  (function init() {
+    var l = "zh";
+    try { l = localStorage.getItem("dfl-lang") || "zh"; } catch (e) {}
+    if (l !== "zh") { current = l; setTimeout(function () { walk(l); }, 400); }
+  })();
+})();
+</script>
+</body>
+</html>

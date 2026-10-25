@@ -1,0 +1,1100 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<title>DeepFaceLab-PyTorch</title>
+<link rel="stylesheet" href="/static/css/noto.css?v=3">
+  <link rel="stylesheet" href="/static/css/app.css?v=31">
+  <link rel="stylesheet" href="/static/css/shadcn.css?v=4">
+</head>
+<body>
+<svg id="sprite" aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden"><symbol id="i-home" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.2 12 3l9 7.2"/><path d="M5.5 9.5V20a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1V9.5"/></symbol><symbol id="i-scan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="11" r="3"/><path d="M9 16.6c.85-.9 1.85-1.35 3-1.35s2.15.45 3 1.35"/></symbol><symbol id="i-layers" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/></symbol><symbol id="i-cpu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/></symbol><symbol id="i-box" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 20 7v10l-8 4-8-4V7l8-4Z"/><path d="m4 7 8 4 8-4M12 11v10"/></symbol><symbol id="i-sliders" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h8M16 7h4M4 17h4M12 17h8"/><circle cx="14" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></symbol><symbol id="i-gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol><symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.8h.01"/></symbol><symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></symbol><symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></symbol><symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></symbol><symbol id="i-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 5.2v13.6L20 12 8.5 5.2Z"/></symbol><symbol id="i-power" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5v8"/><path d="M7.2 6.6a7.2 7.2 0 1 0 9.6 0"/></symbol><symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol><symbol id="i-warn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.2 2.6 19.8h18.8L12 3.2z"/><path d="M12 9.4v4.6"/><path d="M12 17.4h.01"/></symbol><symbol id="i-error" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/></symbol><symbol id="i-panel" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M9 4v16"/></symbol><symbol id="i-brush" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19.5 8.5a2.12 2.12 0 0 0-3-3L5 17v3z"/><path d="M14.5 6.5l3 3"/></symbol><symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5v10"/><path d="M8 10.5l4 4 4-4"/><path d="M4.5 19.5h15"/></symbol><symbol id="i-swap" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8.5h13l-3.2-3.2"/><path d="M20 15.5H7l3.2 3.2"/></symbol><symbol id="i-scatter" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4v16h16"/><circle cx="9" cy="15" r="1.3"/><circle cx="13" cy="9.5" r="1.3"/><circle cx="17.5" cy="13" r="1.3"/></symbol><symbol id="i-min" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12h12"/></symbol><symbol id="i-max" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="1.5"/></symbol><symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4"/></symbol><symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 14.6A8.5 8.5 0 1 1 9.4 3.5a6.9 6.9 0 0 0 11.1 11.1Z"/></symbol><symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6 6 18"/></symbol><symbol id="i-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5 12 15.5 18 9.5"/></symbol><symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10M8 11l4 4 4-4M5 20h14"/></symbol><symbol id="i-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L18 10l-4-4L4 16v4Z"/><path d="m13.5 6.5 4 4"/></symbol><symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5.2A1.2 1.2 0 0 1 10.2 4h3.6A1.2 1.2 0 0 1 15 5.2V7"/><path d="M6.5 7 7.4 19a2 2 0 0 0 2 1.9h5.2a2 2 0 0 0 2-1.9L17.5 7"/></symbol></svg>
+<div class="app">
+  <div class="wctl">
+    <button class="wbtn" onclick="winMin()" title="最小化"><svg class="ic"><use href="#i-min"/></svg></button>
+    <button class="wbtn" onclick="winMax()" title="最大化"><svg class="ic"><use href="#i-max"/></svg></button>
+    <button class="wbtn close" onclick="winClose()" title="关闭"><svg class="ic"><use href="#i-close"/></svg></button>
+  </div>
+  <div class="shell">
+    <div class="side">
+      <div class="brand">
+        <img class="logo" id="brandLogo" src="/static/img/logo.png" alt="DeepFaceLab" title="折叠侧边栏" draggable="false">
+        <div class="btext"><b class="lbl">DeepFaceLab-PyTorch</b></div>
+      </div>
+      <div class="nav on" data-go="home"><svg class="ic"><use href="#i-home"/></svg><span class="lbl">主页</span></div>
+      <div class="nav" data-go="extract"><svg class="ic"><use href="#i-scan"/></svg><span class="lbl">提取器</span></div>
+      <div class="nav" data-go="dataset"><svg class="ic"><use href="#i-layers"/></svg><span class="lbl">数据处理</span></div>
+      <div class="nav" data-go="train"><svg class="ic"><use href="#i-cpu"/></svg><span class="lbl">训练器</span></div>
+      <div class="nav" data-go="merge"><svg class="ic"><use href="#i-box"/></svg><span class="lbl">合成器</span></div>
+      <div class="navgrp" id="toolgrp">
+        <div class="grphd" id="toolgrpHd" title="工具">
+          <svg class="ic"><use href="#i-sliders"/></svg>
+          <span class="lbl">工具</span>
+          <svg class="chev"><use href="#i-chevron"/></svg>
+        </div>
+        <div class="grpbody" id="toolgrpBody">
+          <div class="nav sub" data-go="tool-mask"><span class="lbl">遮罩绘制</span></div>
+          <div class="nav sub" data-go="tool-bili"><span class="lbl">B 站下载</span></div>
+          <div class="nav sub" data-go="tool-color"><span class="lbl">色域迁移</span></div>
+          <div class="nav sub" data-go="tool-angle"><span class="lbl">角度可视化</span></div>
+          <div class="nav sub" data-go="tool-engine"><span class="lbl">引擎编译</span></div>
+        </div>
+      </div>
+      <div class="foot">
+        <div class="userbox" id="userBox" style="display:none">
+          <div class="uavatar" id="uAvatar" role="button" tabindex="0" title="账户">D</div>
+          <div class="uname" id="uName">—</div>
+          <button class="mini" id="uLogout" title="退出登录">退出</button>
+          <div class="umenu" id="uMenu" role="menu">
+            <div class="uitem" id="uMenuLogout" role="menuitem">退出登录</div>
+          </div>
+        </div>
+        <div class="nav" data-go="settings"><svg class="ic"><use href="#i-gear"/></svg><span class="lbl">设置</span></div>
+        <div class="nav" data-go="about"><svg class="ic"><use href="#i-info"/></svg><span class="lbl">关于</span></div>
+        <div class="nav" id="themeToggle" title="切换深浅色"><svg class="ic"><use class="ic-moon" href="#i-moon"/><use class="ic-sun" href="#i-sun"/></svg><span class="lbl" id="themeLabel">深色模式</span></div>
+      </div>
+    </div>
+
+    <div class="maincol">
+      <div class="wtop"><i class="topdrag" aria-hidden="true"></i><nav class="crumbs" id="crumbs"></nav></div>
+      <div class="dragstrip" aria-hidden="true"></div>
+      <div class="main">
+
+      <!-- ================= 主页 ================= -->
+      <div class="page on" id="p-home">
+        <!-- 问候 + 下一步 + 品牌 -->
+        <div class="hero">
+          <img class="heroMark" src="/static/img/logo.png" alt="">
+          <div class="heroIn">
+            <div class="hello" id="hello">你好</div>
+            <div class="hsub" id="helloSub">正在读取工作区…</div>
+            <div class="hactions">
+              <button class="btn pri" id="nextBtn">继续训练</button>
+              <span class="hint" id="nextHint"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 成绩单：越用越有分量的数字 -->
+        <div class="stats" id="homeStats">
+          <div class="st"><div class="sv" id="stIter">—</div><div class="sl">累计迭代</div></div>
+          <div class="st"><div class="sv" id="stModels">—</div><div class="sl">模型</div></div>
+          <div class="st"><div class="sv" id="stFaces">—</div><div class="sl">已对齐人脸</div></div>
+          <div class="st"><div class="sv" id="stExports">—</div><div class="sl">导出 DFM</div></div>
+        </div>
+
+        <div class="pipe" id="homePipe">
+          <div class="pstep" data-step="data">
+            <div class="pt">数据集</div>
+            <div class="pv" id="pvData">—</div>
+            <button class="mini" data-go="dataset">打开</button>
+          </div>
+          <div class="pstep" data-step="model">
+            <div class="pt">模型</div>
+            <div class="pv" id="pvModel">—</div>
+            <button class="mini" data-go="train">管理</button>
+          </div>
+          <div class="pstep" data-step="merge">
+            <div class="pt">合成</div>
+            <div class="pv" id="pvMerge">—</div>
+            <button class="mini" data-go="merge">打开</button>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="cardhd"><b>最近活动</b><span class="hint" id="homeVer"></span></div>
+          <div id="homeRecent"></div>
+        </div>
+      </div>
+
+      <!-- ================= 提取器 ================= -->
+      <div class="page" id="p-extract">
+        <div style="display:flex;align-items:flex-start;gap:14px">
+          <div>
+            <div class="title">人脸提取</div>
+          </div>
+          <div style="flex:1"></div>
+        </div>
+
+        <div class="card" style="margin-bottom:14px">
+          <div class="hd"><b>参数</b></div>
+          <div class="paths">
+            <div class="inp mono pathinp">
+              <span class="lb">输入</span><input class="pathval" value="D:&#92;media&#92;raw&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
+              <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span>
+            </div>
+            <div class="inp mono pathinp">
+              <span class="lb">输出</span><input class="pathval" value="workspace&#92;_frames&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
+              <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span>
+            </div>
+          </div>
+          <div class="prow compact" style="margin-top:16px">
+            <div class="pc">
+              <label class="f">检测器</label>
+              <div class="seg"><b class="on">高精度 · RetinaFace</b><b>高性能 · TinyMog</b></div>
+            </div>
+            <div class="pc">
+              <label class="f">检测角度</label>
+              <div class="seg"><b class="on">0°</b><b>90°</b><b>180°</b><b>270°</b></div>
+            </div>
+            <div class="pc">
+              <label class="f">帧跳跃</label>
+              <div style="display:flex;align-items:center;gap:8px">
+                <div class="num">
+                  <button class="nb" data-d="-1" title="少一帧">−</button><input value="1" inputmode="numeric"
+                    min="1" max="120" title="每 N 帧取一张（24fps 下 N 超过 120 等同于 0.2 fps 下限）"><button class="nb" data-d="1" title="多一帧">+</button>
+                </div>
+              <span style="font-size:12px;color:var(--ink-3)">帧</span>
+              </div>
+            </div>
+          </div>
+          <button class="btn pri" id="btnExtract" style="width:100%;margin-top:16px;height:38px">开始提取</button>
+        </div>
+
+        <div class="card tint hide" id="exProgress">
+          <div style="display:flex;align-items:center;margin-bottom:9px">
+            <b style="font-size:13px" id="exTitle">正在处理</b>
+            <div style="flex:1"></div>
+            <span class="hint" id="exStage" style="margin-right:8px"></span><span class="hint" id="exCounter" style="font-variant-numeric:tabular-nums">就绪</span>
+          </div>
+          <div class="bar"><i id="exBar" style="width:0%"></i></div>
+          <div class="hint" id="exMsg" style="margin-top:10px;font-size:11.5px">准备中…</div>
+          <div class="stats4" style="margin-top:12px">
+            <div class="stat"><div class="k">帧速度</div><div class="v"><span id="exFps">0</span><small>帧/秒</small></div></div>
+            <div class="stat"><div class="k">人脸速度</div><div class="v"><span id="exFaceRate">0</span><small>张/秒</small></div></div>
+            <div class="stat"><div class="k">已对齐人脸</div><div class="v"><span id="exFaces">0</span><small>张</small></div></div>
+            <div class="stat"><div class="k">已处理帧</div><div class="v"><span id="exFiles">0</span><small id="exFilesTotal">/ 0</small></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= 数据处理 ================= -->
+      <div class="page" id="p-dataset">
+        <div class="title">数据处理</div>
+
+        <div class="ds-path in" id="dspath">
+          <div class="inp mono pathinp dspathinp" id="dsPathBox" title="点一下换数据集">
+            <span class="lb">当前数据集</span>
+            <input class="pathval" id="dsPathVal" value="workspace&#92;data_src&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
+            <span class="tag n" id="dsPathCount">342 张</span>
+            <span class="pill iconpill"><svg class="ic"><use href="#i-folder"/></svg></span>
+          </div>
+        </div>
+
+        
+
+                <div class="ds-work in" id="dswork">
+          <div id="dsSteps"></div>
+        </div>
+      </div>
+
+      <!-- ================= 训练器 ================= -->
+      <div class="page" id="p-train">
+        <div class="title">模型</div>
+        <div class="trbar">
+          <div class="trsearch">
+            <input id="msearch" placeholder="搜索模型名…" spellcheck="false" autocomplete="off">
+            <svg class="tri" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <circle cx="7" cy="7" r="4.5"/>
+              <path d="M10.5 10.5 14 14" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <button class="trnew" id="btnNewModel" title="新建模型">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+              <path d="M8 3v10M3 8h10"/>
+            </svg>
+          </button>
+        </div>
+        <div id="mgrid"></div>
+      </div>
+
+
+
+
+      <!-- ================= 工具：遮罩绘制 ================= -->
+      <div class="page" id="p-tool-mask">
+        <iframe id="mkFrame" src="/mask-editor/index.html" title="Mask Processor"></iframe>
+      </div>
+
+      <!-- ================= 工具：B 站下载 ================= -->
+      <div class="page" id="p-tool-bili">
+        <div class="title">B 站下载</div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="cardhd"><b>用户搜索</b><span class="hint" id="biliOwner">未查询</span></div>
+          <div class="dbgrow">
+            <div class="inp pathinp" style="flex:1"><span class="lb">UP 主 UID</span>
+              <input id="biliUid" inputmode="numeric" placeholder="请输入哔哩哔哩 UID（纯数字）…"
+                style="flex:1;min-width:0;border:0;background:transparent;color:var(--ink);font-size:12px;outline:none">
+            </div>
+            <button class="btn pri" id="biliFetch" style="flex:0 0 auto;height:33px">获取视频列表</button>
+          </div>
+          <div class="bili-fetchbar" id="biliFetchBar" hidden>
+            <div class="bfb-track"><i id="biliFetchFill"></i></div>
+            <span class="bfb-text" id="biliFetchText">准备中…</span>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="cardhd"><b>下载设置</b><span class="hint">Cookie 有效至 2027-03</span></div>
+          <div class="dbgrow"><div class="inp mono pathinp"><span class="lb">保存路径</span><input class="pathval" value="workspace&#92;raw&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
+              <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span></div>
+          </div>
+          <div class="dbgrow"><div class="inp mono pathinp"><span class="lb">FFmpeg</span><input class="pathval" value="_internal&#92;ffmpeg.exe" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
+              <span class="pill iconpill" title="选择文件"><svg class="ic"><use href="#i-folder"/></svg></span></div>
+          </div>
+          <div class="prow compact" style="margin-top:16px">
+            <div class="pc">
+              <label class="f">画质</label>
+              <div class="seg" id="biliQuality"><b class="on">最高</b><b>1080P</b><b>720P</b></div>
+            </div>
+            <div class="pc">
+              <label class="f">下载线程</label>
+              <div class="seg" id="biliThreads"><b>2</b><b class="on">4</b><b>8</b><b>16</b></div>
+            </div>
+          </div>
+        </div>
+
+        
+
+        <div class="card bili-listcard" style="margin-top:14px">
+          <div class="cardhd">
+            <b>视频列表</b>
+            <span class="hint" id="biliCount">0 个</span>
+            <div style="flex:1"></div>
+            <span class="hint bili-selinfo">已选 <b id="biliSel">0</b></span>
+            <button class="btn pri" id="biliStart" disabled>下载选中</button>
+          </div>
+          <table class="t" id="biliTable">
+            <thead>
+              <tr>
+                <th style="width:38px"><input type="checkbox" id="biliAll" title="全选 / 取消全选"></th>
+                <th>标题</th>
+                <th style="width:110px">BV 号</th>
+                <th style="width:70px">合作</th>
+              </tr>
+            </thead>
+            <tbody id="biliBody"></tbody>
+          </table>
+          <div class="empty-note" id="biliEmpty">暂无视频数据，请先搜索 UID</div>
+        </div>
+      </div>
+
+      <!-- ================= 任务 ================= -->
+      <div class="page" id="p-bili-jobs">
+        <div class="runhead" style="margin-bottom:10px">
+          <div class="title" style="margin:0">下载中</div>
+          <div style="flex:1"></div>
+          <span class="hint" id="jobSummaryTop">空闲</span>
+          <button class="mini" id="biliPause">暂停</button>
+          <button class="mini" id="biliStop" style="color:#ef4444;border-color:rgba(239,68,68,.35)">终止</button>
+        </div>
+        <div class="sub">B 站下载的实时队列，离开这页也会继续跑。</div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="cardhd"><b>队列</b></div>
+          <div class="joblist" id="jobList">
+            <div class="empty-note" id="jobEmpty">当前没有任务</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= 工具：色域迁移 ================= -->
+      <div class="page" id="p-tool-color">
+        <div class="title">色域迁移</div>
+        <div class="sub">杜比视界 / HDR 先转成普通色域再做提取。4.1 不再内置 HDR 提取。</div>
+        <div class="card" style="margin-top:14px">
+          <div class="dbgrow"><div class="inp mono pathinp"><span class="lb">源视频</span><input class="pathval" value="还没有选择文件" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
+              <span class="pill iconpill" title="选择视频"><svg class="ic"><use href="#i-folder"/></svg></span></div>
+          </div>
+          <div class="dbgrow"><label class="f">输出</label>
+            <span class="hint">与源文件同目录，后缀 <span class="kbd">_sdr</span></span>
+          </div>
+          <div class="dbgrow"><label class="f">编码</label>
+            <div class="seg"><b class="on">H.265</b><b>H.264</b></div>
+          </div>
+        </div>
+        <div class="card" style="margin-top:14px">
+          <div class="dbgacts">
+            <button class="btn pri">开始转换</button>
+            <span class="hint">基于 FFmpeg</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ================= 工具：引擎编译 ================= -->
+      <div class="page" id="p-tool-engine">
+        <div class="title">引擎编译</div>
+
+        <div class="card" style="margin-bottom:14px">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
+            <span class="hint" id="engSm" style="font-size:11px"></span>
+            <div style="flex:1"></div>
+            <button class="mini" id="engAll">全部编译</button>
+          </div>
+
+          <table class="engtable">
+            <thead>
+              <tr>
+                <th>模型</th><th>MD5</th><th class="eng-num">原始大小</th><th class="eng-num">引擎大小</th><th class="eng-st">状态</th>
+              </tr>
+            </thead>
+            <tbody id="engList"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ================= 工具：角度可视化 ================= -->
+      <div class="page" id="p-tool-angle">
+        <div class="title">角度可视化</div>
+        <div class="card" style="margin-top:14px">
+          <div class="dbgrow"><div class="inp mono pathinp"><span class="lb">数据集</span><input class="pathval" value="workspace&#92;data_src&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
+              <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span></div>
+          </div>
+          <div class="dbgrow"><label class="f">图表</label>
+            <div class="seg"><b class="on">散点图</b><b>格子图</b></div>
+          </div>
+        </div>
+        <div class="card" style="margin-top:14px">
+          <div class="cardhd"><b>分布</b><span class="hint">尚未加载数据</span></div>
+          <div class="chartbox" style="height:220px" id="angleBox"></div>
+        </div>
+      </div>
+
+      <!-- ================= 通知调试 ================= -->
+      <div class="page" id="p-debug">
+        <div class="title">调试</div>
+
+        <div class="card" style="margin-bottom:14px">
+          <div class="cardhd"><b>3D 人脸编辑器</b><span class="hint" id="edHint">拖动旋转 · 点选特征点</span></div>
+          <div class="edwrap">
+            <canvas id="edCanvas" width="460" height="460"></canvas>
+            <div class="edside">
+              <div class="edtitle">特征点 <b id="edSel">1</b> / 68</div>
+              <div class="edlist" id="edList"></div>
+              <div class="edfields">
+                <div class="axisrow"><span class="axisx">X</span><div class="numdrag"><input id="edX" type="number" step="0.01" spellcheck="false" autocomplete="off"><span class="grip" title="按住左右拖动调值"></span></div></div>
+                <div class="axisrow"><span class="axisy">Y</span><div class="numdrag"><input id="edY" type="number" step="0.01" spellcheck="false" autocomplete="off"><span class="grip" title="按住左右拖动调值"></span></div></div>
+                <div class="axisrow"><span class="axisz">Z</span><div class="numdrag"><input id="edZ" type="number" step="0.01" spellcheck="false" autocomplete="off"><span class="grip" title="按住左右拖动调值"></span></div></div>
+              </div>
+              <div class="dbgacts">
+                <button class="mini" id="edSave" style="background:var(--accent);color:var(--accent-ink);border-color:transparent">保存</button>
+                <button class="mini" id="edReset">重置</button>
+                <button class="mini" id="edExport">导出 JSON</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="title" style="font-size:16px;margin-top:8px">通知调试</div>
+
+        <div class="card" style="margin-bottom:14px">
+          <div class="cardhd"><b>内容</b><span class="hint">右下角气泡</span></div>
+          <div class="dbgrow">
+            <label class="f">标题</label>
+            <input class="inp" id="dbgTitle" value="提取完成">
+          </div>
+          <div class="dbgrow">
+            <label class="f">副标题</label>
+            <input class="inp" id="dbgSub" value="342 个文件 · 用时 1 分 12 秒">
+          </div>
+          <div class="dbgrow">
+            <label class="f">持续（毫秒）</label>
+            <input class="inp" id="dbgMs" value="3600" inputmode="numeric">
+          </div>
+          <div class="dbgrow">
+            <label class="f">类型</label>
+            <div class="seg" id="dbgType">
+              <b class="on" data-t="success">成功</b><b data-t="info">信息</b><b data-t="warn">警告</b><b data-t="error">错误</b>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="cardhd"><b>触发</b><span class="hint" id="dbgCount">当前 0 条</span></div>
+          <div class="dbgacts">
+            <button class="btn" id="dbgOne">发一条</button>
+            <button class="mini" id="dbgThree">连发 3 条</button>
+            <button class="mini" id="dbgFive">连发 5 条</button>
+            <button class="mini" id="dbgLong">超长文案</button>
+            <button class="mini" id="dbgClear">全部清空</button>
+          </div>
+        </div>
+      </div>
+
+
+      <!-- ================= 参数设置 ================= -->
+      <div class="page" id="p-train-cfg">
+        <div class="title">参数设置</div>
+        <div class="sub" id="cfgSub">训练前确认参数。带 · 的是本次会话才会生效的项。</div>
+        <div id="cfgBox" style="margin-top:14px"></div>
+        <div class="cfgactions">
+          <span class="hint" id="cfgHint"></span>
+          <div style="flex:1"></div>
+          <button class="mini" id="cfgReset">恢复默认</button>
+          <button class="btn pri" id="cfgStart">开始训练</button>
+        </div>
+      </div>
+
+      <!-- ================= 训练中（骨架） ================= -->
+      <div class="page" id="p-run">
+        <div class="runhead">
+          <div class="runit">
+            <span class="live"></span>
+            <b id="runName">384wf</b>
+            <span class="tag ok" id="runStage">正式训练</span>
+          </div>
+          <div style="flex:1"></div>
+          <button class="mini" id="runHide">隐藏</button>
+          <button class="mini">暂停</button>
+          <button class="mini">立即保存</button>
+          <button class="mini" style="color:var(--bad)">停止</button>
+        </div>
+
+        <div class="runbar">
+          <span><b id="runIter">131,200</b> / <span id="runTarget">500,000</span> iter</span>
+          <span class="dot">·</span><span id="runSpeed">1.82 it/s</span>
+          <span class="dot">·</span><span id="runElapsed">已跑 4h 12m</span>
+          <span class="dot">·</span><span id="runEta">约 56 小时剩余</span>
+        </div>
+
+        <div class="runmain">
+          <div class="card rchart">
+            <div class="cardhd"><b>loss</b><span class="hint" id="chartHint">最近 2500 iter</span></div>
+            <div class="chartbox" id="chartBox"></div>
+            <div class="runlog" id="runLog"></div>
+            <div class="chartfoot">
+              <span><i style="background:var(--accent)"></i>src</span>
+              <span><i style="background:var(--ok)"></i>dst</span>
+              <span style="margin-left:auto">最近 100 均 <b id="chartAvg">0.2412</b></span>
+            </div>
+          </div>
+
+          <div class="card rstats">
+            <div class="srow"><span>GPU</span><b id="stGpu">显存 9.2 / 12 GB</b></div>
+            <div class="sbar"><i id="stGpuBar" style="width:77%"></i></div>
+            <div class="srow"><span>利用率</span><b>98%</b></div>
+            <div class="srow"><span>磁盘</span><b id="stDisk">剩 82 GB · 模型 6.4 GB</b></div>
+            <div class="srow"><span>学习率</span><b id="stLr">2.0e-4 · cos</b></div>
+            <div class="srow"><span>上次保存</span><b id="stSave">12 分钟前</b></div>
+            <div class="srow"><span>下次自动</span><b>48 分钟后</b></div>
+            <div class="srow"><span>备份</span><b>3 / 5 份</b></div>
+          </div>
+        </div>
+
+        <div class="card rprev">
+          <div class="cardhd"><b>预览</b><span class="hint" id="prevHint">bs 4 · 显示 4 行</span></div>
+          <div class="pvhead" id="pvhead"></div>
+          <div class="pvgrid" id="pvgrid"></div>
+        </div>
+      </div>
+
+      <!-- ================= 合成器 ================= -->
+      <div class="page" id="p-merge">
+
+        <div class="mgview in" data-view="main">
+        <div class="mgbody">
+          <aside class="mgleft">
+            <div class="inp mono pathinp mgws2">
+              <span class="pill iconpill"><svg class="ic"><use href="#i-folder"/></svg></span>
+              <input class="pathval" value="workspace" spellcheck="false" autocomplete="off">
+            </div>
+            <div class="mggrp">
+              <div class="mggrphd">模型<span id="mgModelCount"></span></div>
+              <div id="mgModels"></div>
+            </div>
+            <div class="mggrp">
+              <div class="mggrphd">素材</div>
+              <div class="empty-note" id="mgVideosEmpty">还没有导入素材</div>
+              <div id="mgVideos"></div>
+              <button class="mini" id="mgAddVideo" style="width:100%;margin-top:8px">＋ 导入视频</button>
+              <button class="mini" id="mgAddProject" onclick="window.mvOpenProject && window.mvOpenProject()" style="width:100%;margin-top:6px">＋ 打开 DFL 项目</button>
+            </div>
+          </aside>
+
+          <div class="mgcenter">
+            <div class="mgviews" id="mgViews">
+              <b class="on" data-v="orig">原图</b>
+              <b data-v="det">检测</b>
+              <b data-v="swap">合成</b>
+            </div>
+            <div class="mgstage" id="mgStage"><span id="mgStageHint">选择视频后显示</span></div>
+          </div>
+
+          <aside class="mgright">
+            <div class="mgsec">
+              <div class="mggrphd"><i class="dot"></i>检测</div>
+              <div class="mgrow"><span class="f">检测器</span>
+                <select class="mgsel" id="mgDetector">
+                  <option>RetinaFace_10g</option><option>RetinaFace_500m</option><option>MogFace</option>
+                  <option>TinyMog</option><option>S3FD</option><option>MTCNN</option><option>BlazeFace</option>
+                  <option>CenterFace</option><option>DamoFD</option><option>LightweightFD</option>
+                  <option>ULFD</option><option>YOLOv8</option><option>YoloV5Face</option><option>YoloV11nFace</option>
+                </select>
+              </div>
+              <div class="mgrow"><span class="f">特征点</span><span class="mgval">insightface-2d106det</span></div>
+              <div class="mgrow"><span class="f">人脸类型</span>
+                <select class="mgsel" id="mgFaceType">
+                  <option>whole_face</option><option>full_face</option><option>half_face</option>
+                  <option>midfull_face</option><option>head</option>
+                </select>
+              </div>
+              <div class="mgrow"><span class="f">检测策略</span>
+                <div class="seg" data-k="detect"><b>总是重检</b><b class="on">沿用 DFL</b></div>
+              </div>
+            </div>
+
+            <div class="mgsec">
+              <div class="mggrphd"><i class="dot"></i>合成</div>
+              <div class="mgrow"><span class="f">模式</span>
+                <select class="mgsel" id="mgMode">
+                  <option>overlay</option><option>original</option><option>hist-match</option>
+                  <option>seamless</option><option>seamless-hist-match</option>
+                  <option>raw-rgb</option><option>raw-predict</option><option>debug</option>
+                </select>
+              </div>
+              <div class="mgrow"><span class="f">遮罩来源</span>
+                <div class="seg" data-k="seg"><b class="on">DFM</b><b>XSeg</b><b>XSegLite</b></div>
+              </div>
+              <div class="mgrow"><span class="f">遮罩模式</span>
+                <div class="seg" data-k="mask"><b class="on">prd×dst</b><b>prd</b><b>dst</b></div>
+              </div>
+              <div class="mgrow"><span class="f">色域迁移</span>
+                <select class="mgsel" id="mgColor">
+                  <option>rct</option><option>mt</option><option>lut</option><option>lct</option>
+                  <option>mkl</option><option>idt</option><option>sot-m</option><option>mix-m</option><option>none</option>
+                </select>
+              </div>
+              <div class="mgrow"><span class="f">遮罩腐蚀</span><div class="mgnum"><input class="mgtiny" value="0" title="范围 −100 ~ 100"></div></div>
+              <div class="mgrow"><span class="f">遮罩羽化</span><div class="mgnum"><input class="mgtiny" value="4" title="范围 −100 ~ 100"></div></div>
+            </div>
+
+    
+
+            <div class="mgsec mgexport">
+              <button class="btn pri" id="mgExport" style="width:100%">导出</button>
+            </div>
+          </aside>
+        </div>
+
+<div class="mtl" id="mergeTracks">
+
+  
+  <div class="mtl-bar">
+    <div class="mtl-jump">
+      <span class="mtl-lbl">帧</span>
+      <div class="mtl-frame">
+        <input class="mtl-frame-in" id="mtlFrame" value="0" inputmode="numeric" spellcheck="false" autocomplete="off" title="范围 0 ~ 总数-1">
+        <span class="mtl-slash">/</span>
+        <span class="mtl-total" id="mtlTotal">0</span>
+      </div>
+    </div>
+
+    <div class="mtl-nav">
+      <button class="mtl-nb" id="mtlPrev" type="button" title="上一帧">
+        <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M4.2 3.4v9.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M12.2 4.1 6.4 8l5.8 3.9V4.1Z" fill="currentColor"/></svg>
+      </button>
+      <button class="mtl-nb mtl-nb--play" id="mtlPlay" type="button" title="播放 / 暂停">
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M5.4 3.6 12.4 8l-7 4.4V3.6Z" fill="currentColor"/></svg>
+      </button>
+      <button class="mtl-nb" id="mtlNext" type="button" title="下一帧">
+        <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M11.8 3.4v9.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M3.8 4.1 9.6 8l-5.8 3.9V4.1Z" fill="currentColor"/></svg>
+      </button>
+    </div>
+
+    <div class="mtl-right">
+      <span class="mtl-tc" id="mtlTime">00:00.00</span>
+      <button class="mtl-zb" id="mtlZoomOut" type="button" title="缩小">
+        <svg viewBox="0 0 14 14" width="12" height="12" aria-hidden="true" fill="none"><circle cx="6" cy="6" r="3.8" stroke="currentColor" stroke-width="1.1"/><path d="M8.9 8.9 12.2 12.2" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/><path d="M4.2 6h3.6" stroke="currentColor" stroke-width="1"/></svg>
+      </button>
+      <button class="mtl-zb" id="mtlZoomIn" type="button" title="放大">
+        <svg viewBox="0 0 14 14" width="12" height="12" aria-hidden="true" fill="none"><circle cx="6" cy="6" r="3.8" stroke="currentColor" stroke-width="1.1"/><path d="M8.9 8.9 12.2 12.2" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/><path d="M4.2 6h3.6M6 4.2v3.6" stroke="currentColor" stroke-width="1"/></svg>
+      </button>
+      
+      <div class="seg mtl-zseg" id="mtlZoomSeg" data-k="zoom">
+        <b class="on" data-zoom="1">1:1</b><b data-zoom="0.5">1/2</b><b data-zoom="0.25">1/4</b><b data-zoom="0.125">1/8</b>
+      </div>
+    </div>
+  </div>
+
+  
+  <div class="mtl-body">
+    <div class="mtl-names">
+      <div class="mtl-name mtl-name--ruler"></div>
+      <div class="mtl-name">视频</div>
+      <div class="mtl-name">人脸</div>
+      <div class="mtl-name">剪切</div>
+      <div class="mtl-name">角度</div>
+    </div>
+
+    <div class="mtl-scroll" id="mtlScroll">
+      <div class="mtl-stack" id="mtlStack">
+        
+        <div class="mtl-ruler" id="mtlRuler"></div>
+        
+        <div class="mtl-trk mtl-trk--video" id="mtlVideo"></div>
+        
+        <div class="mtl-trk mtl-trk--faces" id="mtlFaces"></div>
+        
+        <div class="mtl-trk mtl-trk--cut" id="mtlCut"></div>
+        
+        <div class="mtl-trk mtl-trk--angle" id="mtlAngle"></div>
+        
+        <div class="mtl-head" id="mtlHead"><i></i></div>
+      </div>
+    </div>
+  </div>
+</div>
+        </div>
+
+        <div class="mgview" data-view="facedb">
+<div class="mgp-head">
+    <div class="mgp-tt">
+      <b>人脸库</b>
+    </div>
+    <!-- 计数：建库后由 MergePages.setFaceCount(n) 更新 -->
+    <span class="mgp-count" id="mgFaceCount">已建库 <b>0</b> 张人脸</span>
+    <!-- 动作对应 4.0 的 Compute Face Embeddings（POST /api/face/compute-embeddings） -->
+    <button class="btn mgp-btn" id="mgComputeEmb" type="button">计算人脸特征</button>
+          <button class="btn pri mgp-btn" id="mgToSettings" type="button">下一步</button>
+  </div>
+
+  <!-- 页面内部滚动区：缩略图多了也不撑破容器 -->
+  <div class="mgp-scroll">
+    <div class="mgp-grid" id="mgFaceGrid">
+      <!-- 24 个棋盘格占位缩略图由 merge-pages.js 生成 -->
+    </div>
+    <div class="empty-note mgp-empty" id="mgFaceEmpty" hidden>还没有建立人脸库</div>
+  </div>
+        </div>
+        <div class="mgview" data-view="settings">
+<div class="mgp-head">
+    <div class="mgp-tt">
+      <b>导出设置</b>
+    </div>
+    <!-- 参数最终写入 POST /api/export/start（字段名同 4.0 ExportStartRequest） -->
+    <span class="mgp-count">输出 · 编码 · 性能</span>
+          <button class="btn pri mgp-btn" id="mgStartExport2" type="button">开始导出</button>
+  </div>
+
+  <div class="mgp-scroll">
+    <!-- 组 1：输出 -->
+    <div class="mgp-sec">
+      <div class="mgp-hd">输出</div>
+      <div class="mgrow">
+        <span class="f">格式</span>
+        <div class="seg" data-k="image_format">
+          <b class="on" data-v="jpg" title="4.0 值 jpg（Cache Format，JPEG 100%）">JPEG</b>
+          <b data-v="png" title="4.0 值 png（PNG 帧缓存）">PNG</b>
+        </div>
+      </div>
+      <div class="mgrow">
+        <span class="f">质量</span>
+        <div class="mgnum">
+          <!-- MISSING: 4.0 后端 ExportStartRequest 没有质量字段，
+               _stage1_extract_frames 固定 -q:v 2（export_pipeline.py:1272）；
+               这里只按设计稿占位，禁用且不随导出请求提交 -->
+          <input class="mgtiny" id="mgQuality" type="number" min="1" max="100" value="95"
+                 title="4.0 固定 -q:v 2，无此参数" disabled>
+          <span class="mgunit">%</span>
+        </div>
+      </div>
+      <div class="mgrow">
+        <span class="f">输出路径</span>
+        <div class="inp mono pathinp">
+          <input class="pathval" id="mgOutPath" type="text" spellcheck="false" autocomplete="off"
+                 placeholder="留空 = 源视频名_result.mp4">
+          <span class="pill iconpill" id="mgOutPick" title="选择输出目录">
+            <svg class="ic"><use href="#i-folder"/></svg>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 组 2：编码 -->
+    <div class="mgp-sec">
+      <div class="mgp-hd">编码</div>
+      <div class="mgrow">
+        <span class="f">编码器</span>
+        <div class="seg" data-k="encoder">
+          <b class="on" data-v="h264_nvenc" title="NVENC 硬件编码（4.0 默认）">h264_nvenc</b>
+          <b data-v="libx264" title="x264 软件编码">libx264</b>
+        </div>
+      </div>
+      <div class="mgrow">
+        <span class="f">解码加速</span>
+        <div class="seg" data-k="hwaccel">
+          <b class="on" data-v="auto" title="hwaccel='auto'，无 GPU 时自动回退软解">开</b>
+          <b data-v="" title="hwaccel=''（关闭硬解）">关</b>
+        </div>
+      </div>
+    </div>
+
+    <!-- 组 3：性能 -->
+    <div class="mgp-sec">
+      <div class="mgp-hd">性能</div>
+      <div class="mgrow">
+        <span class="f">并行进程</span>
+        <div class="mgnum">
+          <input class="mgtiny" id="mgWorkers" type="number" min="0" max="16" value="0"
+                 title="num_workers · 0 = 自动 · 范围 0 ~ 16">
+          <span class="mgunit">0 = 自动</span>
+        </div>
+      </div>
+    </div>
+  </div>
+        </div>
+        <div class="mgview" data-view="progress">
+          <div class="mgprog">
+            <div class="mgprog-hd">
+              <b>正在导出</b>
+              <span class="mgprog-file" id="mgpFile">0 (1).mp4</span>
+            </div>
+
+            <div class="mgprog-bar">
+              <i id="mgpFill" style="width:0%"></i>
+            </div>
+            <div class="mgprog-meta">
+              <span id="mgpPct">0%</span>
+              <span id="mgpFrames">0 / 486 帧</span>
+              <span id="mgpEta">剩余 —</span>
+            </div>
+
+            <div class="mgprog-steps">
+              <div class="mgpstep on" data-s="detect"><i></i><b>人脸检测</b><span>0 张</span></div>
+              <div class="mgpstep" data-s="swap"><i></i><b>合成</b><span>—</span></div>
+              <div class="mgpstep" data-s="encode"><i></i><b>编码</b><span>—</span></div>
+              <div class="mgpstep" data-s="mux"><i></i><b>封装</b><span>—</span></div>
+            </div>
+
+            <div class="mgprog-foot">
+              <button class="btn" id="mgpPause">暂停</button>
+              <button class="btn" id="mgpCancel">取消导出</button>
+            </div>
+          </div>
+        </div>
+
+
+      </div>
+
+      <!-- ================= 工具：遮罩绘制 ================= -->
+      
+
+      <!-- ================= 工具：B 站下载 ================= -->
+      
+
+      <!-- ================= 工具：色域迁移 ================= -->
+      
+
+      <!-- ================= 工具：角度可视化 ================= -->
+      
+
+      <!-- ================= 通知调试 ================= -->
+      
+
+      <!-- ================= 训练中（骨架） ================= -->
+      
+
+      <!-- ================= 合成器 ================= -->
+      
+
+      <!-- ================= 训练中（骨架） ================= -->
+      
+
+      <!-- ================= 合成器 ================= -->
+      
+
+      <!-- ================= 工具：遮罩绘制 ================= -->
+      
+
+      <!-- ================= 工具：B 站下载 ================= -->
+      
+
+      <!-- ================= 工具：色域迁移 ================= -->
+      
+
+      <!-- ================= 工具：角度可视化 ================= -->
+      
+
+      <!-- ================= 通知调试 ================= -->
+      
+
+      <!-- ================= 训练中（骨架） ================= -->
+      
+
+      <!-- ================= 合成器 ================= -->
+      
+
+      
+
+      <!-- ================= 设置 ================= -->
+      <div class="page" id="p-settings">
+        <div class="title">全局设置</div>
+
+        <div class="card" style="margin-bottom:14px">
+          <b style="font-size:13px;display:block;margin-bottom:10px">语言</b>
+          <div class="seg" id="langseg">
+            <b class="on" data-lang="zh">中文</b><b data-lang="en">English</b>
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom:14px">
+          <b style="font-size:13px;display:block;margin-bottom:10px">外观</b>
+          <div class="seg" id="themeSeg">
+            <b data-mode="auto" class="on">跟随系统</b><b data-mode="light">浅色</b><b data-mode="dark">深色</b>
+          </div>
+          <div class="hint" style="margin-top:8px">默认跟随系统；选过之后按你的来，下次启动也记住。</div>
+        </div>
+
+        <div class="card" style="margin-bottom:14px">
+          <b style="font-size:13px;display:block;margin-bottom:10px">隐私密码</b>
+          <div style="display:flex;align-items:center;gap:10px">
+            <div class="inp pathinp" style="flex:1">
+              <span class="lb">密码</span>
+              <input id="setPass" type="password" placeholder="未设置时无法解锁隐藏模式" autocomplete="off"
+                style="flex:1;min-width:0;border:0;background:transparent;color:var(--ink);font-size:12px;outline:none">
+            </div>
+            <button class="mini" id="setPassSave">保存</button>
+          </div>
+          <div class="hint" style="margin-top:8px">隐藏模式会用它解锁。只存在本机浏览器里。</div>
+        </div>
+
+        
+        
+        <div class="card" style="margin-bottom:14px">
+          <b style="font-size:13px;display:block;margin-bottom:10px">B 站账号</b>
+          <div style="display:flex;align-items:center;gap:10px">
+            <span class="tag ok">已登录</span>
+            <span style="font-size:12px;color:var(--ink-3)">Cookie 有效期至 2027-03</span>
+            <div style="flex:1"></div>
+            <button class="mini">清除 Cookie 并重新登录</button>
+          </div>
+        </div>
+        <div class="card" style="margin-bottom:14px">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+            <b style="font-size:13px">远程访问</b>
+            <div style="flex:1"></div>
+            <span class="hint" id="remoteState">未启用</span>
+            <div class="sw" id="remoteSw"></div>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px">
+            <div class="inp pathinp" style="flex:1">
+              <span class="lb">端口</span>
+              <input id="remotePort" type="number" value="8002" min="1024" max="65535"
+                     style="flex:1;min-width:0;border:0;background:transparent;color:var(--ink);font-size:12px;outline:none;font-variant-numeric:tabular-nums">
+            </div>
+            <div class="inp pathinp" style="flex:1.4">
+              <span class="lb">地址</span>
+              <input id="remoteUrl" readonly value="—"
+                     style="flex:1;min-width:0;border:0;background:transparent;color:var(--ink-3);font-size:12px;outline:none">
+            </div>
+          </div>
+          <div class="hint" style="margin-top:8px">开启后整个界面监听 0.0.0.0，同网段的设备（或部署在服务器上时）用浏览器直接打开。只在自己信任的网络里开。</div>
+        </div>
+        <div class="card">
+          <b style="font-size:13px;display:block;margin-bottom:10px">GitHub 代理</b>
+          <div class="inp mono" style="margin-bottom:9px">http://127.0.0.1:26561</div>
+          <div class="hint">自动更新走这个代理。留空则直连 —— 国内直连通常连不上，建议用 Steam++ 的系统代理并填这里。</div>
+        </div>
+      </div>
+
+      <!-- ================= 关于 ================= -->
+      <div class="page" id="p-about">
+        <div class="aboutHero">
+          <img class="aboutLogo" id="aboutLogo" src="/static/img/logo.png" alt="DeepFaceLab" title="点我">
+          <div class="aboutName">DeepFaceLab<span>PyTorch</span></div>
+          <div class="aboutTag">4.0 是技术样机，4.1 是产品。</div>
+        </div>
+        <div class="card">
+          <table class="t">
+            <tr><td style="width:150px;color:var(--ink-3)">版本</td><td><span id="aboutVer">4.1.0</span></td></tr>
+            <tr><td style="color:var(--ink-3)">界面</td><td id="aboutUI">—</td></tr>
+            <tr><td style="color:var(--ink-3)">构建</td><td id="buildTag" class="mono">—</td></tr>
+            <tr><td style="color:var(--ink-3)">推理</td><td id="aboutInfer">ONNX Runtime · PyTorch</td></tr>
+            <tr><td style="color:var(--ink-3)">模型</td><td>TinyMog · RetinaFace_10g · InsightFace2D106</td></tr>
+            <tr><td style="color:var(--ink-3)">后端</td><td id="aboutBackend">—</td></tr>
+            <tr><td style="color:var(--ink-3)">工作区</td><td id="aboutWorkspace" class="mono">—</td></tr>
+            <tr><td style="color:var(--ink-3)">作者</td><td id="aboutAuthor">CaijiPlayer258</td></tr>
+            <tr><td style="color:var(--ink-3)">GitHub</td><td><a class="lnk" href="https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch" data-url="https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch">github.com/CaijiPlayer258/DeepFaceLab-PyTorch</a></td></tr>
+            <tr><td style="color:var(--ink-3)">Bilibili</td><td><a class="lnk" href="https://space.bilibili.com/500398541" data-url="https://space.bilibili.com/500398541">space.bilibili.com/500398541</a></td></tr>
+            <tr><td style="color:var(--ink-3)">协议</td><td>GPL-3.0</td></tr>
+          </table>
+        </div>
+
+        <!-- 里程碑：只记真实发生的事，日期即提交/验收当天 -->
+        <div class="card" style="margin-top:14px">
+          <div class="cardhd"><b>里程碑</b><span class="hint">按完成时间倒序</span></div>
+          <div class="msrow">
+            <span class="msdate">2026-10-25</span>
+            <span>界面布局与交互设计完成：参数页四段式（标签 · 说明 · 控件）、吸顶搜索、吸底操作条、
+              下拉框主题化、按架构过滤冻结层、设备下拉直显 GPU 型号</span>
+          </div>
+          <div class="msrow">
+            <span class="msdate">2026-10-25</span>
+            <span>提取器完工：检测器 RetinaFace_10g / TinyMog 双档、动态分辨率对齐、越界填黑、
+              帧跳跃语义修正（1 = 逐帧）、四格实时统计</span>
+          </div>
+        </div>
+
+        <!-- 色板：品牌色 + 中性灰阶 + 状态色（与 UI设计规范.md §1 一致） -->
+        <div class="card" style="margin-top:14px">
+          <div class="cardhd"><b>色板</b><span class="hint">Linear 色系 · 种子 #5D6CCF · 规范见 UI设计规范.md §1</span></div>
+
+
+          <div class="palgroup">
+            <div class="palhead"><b>品牌色</b><span class="hint">9 档色阶（OKLCH 生成，50 = 种子）· 仅用于主按钮与进度条</span></div>
+            <div class="palrow">
+            <div class="palsw"><i style="background:#12173b"></i><b>10</b><span>#12173b</span></div>
+            <div class="palsw"><i style="background:#202174"></i><b>20</b><span>#202174</span></div>
+            <div class="palsw"><i style="background:#323896"></i><b>30</b><span>#323896</span></div>
+            <div class="palsw"><i style="background:#4652b2"></i><b>40</b><span>#4652b2</span></div>
+            <div class="palsw"><i style="background:#5d6ccf"></i><b>50</b><span>#5d6ccf</span></div>
+            <div class="palsw"><i style="background:#7587ec"></i><b>60</b><span>#7587ec</span></div>
+            <div class="palsw"><i style="background:#8ea2ff"></i><b>70</b><span>#8ea2ff</span></div>
+            <div class="palsw"><i style="background:#adbeff"></i><b>80</b><span>#adbeff</span></div>
+            <div class="palsw"><i style="background:#d8e0ff"></i><b>90</b><span>#d8e0ff</span></div>
+            </div>
+          </div>
+
+          <div class="palgroup">
+            <div class="palhead"><b>中性 · 浅色</b><span class="hint">表面层次与文字，界面主体全靠这一组拉开</span></div>
+            <div class="palrow">
+            <div class="palsw"><i style="background:#ececee"></i><b>app-bg</b><span>#ECECEE</span></div>
+            <div class="palsw"><i style="background:#ffffff"></i><b>surface</b><span>#FFFFFF</span></div>
+            <div class="palsw"><i style="background:#f7f7f8"></i><b>surface-2</b><span>#F7F7F8</span></div>
+            <div class="palsw"><i style="background:#f2f2f4"></i><b>hover</b><span>#F2F2F4</span></div>
+            <div class="palsw"><i style="background:#e7e7ea"></i><b>border</b><span>#E7E7EA</span></div>
+            <div class="palsw"><i style="background:#d6d6db"></i><b>border-strong</b><span>#D6D6DB</span></div>
+            <div class="palsw"><i style="background:#17171a"></i><b>ink-1</b><span>#17171A</span></div>
+            <div class="palsw"><i style="background:#55555f"></i><b>ink-2</b><span>#55555F</span></div>
+            <div class="palsw"><i style="background:#8f8f99"></i><b>ink-3</b><span>#8F8F99</span></div>
+            </div>
+          </div>
+
+          <div class="palgroup">
+            <div class="palhead"><b>中性 · 深色</b><span class="hint">同一套 token 的深色取值</span></div>
+            <div class="palrow">
+            <div class="palsw"><i style="background:#08080a"></i><b>app-bg</b><span>#08080A</span></div>
+            <div class="palsw"><i style="background:#141418"></i><b>surface</b><span>#141418</span></div>
+            <div class="palsw"><i style="background:#1a1a1f"></i><b>surface-2</b><span>#1A1A1F</span></div>
+            <div class="palsw"><i style="background:#232329"></i><b>hover</b><span>#232329</span></div>
+            <div class="palsw"><i style="background:#26262d"></i><b>border</b><span>#26262D</span></div>
+            <div class="palsw"><i style="background:#35353f"></i><b>border-strong</b><span>#35353F</span></div>
+            <div class="palsw"><i style="background:#f2f2f4"></i><b>ink-1</b><span>#F2F2F4</span></div>
+            <div class="palsw"><i style="background:#a3a3ad"></i><b>ink-2</b><span>#A3A3AD</span></div>
+            <div class="palsw"><i style="background:#6d6d78"></i><b>ink-3</b><span>#6D6D78</span></div>
+            </div>
+          </div>
+
+          <div class="palgroup">
+            <div class="palhead"><b>状态色</b><span class="hint">只用于标签和图标，不做大面积背景、不进正文（浅 / 深）</span></div>
+            <div class="palrow" style="grid-template-columns:repeat(3,minmax(0,1fr));max-width:520px">
+            <div class="palsw"><i style="background:#0f9d58"></i><b>ok</b><span>#0F9D58 / #3DDC84</span></div>
+            <div class="palsw"><i style="background:#c2740b"></i><b>warn</b><span>#C2740B / #F0B429</span></div>
+            <div class="palsw"><i style="background:#d33a3a"></i><b>bad</b><span>#D33A3A / #F87171</span></div>
+            </div>
+          </div>
+          <div class="palgroup">
+            <div class="palhead"><b>辅助色</b><span class="hint">8 色盘点缀 · 单个控件里不超过 2 个 · 语义固定（悬停看用途）</span></div>
+            <div class="palrow">
+            <div class="palsw" title="警告 / 待处理 / 编译中"><i style="background:#eab308"></i><b>琥珀黄</b><span>#EAB308</span></div>
+            <div class="palsw" title="错误 / 断开 / 停止"><i style="background:#ef4444"></i><b>红</b><span>#EF4444</span></div>
+            <div class="palsw" title="在线 / 成功 / 正常"><i style="background:#22c55e"></i><b>绿</b><span>#22C55E</span></div>
+            <div class="palsw" title="渐变起点 / 强调"><i style="background:#7c3aed"></i><b>紫（亮）</b><span>#7C3AED</span></div>
+            <div class="palsw" title="渐变终点"><i style="background:#6d28d9"></i><b>紫（深）</b><span>#6D28D9</span></div>
+            <div class="palsw" title="滑块选中 / 高亮"><i style="background:#94a9ef"></i><b>淡紫蓝</b><span>#94A9EF</span></div>
+            <div class="palsw" title="未激活的强调底"><i style="background:#4c3a8a"></i><b>暗紫灰</b><span>#4C3A8A</span></div>
+            <div class="palsw" title="链接 / 信息提示"><i style="background:#60a5fa"></i><b>天蓝</b><span>#60A5FA</span></div>
+            </div>
+          </div>
+
+          <div class="hint" style="margin-top:12px">
+            主题色只出现在 <b>主按钮</b>（开始提取 / 开始训练 / 继续训练）和 <b>进度条</b> 上；
+            导航选中、焦点环、输入框、卡片全部走中性灰阶。
+          </div>
+        </div>
+      </div>
+
+    </div>
+    </div>
+  </div>
+</div>
+
+<div id="toastroot"></div>
+  <div class="welcome" id="welcome" style="display:none">
+    <div class="wdrag"></div>
+    <div class="wlang" id="wLang">
+      <b class="on" data-lang="zh">中文</b><b data-lang="en">EN</b>
+    </div>
+    <div class="wcard">
+      <img class="wlogo" src="/static/img/logo.png" alt="">
+      <div class="wtitle">DeepFaceLab-PyTorch</div>
+
+      <div class="wfeats">
+        <div class="wf"><b>简洁的交互界面</b><span>所有流程都在一个窗口里完成，不用记命令。</span></div>
+        <div class="wf"><b>更快的训练</b><span>预览与 loss 实时流出，不用等一轮跑完。</span></div>
+        <div class="wf"><b>更自然的合成</b><span>遮罩、色域、角度逐帧校正，边缘不糊。</span></div>
+        <div class="wf"><b>更好的数据处理</b><span>张数、对齐质量、角度分布一目了然。</span></div>
+        <div class="wf"><b>最快的人脸提取</b><span>RetinaFace 与 TinyMog 双检测器，批量对齐。</span></div>
+        <div class="wf"><b>更多实用工具</b><span>遮罩绘制、色域迁移、角度分析、B 站下载，都在同一个侧边栏。</span></div>
+      </div>
+
+      <div class="wlogin">
+        <div class="wqr" id="wQr">
+          <img id="wQrImg" alt="二维码" style="width:100%;height:100%;border-radius:10px;display:none">
+          <span id="wQrHint">正在获取…</span>
+          <button class="wqrretry" id="wQrRetry" title="刷新二维码" aria-label="刷新二维码">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+              <path d="M21 3v6h-6"/>
+            </svg>
+          </button>
+        </div>
+        <div class="wtip">
+          <b>用 B 站 App 扫码登录</b>
+          <p id="wQrState">登录后可以下载高码率素材，主页也会记住你的名字。</p>
+          <div style="display:flex;gap:8px;margin-top:10px">
+            <button class="btn ghost" id="wSkip">跳过，先看看</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flyout" id="toolFly">
+    <div class="flyhd">工具</div>
+    <div class="nav sub" data-go="tool-mask"><svg class="ic"><use href="#i-brush"/></svg><span class="lbl">遮罩绘制</span></div>
+    <div class="nav sub" data-go="tool-bili"><svg class="ic"><use href="#i-download"/></svg><span class="lbl">B 站下载</span></div>
+    <div class="nav sub" data-go="tool-color"><svg class="ic"><use href="#i-swap"/></svg><span class="lbl">色域迁移</span></div>
+    <div class="nav sub" data-go="tool-angle"><svg class="ic"><use href="#i-scatter"/></svg><span class="lbl">角度可视化</span></div>
+  </div>
+
+  <div class="modal" id="confirmBox" style="display:none">
+    <div class="modalCard">
+      <div class="modalTitle" id="cfTitle">确认</div>
+      <div class="modalDesc" id="cfDesc"></div>
+      <div class="modalActs">
+        <button class="btn ghost" id="cfCancel">取消</button>
+        <button class="btn" id="cfOk">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="curtain" id="curtain" style="display:none">
+    <div class="cstage">
+      <div class="cface" id="cface"></div>
+      <div class="chint">这是一段私密内容 · 只有你能打开</div>
+      <div class="clock">
+        <input class="inp" id="cpass" type="password" placeholder="输入解锁密码" autocomplete="off">
+        <button class="btn pri" id="cunlock">解锁</button>
+      </div>
+      <div class="cerr" id="cerr"></div>
+    </div>
+  </div>
+
+  <script src="/static/js/i18n.js?v=3"></script>
+  <script src="/static/js/app.js?v=3"></script>
+  <script src="/static/js/engines.js?v=3"></script>
+</body>
+</html>

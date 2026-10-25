@@ -1,0 +1,28 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   遮罩绘制（#p-tool-mask）增量样式 —— 只补两条，不新增布局、不覆盖既有类
+   ───────────────────────────────────────────────────────────────────────────
+   现有页面的行结构 .dbgrow / .seg / .inp.pathinp / .kbd / .mini / .dbgacts
+   和 .card / .cardhd 已经在 app.css 里齐了，这里只做两件事：
+     1) 把新增的 select / 数字框拉到本页既有控件的 33px 高度
+        （.inp.pathinp 是 min-height:33px，.mgsel 默认只有 26px、.mgtiny 只有 24px）；
+     2) 补上 margin-left:12px —— app.css:1121 给 .dbgrow > .seg 加的缩进，
+        新控件不在那条选择器里，不补就会比「遮罩模型」那行往左偏 12px。
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* 模型文件下拉：跟 .inp / .seg 同高、同缩进，宽度封顶免得一行拖满 */
+#p-tool-mask .dbgrow > .mgsel {
+  flex: 0 1 320px;
+  min-width: 0;
+  height: 33px;
+  margin-left: 12px;
+  border-radius: 9px;
+}
+
+/* 分辨率的数字框：.mgtiny 默认 52×24 太小，对齐本页 33px 控件 */
+#p-tool-mask .dbgrow > .mgtiny {
+  flex: 0 0 72px;
+  width: 72px;
+  height: 33px;
+  margin-left: 12px;
+  border-radius: 9px;
+}
