@@ -36,6 +36,7 @@
 
   /* ---------- 顶栏面包屑 ---------- */
   var CRUMBS = {
+    train: [{ t: "模型选择" }],
     run: [{ t: "模型选择", go: "train" }, { t: "参数设置", go: "train-cfg" }, { t: "训练界面" }],
     "train-cfg": [{ t: "模型选择", go: "train" }, { t: "参数设置" }],
     "tool-mask": [{ t: "工具" }, { t: "遮罩绘制" }],
@@ -54,9 +55,12 @@
   function renderCrumbs(key) {
     var box = $("crumbs");
     if (!box) return;
-    var trail = CRUMBS[key];
+    var trail = (CRUMBS[key] || []).slice();
+    /* 从训练界面退回模型列表后，顶栏要留一条「训练界面」的路 ——
+       否则只能靠卡片上的按钮，而那个按钮以前还会被禁用，直接走不回去。 */
+    if (key === "train" && window.__runModel) trail.push({ t: "训练界面", run: true });
     box.innerHTML = "";
-    if (!trail) return;
+    if (!trail.length) return;
     trail.forEach(function (c, i) {
       /* 英文模式下面包屑也要走字典 */
       var lang = (window.I18N && window.I18N.get) ? window.I18N.get() : "zh";
@@ -64,7 +68,9 @@
       if (lang === "en" && window.I18N && window.I18N.dict && window.I18N.dict[c.t]) {
         label = window.I18N.dict[c.t];
       }
-      c = { t: label, go: c.go };
+      /* 注意：这里重建成新对象时要把 run/step 一起带上 ——
+         以前只留了 t 和 go，导致「训练界面」那节虽然画出来了却没有绑定点击。 */
+      c = { t: label, go: c.go, run: c.run, step: c.step };
       if (i > 0) {
         var sep = document.createElement("span");
         sep.className = "crumb-sep";
@@ -75,7 +81,13 @@
       el.className = "crumb" + (i === trail.length - 1 ? " on" : "");
       el.textContent = c.t;
       el.setAttribute("data-i18n-skip", "1");
-      if (c.step && i < trail.length - 1) {
+      if (c.run) {
+        el.classList.add("link");
+        el.addEventListener("click", function () {
+          if (window.openRun) window.openRun(window.__runModel);
+          else go("run");
+        });
+      } else if (c.step && i < trail.length - 1) {
         el.classList.add("link");
         el.addEventListener("click", function () { if (window.mgStep) window.mgStep(c.step); });
       } else if (c.go && i < trail.length - 1) {
@@ -1151,22 +1163,36 @@
         '<button class="mini" data-act="del">删除</button></div>' +
       "</div>";
     var runBtn = el.querySelector('[data-act="run"]');
+    if (runBtn) {
+      /* 已经在训练的模型，按钮就是「回到训练界面」的入口 —— 不能再禁用，
+         否则从监控界面退回列表之后就没有路回去了。 */
+      if (m.state === "训练中" || m.state === "已暂停") runBtn.textContent = m.state;
+    }
     if (runBtn) runBtn.addEventListener("click", function () {
       /* 「训练」就该真的开训：先把界面切到这个模型（曲线/预览），再拉进程。
          只有首页置顶那张卡才叫「继续训练」—— 它指的是最近训练过的那个模型。 */
       openRun(m);
-      if (runBtn.disabled) return;
-      runBtn.disabled = true;
+      if (runBtn.__busy) return;
+      if (m.state === "训练中" || m.state === "已暂停") return;  /* 已经在跑：只是回来看 */
+      runBtn.__busy = true;
       runBtn.textContent = "启动中…";
+      if (window.trainStartingUi) window.trainStartingUi();
       window.startTraining(m.name).then(function () {
         runBtn.textContent = "训练中";
-        if (window.pollTrain) window.pollTrain();
+        runBtn.__busy = false;
+        if (window.trainStartingUi) window.trainStartingUi();
+        if (window.pollTrain) window.pollTrain(m);
       }).catch(function (e) {
-        runBtn.disabled = false;
-        runBtn.textContent = "训练";
-        if (window.toast) {
-          window.toast("启动失败", String((e && e.message) || e).slice(0, 120), "error");
+        var msg = String((e && e.message) || e);
+        runBtn.__busy = false;
+        /* 这个模型本来就在训练（从列表里重复点）——不是失败，接着看就行 */
+        if (msg.indexOf("已经在训练") >= 0) {
+          runBtn.textContent = "训练中";
+          if (window.pollTrain) window.pollTrain(m);
+          return;
         }
+        runBtn.textContent = "训练";
+        if (window.toast) window.toast("启动失败", msg.slice(0, 120), "error");
       });
     });
 
@@ -1179,13 +1205,57 @@
 
     var expBtn = el.querySelector('[data-act="export"]');
     if (expBtn) expBtn.addEventListener("click", function () {
-      toast("导出 DFM", m.name + " · 导出流程还没接后端", "info");
+      if (expBtn.disabled) return;
+      expBtn.disabled = true;
+      expBtn.textContent = "导出中…";
+      toast("导出 DFM", m.name + " · 要加载模型，几分钟", "info");
+      fetch("/api/models/" + encodeURIComponent(m.name) + "/export", { method: "POST" })
+        .then(function (r) { return r.json().then(function (d) {
+          if (!r.ok) throw new Error(d.detail || "启动失败");
+          return d;
+        }); })
+        .then(function () {
+          var t = setInterval(function () {
+            fetch("/api/models/export/status").then(function (r) { return r.json(); }).then(function (d) {
+              if (d.running) {
+                var last = (d.log && d.log.length) ? d.log[d.log.length - 1] : "";
+                expBtn.textContent = last ? String(last).slice(0, 6) : "导出中…";
+                return;
+              }
+              clearInterval(t);
+              expBtn.disabled = false;
+              expBtn.textContent = "导出";
+              if (d.ok) {
+                toast("导出完成", m.name + ".dfm 已生成", "success");
+                loadModels();
+              } else {
+                toast("导出失败", String(d.error || "").slice(0, 110), "error");
+              }
+            }).catch(function () {});
+          }, 1500);
+        })
+        .catch(function (e) {
+          expBtn.disabled = false;
+          expBtn.textContent = "导出";
+          toast("导出失败", String((e && e.message) || e).slice(0, 110), "error");
+        });
     });
 
     var delBtn = el.querySelector('[data-act="del"]');
     if (delBtn) delBtn.addEventListener("click", function () {
       confirmBox("删除模型", "会移除 " + m.name + " 的全部权重与配置，无法恢复。", function () {
-        toast("已取消", "删除接口还没接", "info");
+        fetch("/api/models/" + encodeURIComponent(m.name) + "/delete", { method: "POST" })
+          .then(function (r) { return r.json().then(function (d) {
+            if (!r.ok) throw new Error(d.detail || "删除失败");
+            return d;
+          }); })
+          .then(function (d) {
+            toast("已删除", m.name + " · 移除 " + (d.count || 0) + " 个文件", "success");
+            loadModels();
+          })
+          .catch(function (e) {
+            toast("删除失败", String((e && e.message) || e).slice(0, 110), "error");
+          });
       });
     });
     return el;
@@ -1254,10 +1324,32 @@
       img.alt = "";
       st.appendChild(img);
     }
+    img.onload = function () {
+      /* 只看「检测」视图时才补画，别的视图不该出现框 */
+      var onDet = document.querySelector('#mgViews b[data-v="det"].on');
+      if (onDet) window.mvRedrawBoxes();
+    };
     img.src = dataUrl;
     var hint = document.getElementById("mgStageHint");
     if (hint) hint.style.display = "none";
     return true;
+  };
+
+  window.mvMerged = function (n) {
+    var st = window.__mv;
+    n = parseInt(n, 10) || 0;
+    fetch("/api/merge/merged/" + n + "?w=900").then(function (r) {
+      return r.json().then(function (d) {
+        if (!r.ok) throw new Error(d.detail || "取不到成片");
+        return d;
+      });
+    }).then(function (d) {
+      if (d.png) window.mvStage(d.png);
+    }).catch(function (e) {
+      toast("成片预览", String((e && e.message) || e).slice(0, 90), "info");
+      var hint = document.getElementById("mgStageHint");
+      if (hint) { hint.style.display = ""; hint.textContent = "还没有成片 —— 先导出一次"; }
+    });
   };
 
   window.mvFrame = function (n) {
@@ -1354,6 +1446,119 @@
     }
   };
 
+  /* ---------- 素材准备：视频 → 抽帧 + 对齐 → 可合成项目 ---------- */
+  /* 4.1 的提取器只落对齐脸、不落原帧，而合成必须要有原帧才能把脸贴回去。
+     后端 /api/merge/prepare 补了这条路，这里负责把它接进界面。 */
+  window.__mergePrep = { running: false, project: "", timer: null };
+
+  function mgPrepLine(text, pct) {
+    var box = document.getElementById("mgPrep");
+    if (!box) return;
+    if (!text) { box.style.display = "none"; return; }
+    box.style.display = "";
+    var lb = box.querySelector(".lb");
+    var bar = box.querySelector(".bar i");
+    if (lb) lb.textContent = text;
+    if (bar && typeof pct === "number") {
+      bar.style.width = Math.max(2, Math.min(100, pct)) + "%";
+    }
+  }
+
+  /* 素材准备完成后，把项目挂到左栏素材列表上（否则一直显示"还没有导入素材"） */
+  function mgShowPrepared(project, frames) {
+    var box = document.getElementById("mgVideos");
+    var empty = document.getElementById("mgVideosEmpty");
+    if (!box || !project) return;
+    var name = String(project).split(/[\\/]/).pop();
+    var row = null;
+    Array.prototype.forEach.call(box.children, function (x) {
+      if (x.dataset.path === project) row = x;
+    });
+    if (!row) {
+      row = document.createElement("div");
+      row.className = "mgitem";
+      row.dataset.path = project;
+      row.innerHTML = '<span class="nm">' + name + '</span><span class="tag">' + (frames || 0) + ' 帧</span>';
+      row.addEventListener("click", function () {
+        window.__mergeInputDir = project;
+        window.mgOpenPrepared(project, frames, 0);
+      });
+      box.appendChild(row);
+    }
+    Array.prototype.forEach.call(box.children, function (x) {
+      x.classList.toggle("on", x === row);
+    });
+    if (empty) empty.style.display = "none";
+  }
+  window.mgShowPrepared = mgShowPrepared;
+
+  window.mgOpenPrepared = function (project, frames, aligned) {
+    var st = window.__mv;
+    st.path = project || "project";
+    st.frames = frames || 0;
+    window.__mergeInputDir = project || "";
+    fetch("/api/merge/info").then(function (r) { return r.json(); }).then(function (d) {
+      st.frames = d.frames || frames || 0;
+      st.fps = d.fps || 30;
+      if (window.MergeTimeline && window.MergeTimeline.init) {
+        try { window.MergeTimeline.init(st.frames, st.fps); } catch (e) {}
+      }
+      var tot = document.getElementById("mtlTotal");
+      if (tot) tot.textContent = st.frames;
+      mgShowPrepared(project, st.frames);
+      window.mvFrame(0);
+      if (window.mvAnalyze) window.mvAnalyze(24);
+      toast("素材已就绪", st.frames + " 帧 · " + (aligned || 0) + " 张对齐脸", "success");
+    }).catch(function () {
+      window.mvFrame(0);
+      toast("素材已就绪", (frames || 0) + " 帧", "success");
+    });
+  };
+
+  window.mgPrepare = function (video) {
+    if (!video) return;
+    var st = window.__mergePrep;
+    if (st.running) { toast("正在准备", "等这一段处理完再来", "info"); return; }
+    st.running = true;
+    st.project = "";
+    window.__mergeInputDir = "";
+    mgPrepLine("抽帧…", 0);
+    toast("准备素材", String(video).split(/[\\/]/).pop() + " · 抽帧 + 对齐", "info");
+
+    fetch("/api/merge/prepare", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ video: video })
+    }).then(function (r) {
+      return r.json().then(function (d) {
+        if (!r.ok) throw new Error(d.detail || "启动失败");
+        return d;
+      });
+    }).then(function () {
+      if (st.timer) clearInterval(st.timer);
+      st.timer = setInterval(function () {
+        fetch("/api/merge/prepare/status").then(function (r) { return r.json(); })
+          .then(function (d) {
+            mgPrepLine((d.stage ? d.stage + " · " : "") + (d.msg || ""), d.pct);
+            if (d.running) return;
+            clearInterval(st.timer); st.timer = null; st.running = false;
+            if (d.ok) {
+              st.project = d.project || "";
+              window.__mergeInputDir = st.project;
+              mgPrepLine("", 0);
+              window.mgOpenPrepared(st.project, d.frames, d.aligned);
+            } else {
+              mgPrepLine("准备失败：" + String(d.error || "").slice(0, 80), 100);
+              toast("准备失败", String(d.error || "未知错误").slice(0, 120), "error");
+            }
+          }).catch(function () {});
+      }, 700);
+    }).catch(function (e) {
+      st.running = false;
+      mgPrepLine("准备失败：" + String((e && e.message) || e).slice(0, 80), 100);
+      toast("准备失败", String((e && e.message) || e).slice(0, 120), "error");
+    });
+  };
+
   window.mvList = function (dir) {
     var box = document.getElementById("mgVideos");
     if (!box) return;
@@ -1361,6 +1566,10 @@
     fetch(url).then(function (r) { return r.json(); }).then(function (d) {
       var list = (d.videos || []);
       box.innerHTML = "";
+      /* 列表是「工作区里的视频」，不含已经抽好帧的项目 —— 重新拉一次别把当前项目弄丢 */
+      if (window.__mergeInputDir) {
+        try { mgShowPrepared(window.__mergeInputDir, (window.__mv || {}).frames || 0); } catch (e) {}
+      }
       var empty = document.getElementById("mgVideosEmpty");
       if (!list.length) {
         if (empty) { empty.style.display = ""; }
@@ -1393,23 +1602,40 @@
   };
 
   window.mvClearBoxes = function () {
+    window.__mvBoxes = null;
     var cv = document.querySelector("#mgStage canvas.mgovl");
     if (!cv) return;
     var ctx = cv.getContext("2d");
     ctx.clearRect(0, 0, cv.width, cv.height);
   };
 
+  /* 图片是异步换的：换完再画一次，否则 canvas 会按旧尺寸画在空气里 */
+  window.mvRedrawBoxes = function (tries) {
+    var b = window.__mvBoxes;
+    if (!b) return;
+    tries = tries == null ? 8 : tries;
+    window.mvDrawBoxes(b.boxes, b.w, b.h);
+    if (window.__mvPending && tries > 0) {
+      /* 版面还没就绪（刚切页/刚换图），下一帧再试，最多 8 次 */
+      requestAnimationFrame(function () { window.mvRedrawBoxes(tries - 1); });
+    }
+  };
+
   window.mvDrawBoxes = function (boxes, ow, oh) {
     var cv = window.mvOverlay();
     if (!cv || !ow || !oh) return;
+    window.__mvBoxes = { boxes: boxes, w: ow, h: oh };
     var st = document.getElementById("mgStage");
-    /* 用预览图自己的盒子（不是整个舞台）：img 有 6px 内缩，canvas 也一样内缩，
-       两边同一坐标系，框才不会偏 */
-    var img = st.querySelector("img");
-    var r = (img && img.getBoundingClientRect().width ? img.getBoundingClientRect()
-                                                      : st.getBoundingClientRect());
-    cv.width = Math.round(r.width);
-    cv.height = Math.round(r.height);
+    /* canvas 和 img 在 CSS 里是同一块内缩盒子（inset:6px），所以直接按舞台量；
+       量到 0 说明页面还没排好版（隐藏/首帧），把框留着，等 img.onload 再画一次。 */
+    var r = st.getBoundingClientRect();
+    if (r.width < 20 || r.height < 20) {
+      window.__mvPending = true;
+      return;
+    }
+    window.__mvPending = false;
+    cv.width = Math.round(r.width) - 12;
+    cv.height = Math.round(r.height) - 12;
     var ctx = cv.getContext("2d");
     ctx.clearRect(0, 0, cv.width, cv.height);
 
@@ -1446,7 +1672,7 @@
     step = step || 12;
     toast("开始分析", "每隔 " + step + " 帧检测一次，稍等…", "info");
     var t0 = Date.now();
-    fetch("/api/merge/analyze?step=" + step + "&model=det_500m")
+    fetch("/api/merge/analyze?step=" + step + "&model=" + encodeURIComponent(mgDetectorName()))
       .then(function (r) { return r.json(); })
       .then(function (d) {
         if (!d.marks) { toast("分析失败", d.detail || "未知错误", "error"); return; }
@@ -1466,13 +1692,20 @@
       .catch(function (e) { toast("分析失败", String((e && e.message) || e), "error"); });
   };
 
+  function mgDetectorName() {
+    var sel = document.getElementById("mgDetector");
+    return (sel && sel.value) || "det_500m";
+  }
+  window.mgDetectorName = mgDetectorName;
+
   window.mvDetect = function (n) {
     var mv = window.__mv || {};
     if (!mv.path) return;
-    fetch("/api/merge/detect/" + n + "?model=det_500m&thresh=0.5")
+    fetch("/api/merge/detect/" + n + "?model=" + encodeURIComponent(mgDetectorName()) + "&thresh=0.5")
       .then(function (r) { return r.json(); })
       .then(function (d) {
         if (d.boxes) window.mvDrawBoxes(d.boxes, d.width, d.height);
+        else if (d.detail) toast("检测失败", String(d.detail).slice(0, 90), "error");
       })
       .catch(function () {});
   };
@@ -1558,11 +1791,15 @@
         Array.prototype.forEach.call(views.children, function (x) { x.classList.remove("on"); });
         b.classList.add("on");
         var view = b.dataset.v;
+        var f = document.getElementById("mtlFrame");
+        var idx = parseInt(f ? f.value : 0, 10) || 0;
         if (view === "det") {
-          var f = document.getElementById("mtlFrame");
-          window.mvDetect(parseInt(f ? f.value : 0, 10) || 0);
+          window.mvDetect(idx);
+        } else if (view === "swap") {
+          window.mvMerged(idx);
         } else {
           window.mvClearBoxes();
+          window.mvFrame(idx);
         }
       });
     }
@@ -1586,12 +1823,10 @@
       if (name === "facedb") trail.push({ t: "人脸数据库", step: "facedb" });
       if (name === "settings") trail = [
         { t: "合成工作室", step: "main" },
-        { t: "人脸数据库", step: "facedb" },
         { t: "导出设置", step: "settings" }
       ];
       if (name === "progress") trail = [
         { t: "合成工作室", step: "main" },
-        { t: "人脸数据库", step: "facedb" },
         { t: "导出设置", step: "settings" },
         { t: "导出进度", step: "progress" }
       ];
@@ -1620,13 +1855,21 @@
     if (exBtn && !exBtn.dataset.bound) {
       exBtn.dataset.bound = "1";
       exBtn.addEventListener("click", function () {
-        if (window.mgStep) window.mgStep("facedb");
+        /* 人脸库（分组/去重）还没做，先不挡路：直接进导出设置。
+           合成本身不需要人脸库 —— MergeStudio 靠 DFLJPG 的元数据定位人脸。 */
+        if (!window.__mergeInputDir) {
+          toast("还没有素材", "先导入一段视频（会自动抽帧 + 对齐）", "warn");
+          return;
+        }
+        if (window.mgStep) window.mgStep("settings");
       });
     }
 
     /* 导出进度的演示：节奏参照真实 ffmpeg 抽帧 + ORT 推理，只为把界面跑起来看 */
     var MGP_TIMER = null;
     function mgDemoProgress(total) {
+      /* 真跑合成的时候别让演示进度盖掉真实数据 */
+      if (window.__mergeExporting) return;
       total = total || 486;
       var fill = $("mgpFill"), pct = $("mgpPct"), fr = $("mgpFrames"), eta = $("mgpEta");
       var steps = document.querySelectorAll("#p-merge .mgpstep");
@@ -1660,20 +1903,19 @@
     }
     window.mgDemoProgress = mgDemoProgress;
 
-    var pauseBtn = $("mgpPause");
-    if (pauseBtn && !pauseBtn.dataset.bound) {
-      pauseBtn.dataset.bound = "1";
-      pauseBtn.addEventListener("click", function () {
-        if (MGP_TIMER) { clearInterval(MGP_TIMER); MGP_TIMER = null; pauseBtn.textContent = "继续"; }
-        else { mgDemoProgress(486); pauseBtn.textContent = "暂停"; }
-      });
-    }
     var cancelBtn = $("mgpCancel");
     if (cancelBtn && !cancelBtn.dataset.bound) {
       cancelBtn.dataset.bound = "1";
       cancelBtn.addEventListener("click", function () {
-        if (MGP_TIMER) { clearInterval(MGP_TIMER); MGP_TIMER = null; }
-        if (window.mgStep) window.mgStep("settings");
+        if (!window.__mergeExporting) { if (window.mgStep) window.mgStep("settings"); return; }
+        cancelBtn.disabled = true;
+        fetch("/api/merge/export/cancel", { method: "POST" })
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            toast(d.ok ? "正在取消" : "取消失败", d.ok ? "等它退出，几秒" : String(d.reason || ""), d.ok ? "info" : "error");
+          })
+          .catch(function () {})
+          .then(function () { setTimeout(function () { cancelBtn.disabled = false; }, 2500); });
       });
     }
 
@@ -1682,52 +1924,97 @@
       toSet.dataset.bound = "1";
       toSet.addEventListener("click", function () { if (window.mgStep) window.mgStep("settings"); });
     }
+    /* 真跑一次合成。工作台里的「导出」会先走到导出设置页，
+       两个「开始导出」（#mgStartExport2 在工作台、#mgStartExport 在子页）共用这一份逻辑。 */
+    function mgRunExport(payload) {
+      payload = payload || {};
+      document.dispatchEvent(new CustomEvent("merge:export-start", { detail: payload }));
+
+      var inputDir = window.__mergeInputDir || "";
+      if (!inputDir) {
+        toast("没有素材", "先在工作台导入一段视频 —— 会自动抽帧 + 对齐", "warn");
+        return;
+      }
+      if (window.__mergeExporting) {
+        toast("正在合成", "上一次还没结束", "info");
+        return;
+      }
+      window.__mergeExporting = true;
+
+      var body = {
+        input_dir: inputDir,
+        project: inputDir,
+        model: (document.querySelector("#mgModels .mgitem.on .nm") || {}).textContent || "",
+        workers: parseInt(payload.num_workers, 10) || 0,
+        encoder: payload.encoder || "h264_nvenc",
+        hwaccel: payload.hwaccel === "" ? "off" : (payload.hwaccel || "auto"),
+        settings: {
+          mode: payload.mode || "overlay",
+          /* 界面上是两个 seg：遮罩来源（DFM / XSeg / XSegLite）× 遮罩模式（prd×dst / prd / dst）。
+             这里合成 MergeStudio 的 mask_mode 整数：
+               DFM   → 4 / 2 / 1      XSeg → 8 / 6 / 7 */
+          mask_mode: (function () {
+            var src = (document.querySelector('#p-merge .seg[data-k="seg"] b.on') || {}).textContent || "DFM";
+            var md = (document.querySelector('#p-merge .seg[data-k="mask"] b.on') || {}).textContent || "prd×dst";
+            md = md.trim();
+            var isX = src.trim().indexOf("XSeg") === 0;
+            if (isX) return md === "dst" ? 7 : (md === "prd" ? 6 : 8);
+            return md === "dst" ? 1 : (md === "prd" ? 2 : 4);
+          })(),
+          erode_mask: payload.erode_mask,
+          blur_mask: payload.blur_mask,
+          color_transfer: payload.color_transfer,
+          face_type: payload.face_type,
+          image_format: payload.image_format || "jpg"
+        }
+      };
+      if (payload.output_path && /^[A-Za-z]:[\\/]/.test(payload.output_path)) {
+        body.output_dir = payload.output_path;
+      }
+
+      fetch("/api/merge/export", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      }).then(function (r) {
+        return r.json().then(function (d) {
+          if (!r.ok) throw new Error(d.detail || "启动失败");
+          return d;
+        });
+      }).then(function (d) {
+        toast("已开始合成", String(d.output || d.input_dir || "").slice(-46), "info");
+        if (window.mgStep) window.mgStep("progress");
+        pollMergeExport();
+      }).catch(function (e) {
+        window.__mergeExporting = false;
+        toast("合成未启动", String((e && e.message) || e).slice(0, 120), "error");
+      });
+    }
+    window.mgRunExport = mgRunExport;
+
     var startEx = $("mgStartExport2");
     if (startEx && !startEx.dataset.bound) {
       startEx.dataset.bound = "1";
       startEx.addEventListener("click", function () {
-        var payload = (window.MergePages && window.MergePages.settings) ? window.MergePages.settings() : {};
-        document.dispatchEvent(new CustomEvent("merge:export-start", { detail: payload }));
-
-        /* 有输入目录就真跑 4.0 的合成；没有就只演示界面 */
-        var inputDir = window.__mergeInputDir || "";
-        if (!inputDir) {
-          toast("没有输入帧", "先在工作台导入视频，或把已抽好的帧目录填进工作区", "warn");
-          if (window.mgStep) window.mgStep("progress");
-          if (window.mgDemoProgress) window.mgDemoProgress(486);
-          return;
-        }
-
-        fetch("/api/merge/export", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            input_dir: inputDir,
-            settings: {
-              mode: payload.mode, mask_mode: payload.mask_mode,
-              erode_mask: payload.erode_mask, blur_mask: payload.blur_mask,
-              color_transfer: payload.color_transfer, face_type: payload.face_type
-            }
-          })
-        }).then(function (r) {
-          return r.json().then(function (d) {
-            if (!r.ok) throw new Error(d.detail || "启动失败");
-            return d;
-          });
-        }).then(function (d) {
-          toast("已开始合成", d.input_dir, "info");
-          if (window.mgStep) window.mgStep("progress");
-          pollMergeExport();
-        }).catch(function (e) {
-          toast("合成未启动", String((e && e.message) || e).slice(0, 120), "error");
-        });
+        mgRunExport((window.MergePages && window.MergePages.settings) ? window.MergePages.settings() : {});
       });
     }
+
+    /* 导出设置子页里的「开始导出」：它以前只 dispatch 一个没人听的事件 */
+    document.addEventListener("click", function (e) {
+      var t = e.target && e.target.closest ? e.target.closest("#mgStartExport") : null;
+      if (!t) return;
+      e.preventDefault();
+      mgRunExport((window.MergePages && window.MergePages.settings) ? window.MergePages.settings() : {});
+    });
 
     var tlBox = $("mergeTracks");
     if (tlBox && !tlBox.dataset.frameBound) {
       tlBox.dataset.frameBound = "1";
       tlBox.addEventListener("mtl:frame", function (e) {
-        window.mvFrame((e.detail && e.detail.frame) || 0);
+        var n = (e.detail && e.detail.frame) || 0;
+        var onSwap = document.querySelector('#mgViews b[data-v="swap"].on');
+        if (onSwap) window.mvMerged(n);
+        else window.mvFrame(n);
       });
     }
 
@@ -1738,7 +2025,17 @@
     }
 
     var addV = $("mgAddVideo");
+    if (addV && !addV.dataset.bound) {
+      addV.dataset.bound = "1";
+    }
     if (addV) addV.addEventListener("click", function () {
+      /* 桌面版直接选一个视频文件（比"先选目录再列文件"少一步） */
+      if (window.desktop && window.desktop.pickFile) {
+        window.desktop.pickFile("选择视频").then(function (p) {
+          if (p) window.mgPrepare(p);
+        });
+        return;
+      }
       if (!(window.desktop && window.desktop.pickDir)) {
         toast("导入视频", "网页版拿不到本地路径，请把视频放进工作区", "info");
         return;
@@ -1765,8 +2062,8 @@
               row.dataset.path = v.path;
               row.innerHTML = '<span class="nm">' + v.name + '</span><span class="tag">' + v.mb + " MB</span>";
               row.addEventListener("click", function () {
-                window.__mergeInputDir = v.dir || "";
-                window.mvOpen(v.path, v.name);
+                /* 点视频 = 准备这个素材（抽帧 + 对齐），不是只看看首帧 */
+                window.mgPrepare(v.path);
               });
               box.appendChild(row);
             });
@@ -1824,20 +2121,62 @@
     MERGE_POLL = setInterval(function () {
       fetch("/api/merge/export/status").then(function (r) { return r.json(); }).then(function (d) {
         var fill = document.getElementById("mgpFill");
+        var pctEl = document.getElementById("mgpPct");
+        var frEl = document.getElementById("mgpFrames");
         var msg = document.getElementById("mgpEta");
         var last = (d.log && d.log.length) ? d.log[d.log.length - 1] : "";
-        /* 后端现在会上报真实阶段进度（pct/msg），有就用它，没有退回日志最后一行 */
+        /* 后端上报的是真实阶段进度（pct / msg / 帧数），进度页直接照它画 */
         var text = d.msg || last;
+        var p = Math.max(0, Math.min(100, Number(d.pct) || 0));
         if (msg) msg.textContent = text ? String(text).slice(0, 60) : "合成中…";
-        if (fill && d.running && typeof d.pct === "number" && d.pct > 0) {
-          fill.style.width = Math.max(2, Math.min(99, d.pct)) + "%";
+        var fileEl = document.getElementById("mgpFile");
+        if (fileEl && d.out && String(d.out) !== "—") {
+          fileEl.textContent = String(d.out).split(/[\\/]/).pop();
         }
+        if (fill) fill.style.width = (d.running ? Math.max(2, Math.min(99, p)) : 100) + "%";
+        if (pctEl) pctEl.textContent = (d.running ? p : 100) + "%";
+
+        /* 阶段直接用后端的 @@P stage：0 搭目录/载模型 · 3 换脸 · 5 合成 · 6 编码 */
+        var srv = Number(d.stage);
+        var stage;
+        if (!isNaN(srv) && srv >= 0) {
+          stage = srv >= 6 ? 2 : (srv >= 3 ? 1 : 0);
+        } else {
+          stage = p < 20 ? 0 : p < 92 ? 1 : p < 100 ? 2 : 3;
+        }
+        if (!d.running) stage = d.ok ? 3 : stage;
+        var done = /Merging frames (\d+)\/(\d+)/.exec(text || "");
+        if (frEl) {
+          if (done) frEl.textContent = done[1] + " / " + done[2] + " 帧";
+          else if (!d.running && d.ok) frEl.textContent = "完成";
+        }
+        var steps = document.querySelectorAll("#p-merge .mgpstep");
+        for (var i = 0; i < steps.length; i++) {
+          steps[i].classList.toggle("on", d.running && i === stage);
+          steps[i].classList.toggle("done", (d.running && i < stage) || (!d.running && d.ok));
+        }
+        var stepInfo = [null, done ? (done[1] + " / " + done[2]) : null,
+                        d.running && stage === 2 ? "h264" : null,
+                        (!d.running && d.ok) ? "mp4" : null];
+        for (var k = 0; k < steps.length; k++) {
+          var sp = steps[k].querySelector("span");
+          if (sp && stepInfo[k]) sp.textContent = stepInfo[k];
+        }
+
         if (!d.running) {
           clearInterval(MERGE_POLL); MERGE_POLL = null;
-          if (fill) fill.style.width = "100%";
+          window.__mergeExporting = false;
           toast(d.ok ? "合成完成" : "合成失败",
                 d.ok ? ("输出 " + d.out) : String(d.error || "").slice(0, 120),
                 d.ok ? "success" : "error");
+          if (d.ok) {
+            /* 导出完自动切回工作台并显示成片那一帧，省得用户自己找 */
+            try {
+              if (window.mgStep) window.mgStep("main");
+              var sw = document.querySelector('#mgViews b[data-v="swap"]');
+              if (sw) sw.click();
+            } catch (e) {}
+          }
         }
       }).catch(function () {});
     }, 1500);
@@ -3336,7 +3675,7 @@
       { k: "lr_policy", l: "学习率策略", t: "seg", o: ["None", "CosineAnnealingLR"], v: "None" },
       { k: "lr_cos", l: "余弦周期", t: "num", v: "0", d: "0 = 关闭" },
       { k: "lr_total_steps", l: "学习率总步数", t: "num", v: "0", d: "0 = 关闭" },
-      { k: "lr_plateau_factor", l: "平台衰减系数", t: "seg", o: ["1.0（关闭）", "0.5", "0.7", "0.3"], v: "1.0（关闭）" },
+      { k: "lr_plateau_factor", l: "平台衰减系数", t: "seg", o: ["1.0", "0.5", "0.7", "0.3"], v: "1.0", d: "1.0 = 关闭" },
       { k: "lr_plateau_patience", l: "平台耐心", t: "num", v: "0", d: "连续 N 轮不降才衰减" },
       { k: "lr_plateau_min_ratio", l: "平台最小比例", t: "num", v: "0.1" },
       { k: "lr_dropout", l: "LR Dropout", t: "seg", o: ["n", "y", "cpu"], v: "n" },
@@ -3633,20 +3972,102 @@
   }
   window.openCfg = openCfg;
 
+  /* ---------- 训练页控制按钮：暂停 / 继续 · 立即保存 · 停止 ---------- */
+  function trainCtl(path, okMsg) {
+    return fetch(path, { method: "POST" })
+      .then(function (r) { return r.json().then(function (d) {
+        if (!r.ok) throw new Error(d.detail || "请求失败");
+        return d;
+      }); })
+      .then(function (d) {
+        if (okMsg) toast(okMsg, String((d && d.msg) || "").slice(0, 80), "success");
+        return d;
+      })
+      .catch(function (e) { toast("操作失败", String((e && e.message) || e).slice(0, 120), "error"); });
+  }
+
+  (function bindRunButtons() {
+    document.addEventListener("click", function (e) {
+      window.__runClick = (window.__runClick || 0) + 1;
+      var t = e.target && e.target.closest ? e.target : null;
+      window.__runClickId = t && t.id;
+      if (!t || !t.id) return;
+      if (t.id === "runPause") {
+        var paused = t.textContent.trim() === "继续";
+        trainCtl(paused ? "/api/train/resume" : "/api/train/pause",
+                 paused ? "已继续" : "已暂停");
+        t.textContent = paused ? "暂停" : "继续";
+      } else if (t.id === "runSave") {
+        t.disabled = true;
+        var oldTxt = t.textContent;
+        t.textContent = "保存中…";
+        trainCtl("/api/train/save", "已请求保存").then(function (d) {
+          t.textContent = (d && d.ok) ? "已保存" : oldTxt;
+          setTimeout(function () { t.disabled = false; t.textContent = oldTxt; }, 2000);
+        });
+      } else if (t.id === "runStop") {
+        /* 用应用自己的弹窗：原生 confirm 在 Electron 里是系统对话框，
+           和整站风格完全不搭（而且键盘焦点会丢）。 */
+        confirmBox("停止训练？", "会先让训练进程保存再退出，可能要等十几秒。",
+          "停止训练", function () {
+            t.disabled = true;
+            t.textContent = "停止中…";
+            trainCtl("/api/train/stop", "训练已停止").then(function () {
+              t.disabled = false;
+              t.textContent = "停止";
+            });
+          }, true);
+      }
+    });
+  })();
+
   /* ---------- 训练中（骨架：数据先用真实模型 + 模拟值） ---------- */
   /* 训练状态：真进程在跑就按它刷新，没跑就显示模型里最后的 iter */
   var TRAIN_POLL = null;
+  function _num(n) { return Number(n || 0).toLocaleString("en-US"); }
+
+  /* 训练状态的唯一来源：徽章、圆点、状态条都读它，避免三处各写一套对不上。
+     返回 { text, tone }，tone ∈ blue / green / yellow / red / gray */
+  function trainState(d) {
+    if (!d) return { text: "连接中", tone: "blue" };
+    if (!d.running) {
+      return d.ok === false ? { text: "训练失败", tone: "red" }
+                            : { text: "已停止", tone: "gray" };
+    }
+    if (d.stopping) return { text: "正在停止", tone: "red" };
+    if (d.paused) return { text: "已暂停", tone: "yellow" };
+    if (!d.iter_seen) return { text: "加载中", tone: "blue" };
+    return { text: "训练中", tone: "green" };
+  }
+  window.trainState = trainState;
+
   function pollTrain(m) {
+    /* 调用点有时不给 m（例如「启动成功后 pollTrain()」），那样右侧统计就永远不刷新。
+       记住最近一次训练界面用的模型，后续轮询都拿它。 */
+    if (m && m.name) window.__runModel = m;
+    var rm = (m && m.name) ? m : window.__runModel;
     if (TRAIN_POLL) clearInterval(TRAIN_POLL);
-    TRAIN_POLL = setInterval(function () {
+    function tick() {
       fetch("/api/train/status").then(function (r) { return r.json(); }).then(function (d) {
+        window.__lastTrain = d;
         var iterEl = document.getElementById("runIter");
         if (iterEl && d.iter) iterEl.textContent = Number(d.iter).toLocaleString();
+        /* 「点训练 → 等进程起来」这段窗口里，后端还会说 running:false。
+           这时候不能把徽章改成「已停止」—— 那会让用户以为刚才那下没生效。 */
+        var startingIdle = !!(window.__trainStarting
+          && (Date.now() - window.__trainStarting) < 20000
+          && !d.running && d.ok !== false);
+        var state = startingIdle ? { text: "启动中", tone: "blue" } : trainState(d);
         var stage = document.getElementById("runStage");
         if (stage) {
-          stage.textContent = d.running ? "训练中" : (d.ok === false ? "已失败" : "已停止");
-          stage.className = "tag " + (d.running ? "ok" : (d.ok === false ? "bad" : ""));
+          stage.textContent = state.text;
+          stage.className = "tag t-" + state.tone;
         }
+        var dot = document.querySelector("#p-run .live");
+        var dotCls = "live s-" + state.tone;
+        if (dot && dot.className !== dotCls) dot.className = dotCls;
+        var pbtn = document.getElementById("runPause");
+        if (pbtn) pbtn.textContent = d.paused ? "继续" : "暂停";
         /* 进程崩了只显示"已停止"会让人以为是自己停的，把真实原因打出来 */
         if (!d.running && d.ok === false && d.error) {
           var logEl0 = document.getElementById("runLog");
@@ -3658,42 +4079,187 @@
           var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
           return h ? (h + "h " + m + "m") : (m ? (m + "m " + s + "s") : (s + "s"));
         }
-        if ($("runIter")) $("runIter").textContent = Number(d.iter || 0).toLocaleString("en-US");
-        if ($("runTarget")) $("runTarget").textContent = d.target_iter ? Number(d.target_iter).toLocaleString("en-US") : "不限";
-        if ($("runSpeed")) $("runSpeed").textContent = (d.it_s || 0) > 0 ? (Number(d.it_s).toFixed(2) + " it/s") : "测速中…";
-        if ($("runElapsed")) $("runElapsed").textContent = d.elapsed_s ? ("已跑 " + _hms(d.elapsed_s)) : "—";
-        if ($("runEta")) {
-          $("runEta").textContent = d.eta_s != null ? ("约 " + _hms(d.eta_s) + " 剩余")
-            : (d.target_iter ? "" : "未设目标迭代");
+        /* __trainStarting：刚点下「训练」的这几秒，模型里的旧迭代数不能拿来充数 */
+        var starting = window.__trainStarting && (Date.now() - window.__trainStarting < 600000);
+        if (starting && d.running && d.iter_seen) window.__trainStarting = 0;
+        if (starting && !d.running && Date.now() - window.__trainStarting > 8000) window.__trainStarting = 0;
+        var idleIter = d.iter || (window.__trainStarting ? 0 : ((rm && rm.iter) || 0));
+        if ($("runIter")) $("runIter").textContent = Number(idleIter).toLocaleString("en-US");
+        if ($("runTarget")) {
+          var tg = d.target_iter || (rm && rm.target_iter) || 0;
+          $("runTarget").textContent = tg ? Number(tg).toLocaleString("en-US") : "不限";
         }
-
-        var logEl = document.getElementById("runLog");
-        if (logEl && d.log && d.log.length) {
-          logEl.textContent = d.log.slice(-6).join("\n");
+        if ($("runSpeed")) {
+          $("runSpeed").textContent = (!d.running && !window.__trainStarting) ? "—"
+            : (d.paused ? "已暂停"
+              : ((d.it_s || 0) > 0 ? (Number(d.it_s).toFixed(2) + " it/s") : "测速中…"));
         }
-        /* 实时预览：4.0 的监控服务在训练进程里，走 4.1 的代理拿 */
-        if (d.running && d.has_preview !== false) {
-          var pv = document.querySelector("#p-run .pvcell");
-          if (pv && !pv.dataset.liveBound) {
-            pv.dataset.liveBound = "1";
-            setInterval(function () {
-              fetch("/api/train/preview").then(function (r) { return r.json(); }).then(function (j) {
-                var first = (j.previews || [])[0];
-                if (!first || !first.data) return;
-                var img = new Image();
-                img.onload = function () {
-                  pv.style.backgroundImage = "url(" + img.src + ")";
-                  pv.style.backgroundPosition = "center";
-                  pv.style.backgroundSize = "cover";
-                };
-                img.src = "data:image/jpeg;base64," + first.data;
-              }).catch(function () {});
-            }, 5000);
+        /* 学习率与两个 loss：训练日志里每轮都带着，直接照抄比另算可信 */
+        if ($("stLr")) {
+          $("stLr").textContent = d.lr ? Number(d.lr).toExponential(2) : (d.running ? "—" : "未在训练");
+        }
+        if (d.history && d.history.length) {
+          /* 实时曲线：每个轮询（2 秒）重画一次，曲线才会跟着走 */
+          var hs = [], hd = [];
+          d.history.forEach(function (h) { hs.push(h[1]); hd.push(h[2]); });
+          var box = document.getElementById("chartBox");
+          var sig = hs.length + ":" + hs[hs.length - 1] + ":" + hd[hd.length - 1];
+          if (box && sig !== window.__chartSig) {
+            window.__chartSig = sig;
+            window.__chartLive = true;
+            box.innerHTML = chartSVG({ src: hs, dst: hd });
+            if ($("chartHint")) $("chartHint").textContent = "最近 " + hs.length + " iter（实时）";
+          }
+          if ($("chartAvg")) {
+            var tail = d.history.slice(-100);
+            var sum = 0;
+            tail.forEach(function (h) { sum += (h[1] + h[2]) / 2; });
+            $("chartAvg").textContent = (sum / tail.length).toFixed(4);
           }
         }
-        if (!d.running) { clearInterval(TRAIN_POLL); TRAIN_POLL = null; }
+        var sparkSrc = (rm && rm.spark && rm.spark.src) || [];
+        var sparkDst = (rm && rm.spark && rm.spark.dst) || [];
+        if ($("runLossSrc")) {
+          $("runLossSrc").textContent = (d.loss_src != null) ? Number(d.loss_src).toFixed(4)
+            : (!d.running && !window.__trainStarting && sparkSrc.length ? Number(sparkSrc[sparkSrc.length - 1]).toFixed(4) : "—");
+        }
+        if ($("runLossDst")) {
+          $("runLossDst").textContent = (d.loss_dst != null) ? Number(d.loss_dst).toFixed(4)
+            : (!d.running && !window.__trainStarting && sparkDst.length ? Number(sparkDst[sparkDst.length - 1]).toFixed(4) : "—");
+        }
+        if ($("runElapsed")) $("runElapsed").textContent = d.elapsed_s ? ("已跑 " + _hms(d.elapsed_s)) : "—";
+        /* 有目标才显示剩余时间；没目标时进度行已经是「X / 不限 iter」，
+           再写一句「未设目标迭代」就是同一件事说两遍。 */
+        var hasTarget = !!(d.target_iter || (rm && rm.target_iter));
+        if ($("runEta")) {
+          $("runEta").textContent = d.eta_s != null ? ("约 " + _hms(d.eta_s) + " 剩余") : "";
+          $("runEta").style.display = (hasTarget || d.eta_s != null) ? "" : "none";
+        }
+        if ($("runEtaDot")) {
+          $("runEtaDot").style.display = (hasTarget || d.eta_s != null) ? "" : "none";
+        }
+
+        /* 右侧统计：全按 /api/models/{name}/stats 的真实值填，取不到就显示 — */
+        if (rm && rm.name && !window.__statsBusy) {
+          window.__statsBusy = true;
+          fetch("/api/models/" + encodeURIComponent(rm.name) + "/stats")
+            .then(function (r) { return r.json(); }).then(function (s) {
+              window.__statsBusy = false;
+              if (!s || s.HTTP) return;
+              if (s.gpu) {
+                if ($("stGpu")) $("stGpu").textContent = "显存 " + s.gpu.used_gb + " / " + s.gpu.total_gb + " GB";
+                if ($("stGpuBar")) $("stGpuBar").style.width =
+                  Math.min(100, Math.round(100 * s.gpu.used_gb / (s.gpu.total_gb || 1))) + "%";
+                if ($("stUtil")) $("stUtil").textContent = (s.gpu.util == null ? "—" : s.gpu.util + "%");
+                if ($("stUtilBar")) $("stUtilBar").style.width = (s.gpu.util == null ? 0 : s.gpu.util) + "%";
+              }
+              if ($("stCpu")) $("stCpu").textContent = (s.cpu_percent == null ? "—" : s.cpu_percent + "%");
+              if ($("stCpuBar")) $("stCpuBar").style.width = (s.cpu_percent || 0) + "%";
+              if ($("stRam")) {
+                $("stRam").textContent = (s.ram_used_gb == null) ? "—"
+                  : (s.ram_used_gb + " / " + s.ram_total_gb + " GB · " + Math.round(s.ram_percent) + "%");
+              }
+              if ($("stRamBar")) $("stRamBar").style.width = (s.ram_percent || 0) + "%";
+              if ($("stDisk")) {
+                var parts = [];
+                if (s.disk_free_gb != null) parts.push("剩 " + s.disk_free_gb + " GB");
+                if (s.model_gb != null) parts.push("模型 " + s.model_gb + " GB");
+                $("stDisk").textContent = parts.join(" · ") || "—";
+              }
+              if ($("stSave") && s.last_save_ts) {
+                var mins = Math.max(0, Math.round((Date.now() / 1000 - s.last_save_ts) / 60));
+                $("stSave").textContent = mins < 1 ? "刚刚" : (mins < 60 ? mins + " 分钟前" : Math.floor(mins / 60) + " 小时前");
+              }
+              if ($("stNext")) {
+                if (!s.backup_interval) {
+                  $("stNext").textContent = "关闭";
+                } else {
+                  /* 倒计时：4.0 是在「距上次备份 >= backup_interval」时备份，
+                     所以按真实的上次备份迭代数算，而不是取模猜（重启后锚点会变）。 */
+                  var lt2 = window.__lastTrain || {};
+                  var curIt = lt2.iter || s.iter || 0;
+                  var lastBak = lt2.last_backup_iter || 0;
+                  var left = lastBak > 0
+                    ? Math.max(0, s.backup_interval - (curIt - lastBak))
+                    : (s.backup_interval - (curIt % s.backup_interval));
+                  $("stNext").textContent = lastBak > 0
+                    ? ("还有 " + _num(left) + " iter")
+                    : ("还有 " + _num(left) + " iter（约）");
+                }
+              }
+              if ($("stBak")) {
+                $("stBak").textContent = s.has_backup_dir
+                  ? (s.backup_count + (s.max_backups ? " / " + s.max_backups : "") + " 份")
+                  : (s.max_backups ? "0 / " + s.max_backups + " 份" : "—");
+              }
+            }).catch(function () { window.__statsBusy = false; });
+        }
+
+        /* 状态条只在「徽章说不清」的时候出现：
+           加载模型 / 正在保存 / 正在停止 / 训练失败。
+           训练中、已暂停、已停止都不显示 —— 徽章已经写着状态，上面那行已经有迭代数。 */
+        var act = "", cls = "", sub = "";
+        var showStrip = false;
+        if (startingIdle) {
+          showStrip = true;
+          act = "启动中…";
+          cls = "busy";
+          sub = "4.0 进程正在起来，模型加载要一会儿";
+        } else if (!d.running) {
+          if (d.ok === false) {
+            showStrip = true;
+            cls = "bad";
+            sub = String(d.error || "").slice(0, 70);
+          }
+        } else if (d.stopping) {
+          showStrip = true; act = "正在停止…"; cls = "busy"; sub = "等它保存完再退出";
+        } else if (d.saving) {
+          showStrip = true; act = "正在保存…"; cls = "busy"; sub = "下一个迭代后落盘";
+        } else if (!d.paused && !d.iter_seen) {
+          showStrip = true; cls = "busy";
+          var hint = "";
+          (d.log || []).slice().reverse().some(function (l) {
+            if (!l || l.charAt(0) === "[") return false;
+            hint = String(l).replace(/^[\s·]+/, "").slice(0, 34);
+            return true;
+          });
+          act = "加载模型…";
+          sub = [d.elapsed_s ? ("已等 " + _hms(d.elapsed_s)) : "", hint].filter(Boolean).join(" · ");
+        }
+
+        var strip = document.getElementById("runStat");
+        if (strip) {
+          strip.className = "runstat " + cls;
+          strip.style.display = showStrip ? "" : "none";
+          var tEl = document.getElementById("runStatText");
+          var sEl = document.getElementById("runStatSub");
+          if (tEl) { tEl.textContent = act; tEl.style.display = act ? "" : "none"; }
+          if (sEl) sEl.textContent = sub;
+        }
+        /* 第一行迭代出现 = 训练真的开始了：这时候把占位图换成实时预览（每次开训只自动一次） */
+        if (d.running && d.iter_seen) {
+          if (!window.__pvAutoDone) {
+            window.__pvAutoDone = true;
+            if (window.pvAutoAfterStart) window.pvAutoAfterStart();
+          }
+        } else if (!d.running) {
+          window.__pvAutoDone = false;   /* 下次开训再自动一次 */
+        }
+        /* 没在训练也别把定时器清掉：降频到 5 秒继续看。
+           否则在别处（或另一个窗口）开训之后，这个页面永远停在「已停止」。 */
+        var want = d.running ? 2000 : 5000;
+        if (window.__pollEvery !== want) {
+          window.__pollEvery = want;
+          if (TRAIN_POLL) clearInterval(TRAIN_POLL);
+          TRAIN_POLL = setInterval(tick, want);
+        }
       }).catch(function () {});
-    }, 2000);
+    }
+    /* 先立刻打一枪：进页面那两秒不该停在「连接中…」这种中间态上 */
+    window.__pollEvery = 2000;
+    tick();
+    if (TRAIN_POLL) clearInterval(TRAIN_POLL);
+    TRAIN_POLL = setInterval(tick, 2000);
   }
   window.pollTrain = pollTrain;
 
@@ -3709,72 +4275,262 @@
     });
   }
   window.startTraining = startTraining;
+  window.openRun = openRun;
+
+  /* ---------- 训练预览：单图 + 手动刷新 ---------- */
+  var PV_TABS = ["原图", "遮罩", "输入", "合并"];
+
+  function pvShow(idx) {
+    var st = window.__pv || {};
+    idx = Math.max(0, Math.min(3, parseInt(idx, 10) || 0));
+    st.idx = idx;
+    window.__pv = st;
+    var tabs = document.querySelectorAll("#pvTabs b");
+    Array.prototype.forEach.call(tabs, function (b) {
+      b.classList.toggle("on", Number(b.dataset.v) === idx);
+    });
+    var img = document.getElementById("pvImg");
+    var empty = document.getElementById("pvEmpty");
+    var crop = document.getElementById("pvCrop");
+    var src = st.imgs && st.imgs[idx] ? st.imgs[idx] : "";
+    if (crop) {
+      /* 没在训练、也没有实时图时，用模型里存的那张网格图裁一格当「上次的样子」 */
+      var useCrop = !src && idx === 0 && st.static;
+      crop.style.display = useCrop ? "" : "none";
+      if (useCrop) {
+        crop.style.backgroundImage = "url('" + st.static + "')";
+      }
+    }
+    if (img) {
+      if (src) {
+        img.src = src;
+        img.style.display = "";
+        if (empty) empty.style.display = "none";
+      } else {
+        img.removeAttribute("src");
+        img.style.display = "none";
+        var hasCrop = !!(idx === 0 && st.static);
+        if (empty) {
+          empty.style.display = hasCrop ? "none" : "";
+          empty.textContent = "这一类还没有图 —— 点「刷新」拉一张";
+        }
+      }
+    }
+    var hint = document.getElementById("prevHint");
+    if (hint) {
+      var bits = [];
+      var cropped = !(st.imgs && st.imgs[idx]) && idx === 0 && st.static;
+      if (cropped) {
+        bits.push("上次保存的样本");
+        if (st.modelIter) bits.push(_num(st.modelIter) + " iter");
+      }
+      if (st.imgs && st.imgs[idx]) {
+        if (st.iter) bits.push(_num(st.iter) + " iter");
+        if (st.at) {
+          var sec = Math.max(0, Math.round((Date.now() - st.at) / 1000));
+          bits.push(sec < 60 ? (sec + "s 前") : (Math.floor(sec / 60) + "m 前"));
+        }
+      }
+      hint.textContent = bits.join(" · ");
+    }
+  }
+  window.pvShow = pvShow;
+
+  function pvFetch(silent) {
+    var btn = document.getElementById("pvRefresh");
+    if (btn && !silent) { btn.disabled = true; btn.textContent = "等新图…"; }
+    /* wait=8：后端会一直等到 4.0 真的吐出一张新图（最多 8 秒）。
+       不带这个参数只会立刻返回缓存 —— 点刷新像没反应，就是这个原因。
+       进页面那次也给 6 秒：训练在跑的话通常一进来就有图，不用先点一下。 */
+    return fetch("/api/train/preview?wait=" + (silent ? "6" : "8")).then(function (r) { return r.json(); }).then(function (j) {
+      var list = j.previews || [];
+      var st = window.__pv || (window.__pv = { imgs: [], labels: [], iter: 0, at: 0, idx: 0 });
+      if (list.length) {
+        st.imgs = list.map(function (p) { return p.data ? ("data:image/jpeg;base64," + p.data) : ""; });
+        st.labels = list.map(function (p) { return p.name || ""; });
+        st.at = Date.now();
+      }
+      st.iter = j.iter || (window.__lastTrain || {}).iter || 0;
+      st.fresh = !!j.fresh;
+      pvShow(st.idx || 0);
+      if (btn && !silent) { btn.disabled = false; btn.textContent = "刷新"; }
+      if (!silent) {
+        if (!list.length) toast("预览还没准备好", "4.0 通常几十秒后才有第一张", "info");
+        else if (!j.fresh) toast("没拿到新图", "训练那边还没出下一张，稍后再点一次", "info");
+      }
+      return { n: list.length, fresh: !!j.fresh };
+    }).catch(function () {
+      if (btn && !silent) { btn.disabled = false; btn.textContent = "刷新"; }
+      return { n: 0, fresh: false };
+    });
+  }
+  window.pvFetch = pvFetch;
+
+  /* 开训后自动拉一次预览：4.0 要跑出第一张才会给图，一次可能落空，
+     所以最多重试 3 次、每次隔 12 秒。只在「本次开训」自动这一次。 */
+  function pvAutoAfterStart() {
+    var tries = 0;
+    (function attempt() {
+      tries += 1;
+      pvFetch(true).then(function (r) {
+        if (r && r.fresh) return;
+        if (tries < 3) setTimeout(attempt, 12000);
+      });
+    })();
+  }
+  window.pvAutoAfterStart = pvAutoAfterStart;
+
+  document.addEventListener("click", function (e) {
+    var t = e.target;
+    if (!t) return;
+    if (t.id === "pvRefresh") { pvFetch(false); return; }
+    var tab = t.closest ? t.closest("#pvTabs b") : null;
+    if (tab) { pvShow(Number(tab.dataset.v)); }
+  });
+
+  /* 点「开始训练」之后立刻把界面打回「加载模型…」：
+     4.0 要几十秒才出第一行迭代，这段时间显示旧数字（或「训练中」）都是假的。 */
+  function trainStartingUi() {
+    window.__trainStarting = Date.now();
+    window.__pvAutoDone = false;
+    var dot0 = document.querySelector("#p-run .live");
+    if (dot0) dot0.className = "live s-blue";
+    if ($("runStat")) {
+      $("runStat").className = "runstat busy";
+      if ($("runStatText")) $("runStatText").textContent = "启动中…";
+      if ($("runStatSub")) $("runStatSub").textContent = "";
+    }
+    if ($("runStage")) {
+      $("runStage").textContent = "启动中";
+      $("runStage").className = "tag t-blue";
+    }
+    if ($("runIter")) $("runIter").textContent = "0";
+    if ($("runTarget")) $("runTarget").textContent = "不限";
+    if ($("runSpeed")) $("runSpeed").textContent = "测速中…";
+    if ($("runElapsed")) $("runElapsed").textContent = "—";
+    if ($("runEta")) { $("runEta").textContent = ""; $("runEta").style.display = "none"; }
+    if ($("runEtaDot")) $("runEtaDot").style.display = "none";
+    if ($("runLossSrc")) $("runLossSrc").textContent = "—";
+    if ($("runLossDst")) $("runLossDst").textContent = "—";
+    window.__lastTrain = null;
+  }
+  window.trainStartingUi = trainStartingUi;
 
   function openRun(m) {
+    /* 进页面先把占位文案清掉：没连上后端时不该显示 "1.82 it/s · 正式训练" 这种假数据 */
+    if ($("runSpeed")) $("runSpeed").textContent = "测速中…";
+    if ($("runElapsed")) $("runElapsed").textContent = "—";
+    if ($("runEta")) { $("runEta").textContent = ""; $("runEta").style.display = "none"; }
+    if ($("runEtaDot")) $("runEtaDot").style.display = "none";
+    if ($("runLossSrc")) $("runLossSrc").textContent = "—";
+    if ($("runLossDst")) $("runLossDst").textContent = "—";
+    if ($("stLr")) $("stLr").textContent = "—";
+    /* 已经在训练的话，别把标签重置成「连接中」再等下一次轮询 —— 会闪一下。
+       只有确实没在跑时才写成「加载模型…」（从点「训练」到第一枪状态回来的这一瞬）。 */
+    var lt = window.__lastTrain;
+    var sameRun = !!(lt && lt.running && (!m || !m.name || lt.name === m.name));
+    if (!sameRun) {
+      if ($("runStage")) {
+        $("runStage").textContent = "连接中";
+        $("runStage").className = "tag t-blue";
+      }
+      if ($("runStat")) {
+        $("runStat").className = "runstat busy";
+        if ($("runStatText")) $("runStatText").textContent = "加载模型…";
+        if ($("runStatSub")) $("runStatSub").textContent = "";
+      }
+      var dot1 = document.querySelector("#p-run .live");
+      if (dot1) dot1.className = "live s-blue";
+    }
+    if (window.pollTrain) window.pollTrain(m);
+
     var box = $("chartBox");
     var nameEl = $("runName");
     if (nameEl) nameEl.textContent = m ? m.name : "模型";
 
-    var bs = Math.max(1, Math.min(4, (m && m.batch_size) || 4));
-    if ($("prevHint")) $("prevHint").textContent = "bs " + ((m && m.batch_size) || 4) + " · 显示 " + bs + " 行";
-
-    /* 五列预览：src | src-pred | dst | dst-pred | dst-src */
-    var COLS = [
-      { k: "src", lbl: "src", pos: "0% 0%" },
-      { k: "sp", lbl: "src-pred", pos: "20% 0%" },
-      { k: "dst", lbl: "dst", pos: "40% 0%" },
-      { k: "dp", lbl: "dst-pred", pos: "60% 0%" },
-      { k: "ds", lbl: "dst-src", pos: "80% 0%" }
-    ];
-    var head = $("pvhead"), grid = $("pvgrid");
-    if (head && grid) {
-      head.innerHTML = COLS.map(function (c) { return "<span>" + c.lbl + "</span>"; }).join("");
-      grid.innerHTML = "";
-      var url = (m && m.preview_url) || "";
-      for (var r = 0; r < bs; r++) {
-        COLS.forEach(function (c) {
-          var d = document.createElement("div");
-          d.className = "pvcell";
-          if (url) {
-            d.style.backgroundImage = "url('" + url + "')";
-            d.style.backgroundPosition = c.pos;
-          }
-          grid.appendChild(d);
-        });
-      }
+    /* 预览只放一张，按分类切换；刷新是手动的 —— 自动刷新会打断观察
+       （刚看清遮罩边缘，图就被下一轮换掉了）。进入页面时先拉一次，
+       之后只有点「刷新」才更新。 */
+    window.__pv = { imgs: [], labels: [], iter: 0, at: 0, idx: 0,
+                    static: (m && m.preview_url) || "",
+                    bs: (m && m.batch_size) || 4,
+                    modelIter: (m && m.iter) || 0 };
+    /* 没在训练时，运行条读模型里保存的值 —— 显示 0 iter / 一堆破折号看着像没加载出来 */
+    if (m && m.iter && !(window.__lastTrain && window.__lastTrain.running)) {
+      if ($("runIter")) $("runIter").textContent = _num(m.iter);
+      if ($("runTarget")) $("runTarget").textContent = m.target_iter ? _num(m.target_iter) : "不限";
+      if ($("runSpeed")) $("runSpeed").textContent = "—";
+      var sp = (m.spark && m.spark.src) || [];
+      var dp = (m.spark && m.spark.dst) || [];
+      if ($("runLossSrc")) $("runLossSrc").textContent = sp.length ? Number(sp[sp.length - 1]).toFixed(4) : "—";
+      if ($("runLossDst")) $("runLossDst").textContent = dp.length ? Number(dp[dp.length - 1]).toFixed(4) : "—";
     }
+    if ($("prevHint")) {
+      $("prevHint").textContent = m && m.batch_size ? ("bs " + m.batch_size) : "—";
+    }
+    /* 不再拿模型里存的那张 preview.jpg 当占位 —— 它是 4 行 × 5 列的拼图，
+       单独摆在预览区里看着像「四张脸拼在一起」。宁可空着，提示去刷新。 */
+    pvShow(0);
+    if (window.pollTrain) window.pollTrain(m);
+    pvFetch(true);
 
-    /* loss 曲线：用真实 spark，画原始细线 + 30 点滑动平均粗线 */
+    if (box && !(m && m.spark && m.spark.src && m.spark.src.length)) {
+      box.innerHTML = '<div class="chartempty">还没有 loss 记录 —— 跑几十个迭代就有了</div>';
+    }
+    /* loss 曲线：先用模型里存的历史占位，训练跑起来之后改画实时 history */
+    window.__chartLive = false;
     if (box && m && m.spark && m.spark.src && m.spark.src.length) {
       box.innerHTML = chartSVG(m.spark);
       var avg = m.spark.src.slice(-100);
       var mean = avg.reduce(function (a, b) { return a + b; }, 0) / (avg.length || 1);
       if ($("chartAvg")) $("chartAvg").textContent = mean.toFixed(4);
+      if ($("chartHint")) $("chartHint").textContent = "最近 " + m.spark.src.length + " iter（模型里存的）";
     }
     go("run");
   }
 
   function chartSVG(spark) {
-    var s = spark.src || [], d = spark.dst || [];
-    if (!s.length) return "";
+    var s = (spark && spark.src) || [], d = (spark && spark.dst) || [];
+    if (!s.length && !d.length) return "";
+    /* 两条曲线共用一套纵轴，才能直接比高低 */
     var all = s.concat(d);
     var min = Math.min.apply(null, all), max = Math.max.apply(null, all);
     var span = (max - min) || 1;
     var W = 600, H = 160;
-    function line(arr, smooth) {
-      var pts = [];
-      var src = smooth ? movingAvg(arr, 30) : arr;
+
+    function pts(arr, smooth) {
+      var out = [];
+      var src = smooth ? movingAvg(arr, 8) : arr;
       for (var i = 0; i < src.length; i++) {
         var x = (i / (src.length - 1 || 1)) * W;
-        var y = H - ((src[i] - min) / span) * (H - 8) - 4;
-        pts.push(x.toFixed(1) + "," + y.toFixed(1));
+        var y = H - ((src[i] - min) / span) * (H - 10) - 5;
+        out.push(x.toFixed(1) + "," + y.toFixed(1));
       }
-      return pts.join(" ");
+      return out.join(" ");
     }
-    return '<svg viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="none">' +
-      '<polyline fill="none" stroke="var(--ink-2)" stroke-width=".7" opacity=".55" vector-effect="non-scaling-stroke" points="' + line(s, false) + '"/>' +
-      '<polyline fill="none" stroke="var(--ok)" stroke-width=".7" opacity=".4" vector-effect="non-scaling-stroke" points="' + line(d, false) + '"/>' +
-      '<polyline fill="none" stroke="var(--ink-2)" stroke-width="1.6" vector-effect="non-scaling-stroke" points="' + line(s, true) + '"/>' +
+    function poly(arr, color, w, opacity) {
+      if (!arr || arr.length < 2) return "";
+      return '<polyline fill="none" stroke="' + color + '" stroke-width="' + w + '"' +
+        (opacity ? ' opacity="' + opacity + '"' : '') +
+        ' vector-effect="non-scaling-stroke" stroke-linejoin="round" points="' + pts(arr, false) + '"/>';
+    }
+    function polyS(arr, color) {
+      if (!arr || arr.length < 2) return "";
+      return '<polyline fill="none" stroke="' + color + '" stroke-width="1.8"' +
+        ' vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round" points="' + pts(arr, true) + '"/>';
+    }
+    /* 三条水平参考线：0% / 50% / 100%，很淡，只用来判断幅度 */
+    var grid = "";
+    [0.25, 0.5, 0.75].forEach(function (f) {
+      var y = (H * f).toFixed(1);
+      grid += '<line x1="0" y1="' + y + '" x2="' + W + '" y2="' + y +
+        '" stroke="var(--line)" stroke-width="1" vector-effect="non-scaling-stroke"/>';
+    });
+    return '<svg viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="none">' + grid +
+      poly(d, "var(--chart-dst)", ".8", ".35") +
+      poly(s, "var(--chart-src)", ".8", ".35") +
+      polyS(d, "var(--chart-dst)") +
+      polyS(s, "var(--chart-src)") +
       "</svg>";
   }
 
@@ -4094,7 +4850,8 @@
       if (!k || STRUCT.indexOf(k) >= 0) return;
       if (el.tagName === "INPUT") {
         var v = el.value.trim();
-        patch[k] = (v !== "" && !isNaN(Number(v))) ? Number(v) : v;
+        if (v === "") return;                 /* 空着 = 不改这项，别把 "" 写进 _data.dat */
+        patch[k] = !isNaN(Number(v)) ? Number(v) : v;
       } else if (el.tagName === "SELECT") {
         patch[k] = el.value;
       } else if (el.classList.contains("sw")) {
@@ -4102,7 +4859,12 @@
       } else if (el.classList.contains("seg")) {
         /* 取 data-v（原始值），不能取 textContent —— 英文界面下会写进 "Fast" 这种 */
         var on = el.querySelector("b.on");
-        if (on) patch[k] = (on.dataset.v !== undefined ? on.dataset.v : on.textContent.trim());
+        if (on) {
+          var sv = (on.dataset.v !== undefined ? on.dataset.v : on.textContent.trim());
+          /* "1.0（关闭）" 这种带说明的选项值不能原样写进 .dat —— 4.0 会 float() 崩掉 */
+          var mm = /^([0-9.]+)\s*[（(].*[）)]$/.exec(String(sv));
+          patch[k] = mm ? mm[1] : sv;
+        }
       }
     });
 
@@ -4119,11 +4881,13 @@
       cfgStart.disabled = false;
       if (d.count) toast("参数已保存", m.name + " · 改动 " + d.count + " 项", "success");
       openRun(m);
+      if (window.trainStartingUi) window.trainStartingUi();
       /* 参数落盘之后真的拉起 4.0 的训练进程 */
       if (window.startTraining) {
         window.startTraining(m.name)
           .then(function () {
             toast("训练已启动", m.name + " · 4.0 进程已拉起", "success");
+            if (window.trainStartingUi) window.trainStartingUi();
             if (window.pollTrain) window.pollTrain(m);
           })
           .catch(function (e) {
@@ -4292,36 +5056,8 @@
       d.video.push({ s: Math.round(i * span), e: Math.round((i + 1) * span) });
     }
 
-    /* 人脸标记：25 个宽窄不一的小块（真实数据接 state 里的人脸统计） */
-    span = total / N_FACE;
-    for (i = 0; i < N_FACE; i++) {
-      s = Math.round(i * span + span * 0.10);
-      e = Math.round(i * span + span * (0.55 + 0.035 * ((i * 7) % 10)));
-      d.faces.push({ s: s, e: e > s ? e : s + 1 });
-    }
-
-    /* 剪切区段：6 段，长短交错（真实数据接 state.cutSegments） */
-    var cutPlan = [
-      [0.02, 0.09], [0.15, 0.21], [0.28, 0.375],
-      [0.42, 0.50], [0.61, 0.70], [0.82, 0.94]
-    ];
-    for (i = 0; i < N_CUT; i++) {
-      d.cuts.push({
-        s: Math.round(cutPlan[i][0] * total),
-        e: Math.round(cutPlan[i][1] * total)
-      });
-    }
-
-    /* 角度色带：3 段（真实数据接 state.angleSegments，angles 同 4.0 默认值） */
-    var anglePlan = [[0.0, 0.30], [0.30, 0.62], [0.62, 1.0]];
-    var angleVal = ['0,90,180,270', '0,90,180,270', '0,45,90,135,180,225,270,315'];
-    for (i = 0; i < N_ANGLE; i++) {
-      d.angles.push({
-        s: Math.round(anglePlan[i][0] * total),
-        e: Math.round(anglePlan[i][1] * total),
-        angles: angleVal[i]
-      });
-    }
+    /* 剪切 / 角度：既然还没接后端，就不要造假数据 —— 空的轨道比假的红块诚实。
+       有真实数据时由 MergeTimeline.setData({cuts, angles}) 填。 */
     return d;
   }
 
@@ -4374,9 +5110,20 @@
     var i, d = S.data;
     if (!host || !d) return;
     clear(host);
+    hideRow(host, !d.faces.length);
     for (i = 0; i < d.faces.length; i++) {
       addBlock(host, 'mtl-blk--face', d.faces[i].s, d.faces[i].e, '人脸 帧 ' + d.faces[i].s + ' ~ ' + d.faces[i].e);
     }
+  }
+
+  /* 轨道和它左边的标签名在两个不同的容器里，用序号对齐 */
+  function hideRow(host, empty) {
+    var stack = $('mtlStack');
+    if (!host || !stack) return;
+    var idx = Array.prototype.indexOf.call(stack.children, host);
+    var names = document.querySelectorAll('#p-merge .mtl-name');
+    if (idx >= 0 && names[idx]) names[idx].style.display = empty ? 'none' : '';
+    host.style.display = empty ? 'none' : '';
   }
 
   function renderCut() {
@@ -4384,6 +5131,7 @@
     var i, d = S.data;
     if (!host || !d) return;
     clear(host);
+    hideRow(host, !d.cuts.length);
     for (i = 0; i < d.cuts.length; i++) {
       addBlock(host, 'mtl-blk--cut', d.cuts[i].s, d.cuts[i].e, '剪切 帧 ' + d.cuts[i].s + ' ~ ' + d.cuts[i].e);
     }
@@ -4394,6 +5142,7 @@
     var i, d = S.data;
     if (!host || !d) return;
     clear(host);
+    hideRow(host, !d.angles.length);
     for (i = 0; i < d.angles.length; i++) {
       addBlock(host, 'mtl-blk--angle', d.angles[i].s, d.angles[i].e, '角度 ' + d.angles[i].angles);
     }
@@ -5972,6 +6721,11 @@
       setTimeout(function () {
         if (key === "train-cfg") { ensureCfgSearch(); filterCfg(); }
         if (key === "train") { refreshResume(); }
+        /* 回到训练界面：轮询可能已经停了（上一个页面 idle 时被清掉/超时），
+           这里重新拉一次，顺便把预览也刷一下。 */
+        if (key === "run" && window.__runModel && window.pollTrain) {
+          window.pollTrain(window.__runModel);
+        }
       }, 60);
       return r;
     };

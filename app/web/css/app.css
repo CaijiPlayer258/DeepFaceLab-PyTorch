@@ -154,6 +154,12 @@ label.f{display:block;font-size:12px;color:var(--ink-2);margin-bottom:6px;font-w
 .tag{display:inline-block;font-size:10.5px;padding:2px 8px;border-radius:999px;font-weight:650;white-space:nowrap}
 .tag.ok{background:rgba(15,157,88,.13);color:var(--ok)}
 .tag.n{background:var(--line);color:var(--ink-2)}
+/* 训练状态的徽章：和左上角圆点同一套色（蓝=连接/加载，绿=训练，黄=暂停，红=停止中/失败，灰=已停止） */
+.tag.t-blue  { background: rgba(93,108,207,.14); color: var(--brand); }
+.tag.t-green { background: rgba(15,157,88,.13);  color: var(--ok); }
+.tag.t-yellow{ background: rgba(194,116,11,.15); color: var(--warn); }
+.tag.t-red   { background: rgba(211,58,58,.13);  color: var(--bad); }
+.tag.t-gray  { background: var(--line);          color: var(--ink-3); }
 .kbd{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;background:var(--line);padding:1px 6px;border-radius:5px}
 .hint{font-size:11.5px;color:var(--ink-3)}
 .lvl3 .foot{display:flex;align-items:center;gap:10px;margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
@@ -621,15 +627,41 @@ body, .app, .shell, .main { background-color: var(--panel); }
 /* ===== 训练中界面 ===== */
 .runhead { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
 .runit { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 680; letter-spacing: -.01em; }
+/* 状态圆点：颜色就是状态本身，不再一律用绿色。
+   蓝 = 连接 / 加载 / 训练中 · 黄 = 已暂停 · 红 = 正在停止 / 失败 · 灰 = 已停止 */
 .live {
-  width: 7px; height: 7px; border-radius: 50%; background: var(--ok);
-  box-shadow: 0 0 0 0 rgba(61,220,132,.6);
-  animation: pulse 1.8s cubic-bezier(.25,.46,.45,.94) infinite;
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--ink-3);
+  transition: background .2s;
 }
-@keyframes pulse {
-  0%   { box-shadow: 0 0 0 0 rgba(61,220,132,.55); }
-  70%  { box-shadow: 0 0 0 6px rgba(61,220,132,0); }
-  100% { box-shadow: 0 0 0 0 rgba(61,220,132,0); }
+.live.s-blue {
+  background: var(--brand);
+  animation: pulseBlue 1.8s cubic-bezier(.25,.46,.45,.94) infinite;
+}
+.live.s-green {
+  background: var(--ok);
+  animation: pulseGreen 1.8s cubic-bezier(.25,.46,.45,.94) infinite;
+}
+.live.s-yellow { background: var(--warn); }
+.live.s-red {
+  background: var(--bad);
+  animation: pulseRed 1.2s cubic-bezier(.25,.46,.45,.94) infinite;
+}
+.live.s-gray { background: var(--ink-3); }
+@keyframes pulseBlue {
+  0%   { box-shadow: 0 0 0 0 rgba(93,108,207,.55); }
+  70%  { box-shadow: 0 0 0 6px rgba(93,108,207,0); }
+  100% { box-shadow: 0 0 0 0 rgba(93,108,207,0); }
+}
+@keyframes pulseGreen {
+  0%   { box-shadow: 0 0 0 0 rgba(15,157,88,.5); }
+  70%  { box-shadow: 0 0 0 6px rgba(15,157,88,0); }
+  100% { box-shadow: 0 0 0 0 rgba(15,157,88,0); }
+}
+@keyframes pulseRed {
+  0%   { box-shadow: 0 0 0 0 rgba(211,58,58,.5); }
+  70%  { box-shadow: 0 0 0 6px rgba(211,58,58,0); }
+  100% { box-shadow: 0 0 0 0 rgba(211,58,58,0); }
 }
 
 .runbar { font-size: 12px; color: var(--ink-3); margin: 6px 0 14px; display: flex; gap: 8px; flex-wrap: wrap; }
@@ -643,11 +675,33 @@ body, .app, .shell, .main { background-color: var(--panel); }
 
 .rchart { min-width: 0; }   /* grid 子项默认 min-width:auto，会被人脸网格撑破 */
 .chartbox { height: 168px; }
+/* 训练页的 loss 卡要和右边八行统计一样高：让图表吃掉多余的高度，
+   否则卡片下方会空出一大块（看着像没加载出来）。 */
+#p-run .rchart { display: flex; flex-direction: column; }
+#p-run .rchart .chartbox { flex: 1 1 auto; min-height: 168px; }
+#p-run .chartempty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  font-size: 12px;
+  color: var(--ink-3);
+}
 .chartbox svg { display: block; width: 100%; height: 100%; }
 .chartfoot { display: flex; align-items: center; gap: 14px; font-size: 11px; color: var(--ink-3); margin-top: 8px; }
 .chartfoot i { display: inline-block; width: 10px; height: 2px; margin-right: 6px; vertical-align: middle; }
+.chartfoot i.sw-src { background: var(--chart-src); }
+.chartfoot i.sw-dst { background: var(--chart-dst); }
+.chartfoot b { color: var(--ink-1); font-variant-numeric: tabular-nums; font-weight: 600; }
 
 .rstats { display: flex; flex-direction: column; gap: 10px; }
+/* 曲线配色：src 用主题色，dst 用它的对位暖色（撞色），两种都开/关主题下可读 */
+:root { --chart-src: #5d6ccf; --chart-dst: #d98b2b; }
+html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
+@media (prefers-color-scheme: dark) {
+  html[data-theme="auto"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
+}
+
 .rstats .srow { display: flex; align-items: baseline; font-size: 11.5px; color: var(--ink-3); }
 .rstats .srow b { margin-left: auto; color: var(--ink-1); font-size: 12px; font-variant-numeric: tabular-nums; }
 .rstats .sbar { height: 4px; border-radius: 999px; background: var(--line); overflow: hidden; margin-top: -4px; }
@@ -665,6 +719,35 @@ body, .app, .shell, .main { background-color: var(--panel); }
   background-size: 600% 100%;
   background-repeat: no-repeat;
   border: 1px solid var(--line);
+}
+
+/* 训练页的真预览：4.0 发的是整张网格图，按容器等比缩放铺满，
+   左上角标一下这张是什么（原图预览 / 遮罩下 / 原始输入 / 合并预览）。 */
+.pvcell.pvbig {
+  position: relative;
+  aspect-ratio: auto;
+  min-height: 220px;
+  overflow: hidden;
+  background-size: cover;
+  background-position: center;
+}
+.pvcell.pvbig img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.pvcell.pvbig .pvtag {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  color: var(--ink-2);
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+  border: 1px solid var(--line);
+  pointer-events: none;
 }
 
 /* ===== 滚动条 ===== */
@@ -968,6 +1051,12 @@ body, .app, .shell, .main { background-color: var(--panel); }
 }
 .app.collapsed .grphd .ic { width: 18px; height: 18px; }
 
+/* 合成器：素材准备进度（抽帧 + 对齐） */
+.mgprep { margin-top: 8px; }
+.mgprep .lb { font-size: 11px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mgprep .bar { height: 4px; margin-top: 6px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.mgprep .bar i { display: block; height: 100%; width: 0; border-radius: 999px; background: var(--brand); transition: width .3s ease; }
+
 /* 顶栏面包屑 */
 .crumbs {
   display: flex; align-items: center; gap: 8px;
@@ -975,6 +1064,11 @@ body, .app, .shell, .main { background-color: var(--panel); }
   /* 关键：不加这行，<nav> 作为块级元素会撑满整条顶栏，
      把 .wtop 的 drag 区全部盖成 no-drag —— 顶栏就完全拖不动了。 */
   width: fit-content;
+  /* 再加一层：.topdrag 是绝对定位的拖拽条，会盖在静态内容之上，
+     命中测试永远先拿到它 —— 面包屑的链接因此点不动。
+     给 crumbs 建层叠上下文，让它排在 topdrag 前面。 */
+  position: relative;
+  z-index: 2;
 }
 .crumb { color: var(--ink-3); cursor: pointer; transition: color .12s ease; -webkit-app-region: no-drag; }
 .crumb:hover { color: var(--ink-1); }
@@ -3429,22 +3523,68 @@ body, .app, .shell, .main { background-color: var(--panel); }
   border-color: transparent !important;
 }
 
-/* 训练界面的实时日志（4.0 进程 stdout 的最后几行） */
-#p-run .runlog {
-  margin-top: 10px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: var(--sel);
-  color: var(--ink-3);
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
-  font-size: 11px;
-  line-height: 1.7;
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 96px;
-  overflow: auto;
+/* 训练界面的状态条：把「加载模型 / 正在保存 / 已暂停」压成一行，
+   不再刷 4.0 的原始 stdout（loss 有曲线，其余细节没人逐行读）。 */
+#p-run .runstat {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--ink-2);
+  min-height: 18px;
 }
-#p-run .runlog:empty { display: none; }
+#p-run .runstat .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-3);
+  flex: none;
+}
+#p-run .runstat b { font-weight: 600; color: var(--ink); }
+#p-run .runstat span { color: var(--ink-3); }
+#p-run .runstat.ok .dot { background: var(--ok); }
+#p-run .runstat.warn .dot { background: var(--warn); }
+#p-run .runstat.bad .dot { background: var(--bad); }
+#p-run .runstat.busy .dot { animation: runPulse 1.2s ease-in-out infinite; }
+@keyframes runPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .35; transform: scale(.82); }
+}
+
+/* 预览：一次只显示一张，按分类切换；刷新是手动的（自动刷新会打断观察） */
+#p-run .pvhd { align-items: center; gap: 10px; }
+#p-run .pvhd .seg { margin-left: 2px; }
+#p-run .pvhd .seg b { padding: 4px 12px; font-size: 11.5px; }
+#p-run .pvhd .hint { margin-left: auto; }
+#p-run .pvstage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 320px;
+  max-height: 62vh;
+  border-radius: 9px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+#p-run .pvstage img {
+  display: block;
+  max-width: 100%;
+  max-height: 62vh;
+  object-fit: contain;
+}
+#p-run .pvempty { font-size: 12px; color: var(--ink-3); }
+/* 没在训练时显示「上次保存的样本」：模型里那张 preview.jpg 是 4×5 的拼图，
+   只取左上角一格，看着就是单张脸，不会像四张图糊在一起。 */
+#p-run .pvcrop {
+  position: absolute;
+  inset: 0;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: contain;
+}
 
 /* ============================================================================
    3D 编辑器的坐标框：Blender 那种「按住拖动调值」的数值框

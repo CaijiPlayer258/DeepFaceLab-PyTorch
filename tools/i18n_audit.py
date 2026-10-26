@@ -135,6 +135,14 @@ def main() -> int:
         page, tag, rest = (ln.split("|", 2) + ["", ""])[:3]
         by_page.setdefault(page, []).append("%s: %s" % (tag, rest))
 
+    # 控制台在中文 Windows 上会乱码，另外写一份 UTF-8 的全量清单
+    try:
+        dump = Path(tempfile.gettempdir()) / "dfl_i18n_audit.txt"
+        dump.write_text("\n".join(rows), encoding="utf-8")
+        print("清单已写到 " + str(dump))
+    except OSError:
+        pass
+
     print("未翻译条目：%d" % len(rows))
     for page, items in by_page.items():
         print("\n=== %s (%d) ===" % (page, len(items)))

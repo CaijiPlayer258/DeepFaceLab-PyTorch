@@ -48,6 +48,8 @@
 界面配色、间距、圆角、字号统一收敛在 [UI设计规范.md](UI设计规范.md)，
 主题色只用于主按钮和进度条，其余保持中性灰阶。
 
+训练器（建模型 → 参数 → 训练 → 暂停/保存/停止 → 续训）见 [app/docs/07-TRAINER.md](app/docs/07-TRAINER.md)，
+合成器（导入视频 → 抽帧对齐 → 合成 → 导出）见 [app/docs/06-MERGER.md](app/docs/06-MERGER.md)，
 详细说明见 [app/docs/02-STRUCTURE.md](app/docs/02-STRUCTURE.md)，
 产品规划见 [app/docs/01-PLAN.md](app/docs/01-PLAN.md)。
 

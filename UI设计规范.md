@@ -427,6 +427,59 @@ stroke-width: 1.6 · stroke-linecap: round · stroke-linejoin: round
 
 ---
 
+### 6.1 标题栏里的可点元素（Electron 拖拽区）
+
+标题栏要能拖动窗口，于是有一片 `-webkit-app-region: drag` 的区域。问题在于：
+**Chromium 的拖拽区优先于 DOM 的点击**，落在拖拽区上的鼠标事件根本到不了元素。
+
+所以顶栏里任何可点的东西（面包屑、刷新按钮、后续加的搜索框）必须同时满足两条：
+
+1. **自己声明 `-webkit-app-region: no-drag`** —— 只靠父级不够，Chromium 只减掉
+   显式声明的元素；
+2. **在层叠上压过拖拽条** —— `.topdrag` 是 `position: absolute`，绝对定位元素
+   绘制在静态内容之上，命中测试永远先拿到它。光有 no-drag 也没用，点击会被它吃掉。
+
+正确写法：
+
+```css
+.wtop .topdrag {
+  position: absolute;
+  left: 0; right: 132px;   /* 右侧留给三个窗口按钮 */
+  top: 0; height: 40px;
+  -webkit-app-region: drag;
+}
+
+/* 可点元素：no-drag + 独立层叠上下文 */
+.crumbs {
+  width: fit-content;      /* 别撑满顶栏，否则拖拽区全被盖掉 */
+  position: relative;
+  z-index: 2;
+  -webkit-app-region: no-drag;
+}
+```
+
+另外 **`.wtop` 本体不要设 drag** —— 它会一路盖到右上角，把最小化/最大化/关闭
+三个按钮的点击区一起吃掉了。
+
+#### 怎么验证
+
+不要靠肉眼。用 `elementFromPoint` 打一发：
+
+```js
+var r = el.getBoundingClientRect();
+document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+// 返回 topdrag → 被拖拽条盖住了；返回元素本身 → 点击链路正常
+```
+
+顺手还要验反向：顶栏空白处 `elementFromPoint` 必须返回 `topdrag`，
+否则窗口拖不动了。
+
+> 真实案例：2026-10-25 参数设置页的「模型选择 › 参数设置」点不动 —— 事件绑定
+> 一直在，是 `.topdrag` 盖在上面。修法是给 `.crumbs` 加 `position: relative;
+> z-index: 2`。
+
+---
+
 ## 7. 禁止事项
 
 - 卡片头放说明句（「路径」后面接一段灰字）

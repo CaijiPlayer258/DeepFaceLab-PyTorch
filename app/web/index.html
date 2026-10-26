@@ -446,46 +446,68 @@
           </div>
           <div style="flex:1"></div>
           <button class="mini" id="runHide">隐藏</button>
-          <button class="mini">暂停</button>
-          <button class="mini">立即保存</button>
-          <button class="mini" style="color:var(--bad)">停止</button>
+          <button class="mini" id="runPause">暂停</button>
+          <button class="mini" id="runSave">保存</button>
+          <button class="mini" id="runStop" style="color:var(--bad)">停止</button>
         </div>
 
         <div class="runbar">
-          <span><b id="runIter">131,200</b> / <span id="runTarget">500,000</span> iter</span>
+          <span><b id="runIter">0</b> / <span id="runTarget">不限</span> iter</span>
           <span class="dot">·</span><span id="runSpeed">1.82 it/s</span>
           <span class="dot">·</span><span id="runElapsed">已跑 4h 12m</span>
-          <span class="dot">·</span><span id="runEta">约 56 小时剩余</span>
+          <span class="dot" id="runEtaDot">·</span><span id="runEta">—</span>
         </div>
 
         <div class="runmain">
           <div class="card rchart">
             <div class="cardhd"><b>loss</b><span class="hint" id="chartHint">最近 2500 iter</span></div>
             <div class="chartbox" id="chartBox"></div>
-            <div class="runlog" id="runLog"></div>
+            <div class="runstat" id="runStat">
+              <i class="dot"></i>
+              <b id="runStatText">连接中…</b>
+              <span id="runStatSub"></span>
+            </div>
             <div class="chartfoot">
-              <span><i style="background:var(--accent)"></i>src</span>
-              <span><i style="background:var(--ok)"></i>dst</span>
+              <span><i class="sw-src"></i>src <b id="runLossSrc">—</b></span>
+              <span><i class="sw-dst"></i>dst <b id="runLossDst">—</b></span>
               <span style="margin-left:auto">最近 100 均 <b id="chartAvg">0.2412</b></span>
             </div>
           </div>
 
           <div class="card rstats">
-            <div class="srow"><span>GPU</span><b id="stGpu">显存 9.2 / 12 GB</b></div>
-            <div class="sbar"><i id="stGpuBar" style="width:77%"></i></div>
-            <div class="srow"><span>利用率</span><b>98%</b></div>
-            <div class="srow"><span>磁盘</span><b id="stDisk">剩 82 GB · 模型 6.4 GB</b></div>
-            <div class="srow"><span>学习率</span><b id="stLr">2.0e-4 · cos</b></div>
-            <div class="srow"><span>上次保存</span><b id="stSave">12 分钟前</b></div>
-            <div class="srow"><span>下次自动</span><b>48 分钟后</b></div>
-            <div class="srow"><span>备份</span><b>3 / 5 份</b></div>
+            <div class="srow"><span>GPU</span><b id="stGpu">—</b></div>
+            <div class="sbar"><i id="stGpuBar" style="width:0%"></i></div>
+            <div class="srow"><span>GPU 利用率</span><b id="stUtil">—</b></div>
+            <div class="sbar"><i id="stUtilBar" style="width:0%"></i></div>
+            <div class="srow"><span>CPU</span><b id="stCpu">—</b></div>
+            <div class="sbar"><i id="stCpuBar" style="width:0%"></i></div>
+            <div class="srow"><span>内存</span><b id="stRam">—</b></div>
+            <div class="sbar"><i id="stRamBar" style="width:0%"></i></div>
+            <div class="srow"><span>磁盘</span><b id="stDisk">—</b></div>
+            <div class="srow"><span>学习率</span><b id="stLr">—</b></div>
+            <div class="srow"><span>上次保存</span><b id="stSave">—</b></div>
+            <div class="srow"><span>下次自动</span><b id="stNext">—</b></div>
+            <div class="srow"><span>备份</span><b id="stBak">—</b></div>
           </div>
         </div>
 
         <div class="card rprev">
-          <div class="cardhd"><b>预览</b><span class="hint" id="prevHint">bs 4 · 显示 4 行</span></div>
-          <div class="pvhead" id="pvhead"></div>
-          <div class="pvgrid" id="pvgrid"></div>
+          <div class="cardhd pvhd">
+            <b>预览</b>
+            <div class="seg" id="pvTabs">
+              <b class="on" data-v="0">原图</b>
+              <b data-v="1">遮罩</b>
+              <b data-v="2">输入</b>
+              <b data-v="3">合并</b>
+            </div>
+            <span class="hint" id="prevHint">—</span>
+            <button class="mini" id="pvRefresh">刷新</button>
+          </div>
+          <div class="pvstage" id="pvStage">
+            <img id="pvImg" alt="" style="display:none">
+            <div id="pvCrop" class="pvcrop" style="display:none"></div>
+            <span class="pvempty" id="pvEmpty">还没有预览图 —— 训练跑起来后点「刷新」</span>
+          </div>
         </div>
       </div>
 
@@ -507,6 +529,10 @@
               <div class="mggrphd">素材</div>
               <div class="empty-note" id="mgVideosEmpty">还没有导入素材</div>
               <div id="mgVideos"></div>
+              <div class="mgprep" id="mgPrep" style="display:none">
+                <div class="lb">准备中…</div>
+                <div class="bar"><i></i></div>
+              </div>
               <button class="mini" id="mgAddVideo" style="width:100%;margin-top:8px">＋ 导入视频</button>
               <button class="mini" id="mgAddProject" onclick="window.mvOpenProject && window.mvOpenProject()" style="width:100%;margin-top:6px">＋ 打开 DFL 项目</button>
             </div>
@@ -526,11 +552,8 @@
               <div class="mggrphd"><i class="dot"></i>检测</div>
               <div class="mgrow"><span class="f">检测器</span>
                 <select class="mgsel" id="mgDetector">
-                  <option>RetinaFace_10g</option><option>RetinaFace_500m</option><option>MogFace</option>
-                  <option>TinyMog</option><option>S3FD</option><option>MTCNN</option><option>BlazeFace</option>
-                  <option>CenterFace</option><option>DamoFD</option><option>LightweightFD</option>
-                  <option>ULFD</option><option>YOLOv8</option><option>YoloV5Face</option><option>YoloV11nFace</option>
-                </select>
+                    <option>RetinaFace_10g</option><option>RetinaFace_500m</option><option>TinyMog</option>
+                  </select>
               </div>
               <div class="mgrow"><span class="f">特征点</span><span class="mgval">insightface-2d106det</span></div>
               <div class="mgrow"><span class="f">人脸类型</span>
@@ -748,7 +771,7 @@
           <div class="mgprog">
             <div class="mgprog-hd">
               <b>正在导出</b>
-              <span class="mgprog-file" id="mgpFile">0 (1).mp4</span>
+              <span class="mgprog-file" id="mgpFile">—</span>
             </div>
 
             <div class="mgprog-bar">
@@ -756,19 +779,18 @@
             </div>
             <div class="mgprog-meta">
               <span id="mgpPct">0%</span>
-              <span id="mgpFrames">0 / 486 帧</span>
+              <span id="mgpFrames">—</span>
               <span id="mgpEta">剩余 —</span>
             </div>
 
             <div class="mgprog-steps">
-              <div class="mgpstep on" data-s="detect"><i></i><b>人脸检测</b><span>0 张</span></div>
-              <div class="mgpstep" data-s="swap"><i></i><b>合成</b><span>—</span></div>
+              <div class="mgpstep on" data-s="load"><i></i><b>载入模型</b><span>—</span></div>
+              <div class="mgpstep" data-s="swap"><i></i><b>逐帧合成</b><span>—</span></div>
               <div class="mgpstep" data-s="encode"><i></i><b>编码</b><span>—</span></div>
-              <div class="mgpstep" data-s="mux"><i></i><b>封装</b><span>—</span></div>
+              <div class="mgpstep" data-s="mux"><i></i><b>完成</b><span>—</span></div>
             </div>
 
             <div class="mgprog-foot">
-              <button class="btn" id="mgpPause">暂停</button>
               <button class="btn" id="mgpCancel">取消导出</button>
             </div>
           </div>
@@ -1096,5 +1118,5 @@
   <script src="/static/js/i18n.js?v=3"></script>
   <script src="/static/js/app.js?v=3"></script>
   <script src="/static/js/engines.js?v=3"></script>
-</body>
+  </body>
 </html>

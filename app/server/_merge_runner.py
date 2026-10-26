@@ -247,6 +247,9 @@ def main(argv=None):
     ap.add_argument("--config", default="{}")
     ap.add_argument("--xseg", default="")
     ap.add_argument("--workers", type=int, default=0)
+    ap.add_argument("--encoder", default="h264_nvenc")
+    ap.add_argument("--hwaccel", default="auto")
+    ap.add_argument("--image-format", default="jpg")
     ap.add_argument("--fps", type=float, default=25.0)
     ap.add_argument("--ffmpeg", default="")
     ap.add_argument("--ffprobe", default="")
@@ -269,15 +272,40 @@ def main(argv=None):
     if not dfm.is_file():
         raise RuntimeError("DFM 不存在: %s" % dfm)
 
-    work = out_path.parent / (".merge_" + out_path.stem)
+    # staging 目录名必须是纯 ASCII：MergeStudio 内部用 cv2.imwrite 写合并帧，
+    # OpenCV 在 Windows 上走 ANSI 路径，遇到中文目录会**静默失败**（merged/ 变空，
+    # 最后编码阶段报"没有可编码的帧"，但整体还返回成功）。
+    import hashlib as _hashlib
+    _slug = _hashlib.sha1(str(out_path.stem).encode("utf-8")).hexdigest()[:8]
+    work = out_path.parent / (".merge_" + _slug)
     work.mkdir(parents=True, exist_ok=True)
 
     _prog(0, 0.0, "搭 staging 项目目录")
     proj = stage_project(frames_dir, aligned_dir, work)
 
     _prog(0, 0.2, "加载模型")
+
+    # 先把 CUDA/cuDNN 的 DLL 目录塞进搜索路径，再建 session。
+    # 不加这一步，CUDAExecutionProvider 会**静默**退回 CPU（日志里只有一行 warning），
+    # 实测 DFM 单张 140ms(CPU) vs 11ms(GPU)，差 12 倍。
+    try:
+        from MergeStudio.core.export_pipeline import _setup_dll_paths as _dll
+        _dll()
+    except Exception:
+        pass
+    try:
+        import onnxruntime as _ort
+        _say("[merge] onnxruntime providers: %s" % (", ".join(_ort.get_available_providers())))
+    except Exception:
+        pass
+
     from MergeStudio.core.model_loader import model_loader
-    model_loader.load_model(str(dfm))
+    _sess = model_loader.load_model(str(dfm))
+    try:
+        _prov = _sess.get_providers() if hasattr(_sess, "get_providers") else []
+        _say("[merge] DFM 运行在: %s" % (", ".join(_prov) or "?"))
+    except Exception:
+        pass
     _say("[merge] 模型已加载: %s" % dfm.name)
 
     cfg = json.loads(args.config or "{}")
@@ -291,6 +319,8 @@ def main(argv=None):
     }
     if cfg.get("face_margin") is not None:
         config["face_margin"] = float(cfg["face_margin"])
+
+    _say("[merge] 合成参数: %s" % json.dumps(config, ensure_ascii=False))
 
     import multiprocessing
     workers = args.workers if args.workers > 0 else max(1, multiprocessing.cpu_count() // 2)
@@ -326,11 +356,15 @@ def main(argv=None):
         raise RuntimeError("造占位源视频失败（ffmpeg）: %s" % ffmpeg)
     _say("[merge] 占位源视频: %s (%.0f fps, 静音)" % (fake_video.name, float(args.fps)))
     _prog(0, 0.3, "开始合成（%d workers）" % workers)
+    _enc = (args.encoder or "h264_nvenc").strip() or "h264_nvenc"
+    _hw = "" if str(args.hwaccel).strip().lower() in ("off", "0", "false", "") else "auto"
+    _say("[merge] 编码器: %s · 解码加速: %s" % (_enc, _hw or "关"))
     run_export_pipeline(
         video_path=str(fake_video),
         output_path=str(out_path),
-        image_format="jpg",
-        encoder="h264_nvenc",
+        image_format=("png" if str(args.image_format).lower() == "png" else "jpg"),
+        encoder=_enc,
+        hwaccel=_hw,
         config=config,
         face_db={},
         face_model_map={},

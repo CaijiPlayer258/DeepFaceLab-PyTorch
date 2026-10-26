@@ -129,6 +129,18 @@ ipcMain.handle("win:close", () => win && win.close());
 
 app.setAppUserModelId("com.caijiplayer.deepfacelab");
 
+ipcMain.handle("dialog:file", async (e, title, filters) => {
+  const r = await dialog.showOpenDialog(win, {
+    title: title || "选择文件",
+    properties: ["openFile"],
+    filters: filters || [
+      { name: "视频", extensions: ["mp4", "mov", "mkv", "avi", "webm", "m4v", "flv", "wmv"] },
+      { name: "全部", extensions: ["*"] },
+    ],
+  });
+  return r.canceled ? "" : (r.filePaths[0] || "");
+});
+
 ipcMain.handle("dialog:dir", async (e, title) => {
   const win = BrowserWindow.fromWebContents(e.sender);
   const r = await dialog.showOpenDialog(win, {
