@@ -1,0 +1,2593 @@
+"""\
+SAEHD模型 - 完整PyTorch训练/推理实现
+
+目标：在不简化功能的前提下，将原 TF/graph 版 SAEHD 训练逻辑迁移到 PyTorch eager。
+
+特性覆盖（对齐原模型行为）：
+- DF / LIAE 两种架构
+- masked_training / eyes_mouth_prio / blur_out_mask
+- lr_dropout / clipgrad / AdaBelief / RMSprop
+- true_face_power (CodeDiscriminator)
+- gan_power (UNetPatchDiscriminator)
+- face_style_power / bg_style_power (style_loss)
+
+注意：本实现依赖 samplelib 产出的 numpy NCHW 数据。
+"""
+
+import multiprocessing
+import os
+from pathlib import Path
+
+import cv2
+import numpy as np
+import torch
+import torch.nn.functional as F
+import torch.utils.checkpoint
+from torchvision import models
+
+try:
+    import torch_xla
+    import torch_xla.core.xla_model as xm
+    _XLA_AVAILABLE = True
+except ImportError:
+    _XLA_AVAILABLE = False
+
+from core.interact import interact as io
+from core.leras import nn
+from core.leras.archis.archi_parse import parse_archi_string, build_archi_classes, archi_is_lite
+from facelib import FaceType
+from models import ModelBase
+from samplelib import SampleGeneratorFace, SampleProcessor, SampleLoaderV4, SampleGeneratorV2
+
+
+# ── VGG 感知损失特征提取器 ──────────────────────────────
+
+class VGGFeatureExtractor(torch.nn.Module):
+    """VGG16 特征提取器（固定权重，不训练）。
+    从 FaceRestoreLite 移植，用于 SAEHD 感知损失。
+    """
+    def __init__(self, layer_ids=(3, 8, 13, 19)):
+        super().__init__()
+        vgg = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1)
+        features = vgg.features
+        self.layers = torch.nn.ModuleList([features[:i+1] for i in layer_ids])
+        # ImageNet 归一化参数
+        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+        for p in self.parameters():
+            p.requires_grad = False
+
+    def forward(self, x):
+        # x 在 [-1, 1] → [0, 1] → ImageNet 归一化
+        x = (x + 1) / 2
+        x = (x - self.mean) / self.std
+        return [layer(x) for layer in self.layers]  # 每个从原始输入重新跑
+
+
+class SAEHDModel(ModelBase):
+    # --- options ---
+    def on_initialize_options(self):
+        # 基本沿用原版选项逻辑
+        device_config = nn.getCurrentDeviceConfig()
+
+        lowest_vram = 2
+        if len(device_config.devices) != 0:
+            lowest_vram = device_config.devices.get_worst_device().total_mem_gb
+
+        suggest_batch_size = 8 if lowest_vram >= 4 else 4
+
+        min_res = 64
+        max_res = 640
+
+        default_resolution = self.options['resolution'] = self.load_or_def_option('resolution', 128)
+        default_face_type = self.options['face_type'] = self.load_or_def_option('face_type', 'f')
+        default_models_opt_on_gpu = self.options['models_opt_on_gpu'] = self.load_or_def_option('models_opt_on_gpu', True)
+
+        default_archi = self.options['archi'] = self.load_or_def_option('archi', 'liae-ud')
+
+        default_ae_dims = self.options['ae_dims'] = self.load_or_def_option('ae_dims', 256)
+        default_e_dims = self.options['e_dims'] = self.load_or_def_option('e_dims', 64)
+        default_d_dims = self.options['d_dims'] = self.options.get('d_dims', None)
+        default_d_mask_dims = self.options['d_mask_dims'] = self.options.get('d_mask_dims', None)
+
+        default_masked_training = self.options['masked_training'] = self.load_or_def_option('masked_training', True)
+        default_eyes_mouth_prio = self.options['eyes_mouth_prio'] = self.load_or_def_option('eyes_mouth_prio', False)
+        # 嘴眼区域范围系数（眼睛 / 嘴巴**分开调**）：1.0 = 原始；>1 膨胀；<1 腐蚀
+        default_eyes_scale = self.options['eyes_scale'] = self.load_or_def_option('eyes_scale', 1.0)
+        default_mouth_scale = self.options['mouth_scale'] = self.load_or_def_option('mouth_scale', 1.0)
+        default_uniform_yaw = self.options['uniform_yaw'] = self.load_or_def_option('uniform_yaw', False)
+        default_blur_out_mask = self.options['blur_out_mask'] = self.load_or_def_option('blur_out_mask', False)
+
+        # 向后兼容：新版 optimizer 优先，次选旧版 adabelief
+        default_optimizer = self.load_or_def_option('optimizer', None)
+        if default_optimizer is None:
+            old_adabelief = self.load_or_def_option('adabelief', None)
+            if old_adabelief is not None:
+                default_optimizer = 'adabelief' if old_adabelief else 'adam'
+            else:
+                default_optimizer = 'adabelief'
+        else:
+            # 清理旧版 adabelief 残留，避免下一次加载时旧值抢优先权
+            self.options.pop('adabelief', None)
+        self.options['optimizer'] = default_optimizer
+
+        lr_dropout = self.load_or_def_option('lr_dropout', 'n')
+        lr_dropout = {True: 'y', False: 'n'}.get(lr_dropout, lr_dropout)
+        default_lr_dropout = self.options['lr_dropout'] = lr_dropout
+
+        default_random_warp = self.options['random_warp'] = self.load_or_def_option('random_warp', True)
+        default_random_hsv_power = self.options['random_hsv_power'] = self.load_or_def_option('random_hsv_power', 0.0)
+        # 扭曲之前的两个独立随机增强（互不影响，也不受 random_warp 影响）
+        default_random_occlusion = self.options['random_occlusion'] = self.load_or_def_option('random_occlusion', False)
+        default_random_noise = self.options['random_noise'] = self.load_or_def_option('random_noise', False)
+        # 随机偏色：强度 + 算法（算法 = none 时整个功能关闭）
+        default_random_color_power = self.options['random_color_power'] = self.load_or_def_option('random_color_power', 0.0)
+        default_random_color_alg = self.options['random_color_alg'] = self.load_or_def_option('random_color_alg', 'none')
+        # 边缘强化：把 pred 用模型自己的遮罩 overlay 合成回原图，再与原图算 loss（0 = 关闭）
+        default_edge_enhance_power = self.options['edge_enhance_power'] = self.load_or_def_option('edge_enhance_power', 0.0)
+        # 合并预览的调色算法：独立于「颜色模式」(ct_mode)，避免为了看预览而改掉训练用的色彩迁移
+        default_preview_grade_alg = self.options['preview_grade_alg'] = self.load_or_def_option('preview_grade_alg', 'same')
+        default_true_face_power = self.options['true_face_power'] = self.load_or_def_option('true_face_power', 0.0)
+        default_face_style_power = self.options['face_style_power'] = self.load_or_def_option('face_style_power', 0.0)
+        default_bg_style_power = self.options['bg_style_power'] = self.load_or_def_option('bg_style_power', 0.0)
+        default_vgg_perceptual_power = self.options['vgg_perceptual_power'] = self.load_or_def_option('vgg_perceptual_power', 0.0)
+        default_ct_mode = self.options['ct_mode'] = self.load_or_def_option('ct_mode', 'none')
+        default_clipgrad = self.options['clipgrad'] = self.load_or_def_option('clipgrad', False)
+        default_pretrain = self.options['pretrain'] = self.load_or_def_option('pretrain', False)
+
+        # Freeze layer options
+        default_freeze_encoder = self.options['freeze_encoder'] = self.load_or_def_option('freeze_encoder', False)
+        default_freeze_inter = self.options['freeze_inter'] = self.load_or_def_option('freeze_inter', False)
+        default_freeze_inter_AB = self.options['freeze_inter_AB'] = self.load_or_def_option('freeze_inter_AB', False)
+        default_freeze_inter_B = self.options['freeze_inter_B'] = self.load_or_def_option('freeze_inter_B', False)
+        default_freeze_decoder_mask = self.options['freeze_decoder_mask'] = self.load_or_def_option('freeze_decoder_mask', False)
+        default_freeze_decoder_dst = self.options['freeze_decoder_dst'] = self.load_or_def_option('freeze_decoder_dst', False)  # 仅 DF 架构生效
+
+        # 预训练单解码器支路（仅 DF + pretrain 生效）：预训练只训练 src 支路
+        # （encoder + inter + decoder_src），保存时把权重同步给 decoder_dst。
+        # 因预训练两条支路读取同一份多身份数据集（见 on_initialize 的
+        # training_data_{src,dst}_path），与"训练 dst 支路再复制给 src"完全等价；
+        # 收益：省掉一条支路的前向/反向 + 其优化器状态，可开更大 batch。
+        default_pretrain_single_decoder = self.options['pretrain_single_decoder'] = self.load_or_def_option('pretrain_single_decoder', False)
+
+        ask_override = self.ask_override()
+        if self.is_first_run() or ask_override:
+            self.ask_write_preview_history()
+            self.ask_target_iter()
+            self.ask_random_src_flip()
+            self.ask_random_dst_flip()
+            self.ask_batch_size(suggest_batch_size)
+            self.ask_backup_interval()
+            self.ask_max_backups()
+            self.ask_crash_threshold()
+
+        if self.is_first_run():
+            resolution = io.input_int(
+                '分辨率',
+                default_resolution,
+                add_info='64-640',
+                help_message='更高分辨率需要更多显存和训练时间。该值会自动调整为 16 的倍数（以及 -d 架构需要的 32 的倍数）。',
+            )
+            resolution = np.clip((resolution // 16) * 16, min_res, max_res)
+            self.options['resolution'] = resolution
+
+            self.options['face_type'] = io.input_str(
+                '人脸类型',
+                default_face_type,
+                ['h', 'mf', 'f', 'wf', 'head'],
+                help_message=(
+                    "Half / mid face / full face / whole face / head。"
+                    "Half 分辨率更高但覆盖脸颊更少；Mid 比 Half 宽约 30%。"
+                    "Whole face 覆盖含额头的整张脸；Head 覆盖整头，但需要 src/dst faceset 都有 XSeg。"
+                ),
+            ).lower()
+
+            while True:
+                archi = io.input_str(
+                    'AE 架构',
+                    default_archi,
+                    help_message=(
+                        "\n"  # keep formatting
+                        "'df' 更偏向保留身份特征。\n"
+                        "'liae' 可缓解脸型差异过大的问题。\n"
+                        "'-u' 提升相似度。\n"
+                        "'-d'（实验性）在相同计算成本下将分辨率翻倍。\n"
+                        "示例：df、liae、df-d、df-ud、liae-ud ...\n"
+                    ),
+                ).lower()
+
+                archi_split = archi.split('-')
+                if len(archi_split) == 2:
+                    archi_type, archi_opts = archi_split
+                elif len(archi_split) == 1:
+                    archi_type, archi_opts = archi_split[0], None
+                else:
+                    continue
+
+                if archi_type not in ['df', 'liae']:
+                    continue
+
+                if archi_opts is not None:
+                    if len(archi_opts) == 0:
+                        continue
+                    if len([1 for opt in archi_opts if opt not in ['u', 'd', 't', 'c']]) != 0:
+                        continue
+                    if 'd' in archi_opts:
+                        self.options['resolution'] = np.clip((self.options['resolution'] // 32) * 32, min_res, max_res)
+
+                self.options['archi'] = archi
+                break
+
+        default_d_dims = self.options['d_dims'] = self.load_or_def_option('d_dims', 64)
+
+        default_d_mask_dims = default_d_dims // 3
+        default_d_mask_dims += default_d_mask_dims % 2
+        self.options['d_mask_dims'] = self.load_or_def_option('d_mask_dims', default_d_mask_dims)
+
+        if self.is_first_run():
+            self.options['ae_dims'] = int(
+                np.clip(
+                    io.input_int(
+                        '自编码器维度（AE dims）',
+                        default_ae_dims,
+                        add_info='32-1024',
+                        help_message=(
+                            '所有人脸信息会被压缩到 AE dims 中。如果维度不足，细节可能丢失。'
+                            '维度越大越好，但更占显存。'
+                        ),
+                    ),
+                    32,
+                    1024,
+                )
+            )
+
+            e_dims = int(
+                np.clip(
+                    io.input_int(
+                        '编码器维度（E dims）',
+                        default_e_dims,
+                        add_info='16-256',
+                        help_message='维度越大越容易学习更多面部特征并获得更锐利的结果，但更占显存。',
+                    ),
+                    16,
+                    256,
+                )
+            )
+            self.options['e_dims'] = e_dims + e_dims % 2
+
+            d_dims = int(
+                np.clip(
+                    io.input_int(
+                        '解码器维度（D dims）',
+                        default_d_dims,
+                        add_info='16-256',
+                        help_message='维度越大越容易学习更多面部特征并获得更锐利的结果，但更占显存。',
+                    ),
+                    16,
+                    256,
+                )
+            )
+            self.options['d_dims'] = d_dims + d_dims % 2
+
+            d_mask_dims = int(
+                np.clip(
+                    io.input_int(
+                        '解码器 Mask 维度（D mask dims）',
+                        self.options['d_mask_dims'],
+                        add_info='16-256',
+                        help_message='通常 mask 维度 = 解码器维度 / 3。增大该值可提升 mask 质量。',
+                    ),
+                    16,
+                    256,
+                )
+            )
+            self.options['d_mask_dims'] = d_mask_dims + d_mask_dims % 2
+
+        if self.is_first_run() or ask_override:
+            if self.options['face_type'] in ('wf', 'head'):
+                self.options['masked_training'] = io.input_bool(
+                    '启用 Masked training',
+                    default_masked_training,
+                    help_message=(
+                        "仅适用于 'whole_face' 或 'head'。"
+                        '启用后会将训练区域裁剪到 full_face mask 或 XSeg mask。'
+                    ),
+                )
+
+            self.options['eyes_mouth_prio'] = io.input_bool(
+                '眼睛与嘴巴优先（Eyes and mouth priority）',
+                default_eyes_mouth_prio,
+                help_message='有助于修复眼睛/嘴巴问题并提升牙齿细节。',
+            )
+            self.options['uniform_yaw'] = io.input_bool(
+                '样本 yaw 均匀分布',
+                default_uniform_yaw,
+                help_message='当 faceset 侧脸样本较少导致侧脸模糊时，该选项有帮助。',
+            )
+            self.options['blur_out_mask'] = io.input_bool(
+                '模糊 Mask 外围',
+                default_blur_out_mask,
+                help_message='对训练样本的人脸 mask 外侧邻近区域进行模糊处理。需要 xseg/full mask。',
+            )
+
+        default_gan_power = self.options['gan_power'] = self.load_or_def_option('gan_power', 0.0)
+        default_gan_patch_size = self.options['gan_patch_size'] = self.load_or_def_option('gan_patch_size', self.options['resolution'] // 8)
+        default_gan_dims = self.options['gan_dims'] = self.load_or_def_option('gan_dims', 16)
+
+        if self.is_first_run() or ask_override:
+            # 注意：这个开关在 PyTorch 版里【只记录、不生效】——优化器状态永远在显卡上
+            # （torch.zeros_like(p, device=p.device)）。TF 版原本可以用它把优化器放到
+            # CPU 省显存，但移植后没实现，也不打算实现：状态放内存条等于每一步 PCIe
+            # 往返 2× 参数量，速度会掉到不可用。详见 core/leras/optimizers/AdaBelief.py 顶部。
+            self.options['models_opt_on_gpu'] = io.input_bool(
+                '将模型与优化器放在 GPU',
+                default_models_opt_on_gpu,
+                help_message='（PyTorch 版无效，仅记录）优化器状态始终在 GPU 上。',
+            )
+
+            self.options['optimizer'] = io.input_str(
+                '优化器选项（adam / adabelief / lion）',
+                default_optimizer,
+                ['adam', 'adabelief', 'lion'],
+                help_message='adam - 标准 Adam，省显存。adabelief - AdaBelief，精度/泛化更好但更费显存。lion - Google 2023，适合大模型，省显存。',
+            )
+
+            self.options['lr_dropout'] = io.input_str(
+                '使用学习率 dropout',
+                default_lr_dropout,
+                ['n', 'y', 'cpu'],
+                help_message='n - 关闭。y - 开启。cpu - 在 CPU 上启用（节省显存）。',
+            )
+
+            self.ask_lr()
+
+            self.ask_lr_scheduler()
+
+            self.ask_lr_plateau()
+
+            self.options['random_warp'] = io.input_bool(
+                '启用样本随机形变（random warp）',
+                default_random_warp,
+                help_message='随机形变有助于泛化表情；后期可关闭以获得更锐利的结果。',
+            )
+
+            self.options['random_occlusion'] = io.input_bool(
+                '启用随机遮挡（random occlusion）',
+                default_random_occlusion,
+                help_message='在画面上随机添加数量和大小都不固定的黑色方块（作用于随机扭曲之前），'
+                             '目的是让模型学会从被遮挡处重建人脸。与其它增强互不影响。',
+            )
+
+            self.options['random_noise'] = io.input_bool(
+                '启用随机噪点（random noise）',
+                default_random_noise,
+                help_message='加入随机噪点与轻微偏色（作用于随机扭曲和随机遮挡之前），'
+                             '目的是让模型即使输入噪点明显也不重建出偏色的人脸。与其它增强互不影响。',
+            )
+
+            self.options['random_color_power'] = float(np.clip(
+                io.input_number(
+                    '随机偏色强度（0 = 关闭）',
+                    default_random_color_power,
+                    help_message='给画面加异色光照：A -> 偏色得 C，其他增强再作用于 C 得 W；'
+                                 '喂 W，loss 比较 CT(pred,C) 与 C。0 为关闭。',
+                ), 0.0, 1.0))
+
+            self.options['random_color_alg'] = io.input_str(
+                '随机偏色算法（loss 侧色彩迁移方法）',
+                default_random_color_alg,
+                ['none', 'rct', 'mt', 'lct', 'direct'],
+                help_message='偏色只作用于输入项，重建目标始终是原图 A。'
+                             'none = 整个功能关闭；'
+                             'direct = loss 不做色彩迁移 -> 强制模型输出正常光照；'
+                             'rct / lct = loss 里先把 pred 的色彩迁移到目标 A 再做比较（色彩中性化，不强迫光照）。',
+            ).strip().lower()
+
+            self.options['edge_enhance_power'] = float(np.clip(
+                io.input_number(
+                    '边缘强化强度（0 = 关闭）',
+                    default_edge_enhance_power,
+                    help_message='把 pred 用模型自己的遮罩 overlay 合成回原图，再与原图算 loss。'
+                                 '专门惩罚过渡带（0<mask<1）的颜色差，用于消除合成后人脸边缘的硬边。0 为关闭。',
+                ), 0.0, 20.0))
+
+            self.options['preview_grade_alg'] = io.input_str(
+                '合并预览调色算法（独立于颜色模式）',
+                default_preview_grade_alg,
+                ['same', 'none', 'rct', 'mt', 'lct', 'mkl', 'idt', 'sot', 'lut'],
+                help_message='「合并预览」那一行第 5 列用哪种算法调色。'
+                             'same = 跟随颜色模式(ct_mode)；none = 不调色；'
+                             'rct/lct/mkl/idt/sot/lut = 指定算法（lut 为拟合式 3D LUT）。'
+                             '这只是一项预览设置，不影响训练，也不影响真正的合成。',
+            ).strip().lower()
+
+            self.options['random_hsv_power'] = float(
+                np.clip(
+                    io.input_number(
+                        '随机色相/饱和度/亮度强度',
+                        default_random_hsv_power,
+                        add_info='0.0 .. 0.3',
+                        help_message='对 src 输入做随机 HSV 偏移以稳定颜色扰动。常用值 0.05。',
+                    ),
+                    0.0,
+                    0.3,
+                )
+            )
+
+            self.options['gan_power'] = float(
+                np.clip(
+                    io.input_number(
+                        'GAN 强度（GAN power）',
+                        default_gan_power,
+                        add_info='0.0 .. 5.0',
+                        help_message='仅建议在人脸已足够清晰时开启（lr_dropout 开启、random_warp 关闭）。常用值 0.1。',
+                    ),
+                    0.0,
+                    5.0,
+                )
+            )
+
+            if self.options['gan_power'] != 0.0:
+                self.options['gan_patch_size'] = int(
+                    np.clip(
+                        io.input_int(
+                            'GAN patch 大小',
+                            default_gan_patch_size,
+                            add_info='3-640',
+                            help_message='常用值为 分辨率/8。',
+                        ),
+                        3,
+                        640,
+                    )
+                )
+
+                self.options['gan_dims'] = int(
+                    np.clip(
+                        io.input_int(
+                            'GAN 维度（GAN dims）',
+                            default_gan_dims,
+                            add_info='4-512',
+                            help_message='常用值 16。',
+                        ),
+                        4,
+                        512,
+                    )
+                )
+
+            if 'df' in self.options['archi']:
+                self.options['true_face_power'] = float(
+                    np.clip(
+                        io.input_number(
+                            "'True face' 强度",
+                            default_true_face_power,
+                            add_info='0.0000 .. 1.0',
+                            help_message='实验性选项。常用值 0.01。',
+                        ),
+                        0.0,
+                        1.0,
+                    )
+                )
+            else:
+                self.options['true_face_power'] = 0.0
+
+            self.options['face_style_power'] = float(
+                np.clip(
+                    io.input_number(
+                        '人脸风格强度（face style）',
+                        default_face_style_power,
+                        add_info='0.0..100.0',
+                        help_message='建议在约 10k+ 迭代后再开启；从 0.001 起逐步增加。开启会增加模型崩溃风险。',
+                    ),
+                    0.0,
+                    100.0,
+                )
+            )
+
+            self.options['bg_style_power'] = float(
+                np.clip(
+                    io.input_number(
+                        '背景风格强度（bg style）',
+                        default_bg_style_power,
+                        add_info='0.0..100.0',
+                        help_message='仅在具备良好 xseg/full mask 时建议开启；常用值 2.0。',
+                    ),
+                    0.0,
+                    100.0,
+                )
+            )
+
+            self.options['vgg_perceptual_power'] = float(
+                np.clip(
+                    io.input_number(
+                        'VGG 感知损失强度（vgg perceptual）',
+                        default_vgg_perceptual_power,
+                        add_info='0.0..100.0',
+                        help_message='VGG16 特征 L1 损失，提升自然纹理。50=与重建损失各半；0=关闭。',
+                    ),
+                    0.0,
+                    100.0,
+                )
+            )
+
+            self.options['ct_mode'] = io.input_str(
+                'src faceset 的颜色迁移模式',
+                default_ct_mode,
+                ['none', 'rct', 'lct', 'mkl', 'idt', 'sot'],
+                help_message='将 src 样本的颜色分布调整得更接近 dst。',
+            )
+
+            self.options['clipgrad'] = io.input_bool(
+                '启用梯度裁剪（clipgrad）',
+                default_clipgrad,
+                help_message='梯度裁剪可降低模型崩溃概率，但会牺牲训练速度。',
+            )
+
+            self.options['pretrain'] = io.input_bool(
+                '启用预训练（先跑预训练，再转正训练）',
+                default_pretrain,
+                help_message='预训练时 src / dst 都使用 pretraining 数据集（多身份人脸集），'
+                             '目的是让编码器先学会通用人脸特征。非常耗时耗力，'
+                             '通常直接用现成的预训练模型即可。',
+            )
+            if self.options['pretrain']:
+                self.options['pretrain_single_decoder'] = io.input_bool(
+                    '预训练只训练单条解码器支路（省显存/算力，可开更大 batch）',
+                    default_pretrain_single_decoder,
+                    help_message='只跑 src 支路（encoder + inter + decoder_src），'
+                                 '保存时把权重同步给 decoder_dst。两条支路预训练同分布，'
+                                 '效果与双支路一致，但省掉一条支路的前向/反向与优化器状态。'
+                                 '仅 DF 架构生效。',
+                )
+
+            self.ask_gradient_checkpointing()
+
+        if self.options['pretrain']:
+            # 预训练集解析：
+            #   1) 默认值 = dst 训练集（GUI 无该选项时的默认行为）；
+            #      CLI 可用 --pretraining-data-dir 覆盖。
+            #   2) 不限制格式：既支持「含 faceset.pak 的打包目录」，也支持
+            #      「散装 DFLJPG 对齐人脸目录」—— 由 SampleLoader / SampleLoaderV4
+            #      自动识别；若直接指到 faceset.pak 文件本身，自动改用其所在目录。
+            if self.get_pretraining_data_path() is None:
+                _default_pt = getattr(self, 'training_data_dst_path', None) if self.is_training else None
+                if _default_pt is not None:
+                    self.pretraining_data_path = _default_pt
+                    io.log_info('[预训练] 未指定预训练集，默认使用 dst 训练集：%s' % _default_pt)
+
+            _pt = self.get_pretraining_data_path()
+            if _pt is not None and Path(_pt).suffix.lower() == '.pak':
+                # 容忍直接把 faceset.pak 文件当预训练集传入
+                self.pretraining_data_path = Path(_pt).parent
+                io.log_info('[预训练] 预训练集指向 pak 文件，已改用其所在目录：%s'
+                            % self.pretraining_data_path)
+
+            if self.get_pretraining_data_path() is None:
+                raise Exception('未定义 pretraining_data_path')
+
+            io.log_info('[预训练] 预训练集支持「含 faceset.pak 的打包目录」或「散装 DFLJPG 人脸目录」，不做格式限制。')
+            io.log_info('[预训练] 提示：预训练理想上使用多身份人脸集；用 dst 单一身份也能跑，但收益会打折。')
+
+        default_fast_gen = self.load_or_def_option('use_fast_generator', False)
+        if self.is_first_run() or ask_override:
+            self.options['use_fast_generator'] = io.input_bool(
+                '启用快速生成器（实验性，V4/V2）',
+                default_fast_gen,
+                help_message='使用新的多进程预取加载器，可显著提升数据加载速度。实验性功能。',
+            )
+
+        default_use_bf16 = self.load_or_def_option('use_bf16', True)
+        if self.is_first_run() or ask_override:
+            self.options['use_bf16'] = io.input_bool(
+                '启用 BF16 混合精度训练',
+                default_use_bf16,
+                help_message='在支持 BF16 的 GPU（Ampere+）上可节省显存并加速训练。权重仍为 FP32。',
+            )
+
+        # --- eager_mode (XLA compilation, 隐藏选项仅限开发者手动启用) ---
+        self.options['eager_mode'] = self.load_or_def_option('eager_mode', False)
+
+        self.gan_model_changed = (default_gan_patch_size != self.options['gan_patch_size']) or (default_gan_dims != self.options['gan_dims'])
+        self.pretrain_just_disabled = (default_pretrain is True and self.options['pretrain'] is False)
+
+    # --- helpers ---
+    def _select_device(self):
+        # eager_mode: 强制使用 XLA 设备
+        if self.options.get('eager_mode', False):
+            if not _XLA_AVAILABLE:
+                raise RuntimeError(
+                    'eager_mode=True 但 torch_xla 未安装。'
+                    '请执行: pip install torch-xla  (仅 Linux TPU 环境可用)'
+                )
+            return xm.xla_device()
+        # Follow leras nn.initialize() decision to keep weights/inputs consistent.
+        if getattr(nn, 'device', None) is not None:
+            return nn.device
+        device_config = nn.getCurrentDeviceConfig()
+        devices = device_config.devices
+        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            return torch.device('mps')
+        if len(devices) > 0 and torch.cuda.is_available():
+            return torch.device('cuda:0')
+        return torch.device('cpu')
+
+    def _np_to_torch(self, x):
+        if isinstance(x, torch.Tensor):
+            return x
+        return torch.from_numpy(x).float().to(self.device)
+
+    def _move_leras_model_to_device(self, model):
+        # leras ModelBase不是torch.nn.Module，但内部LayerBase是；逐层to即可
+        try:
+            layers = model.get_layers()
+        except Exception:
+            return
+        for layer in layers:
+            try:
+                layer.to(self.device)
+            except Exception:
+                pass
+
+    # --- initialization ---
+    def on_initialize(self):
+        eager = self.options.get('eager_mode', False)
+        if eager:
+            # XLA 模式：跳过 leras CUDA 设备枚举，直接初始化 CPU 设备上下文
+            self.model_data_format = 'NCHW'
+            nn.initialize(data_format=self.model_data_format)
+        else:
+            device_config = nn.getCurrentDeviceConfig()
+            devices = device_config.devices
+            self.model_data_format = 'NCHW'
+            nn.initialize(device_config, data_format=self.model_data_format)
+        del eager
+
+        self.device = self._select_device()
+
+        self.resolution = resolution = int(self.options['resolution'])
+
+        # ── 分辨率自动缩放 ──────────────────────────
+        _inter_pth = Path(self.get_model_root_path()) / f'{self.get_model_name()}_inter.pth'
+        if _inter_pth.exists() and not self.is_first_run():
+            try:
+                from models.Model_SAEHD.resize_inter import load_saveable
+                _ckpt = load_saveable(_inter_pth)
+                _param_keys = sorted([k for k in _ckpt if k.startswith('param_')])
+                if _param_keys:
+                    _d1w = _ckpt[_param_keys[0]]
+                    _e_dims = int(self.options.get('e_dims', 64))
+                    _C = _e_dims * 8
+                    _saved_hw = int(int(np.sqrt(_d1w.shape[0] / _C)))
+                    _archi = self.options.get('archi', '')
+                    _archi_opts = _archi.split('-')[1] if '-' in _archi else ''
+                    _is_t = 't' in _archi_opts
+                    _saved_res = _saved_hw * (32 if _is_t else 16)
+                    if _saved_res != resolution:
+                        io.log_info(f'[RESIZE] Inter {_saved_res} → {resolution}')
+                        from models.Model_SAEHD.resize_inter import resize_model
+                        resize_model(Path(self.get_model_root_path()), resolution, dry_run=False, verbose=True)
+                        with open(Path(self.get_strpath_storage_for_file(self.get_model_name() + '_data.dat')), 'rb') as _f:
+                            self.options.update(pickle.load(_f).get('options', {}))
+                        resolution = int(self.options['resolution'])
+                        self.resolution = resolution
+            except Exception as _e:
+                io.log_info(f'[RESIZE] Auto-detect failed ({_e})')
+        self.face_type = {
+            'h': FaceType.HALF,
+            'mf': FaceType.MID_FULL,
+            'f': FaceType.FULL,
+            'wf': FaceType.WHOLE_FACE,
+            'head': FaceType.HEAD,
+        }[self.options['face_type']]
+
+        if 'eyes_prio' in self.options:
+            self.options.pop('eyes_prio')
+
+        self.eyes_mouth_prio = bool(self.options['eyes_mouth_prio'])
+        self.eyes_scale = float(self.options.get('eyes_scale', 1.0) or 1.0)
+        self.mouth_scale = float(self.options.get('mouth_scale', 1.0) or 1.0)
+        self.masked_training = bool(self.options['masked_training'])
+        self.blur_out_mask = bool(self.options['blur_out_mask'])
+        self.use_bf16 = bool(self.load_or_def_option('use_bf16', True))  # None（旧模型未存）时回退 True，避免误用 FP32
+
+        # 统一走 parse_archi_string：它支持第三段 DFLite 修饰符（df-udt-l / -l5 / -l3 / -lx ...），
+        # 两段式旧写法（df-ud）行为不变。
+        _parsed = parse_archi_string(self.options['archi'])
+        if _parsed is None:
+            io.log_info(f"[archi] 无法解析 {self.options['archi']!r}，回退到 df-ud")
+            archi_type, archi_opts, archi_mod = 'df', 'ud', ''
+        else:
+            archi_type, archi_opts, archi_mod = _parsed
+
+        self.archi_type = archi_type
+        self.archi_opts = archi_opts
+        self.archi_mod = archi_mod
+        self.is_lite = archi_is_lite(archi_mod)
+
+        # 兼容旧数据：archi 可能被误存为 'SAEHD' 而非 'df-ud'
+        if self.archi_type not in ('df', 'liae'):
+            self.archi_type = 'df'
+            self.archi_opts = 'ud'
+            self.archi_mod = archi_mod
+
+        ae_dims = int(self.options['ae_dims'])
+        e_dims = int(self.options['e_dims'])
+        d_dims = int(self.options['d_dims'])
+        d_mask_dims = int(self.options['d_mask_dims'])
+
+        self.pretrain = bool(self.options['pretrain'])
+        if getattr(self, 'pretrain_just_disabled', False):
+            self.set_iter(0)
+
+        # 预训练单解码器支路：仅 DF 架构 + 预训练 时生效。
+        # 生效时只跑 src 支路前向/反向，decoder_dst 不参与训练，
+        # 保存时由 _sync_pretrain_single_decoder() 把权重同步过去。
+        self.pretrain_single_decoder = bool(
+            self.pretrain
+            and self.archi_type == 'df'
+            and bool(self.options.get('pretrain_single_decoder', False))
+        )
+        if self.pretrain_single_decoder:
+            io.log_info('[预训练] 已启用「单解码器支路」：只训练 encoder/inter/decoder_src，'
+                        'decoder_dst 不参与前向与反向，保存时自动同步权重。')
+
+        optimizer_name = str(self.options.get('optimizer', 'adabelief'))
+
+        use_fp16 = False
+        use_bf16 = False
+        if self.is_exporting:
+            _prec = os.environ.get('DFM_EXPORT_PRECISION', '')
+            if _prec == 'bf16':
+                use_bf16 = True
+
+        self.gan_power = gan_power = 0.0 if self.pretrain else float(self.options['gan_power'])
+        random_warp = False if self.pretrain else bool(self.options['random_warp'])
+        random_src_flip = True if self.pretrain else bool(self.random_src_flip)
+        random_dst_flip = True if self.pretrain else bool(self.random_dst_flip)
+        random_hsv_power = 0.0 if self.pretrain else float(self.options['random_hsv_power'])
+        # 随机遮挡 / 随机噪点：与 random_warp 相互独立，开关互不影响，也不随预训练改变
+        random_occlusion = bool(self.options.get('random_occlusion', False))
+        random_noise = bool(self.options.get('random_noise', False))
+        # 随机偏色：算法为 none 时整个功能关闭（目标不加偏色，loss 也不做色彩迁移）
+        self.random_color_alg = str(self.options.get('random_color_alg', 'none') or 'none').strip().lower()
+        self.random_color_power = float(self.options.get('random_color_power', 0.0) or 0.0)
+        if self.random_color_alg == 'none':
+            self.random_color_power = 0.0
+        random_color_power = self.random_color_power
+        # 目标项**一律不加**偏色（= 原图 A）。原因：
+        #   1) 偏色是逐像素双射，A 与 C 的空间结构完全相同；
+        #   2) loss 里的 CT 已经把色彩中性化，在 A 的色空间比较与在 C 的色空间比较等价。
+        # 所以「C 作为目标」是多余的，而保持 A 能让预览里的「原图」列不被偏色污染。
+        random_color_cast_target = 0.0
+
+        # 冻结 dst 解码器时，dst 支路**完全不参与训练**（前向都被 _forward_df_src_only 跳过），
+        # 所以没必要再给 dst 做数据增强：既省生成器算力，也让预览里的 dst 直接就是原图。
+        _freeze_dst_branch = ('df' in archi_type) and bool(self.options.get('freeze_decoder_dst', False))
+        random_warp_dst = False if _freeze_dst_branch else random_warp
+        random_occlusion_dst = False if _freeze_dst_branch else random_occlusion
+        random_noise_dst = False if _freeze_dst_branch else random_noise
+        random_hsv_power_dst = 0.0 if _freeze_dst_branch else random_hsv_power
+        # 冻结 dst 时**保留随机偏色**给 dst：它同时充当 dst 的输入与 dst 的目标
+        # （把偏色后的 dst 直接当成 dst 的「原图」）。dst 支路此时不参与训练，纯为预览：
+        # 这样四种预览里 dst 的列全带偏色，能直观检验颜色矫正能力。
+        # 未冻结时仍保持「目标项不加偏色」（目标 = 干净原图）。
+        random_color_cast_target_dst = random_color_power if _freeze_dst_branch else 0.0
+        self.edge_enhance_power = float(self.options.get('edge_enhance_power', 0.0) or 0.0)
+        if _freeze_dst_branch:
+            io.log_info('[冻结dst] dst 支路不参与训练：已关闭 dst 侧的随机扭曲/遮挡/噪点/HSV，'
+                        '但保留随机偏色（偏色后的 dst 直接当作 dst 的原图，便于观察颜色矫正）。')
+
+        if self.pretrain:
+            self.options_show_override['lr_dropout'] = 'n'
+            self.options_show_override['random_warp'] = False
+            self.options_show_override['gan_power'] = 0.0
+            self.options_show_override['random_hsv_power'] = 0.0
+            self.options_show_override['face_style_power'] = 0.0
+            self.options_show_override['bg_style_power'] = 0.0
+            self.options_show_override['uniform_yaw'] = True
+
+        ct_mode = self.options['ct_mode']
+        if ct_mode == 'none':
+            ct_mode = None
+
+        # build model
+        input_ch = 3
+        self.model_filename_list = []
+
+        # Lite 修饰符 -> DFLiteArchi；无修饰符时仍是 DeepFakeArchi，行为与改动前完全一致。
+        # DFLite 里 ae_dims 同时决定瓶颈宽度和解码器输入通道，必须与下面 Inter 的
+        # ae_out_ch 一致，所以显式传进去。
+        _ArchiClass, _archi_kwargs = build_archi_classes(
+            archi_mod, {'ae_dims': ae_dims} if archi_is_lite(archi_mod) else None)
+        model_archi = _ArchiClass(resolution, use_fp16=use_fp16, use_bf16=use_bf16,
+                                  opts=archi_opts, **_archi_kwargs)
+        self.archi_class_name = _ArchiClass.__name__
+
+        if 'df' in archi_type:
+            self.encoder = model_archi.Encoder(in_ch=input_ch, e_ch=e_dims, name='encoder')
+            encoder_out_ch = self.encoder.get_out_ch() * (self.encoder.get_out_res(resolution) ** 2)
+
+            self.inter = model_archi.Inter(in_ch=encoder_out_ch, ae_ch=ae_dims, ae_out_ch=ae_dims, name='inter')
+            inter_out_ch = self.inter.get_out_ch()
+
+            self.decoder_src = model_archi.Decoder(in_ch=inter_out_ch, d_ch=d_dims, d_mask_ch=d_mask_dims, name='decoder_src')
+            self.decoder_dst = model_archi.Decoder(in_ch=inter_out_ch, d_ch=d_dims, d_mask_ch=d_mask_dims, name='decoder_dst')
+
+            self.model_filename_list += [
+                [self.encoder, 'encoder.pth'],
+                [self.inter, 'inter.pth'],
+                [self.decoder_src, 'decoder_src.pth'],
+                [self.decoder_dst, 'decoder_dst.pth'],
+            ]
+
+            if self.is_training and float(self.options['true_face_power']) != 0.0:
+                self.code_discriminator = nn.CodeDiscriminator(ae_dims, code_res=self.inter.get_out_res(), name='dis')
+                self.model_filename_list += [[self.code_discriminator, 'code_discriminator.pth']]
+
+        elif 'liae' in archi_type:
+            self.encoder = model_archi.Encoder(in_ch=input_ch, e_ch=e_dims, name='encoder')
+            encoder_out_ch = self.encoder.get_out_ch() * (self.encoder.get_out_res(resolution) ** 2)
+
+            self.inter_AB = model_archi.Inter(in_ch=encoder_out_ch, ae_ch=ae_dims, ae_out_ch=ae_dims * 2, name='inter_AB')
+            self.inter_B = model_archi.Inter(in_ch=encoder_out_ch, ae_ch=ae_dims, ae_out_ch=ae_dims * 2, name='inter_B')
+
+            inter_out_ch = self.inter_AB.get_out_ch()
+            inters_out_ch = inter_out_ch * 2
+
+            self.decoder = model_archi.Decoder(in_ch=inters_out_ch, d_ch=d_dims, d_mask_ch=d_mask_dims, name='decoder')
+
+            self.model_filename_list += [
+                [self.encoder, 'encoder.pth'],
+                [self.inter_AB, 'inter_AB.pth'],
+                [self.inter_B, 'inter_B.pth'],
+                [self.decoder, 'decoder.pth'],
+            ]
+
+        else:
+            raise ValueError(f'Unsupported architecture type: {archi_type}')
+
+        # GAN discriminator
+        if self.is_training and gan_power != 0.0:
+            self.D_src = nn.UNetPatchDiscriminator(
+                patch_size=int(self.options['gan_patch_size']),
+                in_ch=input_ch,
+                base_ch=int(self.options['gan_dims']),
+                name='D_src',
+            )
+            self.model_filename_list += [[self.D_src, 'GAN.pth']]
+
+        # Move leras models to device
+        for item in [
+            getattr(self, 'encoder', None),
+            getattr(self, 'inter', None),
+            getattr(self, 'decoder_src', None),
+            getattr(self, 'decoder_dst', None),
+            getattr(self, 'inter_AB', None),
+            getattr(self, 'inter_B', None),
+            getattr(self, 'decoder', None),
+            getattr(self, 'code_discriminator', None),
+            getattr(self, 'D_src', None),
+        ]:
+            if item is not None:
+                self._move_leras_model_to_device(item)
+
+        # VGG 感知损失特征提取器（懒初始化）
+        self.vgg_perceptual_power = float(self.options.get('vgg_perceptual_power', 0.0))  # 默认 0.0：无 VGG 值时关闭
+        self.vgg_extractor = None
+        if self.is_training and self.vgg_perceptual_power > 0.0:
+            try:
+                self.vgg_extractor = VGGFeatureExtractor().to(self.device)
+                io.log_info(f'[VGG] VGG16 感知损失已启用（权重={self.vgg_perceptual_power}）')
+            except Exception as _vgg_e:
+                self.vgg_extractor = None
+                self.vgg_perceptual_power = 0.0
+                io.log_info('[VGG] 警告: 显存不足，VGG16 感知损失已自动禁用（不影响训练，如需启用请降低 batch_size 或分辨率）')
+
+        # Optimizers
+        if self.is_training:
+            _lr_raw = self.options.get('lr', 5e-5)
+            try:
+                lr = float(_lr_raw)
+            except (ValueError, TypeError):
+                lr = 5e-5
+                io.log_info(f'[WARN] 学习率值异常 ({_lr_raw!r})，已重置为 {lr}')
+            # lr_cos 与 lr_dropout **解耦**。
+            # lr_dropout 是 iperov 时代的历史参数（只在那行 lr_masks 加噪上有作用，
+            # 对新架构基本没用），以前却把它当"学习率策略"的开关、还会顺手改 lr_cos，
+            # 导致选了 y 就莫名其妙开了余弦热重启。现在：lr_cos != 0 就是开启
+            # 余弦退火·热重启（SGDR），与 lr_dropout 无关。
+            # 术语：余弦退火=单调下降；余弦退火·热重启=周期性弹回峰值。这里是后者。
+            lr_cos = int(self.options.get('lr_cos', 0) or 0)
+            lr_dropout = 0.3 if (self.options['lr_dropout'] in ['y', 'cpu'] and not self.pretrain) else 1.0
+
+            # ---- 单调余弦退火（单次，不重启）----
+            # 术语：余弦退火 = 单调下降到 ~0、不重启；余弦退火·热重启(SGDR) = 周期性弹回峰值。
+            # lr_total_steps > 0 时启用前者，且优先于 lr_cos 的热重启。
+            # 它必须大致等于实际总步数：设准了跑完时 lr 接近 0；设太远则几乎不退火。
+            lr_total_steps = int(self.options.get('lr_total_steps', 0) or 0)
+            if lr_total_steps > 0:
+                io.log_info("[LR] 单调余弦退火已开启：总步数 %d（跑完时 lr 降到接近 0）" % lr_total_steps)
+
+            # ---- 平台期自动降 lr（针对"训练没有预定总步数"的常态）----
+            # factor >= 1.0 视为关闭。patience<=0 时自动按 lr_cos 推导（lr_cos 也没设就给 2000）。
+            lr_plateau_factor     = float(self.options.get('lr_plateau_factor', 1.0) or 1.0)
+            lr_plateau_patience   = int(self.options.get('lr_plateau_patience', 0) or 0)
+            lr_plateau_delta      = float(self.options.get('lr_plateau_delta', 1e-4) or 0.0)
+            lr_plateau_min_ratio  = float(self.options.get('lr_plateau_min_ratio', 0.1) or 0.0)
+            lr_plateau_partitions = int(self.options.get('lr_plateau_partitions', 1) or 1)
+            if lr_plateau_factor < 1.0:
+                io.log_info(
+                    "[LR] 平台期自动降 lr 已开启：连续 %d 步无改善则 lr x%.2f，下限为初始的 %.0f%%"
+                    % (lr_plateau_patience or (lr_cos if lr_cos > 0 else 2000),
+                       lr_plateau_factor, lr_plateau_min_ratio * 100))
+
+            optimizer_map = {'adam': nn.Adam, 'adabelief': nn.AdaBelief, 'lion': nn.Lion}
+            OptimizerClass = optimizer_map.get(optimizer_name, nn.AdaBelief)
+            clipnorm = 1.0 if bool(self.options['clipgrad']) else 0.0
+
+            if 'df' in archi_type:
+                self.src_dst_saveable_weights = (
+                    list(self.encoder.get_weights())
+                    + list(self.inter.get_weights())
+                    + list(self.decoder_src.get_weights())
+                    + list(self.decoder_dst.get_weights())
+                )
+                if self.pretrain_single_decoder:
+                    # decoder_dst 不参与前向/反向，从优化器参数表摘除，
+                    # 省下它的优化器状态（Adam/AdaBelief 每参数 2 份 m/v）。
+                    # saveable 仍保留四个模块 -> 存档结构（decoder_dst.pth）不变。
+                    self.src_dst_trainable_weights = (
+                        list(self.encoder.get_weights())
+                        + list(self.inter.get_weights())
+                        + list(self.decoder_src.get_weights())
+                    )
+                else:
+                    self.src_dst_trainable_weights = self.src_dst_saveable_weights
+            else:
+                self.src_dst_saveable_weights = (
+                    list(self.encoder.get_weights())
+                    + list(self.inter_AB.get_weights())
+                    + list(self.inter_B.get_weights())
+                    + list(self.decoder.get_weights())
+                )
+                # random_warp关闭时，按原逻辑只训练 encoder+inter_B+decoder
+                if random_warp:
+                    self.src_dst_trainable_weights = self.src_dst_saveable_weights
+                else:
+                    self.src_dst_trainable_weights = (
+                        list(self.encoder.get_weights())
+                        + list(self.inter_B.get_weights())
+                        + list(self.decoder.get_weights())
+                    )
+
+            self.src_dst_opt = OptimizerClass(
+                self.src_dst_trainable_weights,
+                lr=lr,
+                lr_dropout=lr_dropout,
+                lr_cos=lr_cos,
+                lr_total_steps=lr_total_steps,
+                lr_plateau_factor=lr_plateau_factor,
+                lr_plateau_patience=lr_plateau_patience,
+                lr_plateau_delta=lr_plateau_delta,
+                lr_plateau_min_ratio=lr_plateau_min_ratio,
+                lr_plateau_partitions=lr_plateau_partitions,
+                clipnorm=clipnorm,
+                name='src_dst_opt',
+            )
+            self.model_filename_list += [(self.src_dst_opt, 'src_dst_opt.pth')]
+
+            if float(self.options['true_face_power']) != 0.0 and 'df' in archi_type:
+                self.D_code_opt = OptimizerClass(
+                    list(self.code_discriminator.get_weights()),
+                    lr=lr,
+                    lr_dropout=lr_dropout,
+                    lr_cos=lr_cos,
+                    lr_total_steps=lr_total_steps,
+                    lr_plateau_factor=lr_plateau_factor,
+                    lr_plateau_patience=lr_plateau_patience,
+                    lr_plateau_delta=lr_plateau_delta,
+                    lr_plateau_min_ratio=lr_plateau_min_ratio,
+                    lr_plateau_partitions=lr_plateau_partitions,
+                    clipnorm=clipnorm,
+                    name='D_code_opt',
+                )
+                self.model_filename_list += [(self.D_code_opt, 'D_code_opt.pth')]
+
+            if gan_power != 0.0:
+                self.D_src_dst_opt = OptimizerClass(
+                    list(self.D_src.get_weights()),
+                    lr=lr,
+                    lr_dropout=lr_dropout,
+                    lr_cos=lr_cos,
+                    lr_total_steps=lr_total_steps,
+                    lr_plateau_factor=lr_plateau_factor,
+                    lr_plateau_patience=lr_plateau_patience,
+                    lr_plateau_delta=lr_plateau_delta,
+                    lr_plateau_min_ratio=lr_plateau_min_ratio,
+                    lr_plateau_partitions=lr_plateau_partitions,
+                    clipnorm=clipnorm,
+                    name='GAN_opt',
+                )
+                self.model_filename_list += [(self.D_src_dst_opt, 'GAN_opt.pth')]
+
+        # Load/init weights
+        self._module_info_list = []
+        # 这个模型以前有没有权重文件？没有 = 全新模型（4.1 新建的），
+        # 此时"加载失败改随机初始化"是预期行为，不该报噪声告警。
+        _had_weights = bool(list(self.saved_models_path.glob(self.get_model_name() + '_*.pth')))
+
+        for model, filename in io.progress_bar_generator(self.model_filename_list, 'Initializing models'):
+            if getattr(self, 'pretrain_just_disabled', False):
+                do_init = False
+                if 'df' in archi_type:
+                    if model is getattr(self, 'inter', None):
+                        do_init = True
+                elif 'liae' in archi_type:
+                    if model is getattr(self, 'inter_AB', None) or model is getattr(self, 'inter_B', None):
+                        do_init = True
+            else:
+                do_init = self.is_first_run()
+                if self.is_training and gan_power != 0.0 and model is getattr(self, 'D_src', None):
+                    if getattr(self, 'gan_model_changed', False):
+                        do_init = True
+
+            if not do_init:
+                load_ok = model.load_weights(self.get_strpath_storage_for_file(filename))
+                do_init = not load_ok
+            else:
+                load_ok = False
+
+            if do_init:
+                model.init_weights()
+                if (not self.is_first_run()
+                        and _had_weights          # 全新模型（目录里一个 .pth 都没有）不算"加载失败"
+                        and not getattr(self, 'pretrain_just_disabled', False)
+                        and not getattr(self, 'is_exporting', False)):
+                    # A failed load silently becomes a random re-init, which
+                    # exports as a solid-colour / noise model. Say so loudly.
+                    print(f"[WARN] {filename}: 权重加载失败，已改为随机初始化（该模块输出将是噪声）。")
+                    print(f"       若源为 DFL 的 .npy，请先运行 "
+                          f"python tools/convert_dfl_tf_to_torch.py --strict 核对转换报告后再重试。")
+                status = '已重置'
+            else:
+                status = '已加载'
+
+            # 统计参数量
+            weights = model.get_weights()
+            param_count = sum(w.numel() for w in weights) if weights else 0
+            module_name = filename.replace('.pth', '')
+            self._module_info_list.append((module_name, param_count, status))
+
+        # Split decoder entries: add separate mask sub-entries in module info
+        _MASK_LAYER_NAMES = ('upscalem0', 'upscalem1', 'upscalem2', 'upscalem3', 'upscalem4', 'out_convm')
+        _DEC_MASK_NAMES = ('decoder_src', 'decoder_dst', 'decoder')
+        _new_module_list = []
+        for nm, pc, st in self._module_info_list:
+            _new_module_list.append((nm, pc, st))
+            if nm in _DEC_MASK_NAMES:
+                _dec = getattr(self, nm, None)
+                if _dec is not None:
+                    _mask_pc = 0
+                    for _mln in _MASK_LAYER_NAMES:
+                        _ml = getattr(_dec, _mln, None)
+                        if _ml is not None:
+                            _mask_pc += sum(w.numel() for w in _ml.get_weights())
+                    if _mask_pc > 0:
+                        _new_module_list.append((nm + '_mask', _mask_pc, st))
+                        _new_module_list[-2] = (nm, pc - _mask_pc, st)
+        self._module_info_list = _new_module_list
+
+        # Persistent GAN freeze: when GAN is active, freeze encoder + inter layers
+        # to prevent GAN training from corrupting feature extractors.
+        if self.is_training and self.gan_power != 0.0:
+            for w in self.encoder.get_weights():
+                if hasattr(w, 'requires_grad'):
+                    w.requires_grad_(False)
+            if 'df' in self.archi_type:
+                for w in self.inter.get_weights():
+                    if hasattr(w, 'requires_grad'):
+                        w.requires_grad_(False)
+            else:
+                for w in self.inter_AB.get_weights():
+                    if hasattr(w, 'requires_grad'):
+                        w.requires_grad_(False)
+                for w in self.inter_B.get_weights():
+                    if hasattr(w, 'requires_grad'):
+                        w.requires_grad_(False)
+            # Update module info status
+            for i, (nm, pc, _) in enumerate(self._module_info_list):
+                frozen_names = ('encoder', 'inter', 'inter_AB', 'inter_B')
+                if nm in frozen_names:
+                    self._module_info_list[i] = (nm, pc, '已冻结')
+
+        # User-controlled layer freeze (independent of GAN)
+        if self.is_training:
+            freeze_enc = bool(self.options.get('freeze_encoder', False))
+            freeze_int = bool(self.options.get('freeze_inter', False))
+            freeze_int_ab = bool(self.options.get('freeze_inter_AB', False))
+            freeze_int_b = bool(self.options.get('freeze_inter_B', False))
+            freeze_dm = bool(self.options.get('freeze_decoder_mask', False))
+            if freeze_enc and hasattr(self, 'encoder'):
+                for w in self.encoder.get_weights():
+                    if hasattr(w, 'requires_grad'):
+                        w.requires_grad_(False)
+            if freeze_int and 'df' in self.archi_type and hasattr(self, 'inter'):
+                for w in self.inter.get_weights():
+                    if hasattr(w, 'requires_grad'):
+                        w.requires_grad_(False)
+            if freeze_int_ab and 'liae' in self.archi_type and hasattr(self, 'inter_AB'):
+                for w in self.inter_AB.get_weights():
+                    if hasattr(w, 'requires_grad'):
+                        w.requires_grad_(False)
+            if freeze_int_b and 'liae' in self.archi_type and hasattr(self, 'inter_B'):
+                for w in self.inter_B.get_weights():
+                    if hasattr(w, 'requires_grad'):
+                        w.requires_grad_(False)
+            if freeze_dm:
+                for nm in ('decoder_src', 'decoder_dst', 'decoder'):
+                    _dec = getattr(self, nm, None)
+                    if _dec is not None:
+                        for _mln in ('upscalem0', 'upscalem1', 'upscalem2', 'upscalem3', 'upscalem4', 'out_convm'):
+                            _ml = getattr(_dec, _mln, None)
+                            if _ml is not None:
+                                for w in _ml.get_weights():
+                                    if hasattr(w, 'requires_grad'):
+                                        w.requires_grad_(False)
+            # 冻结 dst 解码器（仅 DF 架构：两个解码器分离身份；LIAE 单解码器不适用）
+            # 联动：开启 freeze_decoder_dst 时同时冻结 encoder + inter（用户习惯一起开，
+            # 训练后期只精修 src 解码器，配合 src-only 前向完全跳过 dst 训练）
+            freeze_ddst = bool(self.options.get('freeze_decoder_dst', False))
+            if freeze_ddst and 'df' in self.archi_type:
+                if hasattr(self, 'decoder_dst'):
+                    for w in self.decoder_dst.get_weights():
+                        if hasattr(w, 'requires_grad'):
+                            w.requires_grad_(False)
+                for w in self.encoder.get_weights():
+                    if hasattr(w, 'requires_grad'):
+                        w.requires_grad_(False)
+                if hasattr(self, 'inter'):
+                    for w in self.inter.get_weights():
+                        if hasattr(w, 'requires_grad'):
+                            w.requires_grad_(False)
+            # Update module info for user-frozen layers
+            for i, (nm, pc, st) in enumerate(self._module_info_list):
+                if st != '已冻结':  # don't overwrite GAN freeze status
+                    user_frozen = (
+                        (freeze_enc and nm == 'encoder')
+                        or (freeze_int and nm == 'inter')
+                        or (freeze_int_ab and nm == 'inter_AB')
+                        or (freeze_int_b and nm == 'inter_B')
+                        or (freeze_dm and nm.endswith('_mask'))
+                        or (freeze_ddst and nm in ('decoder_dst', 'encoder', 'inter'))
+                    )
+                    if user_frozen:
+                        self._module_info_list[i] = (nm, pc, '已冻结')
+
+        # Generators
+        if self.is_training:
+            training_data_src_path = self.training_data_src_path if not self.pretrain else self.get_pretraining_data_path()
+            training_data_dst_path = self.training_data_dst_path if not self.pretrain else self.get_pretraining_data_path()
+
+            use_fast = self.options.get('use_fast_generator', False)
+
+            # ---- 预览用额外输出：偏色但**不含其它增强**的原图 C ----
+            # 只在「随机偏色」真正开启时才追加，避免平时白跑一路输出。
+            # 它与输入项用同一个 sample_rnd_seed -> 拿到同一份偏色，
+            # 所以正好等于「输入项去掉噪点/遮挡/扭曲之后」的那张图。
+            _cast_pv_on = (self.random_color_alg != 'none') and (float(self.random_color_power) > 0.0)
+            _cast_entry_src = ([{
+                'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
+                'warp': False,
+                'transform': True,
+                'channel_type': SampleProcessor.ChannelType.BGR,
+                'ct_mode': ct_mode,
+                'face_type': self.face_type,
+                'random_color_cast': random_color_power,
+                'data_format': nn.data_format,
+                'resolution': resolution,
+            }] if _cast_pv_on else [])
+            # 冻结 dst 解码器时不加 dst 的偏色原图（预览里也不需要 dst 的偏色列）
+            _cast_entry_dst = ([{
+                'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
+                'warp': False,
+                'transform': True,
+                'channel_type': SampleProcessor.ChannelType.BGR,
+                'face_type': self.face_type,
+                'random_color_cast': random_color_power,
+                'data_format': nn.data_format,
+                'resolution': resolution,
+            }] if (_cast_pv_on and not _freeze_dst_branch) else [])
+
+            if use_fast:
+                # === 快速生成器路径（V4 loader + V2 generator）===
+                src_loader = SampleLoaderV4(
+                    aligned_path=training_data_src_path,
+                    batch_size=self.get_batch_size(),
+                    resolution=resolution,
+                    use_yaw_sampling=bool(self.options['uniform_yaw']) or self.pretrain,
+                )
+                dst_loader = SampleLoaderV4(
+                    aligned_path=training_data_dst_path,
+                    batch_size=self.get_batch_size(),
+                    resolution=resolution,
+                    use_yaw_sampling=bool(self.options['uniform_yaw']) or self.pretrain,
+                )
+
+                src_ct_loader = dst_loader  # always create CT loader for runtime ct_mode switching
+
+                gen_src_outputs = [
+                    {
+                        'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
+                        'warp': random_warp,
+                        'random_occlusion': random_occlusion,
+                        'random_noise': random_noise,
+                        'random_color_cast': random_color_power,
+                        'transform': True,
+                        'channel_type': SampleProcessor.ChannelType.BGR,
+                        'ct_mode': ct_mode,
+                        'random_hsv_shift_amount': random_hsv_power,
+                        'face_type': self.face_type,
+                        'data_format': nn.data_format,
+                        'resolution': resolution,
+                    },
+                    {
+                        'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
+                        'warp': False,
+                        'transform': True,
+                        'channel_type': SampleProcessor.ChannelType.BGR,
+                        'ct_mode': ct_mode,
+                        'face_type': self.face_type,
+                        'random_color_cast': random_color_cast_target,
+                        'data_format': nn.data_format,
+                        'resolution': resolution,
+                    },
+                    {
+                        'sample_type': SampleProcessor.SampleType.FACE_MASK,
+                        'warp': False,
+                        'transform': True,
+                        'channel_type': SampleProcessor.ChannelType.G,
+                        'face_mask_type': SampleProcessor.FaceMaskType.FULL_FACE,
+                        'face_type': self.face_type,
+                        'data_format': nn.data_format,
+                        'resolution': resolution,
+                    },
+                    {
+                        'sample_type': SampleProcessor.SampleType.FACE_MASK,
+                        'warp': False,
+                        'transform': True,
+                        'channel_type': SampleProcessor.ChannelType.G,
+                        'face_mask_type': SampleProcessor.FaceMaskType.EYES_MOUTH,
+                        'face_type': self.face_type,
+                        'data_format': nn.data_format,
+                        'resolution': resolution,
+                    },
+                ] + _cast_entry_src
+
+                gen_dst_outputs = [
+                    {
+                        'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
+                        'warp': random_warp_dst,
+                        'random_occlusion': random_occlusion_dst,
+                        'random_noise': random_noise_dst,
+                        'random_color_cast': random_color_power,
+                        'transform': True,
+                        'channel_type': SampleProcessor.ChannelType.BGR,
+                        'face_type': self.face_type,
+                        'random_hsv_shift_amount': random_hsv_power_dst,
+                        'data_format': nn.data_format,
+                        'resolution': resolution,
+                    },
+                    {
+                        'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
+                        'warp': False,
+                        'transform': True,
+                        'channel_type': SampleProcessor.ChannelType.BGR,
+                        'face_type': self.face_type,
+                        'random_color_cast': random_color_cast_target_dst,
+                        'data_format': nn.data_format,
+                        'resolution': resolution,
+                    },
+                    {
+                        'sample_type': SampleProcessor.SampleType.FACE_MASK,
+                        'warp': False,
+                        'transform': True,
+                        'channel_type': SampleProcessor.ChannelType.G,
+                        'face_mask_type': SampleProcessor.FaceMaskType.FULL_FACE,
+                        'face_type': self.face_type,
+                        'data_format': nn.data_format,
+                        'resolution': resolution,
+                    },
+                    {
+                        'sample_type': SampleProcessor.SampleType.FACE_MASK,
+                        'warp': False,
+                        'transform': True,
+                        'channel_type': SampleProcessor.ChannelType.G,
+                        'face_mask_type': SampleProcessor.FaceMaskType.EYES_MOUTH,
+                        'face_type': self.face_type,
+                        'data_format': nn.data_format,
+                        'resolution': resolution,
+                    },
+                ] + _cast_entry_dst
+
+                self.set_training_data_generators(
+                    [
+                        SampleGeneratorV2(
+                            loader=src_loader,
+                            sample_process_options=SampleProcessor.Options(scale_range=[-0.15, 0.15], random_flip=random_src_flip),
+                            output_sample_types=gen_src_outputs,
+                            resolution=resolution,
+                            debug=self.is_debug(),
+                            ct_loader=src_ct_loader,
+                        ),
+                        SampleGeneratorV2(
+                            loader=dst_loader,
+                            sample_process_options=SampleProcessor.Options(scale_range=[-0.15, 0.15], random_flip=random_dst_flip),
+                            output_sample_types=gen_dst_outputs,
+                            resolution=resolution,
+                            debug=self.is_debug(),
+                        ),
+                    ]
+                )
+            else:
+                # === 原始生成器路径（SampleGeneratorFace）===
+                random_ct_samples_path = training_data_dst_path if ct_mode is not None and not self.pretrain else None
+
+                cpu_count = multiprocessing.cpu_count()
+                src_generators_count = cpu_count // 2
+                dst_generators_count = cpu_count // 2
+                if ct_mode is not None:
+                    src_generators_count = int(src_generators_count * 1.5)
+
+                self.set_training_data_generators(
+                    [
+                        SampleGeneratorFace(
+                            training_data_src_path,
+                            random_ct_samples_path=random_ct_samples_path,
+                            debug=self.is_debug(),
+                            batch_size=self.get_batch_size(),
+                            sample_process_options=SampleProcessor.Options(scale_range=[-0.15, 0.15], random_flip=random_src_flip),
+                            output_sample_types=[
+                                {
+                                    'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
+                                    'warp': random_warp,
+                                    'random_occlusion': random_occlusion,
+                                    'random_noise': random_noise,
+                                    'random_color_cast': random_color_power,
+                                    'transform': True,
+                                    'channel_type': SampleProcessor.ChannelType.BGR,
+                                    'ct_mode': ct_mode,
+                                    'random_hsv_shift_amount': random_hsv_power,
+                                    'face_type': self.face_type,
+                                    'data_format': nn.data_format,
+                                    'resolution': resolution,
+                                },
+                                {
+                                    'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
+                                    'warp': False,
+                                    'transform': True,
+                                    'channel_type': SampleProcessor.ChannelType.BGR,
+                                    'ct_mode': ct_mode,
+                                    'random_color_cast': random_color_cast_target,
+                                    'face_type': self.face_type,
+                                    'data_format': nn.data_format,
+                                    'resolution': resolution,
+                                },
+                                {
+                                    'sample_type': SampleProcessor.SampleType.FACE_MASK,
+                                    'warp': False,
+                                    'transform': True,
+                                    'channel_type': SampleProcessor.ChannelType.G,
+                                    'face_mask_type': SampleProcessor.FaceMaskType.FULL_FACE,
+                                    'face_type': self.face_type,
+                                    'data_format': nn.data_format,
+                                    'resolution': resolution,
+                                },
+                                {
+                                    'sample_type': SampleProcessor.SampleType.FACE_MASK,
+                                    'warp': False,
+                                    'transform': True,
+                                    'channel_type': SampleProcessor.ChannelType.G,
+                                    'face_mask_type': SampleProcessor.FaceMaskType.EYES_MOUTH,
+                                    'face_type': self.face_type,
+                                    'data_format': nn.data_format,
+                                    'resolution': resolution,
+                                },
+                            ] + _cast_entry_src,
+                            uniform_yaw_distribution=bool(self.options['uniform_yaw']) or self.pretrain,
+                            generators_count=src_generators_count,
+                        ),
+                        SampleGeneratorFace(
+                            training_data_dst_path,
+                            debug=self.is_debug(),
+                            batch_size=self.get_batch_size(),
+                            sample_process_options=SampleProcessor.Options(scale_range=[-0.15, 0.15], random_flip=random_dst_flip),
+                            output_sample_types=[
+                                {
+                                    'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
+                                    'warp': random_warp_dst,
+                                    'random_occlusion': random_occlusion_dst,
+                                    'random_noise': random_noise_dst,
+                                    'random_color_cast': random_color_power,
+                                    'transform': True,
+                                    'channel_type': SampleProcessor.ChannelType.BGR,
+                                    'face_type': self.face_type,
+                                    'random_hsv_shift_amount': random_hsv_power_dst,
+                                    'data_format': nn.data_format,
+                                    'resolution': resolution,
+                                },
+                                {
+                                    'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
+                                    'warp': False,
+                                    'transform': True,
+                                    'channel_type': SampleProcessor.ChannelType.BGR,
+                                    'face_type': self.face_type,
+                                    'random_color_cast': random_color_cast_target_dst,
+                                    'data_format': nn.data_format,
+                                    'resolution': resolution,
+                                },
+                                {
+                                    'sample_type': SampleProcessor.SampleType.FACE_MASK,
+                                    'warp': False,
+                                    'transform': True,
+                                    'channel_type': SampleProcessor.ChannelType.G,
+                                    'face_mask_type': SampleProcessor.FaceMaskType.FULL_FACE,
+                                    'face_type': self.face_type,
+                                    'data_format': nn.data_format,
+                                    'resolution': resolution,
+                                },
+                                {
+                                    'sample_type': SampleProcessor.SampleType.FACE_MASK,
+                                    'warp': False,
+                                    'transform': True,
+                                    'channel_type': SampleProcessor.ChannelType.G,
+                                    'face_mask_type': SampleProcessor.FaceMaskType.EYES_MOUTH,
+                                    'face_type': self.face_type,
+                                    'data_format': nn.data_format,
+                                    'resolution': resolution,
+                                },
+                            ] + _cast_entry_dst,
+                            uniform_yaw_distribution=bool(self.options['uniform_yaw']) or self.pretrain,
+                            generators_count=dst_generators_count,
+                        ),
+                    ]
+                )
+
+            if getattr(self, 'pretrain_just_disabled', False):
+                self.update_sample_for_preview(force_new=True)
+
+        # Build merge fn
+        self._build_merge_fns()
+
+    def get_model_filename_list(self):
+        return self.model_filename_list
+
+    def onSave(self):
+        # 预训练单支路：保存前先把训练好的 decoder_src 权重同步给 decoder_dst，
+        # 保证转正训练时两个解码器都带着预训练好的初始化。
+        self._sync_pretrain_single_decoder()
+        for model, filename in io.progress_bar_generator(self.get_model_filename_list(), 'Saving', leave=False):
+            model.save_weights(self.get_strpath_storage_for_file(filename))
+
+    def _sync_pretrain_single_decoder(self):
+        """预训练单支路：把 decoder_src 的权重复制到 decoder_dst。
+
+        预训练阶段两条支路读取同一份多身份数据集，两个解码器结构完全一致，
+        因此这次复制是无损的。
+        """
+        if not getattr(self, 'pretrain_single_decoder', False):
+            return
+        if not (hasattr(self, 'decoder_src') and hasattr(self, 'decoder_dst')):
+            return
+        try:
+            src_ws = self.decoder_src.get_weights()
+            dst_ws = self.decoder_dst.get_weights()
+        except Exception as e:
+            io.log_info(f'[预训练] 取解码器权重失败，跳过同步：{e}')
+            return
+        if len(src_ws) != len(dst_ws):
+            io.log_info('[预训练] 两个解码器权重数量不一致，跳过同步。')
+            return
+        with torch.no_grad():
+            for dst_w, src_w in zip(dst_ws, src_ws):
+                src_data = src_w.data if hasattr(src_w, 'data') else src_w
+                dst_w.data.copy_(src_data.to(device=dst_w.device, dtype=dst_w.dtype))
+        io.log_info('[预训练] 已把 decoder_src 权重同步到 decoder_dst。')
+
+    def should_save_preview_history(self):
+        return (not io.is_colab() and self.iter % (10 * (max(1, self.resolution // 64))) == 0) or (io.is_colab() and self.iter % 100 == 0)
+
+    def export_dfm(self):
+        """Export model to .dfm (ONNX) compatible with DeepFaceLab merger pipeline."""
+        output_path = self.get_strpath_storage_for_file('model.dfm')
+
+        io.log_info(f'Dumping .dfm to {output_path}')
+
+        # In this repo, many leras layers keep weights as raw torch tensors (not registered Parameters).
+        # During ONNX tracing, tensors that require grad cannot be embedded as constants.
+        # Export does not need gradients, so we disable them for the exported sub-graph.
+        def _disable_grad_for_module_weights(m):
+            try:
+                ws = m.get_weights()
+            except Exception:
+                return
+            for w in ws:
+                try:
+                    if hasattr(w, 'requires_grad'):
+                        w.requires_grad_(False)
+                except Exception:
+                    pass
+
+        if self.archi_type.startswith('df'):
+            _disable_grad_for_module_weights(self.encoder)
+            _disable_grad_for_module_weights(self.inter)
+            _disable_grad_for_module_weights(self.decoder_src)
+            _disable_grad_for_module_weights(self.decoder_dst)
+        else:
+            _disable_grad_for_module_weights(self.encoder)
+            _disable_grad_for_module_weights(self.inter_AB)
+            _disable_grad_for_module_weights(self.inter_B)
+            _disable_grad_for_module_weights(self.decoder)
+
+        class _DFMWrapper(torch.nn.Module):
+            def __init__(self, parent):
+                super().__init__()
+                # Register submodules for export
+                if parent.archi_type.startswith('df'):
+                    self.encoder = parent.encoder
+                    self.inter = parent.inter
+                    self.decoder_src = parent.decoder_src
+                    self.decoder_dst = parent.decoder_dst
+                    self.is_df = True
+                else:
+                    self.encoder = parent.encoder
+                    self.inter_AB = parent.inter_AB
+                    self.inter_B = parent.inter_B
+                    self.decoder = parent.decoder
+                    self.is_df = False
+
+            def forward(self, in_face):
+                # in_face: NHWC float32 [0..1]
+                x = in_face.permute(0, 3, 1, 2).contiguous()
+                if hasattr(self, 'model_dtype') and x.dtype != self.model_dtype:
+                    x = x.to(self.model_dtype)
+                if self.is_df:
+                    code = self.inter(self.encoder(x))
+                    out_celeb_face, out_celeb_face_mask = self.decoder_src(code)
+                    _, out_face_mask = self.decoder_dst(code)
+                else:
+                    code = self.encoder(x)
+                    inter_b = self.inter_B(code)
+                    inter_ab = self.inter_AB(code)
+                    code_dst = torch.cat([inter_b, inter_ab], dim=1)
+                    code_src_dst = torch.cat([inter_ab, inter_ab], dim=1)
+                    out_celeb_face, out_celeb_face_mask = self.decoder(code_src_dst)
+                    _, out_face_mask = self.decoder(code_dst)
+
+                # Cast outputs to FP32 for ONNX Runtime compatibility
+                out_celeb_face = out_celeb_face.to(torch.float32)
+                out_celeb_face_mask = out_celeb_face_mask.to(torch.float32)
+                out_face_mask = out_face_mask.to(torch.float32)
+
+                # Return NHWC tensors
+                out_face_mask = out_face_mask.permute(0, 2, 3, 1).contiguous()
+                out_celeb_face = out_celeb_face.permute(0, 2, 3, 1).contiguous()
+                out_celeb_face_mask = out_celeb_face_mask.permute(0, 2, 3, 1).contiguous()
+                return out_face_mask, out_celeb_face, out_celeb_face_mask
+
+        wrapper = _DFMWrapper(self)
+        wrapper.eval()
+
+        # 检测导出精度
+        _export_prec = os.environ.get("DFM_EXPORT_PRECISION", "fp32")
+        use_fp16_export = _export_prec == "fp16"
+        if _export_prec == "fp16":
+            # BF16 不被 ONNX Conv 支持，改用 FP16（同为 16 位，ONNX 原生支持）
+            wrapper.model_dtype = torch.float16
+            for sub in ["encoder", "inter", "decoder_src", "decoder_dst"]:
+                m = getattr(wrapper, sub, None)
+                if m is not None:
+                    try:
+                        m.to("cpu", dtype=torch.float16)
+                    except Exception:
+                        pass
+            io.log_info("FP16 导出模式（权重转 FP16）")
+        else:
+            # FP32 导出：强制所有权重转为 FP32
+            for sub in ["encoder", "inter", "decoder_src", "decoder_dst"]:
+                m = getattr(wrapper, sub, None)
+                if m is not None:
+                    try:
+                        m.to("cpu", dtype=torch.float32)
+                    except Exception:
+                        pass
+
+        # FP16/BF16 on CPU is extremely slow; use GPU/XLA if available
+        if self.options.get('eager_mode', False) and _XLA_AVAILABLE:
+            export_device = xm.xla_device()
+        elif _export_prec != "fp32" and torch.cuda.is_available():
+            export_device = torch.device("cuda:0")
+        else:
+            export_device = torch.device("cpu")
+        wrapper = wrapper.to(export_device)
+        dummy = torch.zeros(1, self.resolution, self.resolution, 3, dtype=torch.float32, device=export_device)
+
+        # Warm-up once to avoid tracer complaining about mutated state during export.
+        with torch.no_grad():
+            _ = wrapper(dummy)
+
+        # DeepFaceLive / DFMModel.py 在推理时固定使用 'in_face:0' 作为输入名。
+        # 原版 DFL(tf2onnx) 导出也使用带 ':0' 的张量名：
+        #   input_names  = ['in_face:0']
+        #   output_names = ['out_face_mask:0','out_celeb_face:0','out_celeb_face_mask:0']
+        # 为保持兼容性，这里仅对 ONNX 的 I/O 命名对齐，不改变导出内容。
+        export_kwargs = dict(
+            input_names=['in_face:0'],
+            output_names=['out_face_mask:0', 'out_celeb_face:0', 'out_celeb_face_mask:0'],
+            dynamic_axes={
+                'in_face:0': {0: 'batch'},
+                'out_face_mask:0': {0: 'batch'},
+                'out_celeb_face:0': {0: 'batch'},
+                'out_celeb_face_mask:0': {0: 'batch'},
+            },
+            opset_version=20 if use_fp16_export else 12,
+        )
+
+        # Torch 2.5+ 默认可能走 dynamo 导出（依赖 onnxscript）；强制 legacy exporter 以提升稳定性。
+        try:
+            torch.onnx.export(
+                wrapper,
+                dummy,
+                output_path,
+                dynamo=False,
+                **export_kwargs,
+            )
+        except TypeError:
+            torch.onnx.export(
+                wrapper,
+                dummy,
+                output_path,
+                **export_kwargs,
+            )
+
+    def _build_merge_fns(self):
+        # merge 在推理时用 warped_dst -> pred_src_dst + masks
+        pass
+
+    # --- core forward helpers ---
+    def _forward_df(self, warped_src, warped_dst, need_swap=True, need_swap_ng=True):
+        src_code = self.inter(self.encoder(warped_src))
+        dst_code = self.inter(self.encoder(warped_dst))
+
+        pred_src_src, pred_src_srcm = self.decoder_src(src_code)
+        pred_dst_dst, pred_dst_dstm = self.decoder_dst(dst_code)
+        # 换脸输出（pred_src_dst / _no_code_grad）只被 face_style / bg_style 使用。
+        # 两个 style 都为 0 时（默认配置）任何 loss 都不会读它们 —— 属于纯死算，
+        # 每步白跑两次 decoder 前向。按需计算可省掉约一半解码器前向。
+        if need_swap:
+            pred_src_dst, pred_src_dstm = self.decoder_src(dst_code)
+        else:
+            pred_src_dst, pred_src_dstm = None, None
+        if need_swap_ng:
+            pred_src_dst_no_code_grad, _ = self.decoder_src(dst_code.detach())
+        else:
+            pred_src_dst_no_code_grad = None
+
+        return {
+            'src_code': src_code,
+            'dst_code': dst_code,
+            'pred_src_src': pred_src_src,
+            'pred_src_srcm': pred_src_srcm,
+            'pred_dst_dst': pred_dst_dst,
+            'pred_dst_dstm': pred_dst_dstm,
+            'pred_src_dst': pred_src_dst,
+            'pred_src_dstm': pred_src_dstm,
+            'pred_src_dst_no_code_grad': pred_src_dst_no_code_grad,
+        }
+
+    def _forward_df_src_only(self, warped_src):
+        """冻结 decoder_dst 时的训练前向：只跑 src 分支（encoder+inter+decoder_src），
+        完全跳过 dst 前向，反向也只经过 src 分支（真正提速）。预览走 AE_view 不受影响。"""
+        src_code = self.inter(self.encoder(warped_src))
+        pred_src_src, pred_src_srcm = self.decoder_src(src_code)
+        return {
+            'src_code': src_code,
+            'pred_src_src': pred_src_src,
+            'pred_src_srcm': pred_src_srcm,
+        }
+
+    def _forward_liae(self, warped_src, warped_dst, need_swap=True, need_swap_ng=True):
+        src_code = self.encoder(warped_src)
+        src_inter_ab = self.inter_AB(src_code)
+        src_code_cat = torch.cat([src_inter_ab, src_inter_ab], dim=1)
+
+        dst_code = self.encoder(warped_dst)
+        dst_inter_b = self.inter_B(dst_code)
+        dst_inter_ab = self.inter_AB(dst_code)
+        dst_code_cat = torch.cat([dst_inter_b, dst_inter_ab], dim=1)
+
+        src_dst_code_cat = torch.cat([dst_inter_ab, dst_inter_ab], dim=1)
+
+        pred_src_src, pred_src_srcm = self.decoder(src_code_cat)
+        pred_dst_dst, pred_dst_dstm = self.decoder(dst_code_cat)
+        # 同 _forward_df：只在 face_style / bg_style 需要时才计算换脸输出
+        if need_swap:
+            pred_src_dst, pred_src_dstm = self.decoder(src_dst_code_cat)
+        else:
+            pred_src_dst, pred_src_dstm = None, None
+        if need_swap_ng:
+            pred_src_dst_no_code_grad, _ = self.decoder(src_dst_code_cat.detach())
+        else:
+            pred_src_dst_no_code_grad = None
+
+        return {
+            'src_code': src_code_cat,
+            'dst_code': dst_code_cat,
+            'pred_src_src': pred_src_src,
+            'pred_src_srcm': pred_src_srcm,
+            'pred_dst_dst': pred_dst_dst,
+            'pred_dst_dstm': pred_dst_dstm,
+            'pred_src_dst': pred_src_dst,
+            'pred_src_dstm': pred_src_dstm,
+            'pred_src_dst_no_code_grad': pred_src_dst_no_code_grad,
+        }
+
+    # --- losses ---
+    @staticmethod
+    def _em_split(em):
+        """把「眼睛+嘴巴」合并掩码切成 (eyes, mouth)。
+
+        对齐空间是按 landmarks 归一化的，所以上下两团之间必然有一段"谷"，
+        取行投影在中段(35%~65%)的最小值位置当切点即可，不依赖 face_type / 姿态。
+        """
+        # 对齐空间里 眼睛≈0.36~0.46 / 嘴巴≈0.66~0.78，真正的"谷"在 0.46~0.66
+        # 搜索区间必须收窄到这里；用 0.35 起搜会落到眼睛上缘，
+        # 于是眼睛被划进下半区 -> 被当成嘴巴（这正是"眼睛显示成蓝色"的原因）。
+        prof = em.sum(dim=(0, 1, 3))            # (H,) 每行的量
+        Hh = int(em.shape[-2])
+        lo, hi = int(Hh * 0.50), max(int(Hh * 0.50) + 1, int(Hh * 0.70))
+        cut = lo + int(torch.argmin(prof[lo:hi]).item())
+        eyes = em.clone();  eyes[:, :, cut:, :] = 0
+        mouth = em.clone(); mouth[:, :, :cut, :] = 0
+        return eyes, mouth, cut
+
+    @staticmethod
+    def _scale_em_mask(m, k):
+        """按系数 k 缩放嘴眼掩码的空间范围（1.0 不变；>1 膨胀；<1 腐蚀）。
+
+        用 max_pool2d 实现形态学膨胀（-max_pool(-x) 即腐蚀），所以峰值为 1 不被改变，
+        只有"边界往哪挪"在变 —— 正好就是惩罚范围。
+        """
+        k = float(k)
+        if abs(k - 1.0) < 1e-6:
+            return m
+        px = abs(k - 1.0) * 8.0 * (m.shape[-1] / 256.0)   # 系数差 1.0 ≈ 256 分辨率下 8px
+        r = max(1, int(round(px)))
+        ker = 2 * r + 1
+        if k > 1.0:
+            return F.max_pool2d(m, kernel_size=ker, stride=1, padding=r)
+        return -F.max_pool2d(-m, kernel_size=ker, stride=1, padding=r)
+
+    def _recon_losses(self, target_src, target_dst, target_srcm, target_dstm, target_srcm_em, target_dstm_em, fw, skip_dst=False):
+        resolution = self.resolution
+
+        pred_src_src = fw['pred_src_src']
+        pred_src_srcm = fw['pred_src_srcm']
+        if skip_dst:
+            pred_dst_dst = pred_dst_dstm = None
+            pred_src_dst = pred_src_dstm = None
+            pred_src_dst_no_code_grad = None
+        else:
+            pred_dst_dst = fw['pred_dst_dst']
+            pred_dst_dstm = fw['pred_dst_dstm']
+            pred_src_dst = fw['pred_src_dst']
+            pred_src_dstm = fw['pred_src_dstm']
+            pred_src_dst_no_code_grad = fw['pred_src_dst_no_code_grad']
+
+        # 随机偏色：先把预测的**全局色彩**迁移到目标 C 的色彩分布，再做比较。
+        # 效果：全局色彩被中性化 —— 输入色彩异常不会导致解码异常，
+        # 同时也不强迫模型收敛到某种固定光照（数据集光照不一致时更稳）。
+        _cc_alg = getattr(self, 'random_color_alg', 'none')
+        if _cc_alg in ('rct', 'mt', 'lct'):
+            # 传脸部遮罩：全图统计会被背景/头发带偏（脸只占一部分）
+            pred_src_src = nn.color_transfer_torch(_cc_alg, pred_src_src, target_src, mask=target_srcm)
+            if pred_dst_dst is not None:
+                pred_dst_dst = nn.color_transfer_torch(_cc_alg, pred_dst_dst, target_dst, mask=target_dstm)
+
+        # mask blur
+        k_blur = max(1, resolution // 32)
+        target_srcm_blur = nn.gaussian_blur(target_srcm, k_blur)
+        target_srcm_blur = torch.clamp(target_srcm_blur, 0.0, 0.5) * 2.0
+        target_srcm_anti_blur = 1.0 - target_srcm_blur
+
+        target_dstm_blur = nn.gaussian_blur(target_dstm, k_blur)
+        target_dstm_blur = torch.clamp(target_dstm_blur, 0.0, 0.5) * 2.0
+
+        # Match original SAEHD behavior (uses target_srcm_blur here)
+        style_mask_blur = target_srcm_blur.detach()
+        style_mask_blur = torch.clamp(style_mask_blur, 0.0, 1.0)
+        style_mask_anti_blur = 1.0 - style_mask_blur
+
+        target_dst_masked = target_dst * target_dstm_blur
+
+        target_src_anti_masked = target_src * target_srcm_anti_blur
+        pred_src_src_anti_masked = pred_src_src * target_srcm_anti_blur
+
+        target_src_masked_opt = target_src * target_srcm_blur if self.masked_training else target_src
+        target_dst_masked_opt = target_dst_masked if self.masked_training else target_dst
+        pred_src_src_masked_opt = pred_src_src * target_srcm_blur if self.masked_training else pred_src_src
+        pred_dst_dst_masked_opt = pred_dst_dst * target_dstm_blur if (self.masked_training and not skip_dst) else target_dst
+
+        def dssim_loss(a, b, fs, w):
+            v = nn.dssim(a, b, max_val=1.0, filter_size=fs)
+            return float(w) * v.mean(dim=[1, 2, 3])
+
+        def mse(a, b, w):
+            return float(w) * ((a - b) ** 2).mean(dim=[1, 2, 3])
+
+        def l1(a, b, w):
+            return float(w) * (a - b).abs().mean(dim=[1, 2, 3])
+
+        fs1 = max(1, int(resolution / 11.6))
+        fs2 = max(1, int(resolution / 23.2))
+
+        if resolution < 256:
+            src_loss = dssim_loss(target_src_masked_opt, pred_src_src_masked_opt, fs1, 10)
+            dst_loss = dssim_loss(target_dst_masked_opt, pred_dst_dst_masked_opt, fs1, 10) if not skip_dst else torch.zeros_like(src_loss)
+        else:
+            src_loss = dssim_loss(target_src_masked_opt, pred_src_src_masked_opt, fs1, 5) + dssim_loss(
+                target_src_masked_opt, pred_src_src_masked_opt, fs2, 5
+            )
+            dst_loss = (dssim_loss(target_dst_masked_opt, pred_dst_dst_masked_opt, fs1, 5) + dssim_loss(
+                target_dst_masked_opt, pred_dst_dst_masked_opt, fs2, 5
+            )) if not skip_dst else torch.zeros_like(src_loss)
+
+        src_loss = src_loss + mse(target_src_masked_opt, pred_src_src_masked_opt, 10)
+        if not skip_dst:
+            dst_loss = dst_loss + mse(target_dst_masked_opt, pred_dst_dst_masked_opt, 10)
+
+        if self.eyes_mouth_prio:
+            _ek = float(getattr(self, 'eyes_scale', 1.0) or 1.0)
+            _mk = float(getattr(self, 'mouth_scale', 1.0) or 1.0)
+            # 各自缩放后**裁回自己的半区**：否则系数>1 时膨胀会越过切点互相覆盖
+            _es, _ms, _cs = self._em_split(target_srcm_em)
+            _ed, _md, _cd = self._em_split(target_dstm_em)
+            _a = self._scale_em_mask(_es, _ek); _a[:, :, _cs:, :] = 0
+            _b = self._scale_em_mask(_ms, _mk); _b[:, :, :_cs, :] = 0
+            _em_s = torch.clamp(_a + _b, 0.0, 1.0)
+            _a = self._scale_em_mask(_ed, _ek); _a[:, :, _cd:, :] = 0
+            _b = self._scale_em_mask(_md, _mk); _b[:, :, :_cd, :] = 0
+            _em_d = torch.clamp(_a + _b, 0.0, 1.0)
+            src_loss = src_loss + l1(target_src * _em_s, pred_src_src * _em_s, 300)
+            if not skip_dst:
+                dst_loss = dst_loss + l1(target_dst * _em_d, pred_dst_dst * _em_d, 300)
+
+        src_loss = src_loss + mse(target_srcm, pred_src_srcm, 10)
+        if not skip_dst:
+            dst_loss = dst_loss + mse(target_dstm, pred_dst_dstm, 10)
+
+        # ---- 边缘强化 ----
+        # 用**模型自己的遮罩**把 pred 直接 overlay 合成回原图，再与原图比：
+        #     comp = pred*m + tgt*(1-m)   ->   comp - tgt = m*(pred - tgt)
+        # 所以误差被 m 加权，过渡带（0<m<1）上的颜色差会被专门惩罚 ——
+        # 这正是「合成后人脸边缘硬边 / 边缘颜色不自然」的成因，也正好被它约束。
+        # 注意：此处 pred 已经在上面做过 CT（rct/lct 档），与主 loss 处在同一色彩空间，
+        # 因此不会和『色彩中性化』互相拆台 —— 三种偏色档下都成立。
+        _edge_p = float(getattr(self, 'edge_enhance_power', 0.0) or 0.0)
+        if _edge_p > 0.0:
+            _comp_src = pred_src_src * pred_src_srcm + target_src * (1.0 - pred_src_srcm)
+            src_loss = src_loss + mse(_comp_src, target_src, _edge_p)
+            if not skip_dst and pred_dst_dst is not None:
+                _comp_dst = pred_dst_dst * pred_dst_dstm + target_dst * (1.0 - pred_dst_dstm)
+                dst_loss = dst_loss + mse(_comp_dst, target_dst, _edge_p)
+
+        # VGG 感知损失（在全图未遮罩的 pred/target 上计算）
+        vgg_perceptual_power = self.vgg_perceptual_power
+        if vgg_perceptual_power > 0.0 and self.vgg_extractor is not None:
+            vgg_weight = vgg_perceptual_power / 50.0  # 50=等权，100=2x，25=0.5x
+            with torch.no_grad():
+                target_src_vgg = self.vgg_extractor(target_src)
+                if not skip_dst:
+                    target_dst_vgg = self.vgg_extractor(target_dst)
+            pred_src_vgg = self.vgg_extractor(pred_src_src)
+            src_vgg_loss = sum(F.l1_loss(pf, tf) for pf, tf in zip(pred_src_vgg, target_src_vgg))
+            src_loss = src_loss + vgg_weight * src_vgg_loss
+            if not skip_dst:
+                pred_dst_vgg = self.vgg_extractor(pred_dst_dst)
+                dst_vgg_loss = sum(F.l1_loss(pf, tf) for pf, tf in zip(pred_dst_vgg, target_dst_vgg))
+                dst_loss = dst_loss + vgg_weight * dst_vgg_loss
+
+        # style losses
+        face_style_power = float(self.options['face_style_power']) / 100.0
+        bg_style_power = float(self.options['bg_style_power']) / 100.0
+
+        extra_style_loss = torch.tensor(0.0, device=self.device)
+
+        if face_style_power != 0.0 and not self.pretrain and not skip_dst:
+            extra_style_loss = extra_style_loss + nn.style_loss(
+                pred_src_dst_no_code_grad * pred_src_dstm.detach(),
+                pred_dst_dst.detach() * pred_dst_dstm.detach(),
+                gaussian_blur_radius=resolution // 8,
+                loss_weight=10000.0 * face_style_power,
+            )
+
+        if bg_style_power != 0.0 and not self.pretrain and not skip_dst:
+            target_dst_style_anti_masked = target_dst * style_mask_anti_blur
+            psd_style_anti_masked = pred_src_dst * style_mask_anti_blur
+            extra_style_loss = extra_style_loss + (
+                10.0 * bg_style_power * nn.dssim(psd_style_anti_masked, target_dst_style_anti_masked, max_val=1.0, filter_size=fs1).mean()
+            )
+            extra_style_loss = extra_style_loss + (
+                (10.0 * bg_style_power) * ((psd_style_anti_masked - target_dst_style_anti_masked) ** 2).mean()
+            )
+
+        # masked training extras with gan
+        extra_masked_gan_loss = torch.tensor(0.0, device=self.device)
+        if self.masked_training and self.gan_power != 0.0:
+            extra_masked_gan_loss = extra_masked_gan_loss + 0.000001 * nn.total_variation_mse(pred_src_src)
+            extra_masked_gan_loss = extra_masked_gan_loss + 0.02 * ((pred_src_src_anti_masked - target_src_anti_masked) ** 2).mean()
+
+        return src_loss, dst_loss, extra_style_loss, extra_masked_gan_loss
+    def train_one_step(self, warped_src, target_src, target_srcm, target_srcm_em, warped_dst, target_dst, target_dstm, target_dstm_em):
+        # ===== XLA eager mode dispatch =====
+        if self.options.get('eager_mode', False):
+            return self._xla_train_one_step(
+                warped_src, target_src, target_srcm, target_srcm_em,
+                warped_dst, target_dst, target_dstm, target_dstm_em,
+            )
+
+        # to tensors (CUDA path)
+        warped_src = self._np_to_torch(warped_src)
+        warped_dst = self._np_to_torch(warped_dst)
+        target_src = self._np_to_torch(target_src)
+        target_dst = self._np_to_torch(target_dst)
+        target_srcm = self._np_to_torch(target_srcm)
+        target_srcm_em = self._np_to_torch(target_srcm_em)
+        target_dstm = self._np_to_torch(target_dstm)
+        target_dstm_em = self._np_to_torch(target_dstm_em)
+
+        # blur-out-mask preprocessing
+        if self.blur_out_mask:
+            sigma = float(self.resolution) / 128.0
+
+            srcm_anti = 1.0 - target_srcm
+            x = nn.gaussian_blur(target_src * srcm_anti, sigma)
+            y = 1.0 - nn.gaussian_blur(target_srcm, sigma)
+            y = torch.where(y == 0, torch.ones_like(y), y)
+            target_src = target_src * target_srcm + (x / y) * srcm_anti
+
+            dstm_anti = 1.0 - target_dstm
+            x = nn.gaussian_blur(target_dst * dstm_anti, sigma)
+            y = 1.0 - nn.gaussian_blur(target_dstm, sigma)
+            y = torch.where(y == 0, torch.ones_like(y), y)
+            target_dst = target_dst * target_dstm + (x / y) * dstm_anti
+
+        # 冻结 decoder_dst（DF 架构）：训练只跑 src 分支，前向+反向完全跳过 dst（真正提速）
+        _freeze_ddst = ('df' in self.archi_type) and bool(self.options.get('freeze_decoder_dst', False))
+        # 预训练单支路 与 冻结dst 共用同一条 src-only 前向
+        _src_only = _freeze_ddst or getattr(self, 'pretrain_single_decoder', False)
+
+        # 换脸输出 pred_src_dst / pred_src_dst_no_code_grad 只服务 face_style / bg_style。
+        # 两者都为 0（默认）时无人读取 -> 跳过它们的 forward，省掉两次 decoder 前向。
+        _face_style_on = (not self.pretrain) and float(self.options['face_style_power']) != 0.0
+        _bg_style_on = (not self.pretrain) and float(self.options['bg_style_power']) != 0.0
+        _need_swap = (not _src_only) and (_face_style_on or _bg_style_on)
+        _need_swap_ng = (not _src_only) and _face_style_on
+
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=self.use_bf16):
+            if _src_only:
+                fw = self._forward_df_src_only(warped_src)
+            else:
+                if 'df' in self.archi_type:
+                    fw_fn = self._forward_df
+                else:
+                    fw_fn = self._forward_liae
+
+                if self.options.get('gradient_checkpointing', False) and self.is_training:
+                    fw = torch.utils.checkpoint.checkpoint(
+                        fw_fn, warped_src, warped_dst,
+                        need_swap=_need_swap, need_swap_ng=_need_swap_ng,
+                        use_reentrant=False)
+                else:
+                    fw = fw_fn(warped_src, warped_dst, _need_swap, _need_swap_ng)
+
+        if self.use_bf16:
+            fw = {k: (v.float() if isinstance(v, torch.Tensor) else v) for k, v in fw.items()}
+
+        # Inter code 分布日志
+        _log_interval = int(self.options.get('log_code_stats', 0))
+        if _log_interval > 0 and self.get_iter() % _log_interval == 0:
+            _frozen = self.options.get('freeze_inter', False) or self.options.get('freeze_inter_AB', False)
+            if not _frozen and 'src_code' in fw and 'dst_code' in fw:
+                sc = fw['src_code'].float()
+                dc = fw['dst_code'].float()
+                mu_s, mu_d = sc.mean(0), dc.mean(0)
+                var_s, var_d = sc.var(0), dc.var(0)
+                io.log_info(f'[CODE] iter={self.get_iter():07d}  mu_gap={(mu_s-mu_d).abs().mean().item():.6f}  var_gap={(var_s-var_d).abs().mean().item():.6f}  mu_s={mu_s.mean().item():.4f}  var_s={var_s.mean().item():.4f}')
+
+        src_loss_vec, dst_loss_vec, extra_style_loss, extra_masked_gan_loss = self._recon_losses(
+            target_src, target_dst, target_srcm, target_dstm, target_srcm_em, target_dstm_em, fw,
+            skip_dst=_src_only,
+        )
+
+        G_loss = src_loss_vec.mean() + dst_loss_vec.mean() + extra_style_loss + extra_masked_gan_loss
+
+        # true_face (DF only)
+        true_face_power = float(self.options['true_face_power'])
+        D_code_loss = None
+        if true_face_power != 0.0 and not self.pretrain and 'df' in self.archi_type and not _freeze_ddst:
+            src_code_d = self.code_discriminator(fw['src_code'])
+            dst_code_d = self.code_discriminator(fw['dst_code'])
+
+            ones_src = torch.ones_like(src_code_d)
+            zeros_src = torch.zeros_like(src_code_d)
+            ones_dst = torch.ones_like(dst_code_d)
+
+            G_loss = G_loss + true_face_power * F.binary_cross_entropy_with_logits(src_code_d, ones_src)
+
+            D_code_loss = 0.5 * (
+                F.binary_cross_entropy_with_logits(dst_code_d, ones_dst)
+                + F.binary_cross_entropy_with_logits(src_code_d.detach(), zeros_src)
+            )
+
+        # GAN
+        D_gan_loss = None
+        if self.gan_power != 0.0:
+            pred_src_src = fw['pred_src_src']
+            target_src_masked_opt = target_src * target_srcm if self.masked_training else target_src
+            pred_src_src_masked_opt = pred_src_src * target_srcm if self.masked_training else pred_src_src
+
+            pred_d1, pred_d2 = self.D_src(pred_src_src_masked_opt)
+            tgt_d1, tgt_d2 = self.D_src(target_src_masked_opt)
+
+            ones1 = torch.ones_like(tgt_d1)
+            zeros1 = torch.zeros_like(pred_d1)
+            ones2 = torch.ones_like(tgt_d2)
+            zeros2 = torch.zeros_like(pred_d2)
+
+            D_gan_loss = 0.5 * (
+                F.binary_cross_entropy_with_logits(tgt_d1, ones1)
+                + F.binary_cross_entropy_with_logits(pred_d1.detach(), zeros1)
+            ) + 0.5 * (
+                F.binary_cross_entropy_with_logits(tgt_d2, ones2)
+                + F.binary_cross_entropy_with_logits(pred_d2.detach(), zeros2)
+            )
+
+            G_loss = G_loss + self.gan_power * (
+                F.binary_cross_entropy_with_logits(pred_d1, torch.ones_like(pred_d1))
+                + F.binary_cross_entropy_with_logits(pred_d2, torch.ones_like(pred_d2))
+            )
+
+        # backward + optimizer steps
+        # 平台期检测：把监测指标喂给优化器。用 src+dst 的和（与界面显示的两个 loss 同源），
+        # 必须放在 step() 之前 —— step() 里判断"是否刚好积累够一个窗口"依赖这里已经入列。
+        # 拿不到 float 时（XLA 等）静默跳过，不影响训练。
+        try:
+            self.src_dst_opt.observe_loss(
+                float(src_loss_vec.mean().detach().cpu()) + float(dst_loss_vec.mean().detach().cpu()))
+        except Exception:
+            pass
+        self.src_dst_opt.zero_grad()
+        G_loss.backward()
+        self.src_dst_opt.step()
+
+        # Update discriminators
+        if D_code_loss is not None:
+            self.D_code_opt.zero_grad()
+            D_code_loss.backward()
+            self.D_code_opt.step()
+
+        if D_gan_loss is not None:
+            self.D_src_dst_opt.zero_grad()
+            D_gan_loss.backward()
+            self.D_src_dst_opt.step()
+
+        # save per-sample vectors for WebUI preview (before mean reduction)
+        self._last_src_loss_per_sample = src_loss_vec.detach().cpu()
+        self._last_dst_loss_per_sample = dst_loss_vec.detach().cpu()
+        return float(src_loss_vec.mean().detach().cpu()), float(dst_loss_vec.mean().detach().cpu())
+
+    # ---- XLA eager mode: compiled core ----
+    def _xla_core(self, warped_src, target_src, target_srcm, target_srcm_em,
+                  warped_dst, target_dst, target_dstm, target_dstm_em):
+        """XLA 编译核心：forward + loss + backward + all optimizer steps 在一个函数内。"""
+        # blur-out-mask preprocessing
+        if self.blur_out_mask:
+            sigma = float(self.resolution) / 128.0
+            srcm_anti = 1.0 - target_srcm
+            x = nn.gaussian_blur(target_src * srcm_anti, sigma)
+            y = 1.0 - nn.gaussian_blur(target_srcm, sigma)
+            y = torch.where(y == 0, torch.ones_like(y), y)
+            target_src = target_src * target_srcm + (x / y) * srcm_anti
+            dstm_anti = 1.0 - target_dstm
+            x = nn.gaussian_blur(target_dst * dstm_anti, sigma)
+            y = 1.0 - nn.gaussian_blur(target_dstm, sigma)
+            y = torch.where(y == 0, torch.ones_like(y), y)
+            target_dst = target_dst * target_dstm + (x / y) * dstm_anti
+
+        # forward (XLA device, no autocast needed)
+        # 冻结 decoder_dst（DF 架构）：训练只跑 src 分支
+        _freeze_ddst = ('df' in self.archi_type) and bool(self.options.get('freeze_decoder_dst', False))
+        _src_only = _freeze_ddst or getattr(self, 'pretrain_single_decoder', False)
+        _face_style_on = (not self.pretrain) and float(self.options['face_style_power']) != 0.0
+        _bg_style_on = (not self.pretrain) and float(self.options['bg_style_power']) != 0.0
+        _need_swap = (not _src_only) and (_face_style_on or _bg_style_on)
+        _need_swap_ng = (not _src_only) and _face_style_on
+        if _src_only:
+            fw = self._forward_df_src_only(warped_src)
+        elif 'df' in self.archi_type:
+            fw = self._forward_df(warped_src, warped_dst, _need_swap, _need_swap_ng)
+        else:
+            fw = self._forward_liae(warped_src, warped_dst, _need_swap, _need_swap_ng)
+
+        # losses
+        src_loss_vec, dst_loss_vec, extra_style_loss, extra_masked_gan_loss = self._recon_losses(
+            target_src, target_dst, target_srcm, target_dstm, target_srcm_em, target_dstm_em, fw,
+            skip_dst=_src_only,
+        )
+        G_loss = src_loss_vec.mean() + dst_loss_vec.mean() + extra_style_loss + extra_masked_gan_loss
+
+        # true_face (DF only)
+        true_face_power = float(self.options['true_face_power'])
+        D_code_loss = None
+        if true_face_power != 0.0 and not self.pretrain and 'df' in self.archi_type and not _freeze_ddst:
+            src_code_d = self.code_discriminator(fw['src_code'])
+            dst_code_d = self.code_discriminator(fw['dst_code'])
+            ones_src = torch.ones_like(src_code_d)
+            zeros_src = torch.zeros_like(src_code_d)
+            ones_dst = torch.ones_like(dst_code_d)
+            G_loss = G_loss + true_face_power * F.binary_cross_entropy_with_logits(src_code_d, ones_src)
+            D_code_loss = 0.5 * (
+                F.binary_cross_entropy_with_logits(dst_code_d, ones_dst)
+                + F.binary_cross_entropy_with_logits(src_code_d.detach(), zeros_src)
+            )
+
+        # GAN
+        D_gan_loss = None
+        if self.gan_power != 0.0:
+            pred_src_src = fw['pred_src_src']
+            target_src_masked_opt = target_src * target_srcm if self.masked_training else target_src
+            pred_src_src_masked_opt = pred_src_src * target_srcm if self.masked_training else pred_src_src
+            pred_d1, pred_d2 = self.D_src(pred_src_src_masked_opt)
+            tgt_d1, tgt_d2 = self.D_src(target_src_masked_opt)
+            ones1 = torch.ones_like(tgt_d1)
+            zeros1 = torch.zeros_like(pred_d1)
+            ones2 = torch.ones_like(tgt_d2)
+            zeros2 = torch.zeros_like(pred_d2)
+            D_gan_loss = 0.5 * (
+                F.binary_cross_entropy_with_logits(tgt_d1, ones1)
+                + F.binary_cross_entropy_with_logits(pred_d1.detach(), zeros1)
+            ) + 0.5 * (
+                F.binary_cross_entropy_with_logits(tgt_d2, ones2)
+                + F.binary_cross_entropy_with_logits(pred_d2.detach(), zeros2)
+            )
+            G_loss = G_loss + self.gan_power * (
+                F.binary_cross_entropy_with_logits(pred_d1, torch.ones_like(pred_d1))
+                + F.binary_cross_entropy_with_logits(pred_d2, torch.ones_like(pred_d2))
+            )
+
+        # backward + optimizer steps (ALL inside compiled region)
+        try:
+            self.src_dst_opt.observe_loss(
+                float(src_loss_vec.mean().detach().cpu()) + float(dst_loss_vec.mean().detach().cpu()))
+        except Exception:
+            pass
+        self.src_dst_opt.zero_grad()
+        G_loss.backward()
+        self.src_dst_opt.step()
+
+        if D_code_loss is not None:
+            self.D_code_opt.zero_grad()
+            D_code_loss.backward()
+            self.D_code_opt.step()
+
+        if D_gan_loss is not None:
+            self.D_src_dst_opt.zero_grad()
+            D_gan_loss.backward()
+            self.D_src_dst_opt.step()
+
+        return src_loss_vec, dst_loss_vec
+
+    # ---- XLA eager mode: entry point ----
+    def _xla_train_one_step(self, warped_src, target_src, target_srcm, target_srcm_em,
+                            warped_dst, target_dst, target_dstm, target_dstm_em):
+        """XLA 训练入口：numpy→XLA tensor，调用 torch_xla.compile 核心，返回 float loss."""
+        device = self.device
+        warped_src = torch.from_numpy(warped_src).float().to(device)
+        warped_dst = torch.from_numpy(warped_dst).float().to(device)
+        target_src = torch.from_numpy(target_src).float().to(device)
+        target_dst = torch.from_numpy(target_dst).float().to(device)
+        target_srcm = torch.from_numpy(target_srcm).float().to(device)
+        target_srcm_em = torch.from_numpy(target_srcm_em).float().to(device)
+        target_dstm = torch.from_numpy(target_dstm).float().to(device)
+        target_dstm_em = torch.from_numpy(target_dstm_em).float().to(device)
+
+        # Lazy-init compiled function (first call compiles, subsequent calls reuse)
+        if not hasattr(self, '_xla_cached_step'):
+            self._xla_cached_step = torch_xla.compile(self._xla_core)
+
+        src_loss_vec, dst_loss_vec = self._xla_cached_step(
+            warped_src, target_src, target_srcm, target_srcm_em,
+            warped_dst, target_dst, target_dstm, target_dstm_em,
+        )
+
+        detach_device = torch.device('cpu')
+        self._last_src_loss_per_sample = src_loss_vec.detach().to(detach_device)
+        self._last_dst_loss_per_sample = dst_loss_vec.detach().to(detach_device)
+        return float(src_loss_vec.mean().detach().to(detach_device)), float(dst_loss_vec.mean().detach().to(detach_device))
+
+    # --- training hook ---
+    def onTrainOneIter(self):
+        if self.get_iter() == 0 and not self.pretrain and not getattr(self, 'pretrain_just_disabled', False):
+            io.log_info('You are training the model from scratch. It is strongly recommended to use a pretrained model to speed up the training and improve the quality.\n')
+
+        _sb, _db = self.generate_next_samples()
+        warped_src, target_src, target_srcm, target_srcm_em = _sb[:4]
+        warped_dst, target_dst, target_dstm, target_dstm_em = _db[:4]
+
+        src_loss, dst_loss = self.train_one_step(
+            warped_src,
+            target_src,
+            target_srcm,
+            target_srcm_em,
+            warped_dst,
+            target_dst,
+            target_dstm,
+            target_dstm_em,
+        )
+
+        return (('src_loss', src_loss), ('dst_loss', dst_loss))
+
+    # --- preview / merge ---
+    def AE_view(self, in_src, in_dst):
+        """跑一遍前向，供预览使用。
+
+        传入的是**训练输入**（generator 的 warped 输出，可能已含随机扭曲 / 随机遮挡 /
+        随机噪点），而不是干净的目标图 —— 这样预览里的预测列才反映训练时真实看到的东西。
+        （形参历史上叫 target_src/target_dst，容易误解，已更名。）
+        """
+        in_src = self._np_to_torch(in_src)
+        in_dst = self._np_to_torch(in_dst)
+
+        with torch.no_grad():
+            # XLA device 上不能用 torch.cuda.amp.autocast
+            # 预览要用 pred_src_dst（SD 列），但不用 pred_src_dst_no_code_grad
+            if self.options.get('eager_mode', False):
+                if 'df' in self.archi_type:
+                    fw = self._forward_df(in_src, in_dst, True, False)
+                else:
+                    fw = self._forward_liae(in_src, in_dst, True, False)
+            else:
+                with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=self.use_bf16):
+                    if 'df' in self.archi_type:
+                        fw = self._forward_df(in_src, in_dst, True, False)
+                    else:
+                        fw = self._forward_liae(in_src, in_dst, True, False)
+
+        pred_src_src = fw['pred_src_src'].detach().cpu().float().numpy()
+        pred_src_srcm = fw['pred_src_srcm'].detach().cpu().float().numpy()
+        pred_dst_dst = fw['pred_dst_dst'].detach().cpu().float().numpy()
+        pred_dst_dstm = fw['pred_dst_dstm'].detach().cpu().float().numpy()
+        pred_src_dst = fw['pred_src_dst'].detach().cpu().float().numpy()
+        pred_src_dstm = fw['pred_src_dstm'].detach().cpu().float().numpy()
+
+        return pred_src_src, pred_src_srcm, pred_dst_dst, pred_dst_dstm, pred_src_dst, pred_src_dstm
+
+    def onGetPreview(self, samples, for_history=False):
+        _sb, _db = samples
+        warped_src, target_src, target_srcm, target_srcm_em = _sb[:4]
+        warped_dst, target_dst, target_dstm, target_dstm_em = _db[:4]
+        # 第 5 个输出（可选）= 偏色但无其它增强的原图 C
+        cast_src = _sb[4] if len(_sb) > 4 else None
+        cast_dst = _db[4] if len(_db) > 4 else None
+
+        # 预测输入改用「训练输入」(warped：已含随机扭曲/遮挡/噪点)，对齐原版 DFL；预览会差一点但更真实。S/D 参照仍取干净目标图。
+        _ae_out = list(self.AE_view(warped_src, warped_dst))
+        S, D = [np.clip(nn.to_data_format(x, 'NHWC', self.model_data_format), 0.0, 1.0) for x in (target_src, target_dst)]
+        SS, SSM, DD, DDM, SD, SDM = [np.clip(nn.to_data_format(x, 'NHWC', self.model_data_format), 0.0, 1.0) for x in _ae_out]
+
+        # Convert target masks to NHWC (1-channel masks)
+        tgt_srcm_nhwc = nn.to_data_format(target_srcm, 'NHWC', self.model_data_format)
+        tgt_dstm_nhwc = nn.to_data_format(target_dstm, 'NHWC', self.model_data_format)
+
+        # Save 1-channel masks for preview compositing
+        ssm_1ch = SSM.copy()
+        ddm_1ch = DDM.copy()
+        sdm_1ch = SDM.copy()
+
+        DDM = np.repeat(DDM, 3, axis=-1)
+        SDM = np.repeat(SDM, 3, axis=-1)
+
+        target_srcm = tgt_srcm_nhwc
+        target_dstm = tgt_dstm_nhwc
+
+        n_samples = min(4, self.get_batch_size())
+
+        WS = np.clip(nn.to_data_format(warped_src, 'NHWC', self.model_data_format), 0.0, 1.0)
+        WD = np.clip(nn.to_data_format(warped_dst, 'NHWC', self.model_data_format), 0.0, 1.0)
+
+        # 独立的预览调色算法（same = 跟随颜色模式）
+        _pv_grade = str(self.options.get('preview_grade_alg', 'same') or 'same').strip().lower()
+        if _pv_grade == 'same':
+            _grade_alg = str(self.options.get('ct_mode', 'none') or 'none').strip().lower()
+        else:
+            _grade_alg = _pv_grade
+
+        # ---- 随机偏色开启时，额外插入两组列 ----
+        #   每组两列 = [ 偏色但无其它增强的原图 C , 经过 RCT 的 pred ]
+        #   插入位置：src 组放在 src-pred 之后、dst 原图之前；
+        #             dst 组放在 dst-pred 之后、dst-src 之前。
+        #   冻结 dst 解码器时不给 dst 组（此时 dst 支路不参与训练）。
+        from core.imagelib import reinhard_color_transfer as _rct_pv
+        _freeze_dst_pv = ('df' in self.archi_type) and bool(self.options.get('freeze_decoder_dst', False))
+        _cast_on_pv = ((str(getattr(self, 'random_color_alg', 'none')).lower() != 'none')
+                       and (float(getattr(self, 'random_color_power', 0.0)) > 0.0))
+        _show_src_cast = bool(_cast_on_pv and (cast_src is not None))
+        _show_dst_cast = bool(_cast_on_pv and (not _freeze_dst_pv) and (cast_dst is not None))
+        # dst 解码器被冻结时，它不参与训练、输出也不会变 —— 预览里没必要再占用一列
+        _show_dst_pred = (not _freeze_dst_pv)
+
+        # 嘴眼优先可视化：开启 eyes_mouth_prio 时，在「原始输入」行的输入图上
+        # 用 1px 线框出嘴眼区域（就是 loss 里被额外加权的那一块）。
+        _em_prio_on = bool(getattr(self, 'eyes_mouth_prio', False))
+        _EM_COLOR_EYE = (0.0, 1.0, 0.0)      # BGR 纯绿 (0,255,0) = 眼睛范围
+        _EM_COLOR_MOUTH = (1.0, 0.0, 0.0)    # BGR 纯蓝 (255,0,0) = 嘴巴范围
+        _em_src = _em_dst = None
+        if _em_prio_on:
+            try:
+                _em_src = nn.to_data_format(target_srcm_em, 'NHWC', self.model_data_format)
+                _em_dst = nn.to_data_format(target_dstm_em, 'NHWC', self.model_data_format)
+            except Exception:
+                _em_src = _em_dst = None
+
+        # 预览侧用 numpy 复刻同一套拆分与缩放
+        def _em_split_np(em):
+            m = np.asarray(em)[..., 0]
+            # 与 torch 版同一区间：必须落在眼睛(≈0.46)与嘴巴(≈0.66)之间
+            prof = m.reshape(m.shape[0], -1).sum(axis=1)
+            Hh = m.shape[0]
+            lo = int(Hh * 0.50); hi = max(lo + 1, int(Hh * 0.70))
+            cut = lo + int(np.argmin(prof[lo:hi]))
+            eyes = m.copy();  eyes[cut:, :] = 0
+            mouth = m.copy(); mouth[:cut, :] = 0
+            return eyes[..., None], mouth[..., None], cut
+
+        # 预览侧用 numpy 复刻同一个缩放（3x3 迭代膨胀/腐蚀）
+        def _em_scale_np(m, k):
+            k = float(k)
+            if abs(k - 1.0) < 1e-6:
+                return m
+            r = max(1, int(round(abs(k - 1.0) * 8.0 * (m.shape[0] / 256.0))))
+            grow = k > 1.0
+            cur = m.copy()
+            for _ in range(r):
+                nb = [cur]
+                for sh, ax in ((1, 0), (-1, 0), (1, 1), (-1, 1)):
+                    nb.append(np.roll(cur, sh, axis=ax))
+                cur = np.max(nb, axis=0) if grow else np.min(nb, axis=0)
+            return cur
+
+        def _em_draw(img, em, i):
+            """按当前系数把眼睛(绿)/嘴巴(蓝)两块轮廓画到 img 上并返回新图。"""
+            _ek2 = float(getattr(self, 'eyes_scale', 1.0) or 1.0)
+            _mk2 = float(getattr(self, 'mouth_scale', 1.0) or 1.0)
+            _ey, _mo, _ct = _em_split_np(em[i])
+            _e = _em_scale_np(_ey, _ek2); _e[_ct:, :] = 0
+            _m = _em_scale_np(_mo, _mk2); _m[:_ct, :] = 0
+            _o = _em_outline(img, _e, _EM_COLOR_EYE)
+            _o = _em_outline(_o, _m, _EM_COLOR_MOUTH)
+            return _o
+
+        def _em_outline(img, em, color=(0.0, 1.0, 0.0)):
+            """把 em 掩码(阈值 0.5)的边界描成 1px 线，叠在 img 上返回新图。"""
+            if em is None:
+                return img
+            m = (np.asarray(em)[..., 0] >= 0.5).astype(np.uint8)
+            if int(m.sum()) == 0:
+                return img
+            up = np.zeros_like(m);    up[1:, :]  = m[:-1, :]
+            dn = np.zeros_like(m);    dn[:-1, :] = m[1:, :]
+            lf = np.zeros_like(m);    lf[:, 1:]  = m[:, :-1]
+            rt = np.zeros_like(m);    rt[:, :-1] = m[:, 1:]
+            edge = (m == 1) & ((up == 0) | (dn == 0) | (lf == 0) | (rt == 0))
+            out = np.array(img, copy=True)
+            out[edge] = color
+            return out
+
+        C_S = (np.clip(nn.to_data_format(cast_src, 'NHWC', self.model_data_format), 0.0, 1.0)
+               if _show_src_cast else None)
+        C_D = (np.clip(nn.to_data_format(cast_dst, 'NHWC', self.model_data_format), 0.0, 1.0)
+               if _show_dst_cast else None)
+        # 调色：参考就是左边那列（偏色原图）。
+        # 与「合并预览」行**共用同一个 _grade_alg**，这样你选 MT 时这里也是 MT，
+        # 不会再出现"列里显示的是 RcT、标签写的是 mt"这种不一致。
+        def _grade_pair(a, b):
+            if _grade_alg in ('', 'none'):
+                return np.clip(a, 0.0, 1.0)
+            if _grade_alg == 'rct':
+                return np.clip(_rct_pv(a, b), 0.0, 1.0)
+            if _grade_alg == 'mt':
+                from core.imagelib.color_transfer import match_tone_np as _mt_pv
+                return np.clip(_mt_pv(a, b), 0.0, 1.0)
+            from core import imagelib as _il_pv
+            return np.clip(_il_pv.color_transfer(_grade_alg, a, b), 0.0, 1.0)
+
+        RCT_SS = ([_grade_pair(SS[i], C_S[i]) for i in range(n_samples)] if _show_src_cast else None)
+        RCT_DD = ([_grade_pair(DD[i], C_D[i]) for i in range(n_samples)] if _show_dst_cast else None)
+
+        def _expand_cols(cols5, i):
+            """按需插入/移除列，返回该行的列元组。
+            冻结 dst 解码器时丢掉 dst pred（第 4 个元素）那一列。"""
+            a, b, c, d, e = cols5
+            out = [a, b]
+            if _show_src_cast:
+                out += [C_S[i], RCT_SS[i]]
+            out += [c]
+            if _show_dst_pred:
+                out += [d]
+            if _show_dst_cast:
+                out += [C_D[i], RCT_DD[i]]
+            out += [e]
+            return tuple(out)
+
+        _col_spec = ['src', 'src_loss']
+        if _show_src_cast:
+            _col_spec += ['cast', 'grade']
+        _col_spec += ['dst']
+        if _show_dst_pred:
+            _col_spec += ['dst_loss']
+        if _show_dst_cast:
+            _col_spec += ['cast', 'grade']
+        _col_spec += ['pred']
+        self.last_preview_n_cols = len(_col_spec)
+        self.last_preview_col_spec = _col_spec
+        # 真实使用的调色算法名（标签上显示 "xxx pred"，不再写死 rct）
+        self.last_preview_grade_name = _grade_alg if _grade_alg not in ('', 'none') else 'none'
+
+        # (text labels rendered as HTML overlays in WebUI — not drawn on image)
+        result = []
+
+        # 1. 原图预览 - 5 columns: S, SS, D, DD, SD
+        st = []
+        for i in range(n_samples):
+            # 嘴眼轮廓画在【未扭曲】的原图上 —— 与 target_*_em 掩码同一空间，必然对齐
+            _s_vis, _d_vis = S[i], D[i]
+            if _em_prio_on and _em_src is not None:
+                _s_vis = _em_draw(S[i], _em_src, i)
+                _d_vis = _em_draw(D[i], _em_dst, i)
+            ar = _expand_cols((_s_vis, SS[i], _d_vis, DD[i], SD[i]), i)
+            st.append(np.concatenate(ar, axis=1))
+        result.append(('原图预览', np.concatenate(st, axis=0)))
+
+        # 2. 遮罩下 — 5 columns, with masks
+        #    src-pred 与同行的 dd-pred / sd 保持一致：直接乘上**模型预测的遮罩**
+        #    （脸外压黑、脸内保留）。这样一行里各列的观感统一，
+        #    而且左列是「目标 × 数据集遮罩」、本列是「pred × 模型遮罩」，
+        #    两列直接对照就能看出遮罩范围差在哪。
+        st = []
+        for i in range(n_samples):
+            SD_mask = DDM[i] * SDM[i] if self.face_type < FaceType.HEAD else SDM[i]
+            # ssm_1ch 是 1 通道（H,W,1），与 (H,W,3) 的 SS 广播相乘
+            ss_masked = np.clip(SS[i] * ssm_1ch[i], 0.0, 1.0)
+            ar = _expand_cols((S[i] * target_srcm[i], ss_masked, D[i] * target_dstm[i], DD[i] * DDM[i], SD[i] * SD_mask), i)
+            st.append(np.concatenate(ar, axis=1))
+        result.append(('遮罩下', np.concatenate(st, axis=0)))
+
+        # 3. 原始输入 — 5 columns: WS, SS, WD, DD, SD
+        st = []
+        for i in range(n_samples):
+            # 这里【不画】嘴眼轮廓：本行是 WS/WD（已被随机扭曲），
+            # 而 target_*_em 掩码永远在【未扭曲】的对齐空间，两者空间不一致会看着"错位"。
+            # 轮廓画在「原图预览」行的 S/D 上（见该行），那里空间一致，必然对齐。
+            ar = _expand_cols((WS[i], SS[i], WD[i], DD[i], SD[i]), i)
+            st.append(np.concatenate(ar, axis=1))
+        result.append(('原始输入', np.concatenate(st, axis=0)))
+
+        # 4. 合并预览 — 5 columns: S, SS_composite, D, DD_composite, SD_composite
+        # 对 SD 施加色彩迁移（参考 D），使预览更接近真实换脸效果。
+        # 算法取自模型的「颜色模式」ct_mode，支持 none/rct/lct/mkl/idt/sot/lut。
+        from core.imagelib import reinhard_color_transfer as _rct
+        st = []
+        for i in range(n_samples):
+            if self.face_type < FaceType.HEAD:
+                dst_merge_mask = tgt_dstm_nhwc[i] * ddm_1ch[i]
+                src_merge_mask = target_srcm[i] * ssm_1ch[i]
+            else:
+                dst_merge_mask = tgt_dstm_nhwc[i]
+                src_merge_mask = target_srcm[i]
+            ss_composite = SS[i] * src_merge_mask + S[i] * (1.0 - src_merge_mask)
+            dd_composite = DD[i] * dst_merge_mask + D[i] * (1.0 - dst_merge_mask)
+            # 合成调色：这里跟随模型配置的「颜色模式」(ct_mode)，
+            # 这样合并预览展示的就是你实际合成时会得到的效果。
+            #   none -> 不调色；rct -> 带遮罩的 Reinhard（原行为）；
+            #   lct / mkl / idt / sot / lut -> 走 core.imagelib.color_transfer 统一分发。
+            if _grade_alg in ('', 'none'):
+                _sd_graded = SD[i]
+            elif _grade_alg == 'rct':
+                _sd_graded = _rct(SD[i], D[i],
+                                  target_mask=dst_merge_mask,
+                                  source_mask=dst_merge_mask)
+            elif _grade_alg == 'mt':
+                # 截图那一版：遮罩加权、RGB 空间（把合成遮罩当成软权重传进去）
+                from core.imagelib.color_transfer import match_tone_np as _mt
+                _sd_graded = _mt(SD[i], D[i],
+                                 src_mask=dst_merge_mask,
+                                 trg_mask=dst_merge_mask)
+            else:
+                from core import imagelib as _il
+                _sd_graded = np.clip(_il.color_transfer(_grade_alg, SD[i], D[i]), 0.0, 1.0)
+            sd_composite = _sd_graded * dst_merge_mask + D[i] * (1.0 - dst_merge_mask)
+            ar = _expand_cols((S[i], ss_composite, D[i], dd_composite, sd_composite), i)
+            st.append(np.concatenate(ar, axis=1))
+        result.append(('合并预览', np.concatenate(st, axis=0)))
+
+        # Store per-column masks for GUI gradient compositing (遮罩下)
+        col4_list = []
+        for j in range(n_samples):
+            if self.face_type < FaceType.HEAD:
+                col4_list.append(ddm_1ch[j] * sdm_1ch[j])
+            else:
+                col4_list.append(sdm_1ch[j])
+        self._preview_masks = {
+            'col0': tgt_srcm_nhwc[:n_samples],
+            'col2': tgt_dstm_nhwc[:n_samples],
+            'col3': ddm_1ch[:n_samples],
+            'col4': np.stack(col4_list, axis=0),
+        }
+
+        return result
+
+    def AE_merge(self, warped_dst):
+        warped_dst = self._np_to_torch(warped_dst)
+        with torch.no_grad():
+            if 'df' in self.archi_type:
+                dst_code = self.inter(self.encoder(warped_dst))
+                pred_src_dst, pred_src_dstm = self.decoder_src(dst_code)
+                _, pred_dst_dstm = self.decoder_dst(dst_code)
+            else:
+                dst_code = self.encoder(warped_dst)
+                dst_inter_b = self.inter_B(dst_code)
+                dst_inter_ab = self.inter_AB(dst_code)
+                dst_code_cat = torch.cat([dst_inter_b, dst_inter_ab], dim=1)
+                src_dst_code_cat = torch.cat([dst_inter_ab, dst_inter_ab], dim=1)
+
+                pred_src_dst, pred_src_dstm = self.decoder(src_dst_code_cat)
+                _, pred_dst_dstm = self.decoder(dst_code_cat)
+
+        return (
+            pred_src_dst.detach().cpu().numpy(),
+            pred_dst_dstm.detach().cpu().numpy(),
+            pred_src_dstm.detach().cpu().numpy(),
+        )
+
+    def predictor_func(self, face=None):
+        face = nn.to_data_format(face[None, ...], self.model_data_format, 'NHWC')
+        bgr, mask_dst_dstm, mask_src_dstm = [
+            nn.to_data_format(x, 'NHWC', self.model_data_format).astype(np.float32)
+            for x in self.AE_merge(face)
+        ]
+        # 后处理偏移修正：硬编码归一化偏移量
+        # 偏移方向: 左上（人脸偏左上方），归一化值 (-0.06, +0.22) 表示右移+下移
+        # 可通过 options 中 output_shift_x / output_shift_y 覆盖
+        bgr0, ms0, md0 = bgr[0], mask_src_dstm[0, ..., 0], mask_dst_dstm[0, ..., 0]
+        res = self.resolution
+        nx = float(self.options.get('output_shift_x', 0.100))
+        ny = float(self.options.get('output_shift_y', 0.100))
+        dx = nx * res / 2.0
+        dy = ny * res / 2.0
+        if abs(dx) > 0.5 or abs(dy) > 0.5:
+            M = np.float32([[1, 0, dx], [0, 1, dy]])
+            bgr0 = cv2.warpAffine(bgr0, M, (res, res), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+            ms0 = cv2.warpAffine(ms0, M, (res, res), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+            md0 = cv2.warpAffine(md0, M, (res, res), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        return bgr0, ms0, md0
+
+    def get_MergerConfig(self):
+        import merger
+
+        return (
+            self.predictor_func,
+            (self.options['resolution'], self.options['resolution'], 3),
+            merger.MergerConfigMasked(face_type=self.face_type, default_mode='overlay'),
+        )
+
+
+Model = SAEHDModel

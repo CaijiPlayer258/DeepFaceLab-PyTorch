@@ -172,6 +172,35 @@ loss 显示最后一次的值；状态条写「已停止 · 停在 12,345 iter�
 每张都是 `min(4, batch_size)` 行 × 5 列的网格）。页面上是「原图 · 遮罩 · 输入 · 合并」
 四个按钮 + 一张大图，切换只换本地缓存，不联网。
 
+### 训练中改参数（热更新）
+
+参数分两类，参数页在训练中会给能热改的行挂一个「热」标记：
+
+| 能热改（改完下一个迭代就生效） | 必须重启训练 |
+|---|---|
+| 数据增强：随机扭曲 / 随机遮挡 / 随机噪点 / 随机偏色 / 随机 HSV / 刚性形变（旋转·缩放·偏移范围） | 分辨率、架构、各维度、face_type |
+| 眼睛缩放 / 嘴巴范围 / 边缘增强 / 遮罩羽化（blur_out_mask） | 冻结分支开关 |
+| 颜色迁移模式 ct_mode、翻转、uniform_yaw | batch_size、优化器、预训练 |
+| 损失权重：face_style / bg_style、学习率 lr / 余弦周期 / lr_dropout | GAN 强度（要重建判别器）、真脸强度（同理） |
+| 崩溃阈值、备份间隔、最大备份数、masked_training、blur_out_mask、eyes_mouth_prio | 冻结分支开关 |
+
+实现分两头：
+- **4.0**（`mainscripts/Trainer.py`）：`_HOT_KEYS` 扩展 + `_apply_model_options` 里按字段改
+  生成器的 `output_sample_types[0]`（每路生成器的第一项就是喂进网络的输入图，
+  目标项不动；ct_mode 例外，输入和目标一起改），顺手清掉 loader 缓存。
+- **4.1**：参数页「保存」（不重启训练）→ `POST /api/models/{name}/config` →
+  后端把可热改的部分 POST 到 4.0 的 `/update-model-options`，返回 `hot / need_restart / hot_applied`，
+  UI 据此说明「哪几项即时生效、哪几项要重启」。
+
+实测（训练中改 `random_warp` 与 `random_noise`）4.0 日志：
+
+```
+[WebUI] Model option random_warp: True -> False
+[WebUI] random_warp -> False（已更新 2 个样本项）
+[WebUI] Model option random_noise: False -> True
+[WebUI] random_noise -> True（已更新 2 个样本项）
+```
+
 **自动拉第一次。** 训练跑出第一行迭代（`iter_seen` 变真）时，页面会自己拉一次预览，
 把「上次保存的样本」换掉 —— 4.0 要跑出第一张才给图，一次可能落空，所以最多重试 3 次、每次隔 12 秒。
 之后仍然只有点「刷新」才更新。
@@ -205,6 +234,28 @@ loss 显示最后一次的值；状态条写「已停止 · 停在 12,345 iter�
 - 导出：`POST /api/models/{name}/export` → 轮询 `/api/models/export/status`，按钮上显示进度；
 - 删除：`POST /api/models/{name}/delete`，删 `<name>_*` 全部文件（权重、data.dat、备份目录），
   训练中的模型拒绝删。
+
+### 启动耗时（实测）
+
+model_004 这个量级（171M 参数 / 1.9GB 权重）：
+
+| 阶段 | 之前 | 现在 |
+|---|---|---|
+| 进程 + import（torch 单独 3.4s） | ~4.5–6.4s | 同（冷启动固定成本） |
+| 权重加载 + CUDA 初始化 | ~2.7s | 同 |
+| 样本扫描 | ~0.9s | 同（实测 iterdir 4 万个只要 0.03s，这段是别的活） |
+| 损失历史 / 摘要 | ~1.9s | 后台延后，不再挡路 |
+| **到第一行迭代** | **~17.5s** | **~14.5s（-3s）** |
+
+做过的：把 117MB `data.dat` 的 loss_history 解析**延后 8 秒**再跑 —— `pickle.loads` 虽在 C 里
+执行但一直握着 GIL，原来正好和权重加载 / 首个迭代抢同一把锁。真到保存时如果它还没跑完，
+`_ensure_loss_history_complete()` 会就地同步补完，不会截断历史。
+
+试过但**撤掉**的：对齐目录列表缓存（按目录 mtime 缓存 4 万个文件名）—— 实测 iterdir 只要
+0.03s，那 0.9s 的等待是 SampleLoaderV4 起预取进程/开 sqlite，不是扫描，缓存没意义。
+
+没做的（留给以后）：权重 `mmap` 需要把「先搬 GPU 再 load」改成「先 load 再搬」，收益不确定；
+常驻预热进程能把 4.5s 的 import 摊掉，但 Windows 没有 fork，架构改动大。
 
 ## 五、已知限制
 

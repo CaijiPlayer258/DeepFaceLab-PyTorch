@@ -35,6 +35,7 @@
         <div class="grpbody" id="toolgrpBody">
           <div class="nav sub" data-go="tool-mask"><span class="lbl">遮罩绘制</span></div>
           <div class="nav sub" data-go="tool-bili"><span class="lbl">B 站下载</span></div>
+    <div class="nav sub" data-go="tool-perf"><span class="lbl">速度测试</span></div>
           <div class="nav sub" data-go="tool-color"><span class="lbl">色域迁移</span></div>
           <div class="nav sub" data-go="tool-angle"><span class="lbl">角度可视化</span></div>
           <div class="nav sub" data-go="tool-engine"><span class="lbl">引擎编译</span></div>
@@ -118,54 +119,68 @@
 
         <div class="card" style="margin-bottom:14px">
           <div class="hd"><b>参数</b></div>
+
           <div class="paths">
-            <div class="inp mono pathinp">
-              <span class="lb">输入</span><input class="pathval" value="D:&#92;media&#92;raw&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
+            <div class="inp mono pathinp" style="height:38px">
+              <span class="lb">输入</span>
+              <input class="pathval" id="exSrc" value="D:&#92;media&#92;raw&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
               <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span>
             </div>
-            <div class="inp mono pathinp">
-              <span class="lb">输出</span><input class="pathval" value="workspace&#92;_frames&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
+            <div class="inp mono pathinp" style="height:38px">
+              <span class="lb">输出</span>
+              <input class="pathval" id="exDst" value="workspace&#92;_frames&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
               <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span>
             </div>
           </div>
-          <div class="prow compact" style="margin-top:16px">
-            <div class="pc">
-              <label class="f">检测器</label>
-              <div class="seg"><b class="on">高精度 · RetinaFace</b><b>高性能 · TinyMog</b></div>
-            </div>
-            <div class="pc">
-              <label class="f">检测角度</label>
-              <div class="seg"><b class="on">0°</b><b>90°</b><b>180°</b><b>270°</b></div>
-            </div>
-            <div class="pc">
-              <label class="f">帧跳跃</label>
+
+          <div class="cfgrow">
+            <span class="cl">检测器</span><span class="cd">Retina 质量优先 · TinyMog 速度优先</span>
+            <span class="cc"><div class="seg" id="exDetSeg"><b class="on">Retina</b><b>TinyMog</b></div></span>
+          </div>
+
+          <div class="cfgrow">
+            <span class="cl">检测角度</span><span class="cd">源视频旋转角度</span>
+            <span class="cc"><div class="seg" id="exAngleSeg"><b class="on">0°</b><b>90°</b><b>180°</b><b>270°</b></div></span>
+          </div>
+
+          <div class="cfgrow">
+            <span class="cl">帧跳跃</span><span class="cd">每 N 帧取一张</span>
+            <span class="cc">
               <div style="display:flex;align-items:center;gap:8px">
                 <div class="num">
-                  <button class="nb" data-d="-1" title="少一帧">−</button><input value="1" inputmode="numeric"
-                    min="1" max="120" title="每 N 帧取一张（24fps 下 N 超过 120 等同于 0.2 fps 下限）"><button class="nb" data-d="1" title="多一帧">+</button>
+                  <button class="nb" data-d="-1" title="少一帧">−</button>
+                  <input id="exSkip" value="1" inputmode="numeric" min="1" max="120" title="每 N 帧取一张">
+                  <button class="nb" data-d="1" title="多一帧">+</button>
                 </div>
-              <span style="font-size:12px;color:var(--ink-3)">帧</span>
+                <span style="font-size:12px;color:var(--ink-3)">帧</span>
               </div>
-            </div>
+            </span>
           </div>
+
           <button class="btn pri" id="btnExtract" style="width:100%;margin-top:16px;height:38px">开始提取</button>
         </div>
+      </div>
 
-        <div class="card tint hide" id="exProgress">
-          <div style="display:flex;align-items:center;margin-bottom:9px">
-            <b style="font-size:13px" id="exTitle">正在处理</b>
-            <div style="flex:1"></div>
-            <span class="hint" id="exStage" style="margin-right:8px"></span><span class="hint" id="exCounter" style="font-variant-numeric:tabular-nums">就绪</span>
+      <!-- ================= 提取运行（二级界面） ================= -->
+      <div class="page" id="p-extract-run">
+        <div class="title">人脸提取</div>
+
+        <div class="card hide" id="exProgress">
+          <div class="xferhd">
+            <b>正在提取人脸</b>
           </div>
-          <div class="bar"><i id="exBar" style="width:0%"></i></div>
-          <div class="hint" id="exMsg" style="margin-top:10px;font-size:11.5px">准备中…</div>
-          <div class="stats4" style="margin-top:12px">
+
+          <canvas id="exGraph"></canvas>
+
+          <div class="stats4" style="margin-top:14px">
             <div class="stat"><div class="k">帧速度</div><div class="v"><span id="exFps">0</span><small>帧/秒</small></div></div>
             <div class="stat"><div class="k">人脸速度</div><div class="v"><span id="exFaceRate">0</span><small>张/秒</small></div></div>
             <div class="stat"><div class="k">已对齐人脸</div><div class="v"><span id="exFaces">0</span><small>张</small></div></div>
             <div class="stat"><div class="k">已处理帧</div><div class="v"><span id="exFiles">0</span><small id="exFilesTotal">/ 0</small></div></div>
           </div>
         </div>
+
+        <button class="btn danger hide" id="btnExStop" style="width:100%;height:38px;margin-top:14px">中断提取</button>
       </div>
 
       <!-- ================= 数据处理 ================= -->
@@ -186,6 +201,31 @@
                 <div class="ds-work in" id="dswork">
           <div id="dsSteps"></div>
         </div>
+      </div>
+
+      <!-- ================= 数据处理运行（二级界面） ================= -->
+      <div class="page" id="p-dataset-run">
+        <div class="title">数据处理</div>
+
+        <div class="card hide" id="dsRunCard">
+          <div class="xferhd">
+            <b id="dsRunTitle">正在处理</b>
+          </div>
+          <canvas id="dsRunGraph"></canvas>
+          <div class="bar"><i id="dsRunBar" style="width:0%"></i></div>
+          <div class="xferft">
+            <span id="dsRunMsg">准备中…</span>
+            <span id="dsRunRate"></span>
+          </div>
+          <div class="stats4" style="margin-top:14px">
+            <div class="stat"><div class="k">已处理</div><div class="v"><span id="dsRunDone">0</span><small id="dsRunTotal">/ 0</small></div></div>
+            <div class="stat"><div class="k">速度</div><div class="v"><span id="dsRunSpeed">0</span><small>张/秒</small></div></div>
+            <div class="stat"><div class="k">已用</div><div class="v"><span id="dsRunElapsed">0</span><small>秒</small></div></div>
+            <div class="stat"><div class="k">剩余</div><div class="v"><span id="dsRunEta">—</span><small></small></div></div>
+          </div>
+        </div>
+
+        <button class="btn danger hide" id="btnDsRunStop" style="width:100%;height:38px;margin-top:14px">中断</button>
       </div>
 
       <!-- ================= 训练器 ================= -->
@@ -214,6 +254,20 @@
       <!-- ================= 工具：遮罩绘制 ================= -->
       <div class="page" id="p-tool-mask">
         <iframe id="mkFrame" src="/mask-editor/index.html" title="Mask Processor"></iframe>
+      </div>
+
+      <!-- ================= 工具：速度测试 ================= -->
+      <div class="page" id="p-tool-perf">
+        <div class="title">速度测试</div>
+        <div class="card">
+          <div class="hd"><b>本机实测</b><span class="hint" id="perfHint">点下面按钮跑一遍</span></div>
+          <div id="perfBody">
+            <div class="cfgrow"><span class="cl">说明</span>
+              <span class="cd">测的是真实链路：解码 / 遮罩 / 检测 / 特征点 / 编码，不写任何文件</span>
+              <span class="cc"></span></div>
+          </div>
+          <button class="btn pri" id="btnPerf" style="width:100%;margin-top:16px;height:38px">开始测速</button>
+        </div>
       </div>
 
       <!-- ================= 工具：B 站下载 ================= -->
@@ -426,12 +480,13 @@
       <!-- ================= 参数设置 ================= -->
       <div class="page" id="p-train-cfg">
         <div class="title">参数设置</div>
-        <div class="sub" id="cfgSub">训练前确认参数。带 · 的是本次会话才会生效的项。</div>
+        <div class="sub" id="cfgSub">训练前确认参数。训练中点「保存」，带「热」标记的项会立即生效，其余要重启训练。</div>
         <div id="cfgBox" style="margin-top:14px"></div>
         <div class="cfgactions">
           <span class="hint" id="cfgHint"></span>
           <div style="flex:1"></div>
           <button class="mini" id="cfgReset">恢复默认</button>
+          <button class="mini" id="cfgSave">保存</button>
           <button class="btn pri" id="cfgStart">开始训练</button>
         </div>
       </div>
@@ -1088,6 +1143,7 @@
     <div class="flyhd">工具</div>
     <div class="nav sub" data-go="tool-mask"><svg class="ic"><use href="#i-brush"/></svg><span class="lbl">遮罩绘制</span></div>
     <div class="nav sub" data-go="tool-bili"><svg class="ic"><use href="#i-download"/></svg><span class="lbl">B 站下载</span></div>
+    <div class="nav sub" data-go="tool-perf"><svg class="ic"><use href="#i-bolt"/></svg><span class="lbl">速度测试</span></div>
     <div class="nav sub" data-go="tool-color"><svg class="ic"><use href="#i-swap"/></svg><span class="lbl">色域迁移</span></div>
     <div class="nav sub" data-go="tool-angle"><svg class="ic"><use href="#i-scatter"/></svg><span class="lbl">角度可视化</span></div>
   </div>

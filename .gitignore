@@ -1,41 +1,41 @@
-# ---- 用户数据，永不入库 ----
-/workspace/*
-!/workspace/.gitkeep
+# ── 运行时环境（各 ~8 GB，不进仓库）──────────────────────────────
+runtime/
 
-# ---- 内置 Python 运行时 ----
-/_python/
+# ── 权重与缓存 ────────────────────────────────────────────────
+weights/
+*.onnx
+!app/modelhub/__init__.py
+**/_engines/
+*_xseglite*.engine
 
-# 注意：不要写成 /docs/ —— 那会连本仓库根级的 docs/ 一起忽略
+# ── 用户数据 ─────────────────────────────────────────────────
+workspace/
 
-# ---- 依赖 ----
-node_modules/
-
-# ---- Python ----
+# ── Python ───────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
-*.egg-info/
+*.so
 .venv/
-/build/
-/dist/
+venv/
 
-# ---- 本地产物 / 开发脚本 ----
-/_shots/
-/_trash/
-/_*.ps1
-/_*.txt
-/_*.err
-/_*.out
-/_shot.py
-/_dbg*.py
-/_anim_test.py
-/_run_*.log
+# ── 构建产物 ─────────────────────────────────────────────────
+dist/
+build/
+node_modules/
 
-# ---- 机器相关 / 私密 ----
-workspace.txt
-.env
-*.local
-*.log
-*.tmp
+# ── 杂项 ─────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
-_mtest/
+*.log
+_shots/
+_trash/
+
+# 权重/模型二进制一律不入库（GitHub 单文件上限 100MB）
+*.pth
+*.pt
+*.npy
+*.dat
+*.onnx.data
+app/modelhub/onnx/
+app/xlib/models/
+app/DFL_GPU_LAB/**/*.npy

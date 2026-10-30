@@ -1,0 +1,1486 @@
+"""\
+SAEHD模型 - 完整PyTorch训练/推理实现
+
+目标：在不简化功能的前提下，将原 TF/graph 版 SAEHD 训练逻辑迁移到 PyTorch eager。
+
+特性覆盖（对齐原模型行为）：
+- DF / LIAE 两种架构
+- masked_training / eyes_mouth_prio / blur_out_mask
+- lr_dropout / clipgrad / AdaBelief / RMSprop
+- true_face_power (CodeDiscriminator)
+- gan_power (UNetPatchDiscriminator)
+- face_style_power / bg_style_power (style_loss)
+
+注意：本实现依赖 samplelib 产出的 numpy NCHW 数据。
+"""
+
+import multiprocessing
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+from core.interact import interact as io
+from core.leras import nn
+from facelib import FaceType
+from models import ModelBase
+from samplelib import SampleGeneratorFace, SampleProcessor, SampleLoaderV4, SampleGeneratorV2
+
+
+class SAEHDModel(ModelBase):
+    # --- options ---
+    def on_initialize_options(self):
+        # 基本沿用原版选项逻辑
+        device_config = nn.getCurrentDeviceConfig()
+
+        lowest_vram = 2
+        if len(device_config.devices) != 0:
+            lowest_vram = device_config.devices.get_worst_device().total_mem_gb
+
+        suggest_batch_size = 8 if lowest_vram >= 4 else 4
+
+        min_res = 64
+        max_res = 640
+
+        default_resolution = self.options['resolution'] = self.load_or_def_option('resolution', 128)
+        default_face_type = self.options['face_type'] = self.load_or_def_option('face_type', 'f')
+        default_models_opt_on_gpu = self.options['models_opt_on_gpu'] = self.load_or_def_option('models_opt_on_gpu', True)
+
+        default_archi = self.options['archi'] = self.load_or_def_option('archi', 'liae-ud')
+
+        default_ae_dims = self.options['ae_dims'] = self.load_or_def_option('ae_dims', 256)
+        default_e_dims = self.options['e_dims'] = self.load_or_def_option('e_dims', 64)
+        default_d_dims = self.options['d_dims'] = self.options.get('d_dims', None)
+        default_d_mask_dims = self.options['d_mask_dims'] = self.options.get('d_mask_dims', None)
+
+        default_masked_training = self.options['masked_training'] = self.load_or_def_option('masked_training', True)
+        default_eyes_mouth_prio = self.options['eyes_mouth_prio'] = self.load_or_def_option('eyes_mouth_prio', False)
+        default_uniform_yaw = self.options['uniform_yaw'] = self.load_or_def_option('uniform_yaw', False)
+        default_blur_out_mask = self.options['blur_out_mask'] = self.load_or_def_option('blur_out_mask', False)
+
+        default_adabelief = self.options['adabelief'] = self.load_or_def_option('adabelief', True)
+
+        lr_dropout = self.load_or_def_option('lr_dropout', 'n')
+        lr_dropout = {True: 'y', False: 'n'}.get(lr_dropout, lr_dropout)
+        default_lr_dropout = self.options['lr_dropout'] = lr_dropout
+
+        default_random_warp = self.options['random_warp'] = self.load_or_def_option('random_warp', True)
+        default_random_hsv_power = self.options['random_hsv_power'] = self.load_or_def_option('random_hsv_power', 0.0)
+        default_true_face_power = self.options['true_face_power'] = self.load_or_def_option('true_face_power', 0.0)
+        default_face_style_power = self.options['face_style_power'] = self.load_or_def_option('face_style_power', 0.0)
+        default_bg_style_power = self.options['bg_style_power'] = self.load_or_def_option('bg_style_power', 0.0)
+        default_ct_mode = self.options['ct_mode'] = self.load_or_def_option('ct_mode', 'none')
+        default_clipgrad = self.options['clipgrad'] = self.load_or_def_option('clipgrad', False)
+        default_pretrain = self.options['pretrain'] = self.load_or_def_option('pretrain', False)
+
+        ask_override = self.ask_override()
+        if self.is_first_run() or ask_override:
+            self.ask_autobackup_hour()
+            self.ask_write_preview_history()
+            self.ask_target_iter()
+            self.ask_random_src_flip()
+            self.ask_random_dst_flip()
+            self.ask_batch_size(suggest_batch_size)
+
+        if self.is_first_run():
+            resolution = io.input_int(
+                '分辨率',
+                default_resolution,
+                add_info='64-640',
+                help_message='更高分辨率需要更多显存和训练时间。该值会自动调整为 16 的倍数（以及 -d 架构需要的 32 的倍数）。',
+            )
+            resolution = np.clip((resolution // 16) * 16, min_res, max_res)
+            self.options['resolution'] = resolution
+
+            self.options['face_type'] = io.input_str(
+                '人脸类型',
+                default_face_type,
+                ['h', 'mf', 'f', 'wf', 'head'],
+                help_message=(
+                    "Half / mid face / full face / whole face / head。"
+                    "Half 分辨率更高但覆盖脸颊更少；Mid 比 Half 宽约 30%。"
+                    "Whole face 覆盖含额头的整张脸；Head 覆盖整头，但需要 src/dst faceset 都有 XSeg。"
+                ),
+            ).lower()
+
+            while True:
+                archi = io.input_str(
+                    'AE 架构',
+                    default_archi,
+                    help_message=(
+                        "\n"  # keep formatting
+                        "'df' 更偏向保留身份特征。\n"
+                        "'liae' 可缓解脸型差异过大的问题。\n"
+                        "'-u' 提升相似度。\n"
+                        "'-d'（实验性）在相同计算成本下将分辨率翻倍。\n"
+                        "示例：df、liae、df-d、df-ud、liae-ud ...\n"
+                    ),
+                ).lower()
+
+                archi_split = archi.split('-')
+                if len(archi_split) == 2:
+                    archi_type, archi_opts = archi_split
+                elif len(archi_split) == 1:
+                    archi_type, archi_opts = archi_split[0], None
+                else:
+                    continue
+
+                if archi_type not in ['df', 'liae']:
+                    continue
+
+                if archi_opts is not None:
+                    if len(archi_opts) == 0:
+                        continue
+                    if len([1 for opt in archi_opts if opt not in ['u', 'd', 't', 'c']]) != 0:
+                        continue
+                    if 'd' in archi_opts:
+                        self.options['resolution'] = np.clip((self.options['resolution'] // 32) * 32, min_res, max_res)
+
+                self.options['archi'] = archi
+                break
+
+        default_d_dims = self.options['d_dims'] = self.load_or_def_option('d_dims', 64)
+
+        default_d_mask_dims = default_d_dims // 3
+        default_d_mask_dims += default_d_mask_dims % 2
+        self.options['d_mask_dims'] = self.load_or_def_option('d_mask_dims', default_d_mask_dims)
+
+        if self.is_first_run():
+            self.options['ae_dims'] = int(
+                np.clip(
+                    io.input_int(
+                        '自编码器维度（AE dims）',
+                        default_ae_dims,
+                        add_info='32-1024',
+                        help_message=(
+                            '所有人脸信息会被压缩到 AE dims 中。如果维度不足，细节可能丢失。'
+                            '维度越大越好，但更占显存。'
+                        ),
+                    ),
+                    32,
+                    1024,
+                )
+            )
+
+            e_dims = int(
+                np.clip(
+                    io.input_int(
+                        '编码器维度（E dims）',
+                        default_e_dims,
+                        add_info='16-256',
+                        help_message='维度越大越容易学习更多面部特征并获得更锐利的结果，但更占显存。',
+                    ),
+                    16,
+                    256,
+                )
+            )
+            self.options['e_dims'] = e_dims + e_dims % 2
+
+            d_dims = int(
+                np.clip(
+                    io.input_int(
+                        '解码器维度（D dims）',
+                        default_d_dims,
+                        add_info='16-256',
+                        help_message='维度越大越容易学习更多面部特征并获得更锐利的结果，但更占显存。',
+                    ),
+                    16,
+                    256,
+                )
+            )
+            self.options['d_dims'] = d_dims + d_dims % 2
+
+            d_mask_dims = int(
+                np.clip(
+                    io.input_int(
+                        '解码器 Mask 维度（D mask dims）',
+                        self.options['d_mask_dims'],
+                        add_info='16-256',
+                        help_message='通常 mask 维度 = 解码器维度 / 3。增大该值可提升 mask 质量。',
+                    ),
+                    16,
+                    256,
+                )
+            )
+            self.options['d_mask_dims'] = d_mask_dims + d_mask_dims % 2
+
+        if self.is_first_run() or ask_override:
+            if self.options['face_type'] in ('wf', 'head'):
+                self.options['masked_training'] = io.input_bool(
+                    '启用 Masked training',
+                    default_masked_training,
+                    help_message=(
+                        "仅适用于 'whole_face' 或 'head'。"
+                        '启用后会将训练区域裁剪到 full_face mask 或 XSeg mask。'
+                    ),
+                )
+
+            self.options['eyes_mouth_prio'] = io.input_bool(
+                '眼睛与嘴巴优先（Eyes and mouth priority）',
+                default_eyes_mouth_prio,
+                help_message='有助于修复眼睛/嘴巴问题并提升牙齿细节。',
+            )
+            self.options['uniform_yaw'] = io.input_bool(
+                '样本 yaw 均匀分布',
+                default_uniform_yaw,
+                help_message='当 faceset 侧脸样本较少导致侧脸模糊时，该选项有帮助。',
+            )
+            self.options['blur_out_mask'] = io.input_bool(
+                '模糊 Mask 外围',
+                default_blur_out_mask,
+                help_message='对训练样本的人脸 mask 外侧邻近区域进行模糊处理。需要 xseg/full mask。',
+            )
+
+        default_gan_power = self.options['gan_power'] = self.load_or_def_option('gan_power', 0.0)
+        default_gan_patch_size = self.options['gan_patch_size'] = self.load_or_def_option('gan_patch_size', self.options['resolution'] // 8)
+        default_gan_dims = self.options['gan_dims'] = self.load_or_def_option('gan_dims', 16)
+
+        if self.is_first_run() or ask_override:
+            self.options['models_opt_on_gpu'] = io.input_bool(
+                '将模型与优化器放在 GPU',
+                default_models_opt_on_gpu,
+                help_message='将模型+优化器权重放在 GPU 上以加速；或放到 CPU 以节省显存。',
+            )
+
+            self.options['adabelief'] = io.input_bool(
+                '使用 AdaBelief 优化器？',
+                default_adabelief,
+                help_message='使用 AdaBelief（此处用 Adam 近似）。更占显存，但可能泛化更好。',
+            )
+
+            self.options['lr_dropout'] = io.input_str(
+                '使用学习率 dropout',
+                default_lr_dropout,
+                ['n', 'y', 'cpu'],
+                help_message='n - 关闭。y - 开启。cpu - 在 CPU 上启用（节省显存）。',
+            )
+
+            self.options['random_warp'] = io.input_bool(
+                '启用样本随机形变（random warp）',
+                default_random_warp,
+                help_message='随机形变有助于泛化表情；后期可关闭以获得更锐利的结果。',
+            )
+
+            self.options['random_hsv_power'] = float(
+                np.clip(
+                    io.input_number(
+                        '随机色相/饱和度/亮度强度',
+                        default_random_hsv_power,
+                        add_info='0.0 .. 0.3',
+                        help_message='对 src 输入做随机 HSV 偏移以稳定颜色扰动。常用值 0.05。',
+                    ),
+                    0.0,
+                    0.3,
+                )
+            )
+
+            self.options['gan_power'] = float(
+                np.clip(
+                    io.input_number(
+                        'GAN 强度（GAN power）',
+                        default_gan_power,
+                        add_info='0.0 .. 5.0',
+                        help_message='仅建议在人脸已足够清晰时开启（lr_dropout 开启、random_warp 关闭）。常用值 0.1。',
+                    ),
+                    0.0,
+                    5.0,
+                )
+            )
+
+            if self.options['gan_power'] != 0.0:
+                self.options['gan_patch_size'] = int(
+                    np.clip(
+                        io.input_int(
+                            'GAN patch 大小',
+                            default_gan_patch_size,
+                            add_info='3-640',
+                            help_message='常用值为 分辨率/8。',
+                        ),
+                        3,
+                        640,
+                    )
+                )
+
+                self.options['gan_dims'] = int(
+                    np.clip(
+                        io.input_int(
+                            'GAN 维度（GAN dims）',
+                            default_gan_dims,
+                            add_info='4-512',
+                            help_message='常用值 16。',
+                        ),
+                        4,
+                        512,
+                    )
+                )
+
+            if 'df' in self.options['archi']:
+                self.options['true_face_power'] = float(
+                    np.clip(
+                        io.input_number(
+                            "'True face' 强度",
+                            default_true_face_power,
+                            add_info='0.0000 .. 1.0',
+                            help_message='实验性选项。常用值 0.01。',
+                        ),
+                        0.0,
+                        1.0,
+                    )
+                )
+            else:
+                self.options['true_face_power'] = 0.0
+
+            self.options['face_style_power'] = float(
+                np.clip(
+                    io.input_number(
+                        '人脸风格强度（face style）',
+                        default_face_style_power,
+                        add_info='0.0..100.0',
+                        help_message='建议在约 10k+ 迭代后再开启；从 0.001 起逐步增加。开启会增加模型崩溃风险。',
+                    ),
+                    0.0,
+                    100.0,
+                )
+            )
+
+            self.options['bg_style_power'] = float(
+                np.clip(
+                    io.input_number(
+                        '背景风格强度（bg style）',
+                        default_bg_style_power,
+                        add_info='0.0..100.0',
+                        help_message='仅在具备良好 xseg/full mask 时建议开启；常用值 2.0。',
+                    ),
+                    0.0,
+                    100.0,
+                )
+            )
+
+            self.options['ct_mode'] = io.input_str(
+                'src faceset 的颜色迁移模式',
+                default_ct_mode,
+                ['none', 'rct', 'lct', 'mkl', 'idt', 'sot'],
+                help_message='将 src 样本的颜色分布调整得更接近 dst。',
+            )
+
+            self.options['clipgrad'] = io.input_bool(
+                '启用梯度裁剪（clipgrad）',
+                default_clipgrad,
+                help_message='梯度裁剪可降低模型崩溃概率，但会牺牲训练速度。',
+            )
+
+            self.options['pretrain'] = io.input_bool(
+                '启用预训练模式（pretrain）',
+                default_pretrain,
+                help_message='使用大量多样人脸进行预训练。该模式会强制启用/关闭多项训练选项。',
+            )
+
+        if self.options['pretrain'] and self.get_pretraining_data_path() is None:
+            raise Exception('未定义 pretraining_data_path')
+
+        default_fast_gen = self.load_or_def_option('use_fast_generator', False)
+        if self.is_first_run() or ask_override:
+            self.options['use_fast_generator'] = io.input_bool(
+                '启用快速生成器（实验性，V4/V2）',
+                default_fast_gen,
+                help_message='使用新的多进程预取加载器，可显著提升数据加载速度。实验性功能。',
+            )
+
+        default_use_bf16 = self.load_or_def_option('use_bf16', False)
+        if self.is_first_run() or ask_override:
+            self.options['use_bf16'] = io.input_bool(
+                '启用 BF16 混合精度训练',
+                default_use_bf16,
+                help_message='在支持 BF16 的 GPU（Ampere+）上可节省显存并加速训练。权重仍为 FP32。',
+            )
+
+        self.gan_model_changed = (default_gan_patch_size != self.options['gan_patch_size']) or (default_gan_dims != self.options['gan_dims'])
+        self.pretrain_just_disabled = (default_pretrain is True and self.options['pretrain'] is False)
+
+    # --- helpers ---
+    def _select_device(self):
+        # Follow leras nn.initialize() decision to keep weights/inputs consistent.
+        if getattr(nn, 'device', None) is not None:
+            return nn.device
+        device_config = nn.getCurrentDeviceConfig()
+        devices = device_config.devices
+        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            return torch.device('mps')
+        if len(devices) > 0 and torch.cuda.is_available():
+            return torch.device('cuda:0')
+        return torch.device('cpu')
+
+    def _np_to_torch(self, x):
+        if isinstance(x, torch.Tensor):
+            return x
+        return torch.from_numpy(x).float().to(self.device)
+
+    def _move_leras_model_to_device(self, model):
+        # leras ModelBase不是torch.nn.Module，但内部LayerBase是；逐层to即可
+        try:
+            layers = model.get_layers()
+        except Exception:
+            return
+        for layer in layers:
+            try:
+                layer.to(self.device)
+            except Exception:
+                pass
+
+    # --- initialization ---
+    def on_initialize(self):
+        device_config = nn.getCurrentDeviceConfig()
+        devices = device_config.devices
+
+        self.model_data_format = 'NCHW'
+        nn.initialize(device_config, data_format=self.model_data_format)
+
+        self.device = self._select_device()
+
+        self.resolution = resolution = int(self.options['resolution'])
+        self.face_type = {
+            'h': FaceType.HALF,
+            'mf': FaceType.MID_FULL,
+            'f': FaceType.FULL,
+            'wf': FaceType.WHOLE_FACE,
+            'head': FaceType.HEAD,
+        }[self.options['face_type']]
+
+        if 'eyes_prio' in self.options:
+            self.options.pop('eyes_prio')
+
+        self.eyes_mouth_prio = bool(self.options['eyes_mouth_prio'])
+        self.masked_training = bool(self.options['masked_training'])
+        self.blur_out_mask = bool(self.options['blur_out_mask'])
+        self.use_bf16 = bool(self.options.get('use_bf16', False))
+
+        archi_split = self.options['archi'].split('-')
+        if len(archi_split) == 2:
+            archi_type, archi_opts = archi_split
+        else:
+            archi_type, archi_opts = archi_split[0], None
+
+        self.archi_type = archi_type
+
+        ae_dims = int(self.options['ae_dims'])
+        e_dims = int(self.options['e_dims'])
+        d_dims = int(self.options['d_dims'])
+        d_mask_dims = int(self.options['d_mask_dims'])
+
+        self.pretrain = bool(self.options['pretrain'])
+        if getattr(self, 'pretrain_just_disabled', False):
+            self.set_iter(0)
+
+        adabelief = bool(self.options['adabelief'])
+
+        use_fp16 = False
+        if self.is_exporting:
+            use_fp16 = io.input_bool('Export quantized?', False, help_message='Makes the exported model faster. If you have problems, disable this option.')
+
+        self.gan_power = gan_power = 0.0 if self.pretrain else float(self.options['gan_power'])
+        random_warp = False if self.pretrain else bool(self.options['random_warp'])
+        random_src_flip = True if self.pretrain else bool(self.random_src_flip)
+        random_dst_flip = True if self.pretrain else bool(self.random_dst_flip)
+        random_hsv_power = 0.0 if self.pretrain else float(self.options['random_hsv_power'])
+
+        if self.pretrain:
+            self.options_show_override['lr_dropout'] = 'n'
+            self.options_show_override['random_warp'] = False
+            self.options_show_override['gan_power'] = 0.0
+            self.options_show_override['random_hsv_power'] = 0.0
+            self.options_show_override['face_style_power'] = 0.0
+            self.options_show_override['bg_style_power'] = 0.0
+            self.options_show_override['uniform_yaw'] = True
+
+        ct_mode = self.options['ct_mode']
+        if ct_mode == 'none':
+            ct_mode = None
+
+        # build model
+        input_ch = 3
+        self.model_filename_list = []
+
+        model_archi = nn.DeepFakeArchi(resolution, use_fp16=use_fp16, opts=archi_opts)
+
+        if 'df' in archi_type:
+            self.encoder = model_archi.Encoder(in_ch=input_ch, e_ch=e_dims, name='encoder')
+            encoder_out_ch = self.encoder.get_out_ch() * (self.encoder.get_out_res(resolution) ** 2)
+
+            self.inter = model_archi.Inter(in_ch=encoder_out_ch, ae_ch=ae_dims, ae_out_ch=ae_dims, name='inter')
+            inter_out_ch = self.inter.get_out_ch()
+
+            self.decoder_src = model_archi.Decoder(in_ch=inter_out_ch, d_ch=d_dims, d_mask_ch=d_mask_dims, name='decoder_src')
+            self.decoder_dst = model_archi.Decoder(in_ch=inter_out_ch, d_ch=d_dims, d_mask_ch=d_mask_dims, name='decoder_dst')
+
+            self.model_filename_list += [
+                [self.encoder, 'encoder.pth'],
+                [self.inter, 'inter.pth'],
+                [self.decoder_src, 'decoder_src.pth'],
+                [self.decoder_dst, 'decoder_dst.pth'],
+            ]
+
+            if self.is_training and float(self.options['true_face_power']) != 0.0:
+                self.code_discriminator = nn.CodeDiscriminator(ae_dims, code_res=self.inter.get_out_res(), name='dis')
+                self.model_filename_list += [[self.code_discriminator, 'code_discriminator.pth']]
+
+        elif 'liae' in archi_type:
+            self.encoder = model_archi.Encoder(in_ch=input_ch, e_ch=e_dims, name='encoder')
+            encoder_out_ch = self.encoder.get_out_ch() * (self.encoder.get_out_res(resolution) ** 2)
+
+            self.inter_AB = model_archi.Inter(in_ch=encoder_out_ch, ae_ch=ae_dims, ae_out_ch=ae_dims * 2, name='inter_AB')
+            self.inter_B = model_archi.Inter(in_ch=encoder_out_ch, ae_ch=ae_dims, ae_out_ch=ae_dims * 2, name='inter_B')
+
+            inter_out_ch = self.inter_AB.get_out_ch()
+            inters_out_ch = inter_out_ch * 2
+
+            self.decoder = model_archi.Decoder(in_ch=inters_out_ch, d_ch=d_dims, d_mask_ch=d_mask_dims, name='decoder')
+
+            self.model_filename_list += [
+                [self.encoder, 'encoder.pth'],
+                [self.inter_AB, 'inter_AB.pth'],
+                [self.inter_B, 'inter_B.pth'],
+                [self.decoder, 'decoder.pth'],
+            ]
+
+        else:
+            raise ValueError(f'Unsupported architecture type: {archi_type}')
+
+        # GAN discriminator
+        if self.is_training and gan_power != 0.0:
+            self.D_src = nn.UNetPatchDiscriminator(
+                patch_size=int(self.options['gan_patch_size']),
+                in_ch=input_ch,
+                base_ch=int(self.options['gan_dims']),
+                name='D_src',
+            )
+            self.model_filename_list += [[self.D_src, 'GAN.pth']]
+
+        # Move leras models to device
+        for item in [
+            getattr(self, 'encoder', None),
+            getattr(self, 'inter', None),
+            getattr(self, 'decoder_src', None),
+            getattr(self, 'decoder_dst', None),
+            getattr(self, 'inter_AB', None),
+            getattr(self, 'inter_B', None),
+            getattr(self, 'decoder', None),
+            getattr(self, 'code_discriminator', None),
+            getattr(self, 'D_src', None),
+        ]:
+            if item is not None:
+                self._move_leras_model_to_device(item)
+
+        # Optimizers
+        if self.is_training:
+            lr = 5e-5
+            if self.options['lr_dropout'] in ['y', 'cpu'] and not self.pretrain:
+                lr_cos = 500
+                lr_dropout = 0.3
+            else:
+                lr_cos = 0
+                lr_dropout = 1.0
+
+            OptimizerClass = nn.AdaBelief if adabelief else nn.RMSprop
+            clipnorm = 1.0 if bool(self.options['clipgrad']) else 0.0
+
+            if 'df' in archi_type:
+                self.src_dst_saveable_weights = (
+                    list(self.encoder.get_weights())
+                    + list(self.inter.get_weights())
+                    + list(self.decoder_src.get_weights())
+                    + list(self.decoder_dst.get_weights())
+                )
+                self.src_dst_trainable_weights = self.src_dst_saveable_weights
+            else:
+                self.src_dst_saveable_weights = (
+                    list(self.encoder.get_weights())
+                    + list(self.inter_AB.get_weights())
+                    + list(self.inter_B.get_weights())
+                    + list(self.decoder.get_weights())
+                )
+                # random_warp关闭时，按原逻辑只训练 encoder+inter_B+decoder
+                if random_warp:
+                    self.src_dst_trainable_weights = self.src_dst_saveable_weights
+                else:
+                    self.src_dst_trainable_weights = (
+                        list(self.encoder.get_weights())
+                        + list(self.inter_B.get_weights())
+                        + list(self.decoder.get_weights())
+                    )
+
+            self.src_dst_opt = OptimizerClass(
+                self.src_dst_trainable_weights,
+                lr=lr,
+                lr_dropout=lr_dropout,
+                lr_cos=lr_cos,
+                clipnorm=clipnorm,
+                name='src_dst_opt',
+            )
+            self.model_filename_list += [(self.src_dst_opt, 'src_dst_opt.pth')]
+
+            if float(self.options['true_face_power']) != 0.0 and 'df' in archi_type:
+                self.D_code_opt = OptimizerClass(
+                    list(self.code_discriminator.get_weights()),
+                    lr=lr,
+                    lr_dropout=lr_dropout,
+                    lr_cos=lr_cos,
+                    clipnorm=clipnorm,
+                    name='D_code_opt',
+                )
+                self.model_filename_list += [(self.D_code_opt, 'D_code_opt.pth')]
+
+            if gan_power != 0.0:
+                self.D_src_dst_opt = OptimizerClass(
+                    list(self.D_src.get_weights()),
+                    lr=lr,
+                    lr_dropout=lr_dropout,
+                    lr_cos=lr_cos,
+                    clipnorm=clipnorm,
+                    name='GAN_opt',
+                )
+                self.model_filename_list += [(self.D_src_dst_opt, 'GAN_opt.pth')]
+
+        # Load/init weights
+        self._module_info_list = []
+        for model, filename in io.progress_bar_generator(self.model_filename_list, 'Initializing models'):
+            if getattr(self, 'pretrain_just_disabled', False):
+                do_init = False
+                if 'df' in archi_type:
+                    if model is getattr(self, 'inter', None):
+                        do_init = True
+                elif 'liae' in archi_type:
+                    if model is getattr(self, 'inter_AB', None) or model is getattr(self, 'inter_B', None):
+                        do_init = True
+            else:
+                do_init = self.is_first_run()
+                if self.is_training and gan_power != 0.0 and model is getattr(self, 'D_src', None):
+                    if getattr(self, 'gan_model_changed', False):
+                        do_init = True
+
+            if not do_init:
+                load_ok = model.load_weights(self.get_strpath_storage_for_file(filename))
+                do_init = not load_ok
+            else:
+                load_ok = False
+
+            if do_init:
+                model.init_weights()
+                status = '已重置'
+            else:
+                status = '已加载'
+
+            # 统计参数量
+            weights = model.get_weights()
+            param_count = sum(w.numel() for w in weights) if weights else 0
+            module_name = filename.replace('.pth', '')
+            self._module_info_list.append((module_name, param_count, status))
+
+        # Generators
+        if self.is_training:
+            training_data_src_path = self.training_data_src_path if not self.pretrain else self.get_pretraining_data_path()
+            training_data_dst_path = self.training_data_dst_path if not self.pretrain else self.get_pretraining_data_path()
+
+            use_fast = self.options.get('use_fast_generator', False)
+
+            if use_fast:
+                # === 快速生成器路径（V4 loader + V2 generator）===
+                src_loader = SampleLoaderV4(
+                    aligned_path=training_data_src_path,
+                    batch_size=self.get_batch_size(),
+                    resolution=resolution,
+                    use_yaw_sampling=bool(self.options['uniform_yaw']) or self.pretrain,
+                )
+                dst_loader = SampleLoaderV4(
+                    aligned_path=training_data_dst_path,
+                    batch_size=self.get_batch_size(),
+                    resolution=resolution,
+                    use_yaw_sampling=bool(self.options['uniform_yaw']) or self.pretrain,
+                )
+
+                src_ct_loader = dst_loader if ct_mode is not None else None
+
+                gen_src_outputs = [
+                    {
+                        'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
+                        'warp': random_warp,
+                        'transform': True,
+                        'channel_type': SampleProcessor.ChannelType.BGR,
+                        'ct_mode': ct_mode,
+                        'random_hsv_shift_amount': random_hsv_power,
+                        'face_type': self.face_type,
+                        'data_format': nn.data_format,
+                        'resolution': resolution,
+                    },
+                    {
+                        'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
+                        'warp': False,
+                        'transform': True,
+                        'channel_type': SampleProcessor.ChannelType.BGR,
+                        'ct_mode': ct_mode,
+                        'face_type': self.face_type,
+                        'data_format': nn.data_format,
+                        'resolution': resolution,
+                    },
+                    {
+                        'sample_type': SampleProcessor.SampleType.FACE_MASK,
+                        'warp': False,
+                        'transform': True,
+                        'channel_type': SampleProcessor.ChannelType.G,
+                        'face_mask_type': SampleProcessor.FaceMaskType.FULL_FACE,
+                        'face_type': self.face_type,
+                        'data_format': nn.data_format,
+                        'resolution': resolution,
+                    },
+                    {
+                        'sample_type': SampleProcessor.SampleType.FACE_MASK,
+                        'warp': False,
+                        'transform': True,
+                        'channel_type': SampleProcessor.ChannelType.G,
+                        'face_mask_type': SampleProcessor.FaceMaskType.EYES_MOUTH,
+                        'face_type': self.face_type,
+                        'data_format': nn.data_format,
+                        'resolution': resolution,
+                    },
+                ]
+
+                gen_dst_outputs = [
+                    {
+                        'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
+                        'warp': random_warp,
+                        'transform': True,
+                        'channel_type': SampleProcessor.ChannelType.BGR,
+                        'face_type': self.face_type,
+                        'data_format': nn.data_format,
+                        'resolution': resolution,
+                    },
+                    {
+                        'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
+                        'warp': False,
+                        'transform': True,
+                        'channel_type': SampleProcessor.ChannelType.BGR,
+                        'face_type': self.face_type,
+                        'data_format': nn.data_format,
+                        'resolution': resolution,
+                    },
+                    {
+                        'sample_type': SampleProcessor.SampleType.FACE_MASK,
+                        'warp': False,
+                        'transform': True,
+                        'channel_type': SampleProcessor.ChannelType.G,
+                        'face_mask_type': SampleProcessor.FaceMaskType.FULL_FACE,
+                        'face_type': self.face_type,
+                        'data_format': nn.data_format,
+                        'resolution': resolution,
+                    },
+                    {
+                        'sample_type': SampleProcessor.SampleType.FACE_MASK,
+                        'warp': False,
+                        'transform': True,
+                        'channel_type': SampleProcessor.ChannelType.G,
+                        'face_mask_type': SampleProcessor.FaceMaskType.EYES_MOUTH,
+                        'face_type': self.face_type,
+                        'data_format': nn.data_format,
+                        'resolution': resolution,
+                    },
+                ]
+
+                self.set_training_data_generators(
+                    [
+                        SampleGeneratorV2(
+                            loader=src_loader,
+                            sample_process_options=SampleProcessor.Options(scale_range=[-0.15, 0.15], random_flip=random_src_flip),
+                            output_sample_types=gen_src_outputs,
+                            resolution=resolution,
+                            debug=self.is_debug(),
+                            ct_loader=src_ct_loader,
+                        ),
+                        SampleGeneratorV2(
+                            loader=dst_loader,
+                            sample_process_options=SampleProcessor.Options(scale_range=[-0.15, 0.15], random_flip=random_dst_flip),
+                            output_sample_types=gen_dst_outputs,
+                            resolution=resolution,
+                            debug=self.is_debug(),
+                        ),
+                    ]
+                )
+            else:
+                # === 原始生成器路径（SampleGeneratorFace）===
+                random_ct_samples_path = training_data_dst_path if ct_mode is not None and not self.pretrain else None
+
+                cpu_count = multiprocessing.cpu_count()
+                src_generators_count = cpu_count // 2
+                dst_generators_count = cpu_count // 2
+                if ct_mode is not None:
+                    src_generators_count = int(src_generators_count * 1.5)
+
+                self.set_training_data_generators(
+                    [
+                        SampleGeneratorFace(
+                            training_data_src_path,
+                            random_ct_samples_path=random_ct_samples_path,
+                            debug=self.is_debug(),
+                            batch_size=self.get_batch_size(),
+                            sample_process_options=SampleProcessor.Options(scale_range=[-0.15, 0.15], random_flip=random_src_flip),
+                            output_sample_types=[
+                                {
+                                    'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
+                                    'warp': random_warp,
+                                    'transform': True,
+                                    'channel_type': SampleProcessor.ChannelType.BGR,
+                                    'ct_mode': ct_mode,
+                                    'random_hsv_shift_amount': random_hsv_power,
+                                    'face_type': self.face_type,
+                                    'data_format': nn.data_format,
+                                    'resolution': resolution,
+                                },
+                                {
+                                    'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
+                                    'warp': False,
+                                    'transform': True,
+                                    'channel_type': SampleProcessor.ChannelType.BGR,
+                                    'ct_mode': ct_mode,
+                                    'face_type': self.face_type,
+                                    'data_format': nn.data_format,
+                                    'resolution': resolution,
+                                },
+                                {
+                                    'sample_type': SampleProcessor.SampleType.FACE_MASK,
+                                    'warp': False,
+                                    'transform': True,
+                                    'channel_type': SampleProcessor.ChannelType.G,
+                                    'face_mask_type': SampleProcessor.FaceMaskType.FULL_FACE,
+                                    'face_type': self.face_type,
+                                    'data_format': nn.data_format,
+                                    'resolution': resolution,
+                                },
+                                {
+                                    'sample_type': SampleProcessor.SampleType.FACE_MASK,
+                                    'warp': False,
+                                    'transform': True,
+                                    'channel_type': SampleProcessor.ChannelType.G,
+                                    'face_mask_type': SampleProcessor.FaceMaskType.EYES_MOUTH,
+                                    'face_type': self.face_type,
+                                    'data_format': nn.data_format,
+                                    'resolution': resolution,
+                                },
+                            ],
+                            uniform_yaw_distribution=bool(self.options['uniform_yaw']) or self.pretrain,
+                            generators_count=src_generators_count,
+                        ),
+                        SampleGeneratorFace(
+                            training_data_dst_path,
+                            debug=self.is_debug(),
+                            batch_size=self.get_batch_size(),
+                            sample_process_options=SampleProcessor.Options(scale_range=[-0.15, 0.15], random_flip=random_dst_flip),
+                            output_sample_types=[
+                                {
+                                    'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
+                                    'warp': random_warp,
+                                    'transform': True,
+                                    'channel_type': SampleProcessor.ChannelType.BGR,
+                                    'face_type': self.face_type,
+                                    'data_format': nn.data_format,
+                                    'resolution': resolution,
+                                },
+                                {
+                                    'sample_type': SampleProcessor.SampleType.FACE_IMAGE,
+                                    'warp': False,
+                                    'transform': True,
+                                    'channel_type': SampleProcessor.ChannelType.BGR,
+                                    'face_type': self.face_type,
+                                    'data_format': nn.data_format,
+                                    'resolution': resolution,
+                                },
+                                {
+                                    'sample_type': SampleProcessor.SampleType.FACE_MASK,
+                                    'warp': False,
+                                    'transform': True,
+                                    'channel_type': SampleProcessor.ChannelType.G,
+                                    'face_mask_type': SampleProcessor.FaceMaskType.FULL_FACE,
+                                    'face_type': self.face_type,
+                                    'data_format': nn.data_format,
+                                    'resolution': resolution,
+                                },
+                                {
+                                    'sample_type': SampleProcessor.SampleType.FACE_MASK,
+                                    'warp': False,
+                                    'transform': True,
+                                    'channel_type': SampleProcessor.ChannelType.G,
+                                    'face_mask_type': SampleProcessor.FaceMaskType.EYES_MOUTH,
+                                    'face_type': self.face_type,
+                                    'data_format': nn.data_format,
+                                    'resolution': resolution,
+                                },
+                            ],
+                            uniform_yaw_distribution=bool(self.options['uniform_yaw']) or self.pretrain,
+                            generators_count=dst_generators_count,
+                        ),
+                    ]
+                )
+
+            if getattr(self, 'pretrain_just_disabled', False):
+                self.update_sample_for_preview(force_new=True)
+
+        # Build merge fn
+        self._build_merge_fns()
+
+    def get_model_filename_list(self):
+        return self.model_filename_list
+
+    def onSave(self):
+        for model, filename in io.progress_bar_generator(self.get_model_filename_list(), 'Saving', leave=False):
+            model.save_weights(self.get_strpath_storage_for_file(filename))
+
+    def should_save_preview_history(self):
+        return (not io.is_colab() and self.iter % (10 * (max(1, self.resolution // 64))) == 0) or (io.is_colab() and self.iter % 100 == 0)
+
+    def export_dfm(self):
+        """Export model to .dfm (ONNX) compatible with DeepFaceLab merger pipeline."""
+        output_path = self.get_strpath_storage_for_file('model.dfm')
+
+        io.log_info(f'Dumping .dfm to {output_path}')
+
+        # In this repo, many leras layers keep weights as raw torch tensors (not registered Parameters).
+        # During ONNX tracing, tensors that require grad cannot be embedded as constants.
+        # Export does not need gradients, so we disable them for the exported sub-graph.
+        def _disable_grad_for_module_weights(m):
+            try:
+                ws = m.get_weights()
+            except Exception:
+                return
+            for w in ws:
+                try:
+                    if hasattr(w, 'requires_grad'):
+                        w.requires_grad_(False)
+                except Exception:
+                    pass
+
+        if self.archi_type.startswith('df'):
+            _disable_grad_for_module_weights(self.encoder)
+            _disable_grad_for_module_weights(self.inter)
+            _disable_grad_for_module_weights(self.decoder_src)
+            _disable_grad_for_module_weights(self.decoder_dst)
+        else:
+            _disable_grad_for_module_weights(self.encoder)
+            _disable_grad_for_module_weights(self.inter_AB)
+            _disable_grad_for_module_weights(self.inter_B)
+            _disable_grad_for_module_weights(self.decoder)
+
+        class _DFMWrapper(torch.nn.Module):
+            def __init__(self, parent):
+                super().__init__()
+                # Register submodules for export
+                if parent.archi_type.startswith('df'):
+                    self.encoder = parent.encoder
+                    self.inter = parent.inter
+                    self.decoder_src = parent.decoder_src
+                    self.decoder_dst = parent.decoder_dst
+                    self.is_df = True
+                else:
+                    self.encoder = parent.encoder
+                    self.inter_AB = parent.inter_AB
+                    self.inter_B = parent.inter_B
+                    self.decoder = parent.decoder
+                    self.is_df = False
+
+            def forward(self, in_face):
+                # in_face: NHWC float32 [0..1]
+                x = in_face.permute(0, 3, 1, 2).contiguous()
+                if self.is_df:
+                    code = self.inter(self.encoder(x))
+                    out_celeb_face, out_celeb_face_mask = self.decoder_src(code)
+                    _, out_face_mask = self.decoder_dst(code)
+                else:
+                    code = self.encoder(x)
+                    inter_b = self.inter_B(code)
+                    inter_ab = self.inter_AB(code)
+                    code_dst = torch.cat([inter_b, inter_ab], dim=1)
+                    code_src_dst = torch.cat([inter_ab, inter_ab], dim=1)
+                    out_celeb_face, out_celeb_face_mask = self.decoder(code_src_dst)
+                    _, out_face_mask = self.decoder(code_dst)
+
+                # Return NHWC tensors
+                out_face_mask = out_face_mask.permute(0, 2, 3, 1).contiguous()
+                out_celeb_face = out_celeb_face.permute(0, 2, 3, 1).contiguous()
+                out_celeb_face_mask = out_celeb_face_mask.permute(0, 2, 3, 1).contiguous()
+                return out_face_mask, out_celeb_face, out_celeb_face_mask
+
+        wrapper = _DFMWrapper(self)
+        wrapper.eval()
+
+        # Export on CPU for maximum compatibility
+        wrapper_cpu = wrapper.to('cpu')
+        dummy = torch.zeros(1, self.resolution, self.resolution, 3, dtype=torch.float32)
+
+        # Warm-up once to avoid tracer complaining about mutated state during export.
+        with torch.no_grad():
+            _ = wrapper_cpu(dummy)
+
+        # DeepFaceLive / DFMModel.py 在推理时固定使用 'in_face:0' 作为输入名。
+        # 原版 DFL(tf2onnx) 导出也使用带 ':0' 的张量名：
+        #   input_names  = ['in_face:0']
+        #   output_names = ['out_face_mask:0','out_celeb_face:0','out_celeb_face_mask:0']
+        # 为保持兼容性，这里仅对 ONNX 的 I/O 命名对齐，不改变导出内容。
+        export_kwargs = dict(
+            input_names=['in_face:0'],
+            output_names=['out_face_mask:0', 'out_celeb_face:0', 'out_celeb_face_mask:0'],
+            dynamic_axes={
+                'in_face:0': {0: 'batch'},
+                'out_face_mask:0': {0: 'batch'},
+                'out_celeb_face:0': {0: 'batch'},
+                'out_celeb_face_mask:0': {0: 'batch'},
+            },
+            opset_version=12,
+        )
+
+        # Torch 2.5+ 默认可能走 dynamo 导出（依赖 onnxscript）；强制 legacy exporter 以提升稳定性。
+        try:
+            torch.onnx.export(
+                wrapper_cpu,
+                dummy,
+                output_path,
+                dynamo=False,
+                **export_kwargs,
+            )
+        except TypeError:
+            torch.onnx.export(
+                wrapper_cpu,
+                dummy,
+                output_path,
+                **export_kwargs,
+            )
+
+    def _build_merge_fns(self):
+        # merge 在推理时用 warped_dst -> pred_src_dst + masks
+        pass
+
+    # --- core forward helpers ---
+    def _forward_df(self, warped_src, warped_dst):
+        src_code = self.inter(self.encoder(warped_src))
+        dst_code = self.inter(self.encoder(warped_dst))
+
+        pred_src_src, pred_src_srcm = self.decoder_src(src_code)
+        pred_dst_dst, pred_dst_dstm = self.decoder_dst(dst_code)
+        pred_src_dst, pred_src_dstm = self.decoder_src(dst_code)
+        pred_src_dst_no_code_grad, _ = self.decoder_src(dst_code.detach())
+
+        return {
+            'src_code': src_code,
+            'dst_code': dst_code,
+            'pred_src_src': pred_src_src,
+            'pred_src_srcm': pred_src_srcm,
+            'pred_dst_dst': pred_dst_dst,
+            'pred_dst_dstm': pred_dst_dstm,
+            'pred_src_dst': pred_src_dst,
+            'pred_src_dstm': pred_src_dstm,
+            'pred_src_dst_no_code_grad': pred_src_dst_no_code_grad,
+        }
+
+    def _forward_liae(self, warped_src, warped_dst):
+        src_code = self.encoder(warped_src)
+        src_inter_ab = self.inter_AB(src_code)
+        src_code_cat = torch.cat([src_inter_ab, src_inter_ab], dim=1)
+
+        dst_code = self.encoder(warped_dst)
+        dst_inter_b = self.inter_B(dst_code)
+        dst_inter_ab = self.inter_AB(dst_code)
+        dst_code_cat = torch.cat([dst_inter_b, dst_inter_ab], dim=1)
+
+        src_dst_code_cat = torch.cat([dst_inter_ab, dst_inter_ab], dim=1)
+
+        pred_src_src, pred_src_srcm = self.decoder(src_code_cat)
+        pred_dst_dst, pred_dst_dstm = self.decoder(dst_code_cat)
+        pred_src_dst, pred_src_dstm = self.decoder(src_dst_code_cat)
+        pred_src_dst_no_code_grad, _ = self.decoder(src_dst_code_cat.detach())
+
+        return {
+            'src_code': src_code_cat,
+            'dst_code': dst_code_cat,
+            'pred_src_src': pred_src_src,
+            'pred_src_srcm': pred_src_srcm,
+            'pred_dst_dst': pred_dst_dst,
+            'pred_dst_dstm': pred_dst_dstm,
+            'pred_src_dst': pred_src_dst,
+            'pred_src_dstm': pred_src_dstm,
+            'pred_src_dst_no_code_grad': pred_src_dst_no_code_grad,
+        }
+
+    # --- losses ---
+    def _recon_losses(self, target_src, target_dst, target_srcm, target_dstm, target_srcm_em, target_dstm_em, fw):
+        resolution = self.resolution
+
+        pred_src_src = fw['pred_src_src']
+        pred_src_srcm = fw['pred_src_srcm']
+        pred_dst_dst = fw['pred_dst_dst']
+        pred_dst_dstm = fw['pred_dst_dstm']
+        pred_src_dst = fw['pred_src_dst']
+        pred_src_dstm = fw['pred_src_dstm']
+        pred_src_dst_no_code_grad = fw['pred_src_dst_no_code_grad']
+
+        # mask blur
+        k_blur = max(1, resolution // 32)
+        target_srcm_blur = nn.gaussian_blur(target_srcm, k_blur)
+        target_srcm_blur = torch.clamp(target_srcm_blur, 0.0, 0.5) * 2.0
+        target_srcm_anti_blur = 1.0 - target_srcm_blur
+
+        target_dstm_blur = nn.gaussian_blur(target_dstm, k_blur)
+        target_dstm_blur = torch.clamp(target_dstm_blur, 0.0, 0.5) * 2.0
+
+        # Match original SAEHD behavior (uses target_srcm_blur here)
+        style_mask_blur = target_srcm_blur.detach()
+        style_mask_blur = torch.clamp(style_mask_blur, 0.0, 1.0)
+        style_mask_anti_blur = 1.0 - style_mask_blur
+
+        target_dst_masked = target_dst * target_dstm_blur
+
+        target_src_anti_masked = target_src * target_srcm_anti_blur
+        pred_src_src_anti_masked = pred_src_src * target_srcm_anti_blur
+
+        target_src_masked_opt = target_src * target_srcm_blur if self.masked_training else target_src
+        target_dst_masked_opt = target_dst_masked if self.masked_training else target_dst
+        pred_src_src_masked_opt = pred_src_src * target_srcm_blur if self.masked_training else pred_src_src
+        pred_dst_dst_masked_opt = pred_dst_dst * target_dstm_blur if self.masked_training else pred_dst_dst
+
+        def dssim_loss(a, b, fs, w):
+            v = nn.dssim(a, b, max_val=1.0, filter_size=fs)
+            return float(w) * v.mean(dim=[1, 2, 3])
+
+        def mse(a, b, w):
+            return float(w) * ((a - b) ** 2).mean(dim=[1, 2, 3])
+
+        def l1(a, b, w):
+            return float(w) * (a - b).abs().mean(dim=[1, 2, 3])
+
+        fs1 = max(1, int(resolution / 11.6))
+        fs2 = max(1, int(resolution / 23.2))
+
+        if resolution < 256:
+            src_loss = dssim_loss(target_src_masked_opt, pred_src_src_masked_opt, fs1, 10)
+            dst_loss = dssim_loss(target_dst_masked_opt, pred_dst_dst_masked_opt, fs1, 10)
+        else:
+            src_loss = dssim_loss(target_src_masked_opt, pred_src_src_masked_opt, fs1, 5) + dssim_loss(
+                target_src_masked_opt, pred_src_src_masked_opt, fs2, 5
+            )
+            dst_loss = dssim_loss(target_dst_masked_opt, pred_dst_dst_masked_opt, fs1, 5) + dssim_loss(
+                target_dst_masked_opt, pred_dst_dst_masked_opt, fs2, 5
+            )
+
+        src_loss = src_loss + mse(target_src_masked_opt, pred_src_src_masked_opt, 10)
+        dst_loss = dst_loss + mse(target_dst_masked_opt, pred_dst_dst_masked_opt, 10)
+
+        if self.eyes_mouth_prio:
+            src_loss = src_loss + l1(target_src * target_srcm_em, pred_src_src * target_srcm_em, 300)
+            dst_loss = dst_loss + l1(target_dst * target_dstm_em, pred_dst_dst * target_dstm_em, 300)
+
+        src_loss = src_loss + mse(target_srcm, pred_src_srcm, 10)
+        dst_loss = dst_loss + mse(target_dstm, pred_dst_dstm, 10)
+
+        # style losses
+        face_style_power = float(self.options['face_style_power']) / 100.0
+        bg_style_power = float(self.options['bg_style_power']) / 100.0
+
+        extra_style_loss = torch.tensor(0.0, device=self.device)
+
+        if face_style_power != 0.0 and not self.pretrain:
+            extra_style_loss = extra_style_loss + nn.style_loss(
+                pred_src_dst_no_code_grad * pred_src_dstm.detach(),
+                pred_dst_dst.detach() * pred_dst_dstm.detach(),
+                gaussian_blur_radius=resolution // 8,
+                loss_weight=10000.0 * face_style_power,
+            )
+
+        if bg_style_power != 0.0 and not self.pretrain:
+            target_dst_style_anti_masked = target_dst * style_mask_anti_blur
+            psd_style_anti_masked = pred_src_dst * style_mask_anti_blur
+            extra_style_loss = extra_style_loss + (
+                10.0 * bg_style_power * nn.dssim(psd_style_anti_masked, target_dst_style_anti_masked, max_val=1.0, filter_size=fs1).mean()
+            )
+            extra_style_loss = extra_style_loss + (
+                (10.0 * bg_style_power) * ((psd_style_anti_masked - target_dst_style_anti_masked) ** 2).mean()
+            )
+
+        # masked training extras with gan
+        extra_masked_gan_loss = torch.tensor(0.0, device=self.device)
+        if self.masked_training and self.gan_power != 0.0:
+            extra_masked_gan_loss = extra_masked_gan_loss + 0.000001 * nn.total_variation_mse(pred_src_src)
+            extra_masked_gan_loss = extra_masked_gan_loss + 0.02 * ((pred_src_src_anti_masked - target_src_anti_masked) ** 2).mean()
+
+        return src_loss, dst_loss, extra_style_loss, extra_masked_gan_loss
+
+    def train_one_step(self, warped_src, target_src, target_srcm, target_srcm_em, warped_dst, target_dst, target_dstm, target_dstm_em):
+        # to tensors
+        warped_src = self._np_to_torch(warped_src)
+        warped_dst = self._np_to_torch(warped_dst)
+        target_src = self._np_to_torch(target_src)
+        target_dst = self._np_to_torch(target_dst)
+        target_srcm = self._np_to_torch(target_srcm)
+        target_srcm_em = self._np_to_torch(target_srcm_em)
+        target_dstm = self._np_to_torch(target_dstm)
+        target_dstm_em = self._np_to_torch(target_dstm_em)
+
+        # blur-out-mask preprocessing
+        if self.blur_out_mask:
+            sigma = float(self.resolution) / 128.0
+
+            srcm_anti = 1.0 - target_srcm
+            x = nn.gaussian_blur(target_src * srcm_anti, sigma)
+            y = 1.0 - nn.gaussian_blur(target_srcm, sigma)
+            y = torch.where(y == 0, torch.ones_like(y), y)
+            target_src = target_src * target_srcm + (x / y) * srcm_anti
+
+            dstm_anti = 1.0 - target_dstm
+            x = nn.gaussian_blur(target_dst * dstm_anti, sigma)
+            y = 1.0 - nn.gaussian_blur(target_dstm, sigma)
+            y = torch.where(y == 0, torch.ones_like(y), y)
+            target_dst = target_dst * target_dstm + (x / y) * dstm_anti
+
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=self.use_bf16):
+            if 'df' in self.archi_type:
+                fw = self._forward_df(warped_src, warped_dst)
+            else:
+                fw = self._forward_liae(warped_src, warped_dst)
+
+        if self.use_bf16:
+            fw = {k: (v.float() if isinstance(v, torch.Tensor) else v) for k, v in fw.items()}
+
+        src_loss_vec, dst_loss_vec, extra_style_loss, extra_masked_gan_loss = self._recon_losses(
+            target_src,
+            target_dst,
+            target_srcm,
+            target_dstm,
+            target_srcm_em,
+            target_dstm_em,
+            fw,
+        )
+
+        G_loss = src_loss_vec.mean() + dst_loss_vec.mean() + extra_style_loss + extra_masked_gan_loss
+
+        # true_face (DF only)
+        true_face_power = float(self.options['true_face_power'])
+        D_code_loss = None
+        if true_face_power != 0.0 and not self.pretrain and 'df' in self.archi_type:
+            src_code_d = self.code_discriminator(fw['src_code'])
+            dst_code_d = self.code_discriminator(fw['dst_code'])
+
+            ones_src = torch.ones_like(src_code_d)
+            zeros_src = torch.zeros_like(src_code_d)
+            ones_dst = torch.ones_like(dst_code_d)
+
+            G_loss = G_loss + true_face_power * F.binary_cross_entropy_with_logits(src_code_d, ones_src)
+
+            D_code_loss = 0.5 * (
+                F.binary_cross_entropy_with_logits(dst_code_d, ones_dst)
+                + F.binary_cross_entropy_with_logits(src_code_d.detach(), zeros_src)
+            )
+
+        # GAN
+        D_gan_loss = None
+        if self.gan_power != 0.0:
+            pred_src_src = fw['pred_src_src']
+            target_src_masked_opt = target_src * target_srcm if self.masked_training else target_src
+            pred_src_src_masked_opt = pred_src_src * target_srcm if self.masked_training else pred_src_src
+
+            pred_d1, pred_d2 = self.D_src(pred_src_src_masked_opt)
+            tgt_d1, tgt_d2 = self.D_src(target_src_masked_opt)
+
+            ones1 = torch.ones_like(tgt_d1)
+            zeros1 = torch.zeros_like(pred_d1)
+            ones2 = torch.ones_like(tgt_d2)
+            zeros2 = torch.zeros_like(pred_d2)
+
+            D_gan_loss = 0.5 * (
+                F.binary_cross_entropy_with_logits(tgt_d1, ones1)
+                + F.binary_cross_entropy_with_logits(pred_d1.detach(), zeros1)
+            ) + 0.5 * (
+                F.binary_cross_entropy_with_logits(tgt_d2, ones2)
+                + F.binary_cross_entropy_with_logits(pred_d2.detach(), zeros2)
+            )
+
+            G_loss = G_loss + self.gan_power * (
+                F.binary_cross_entropy_with_logits(pred_d1, torch.ones_like(pred_d1))
+                + F.binary_cross_entropy_with_logits(pred_d2, torch.ones_like(pred_d2))
+            )
+
+        # backward + optimizer steps
+        self.src_dst_opt.zero_grad()
+        G_loss.backward()
+        self.src_dst_opt.step()
+
+        # Update discriminators
+        if D_code_loss is not None:
+            self.D_code_opt.zero_grad()
+            D_code_loss.backward()
+            self.D_code_opt.step()
+
+        if D_gan_loss is not None:
+            self.D_src_dst_opt.zero_grad()
+            D_gan_loss.backward()
+            self.D_src_dst_opt.step()
+
+        return float(src_loss_vec.mean().detach().cpu()), float(dst_loss_vec.mean().detach().cpu())
+
+    # --- training hook ---
+    def onTrainOneIter(self):
+        if self.get_iter() == 0 and not self.pretrain and not getattr(self, 'pretrain_just_disabled', False):
+            io.log_info('You are training the model from scratch. It is strongly recommended to use a pretrained model to speed up the training and improve the quality.\n')
+
+        ((warped_src, target_src, target_srcm, target_srcm_em), (warped_dst, target_dst, target_dstm, target_dstm_em)) = self.generate_next_samples()
+
+        src_loss, dst_loss = self.train_one_step(
+            warped_src,
+            target_src,
+            target_srcm,
+            target_srcm_em,
+            warped_dst,
+            target_dst,
+            target_dstm,
+            target_dstm_em,
+        )
+
+        return (('src_loss', src_loss), ('dst_loss', dst_loss))
+
+    # --- preview / merge ---
+    def AE_view(self, target_src, target_dst):
+        target_src = self._np_to_torch(target_src)
+        target_dst = self._np_to_torch(target_dst)
+
+        with torch.no_grad():
+            with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=self.use_bf16):
+                if 'df' in self.archi_type:
+                    fw = self._forward_df(target_src, target_dst)
+                else:
+                    fw = self._forward_liae(target_src, target_dst)
+
+        pred_src_src = fw['pred_src_src'].detach().cpu().float().numpy()
+        pred_dst_dst = fw['pred_dst_dst'].detach().cpu().float().numpy()
+        pred_dst_dstm = fw['pred_dst_dstm'].detach().cpu().float().numpy()
+        pred_src_dst = fw['pred_src_dst'].detach().cpu().float().numpy()
+        pred_src_dstm = fw['pred_src_dstm'].detach().cpu().float().numpy()
+
+        return pred_src_src, pred_dst_dst, pred_dst_dstm, pred_src_dst, pred_src_dstm
+
+    def onGetPreview(self, samples, for_history=False):
+        ((warped_src, target_src, target_srcm, target_srcm_em), (warped_dst, target_dst, target_dstm, target_dstm_em)) = samples
+
+        S, D, SS, DD, DDM, SD, SDM = [
+            np.clip(nn.to_data_format(x, 'NHWC', self.model_data_format), 0.0, 1.0)
+            for x in ([target_src, target_dst] + list(self.AE_view(target_src, target_dst)))
+        ]
+
+        DDM = np.repeat(DDM, 3, axis=-1)
+        SDM = np.repeat(SDM, 3, axis=-1)
+
+        target_srcm = nn.to_data_format(target_srcm, 'NHWC', self.model_data_format)
+        target_dstm = nn.to_data_format(target_dstm, 'NHWC', self.model_data_format)
+
+        n_samples = min(4, self.get_batch_size(), 800 // self.resolution)
+
+        result = []
+
+        if self.resolution <= 256:
+            st = []
+            for i in range(n_samples):
+                ar = (S[i], SS[i], D[i], DD[i], SD[i])
+                st.append(np.concatenate(ar, axis=1))
+            result.append(('SAEHD', np.concatenate(st, axis=0)))
+
+            st_m = []
+            for i in range(n_samples):
+                SD_mask = DDM[i] * SDM[i] if self.face_type < FaceType.HEAD else SDM[i]
+                ar = (S[i] * target_srcm[i], SS[i], D[i] * target_dstm[i], DD[i] * DDM[i], SD[i] * SD_mask)
+                st_m.append(np.concatenate(ar, axis=1))
+            result.append(('SAEHD masked', np.concatenate(st_m, axis=0)))
+
+        else:
+            st = []
+            for i in range(n_samples):
+                ar = (S[i], SS[i])
+                st.append(np.concatenate(ar, axis=1))
+            result.append(('SAEHD src-src', np.concatenate(st, axis=0)))
+
+            st = []
+            for i in range(n_samples):
+                ar = (D[i], DD[i])
+                st.append(np.concatenate(ar, axis=1))
+            result.append(('SAEHD dst-dst', np.concatenate(st, axis=0)))
+
+            st = []
+            for i in range(n_samples):
+                ar = (D[i], SD[i])
+                st.append(np.concatenate(ar, axis=1))
+            result.append(('SAEHD pred', np.concatenate(st, axis=0)))
+
+            st_m = []
+            for i in range(n_samples):
+                ar = (S[i] * target_srcm[i], SS[i])
+                st_m.append(np.concatenate(ar, axis=1))
+            result.append(('SAEHD masked src-src', np.concatenate(st_m, axis=0)))
+
+            st_m = []
+            for i in range(n_samples):
+                ar = (D[i] * target_dstm[i], DD[i] * DDM[i])
+                st_m.append(np.concatenate(ar, axis=1))
+            result.append(('SAEHD masked dst-dst', np.concatenate(st_m, axis=0)))
+
+            st_m = []
+            for i in range(n_samples):
+                SD_mask = DDM[i] * SDM[i] if self.face_type < FaceType.HEAD else SDM[i]
+                ar = (D[i] * target_dstm[i], SD[i] * SD_mask)
+                st_m.append(np.concatenate(ar, axis=1))
+            result.append(('SAEHD masked pred', np.concatenate(st_m, axis=0)))
+
+        # ---- data-augmented inputs preview ----
+        WS = np.clip(nn.to_data_format(warped_src, 'NHWC', self.model_data_format), 0.0, 1.0)
+        WD = np.clip(nn.to_data_format(warped_dst, 'NHWC', self.model_data_format), 0.0, 1.0)
+
+        st_in = []
+        for i in range(n_samples):
+            ar = (WS[i], S[i], WD[i], D[i])
+            st_in.append(np.concatenate(ar, axis=1))
+        result.append(('inputs warp→tgt', np.concatenate(st_in, axis=0)))
+
+        return result
+
+    def AE_merge(self, warped_dst):
+        warped_dst = self._np_to_torch(warped_dst)
+        with torch.no_grad():
+            if 'df' in self.archi_type:
+                dst_code = self.inter(self.encoder(warped_dst))
+                pred_src_dst, pred_src_dstm = self.decoder_src(dst_code)
+                _, pred_dst_dstm = self.decoder_dst(dst_code)
+            else:
+                dst_code = self.encoder(warped_dst)
+                dst_inter_b = self.inter_B(dst_code)
+                dst_inter_ab = self.inter_AB(dst_code)
+                dst_code_cat = torch.cat([dst_inter_b, dst_inter_ab], dim=1)
+                src_dst_code_cat = torch.cat([dst_inter_ab, dst_inter_ab], dim=1)
+
+                pred_src_dst, pred_src_dstm = self.decoder(src_dst_code_cat)
+                _, pred_dst_dstm = self.decoder(dst_code_cat)
+
+        return (
+            pred_src_dst.detach().cpu().numpy(),
+            pred_dst_dstm.detach().cpu().numpy(),
+            pred_src_dstm.detach().cpu().numpy(),
+        )
+
+    def predictor_func(self, face=None):
+        face = nn.to_data_format(face[None, ...], self.model_data_format, 'NHWC')
+        bgr, mask_dst_dstm, mask_src_dstm = [
+            nn.to_data_format(x, 'NHWC', self.model_data_format).astype(np.float32)
+            for x in self.AE_merge(face)
+        ]
+        return bgr[0], mask_src_dstm[0][..., 0], mask_dst_dstm[0][..., 0]
+
+    def get_MergerConfig(self):
+        import merger
+
+        return (
+            self.predictor_func,
+            (self.options['resolution'], self.options['resolution'], 3),
+            merger.MergerConfigMasked(face_type=self.face_type, default_mode='overlay'),
+        )
+
+
+Model = SAEHDModel

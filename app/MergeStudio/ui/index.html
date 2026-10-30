@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
+<title>MergeStudio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+<div id="layer-main">
+  <!-- Title Bar -->
+  <header id="title-bar">
+    <div class="title-bar__left">
+      <img src="logo.png" alt="MergeStudio" class="logo">
+      <span class="title-bar__name">MergeStudio</span>
+      <span class="title-bar__version">v1.0</span>
+      <input id="workspace-path" class="title-bar__path" type="text" value="workspace" placeholder="e.g. C:\workspace\project" spellcheck="false">
+      <button id="btn-change-workspace" class="title-bar__change-btn">Change</button>
+    </div>
+    <div class="title-bar__right">
+      <span id="status-indicator" class="title-bar__status">● idle</span>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <div id="main-content">
+    <!-- Left Sidebar -->
+    <aside id="sidebar">
+      <section id="model-section">
+        <div class="section-header">Models</div>
+        <div id="model-list"></div>
+      </section>
+      <section id="video-section">
+        <div class="section-header">Videos</div>
+        <div id="video-list"></div>
+      </section>
+    </aside>
+
+    <!-- Center: Preview Panels -->
+    <div id="preview-area">
+      <div id="preview-original" class="preview-panel">
+        <span class="preview-panel__label">Original</span>
+        <video id="video-original" class="preview-video" muted playsinline preload="auto" style="display:none;"></video>
+        <canvas id="canvas-original"></canvas>
+        <span class="preview-panel__info" id="frame-info"></span>
+        <div class="panel-loading" id="loading-original" style="display:none;"><div class="panel-spinner"></div><div class="panel-loading-label">Loading...</div></div>
+      </div>
+      <div id="preview-detection" class="preview-panel">
+        <span class="preview-panel__label">Detection</span>
+        <canvas id="canvas-detection"></canvas>
+        <span class="preview-panel__info" id="face-count"></span>
+        <div class="panel-loading" id="loading-detection" style="display:none;"><div class="panel-spinner"></div><div class="panel-loading-label">Loading...</div></div>
+      </div>
+      <div id="preview-swapped" class="preview-panel">
+        <span class="preview-panel__label">Swapped <button id="btn-download-swapped" class="preview-download-btn" title="Download full resolution">⬇</button></span>
+        <canvas id="canvas-swapped"></canvas>
+        <div class="debug-grid" id="debug-grid" style="display:none;flex-wrap:wrap;gap:6px;justify-content:center;align-items:center;width:100%;height:100%;overflow-y:auto;padding:6px;"></div>
+        <div class="panel-loading" id="loading-swapped" style="display:none;"><div class="panel-spinner"></div><div class="panel-loading-label">Loading...</div></div>
+      </div>
+    </div>
+
+    <!-- Right Panel -->
+    <aside id="params-panel">
+      <!-- Detection Settings -->
+      <section class="params-section">
+        <div class="params-section__header">
+          <span class="dot dot--accent"></span>Detection
+        </div>
+        <div class="params-section__body">
+          <label class="param-dropdown">Detector<select id="detector-select"></select></label>
+          <label class="param-dropdown">Landmarker<select id="landmarker-select"></select></label>
+          <label class="param-dropdown">Face Type<select id="face-type-select"></select></label>
+          <label class="param-dropdown">检测模式<select id="detect-mode-select"><option value="always">总是重新检测</option><option value="skip_dfl">DFL标准跳过</option></select></label>
+          <div class="param-slider" data-param="face_margin">
+            <div class="param-slider__header">
+              <span class="param-slider__label">Face margin</span>
+              <input class="param-slider__input" type="text" value="40" style="width:28px;min-width:24px;">
+            </div>
+            <div class="param-slider__track">
+              <div class="param-slider__fill" style="width:20%"></div>
+              <div class="param-slider__thumb" style="left:20%"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Merge Settings -->
+      <section class="params-section">
+        <div class="params-section__header">
+          <span class="dot dot--accent"></span>Merge
+        </div>
+        <div id="merge-mode-btns" class="param-btn-group"></div>
+        <div id="merge-params" class="params-section__body"></div>
+      </section>
+
+      <!-- Face Database -->
+      <section class="params-section">
+        <div class="params-section__header">
+          <span class="dot dot--accent"></span>Face
+          <span id="face-db-count" class="params-section__count"></span>
+        </div>
+        <div id="face-db-list" class="params-section__body"></div>
+      </section>
+
+      <!-- Export -->
+      <section class="params-section params-section--export">
+        <button id="btn-export" class="btn-export">⚡ Batch Export</button>
+        <div class="export-options">
+          <label class="param-dropdown">Format<select id="export-format"><option value="jpeg">JPEG</option><option value="png">PNG Sequence</option></select></label>
+        </div>
+        <span id="export-range" class="export-range">All (excl. cuts)</span>
+      </section>
+    </aside>
+  </div>
+
+  <!-- Timeline -->
+  <div id="timeline">
+    <!-- Frame Jumper -->
+    <div id="frame-jumper">
+      <div class="frame-jumper__left">
+        <span class="frame-jumper__label" style="font-size:9px;color:#555;margin-right:4px;">Res</span>
+        <select id="res-select" style="background:#1a1a1e;border:1px solid #2a2a2e;border-radius:3px;padding:2px 4px;color:#e0e0e0;font:10px Inter,sans-serif;outline:none;cursor:pointer;">
+          <option value="1">1:1</option>
+          <option value="0.5" selected>1/2</option>
+          <option value="0.25">1/4</option>
+          <option value="0.125">1/8</option>
+        </select>
+        <span class="frame-jumper__label">Frame</span>
+        <div class="frame-jumper__input">
+          <input type="text" id="frame-input" value="0">
+          <span class="frame-jumper__sep">/</span>
+          <span id="frame-total">0</span>
+        </div>
+      </div>
+      <div id="transport-controls" class="transport">
+        <!-- SVG icons injected by JS -->
+      </div>
+      <div class="frame-jumper__right">
+        <span id="timecode">00:00.00</span>
+        <button id="zoom-out" class="icon-btn">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#555" stroke-width="1"/><line x1="8" y1="8" x2="10" y2="10" stroke="#555" stroke-width="1" stroke-linecap="round"/><line x1="3.5" y1="5" x2="6.5" y2="5" stroke="#555" stroke-width="0.8"/></svg>
+        </button>
+        <button id="zoom-in" class="icon-btn">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="5" cy="5" r="3.5" stroke="#555" stroke-width="1"/><line x1="8" y1="8" x2="10" y2="10" stroke="#555" stroke-width="1" stroke-linecap="round"/><line x1="3.5" y1="5" x2="6.5" y2="5" stroke="#555" stroke-width="0.8"/><line x1="5" y1="3.5" x2="5" y2="6.5" stroke="#555" stroke-width="0.8"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Ruler -->
+    <div id="timeline-ruler">
+      <div class="track-label"></div>
+      <div class="track-content" id="ruler-numbers"></div>
+    </div>
+
+    <!-- Track 1: Video -->
+    <div class="track track--video">
+      <div class="track-label">Video</div>
+      <div class="track-content" id="track-video">
+        <div class="playhead" id="playhead"></div>
+      </div>
+    </div>
+
+    <!-- Track 2: Faces -->
+    <div class="track track--faces">
+      <div class="track-label">Faces</div>
+      <div class="track-content" id="track-faces"></div>
+    </div>
+
+    <!-- Track 3: Cut -->
+    <div class="track track--cut">
+      <div class="track-label">Cut<button id="btn-add-cut" class="btn-cut-add">+</button></div>
+      <div class="track-content" id="track-cut"></div>
+    </div>
+
+    <!-- Track 4: Detection Angle -->
+    <div class="track track--angle">
+      <div class="track-label">角度<button id="btn-add-angle" class="btn-angle-add">+</button></div>
+      <div class="track-content" id="track-angle"></div>
+    </div>
+
+    <!-- Scrollbar Track (hidden, used for scroll sync + click coordinate math) -->
+    <div class="track track--scrollbar">
+      <div class="track-label"></div>
+      <div class="track-content" id="track-scrollbar"></div>
+    </div>
+
+    <!-- Legend -->
+    <div id="timeline-legend"></div>
+  </div>
+</div>
+
+<!-- Layer 2: Face Database -->
+<div id="layer-facedb" class="export-layer">
+  <div class="export-card">
+    <div class="card-scroll">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+        <h2 style="font-size:16px;font-weight:600;">Face Database</h2>
+        <span id="facedb-count" style="font-size:11px;color:#555;"></span>
+      </div>
+      <button id="btn-compute-embeddings" class="export-fixed-btn" style="background:linear-gradient(135deg,#5b5bd6,#7c3aed);border:none;border-radius:8px;color:#fff;padding:10px 24px;cursor:pointer;font-size:13px;margin-bottom:16px;">Compute Face Embeddings</button>
+      <div id="facedb-list"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Layer 3: Export Settings -->
+<div id="layer-settings" class="export-layer">
+  <div class="export-card">
+    <div class="card-scroll">
+      <h2 style="font-size:16px;font-weight:600;margin-bottom:16px;">Export Settings</h2>
+      <div class="form-group">
+        <label class="form-label">Cache Format</label>
+        <select id="layer-export-format" class="form-input"><option value="jpg">JPEG 100%</option><option value="png">PNG</option></select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Encoder</label>
+        <select id="layer-export-encoder" class="form-input"><option value="h264_nvenc">h264_nvenc (GPU)</option><option value="libx264">libx264 (CPU)</option></select>
+      </div>
+      <div class="form-group">
+        <label class="form-label" style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="layer-export-gpu" checked> GPU 解码加速（提取帧硬解码，无 GPU 时自动回退软解）</label>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Output Path</label>
+        <input id="export-path" class="form-input" type="text" placeholder="Default: source_result.mp4" style="background:#121214;border:1px solid #2a2a2e;border-radius:6px;padding:10px;color:#e0e0e0;width:100%;font-size:13px;">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Swap Workers (0=auto)</label>
+        <input id="export-workers" class="form-input" type="number" min="0" max="16" value="0" style="background:#121214;border:1px solid #2a2a2e;border-radius:6px;padding:10px;color:#e0e0e0;width:100%;font-size:13px;">
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Layer 4: Progress -->
+<div id="layer-progress" class="export-layer">
+  <div class="export-card">
+    <div class="card-scroll">
+      <h2 style="font-size:16px;font-weight:600;margin-bottom:16px;">Export Progress</h2>
+    <div id="progress-stages">
+      <div class="progress-stage"><div class="progress-header"><span id="progress-label-0">Extract</span></div><div class="progress-track"><div class="progress-fill" id="progress-bar-0"></div></div></div>
+      <div class="progress-stage"><div class="progress-header"><span id="progress-label-1">Detect</span></div><div class="progress-track"><div class="progress-fill" id="progress-bar-1"></div></div></div>
+      <div class="progress-stage"><div class="progress-header"><span id="progress-label-2">Match</span></div><div class="progress-track"><div class="progress-fill" id="progress-bar-2"></div></div></div>
+      <div class="progress-stage"><div class="progress-header"><span id="progress-label-3">Swap</span></div><div class="progress-track"><div class="progress-fill" id="progress-bar-3"></div></div></div>
+      <div class="progress-stage"><div class="progress-header"><span id="progress-label-4">Mask</span></div><div class="progress-track"><div class="progress-fill" id="progress-bar-4"></div></div></div>
+      <div class="progress-stage"><div class="progress-header"><span id="progress-label-5">Merge</span></div><div class="progress-track"><div class="progress-fill" id="progress-bar-5"></div></div></div>
+      <div class="progress-stage"><div class="progress-header"><span id="progress-label-6">Encode</span></div><div class="progress-track"><div class="progress-fill" id="progress-bar-6"></div></div></div>
+    </div>
+    </div>
+    <button id="btn-cancel-export" class="export-fixed-btn export-fixed-btn--danger" style="margin-top:12px;width:100%;padding:10px;">✕ Cancel Export</button>
+  </div>
+</div>
+
+<!-- Fixed Bottom Bars -->
+<div id="fixed-next" class="export-fixed-bar">
+  <button id="btn-back-facedb" class="export-fixed-btn export-fixed-btn--secondary">Back</button>
+  <button id="btn-next" class="export-fixed-btn export-fixed-btn--primary">Select Faces to Continue</button>
+</div>
+<div id="fixed-export" class="export-fixed-bar">
+  <button id="btn-back-settings" class="export-fixed-btn export-fixed-btn--secondary">Back</button>
+  <button id="btn-start-export" class="export-fixed-btn export-fixed-btn--accent">Start Export</button>
+</div>
+
+</div>
+<script src="js/export-flow.js"></script>
+<script src="js/api.js"></script>
+<script src="js/preview.js"></script>
+<script src="js/timeline.js"></script>
+<script src="js/params.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

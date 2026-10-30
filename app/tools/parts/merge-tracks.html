@@ -1,0 +1,79 @@
+<!-- ============================================================
+     合成工作室 · PR 风格多轨时间轴（片段，仅本文件，勿动 index.html）
+     合并位置：app/web/index.html → #p-merge 底部，替换现有 <div class="mgtl">…</div>
+     依赖：_parts/merge-tracks.css、_parts/merge-tracks.js
+     命名空间：.mtl-* / #mtl*，与既有 .mgtl/.mgtrack/.mgfill 无冲突
+     数据来源（4.0 MergeStudio，全部照抄原命名）：
+       state.totalFrames / state.currentFrame / state.fps
+       state.cutSegments[{start,end}] / state.angleSegments[{start,end,angles}]
+       4.0 缩放档位取值 1 / 0.5 / 0.25 / 0.125（#res-select）
+       4.0 走带按钮语义：上一帧 -1、下一帧 +1（另有 ±30 帧快捷键）
+     ============================================================ -->
+<div class="mtl" id="mergeTracks">
+
+  <!-- ① 顶部帧跳转条：帧 [输入框] / [总数] · 走带 · 时间码 + 缩放 -->
+  <div class="mtl-bar">
+    <div class="mtl-jump">
+      <span class="mtl-lbl">帧</span>
+      <div class="mtl-frame">
+        <input class="mtl-frame-in" id="mtlFrame" value="0" inputmode="numeric" spellcheck="false" autocomplete="off" title="范围 0 ~ 总数-1">
+        <span class="mtl-slash">/</span>
+        <span class="mtl-total" id="mtlTotal">0</span>
+      </div>
+    </div>
+
+    <div class="mtl-nav">
+      <button class="mtl-nb" id="mtlPrev" type="button" title="上一帧">
+        <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M4.2 3.4v9.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M12.2 4.1 6.4 8l5.8 3.9V4.1Z" fill="currentColor"/></svg>
+      </button>
+      <button class="mtl-nb mtl-nb--play" id="mtlPlay" type="button" title="播放 / 暂停">
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M5.4 3.6 12.4 8l-7 4.4V3.6Z" fill="currentColor"/></svg>
+      </button>
+      <button class="mtl-nb" id="mtlNext" type="button" title="下一帧">
+        <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M11.8 3.4v9.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M3.8 4.1 9.6 8l-5.8 3.9V4.1Z" fill="currentColor"/></svg>
+      </button>
+    </div>
+
+    <div class="mtl-right">
+      <span class="mtl-tc" id="mtlTime">00:00.00</span>
+      <button class="mtl-zb" id="mtlZoomOut" type="button" title="缩小">
+        <svg viewBox="0 0 14 14" width="12" height="12" aria-hidden="true" fill="none"><circle cx="6" cy="6" r="3.8" stroke="currentColor" stroke-width="1.1"/><path d="M8.9 8.9 12.2 12.2" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/><path d="M4.2 6h3.6" stroke="currentColor" stroke-width="1"/></svg>
+      </button>
+      <button class="mtl-zb" id="mtlZoomIn" type="button" title="放大">
+        <svg viewBox="0 0 14 14" width="12" height="12" aria-hidden="true" fill="none"><circle cx="6" cy="6" r="3.8" stroke="currentColor" stroke-width="1.1"/><path d="M8.9 8.9 12.2 12.2" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/><path d="M4.2 6h3.6M6 4.2v3.6" stroke="currentColor" stroke-width="1"/></svg>
+      </button>
+      <!-- 缩放档位：值域同 4.0 #res-select（1 / 0.5 / 0.25 / 0.125） -->
+      <div class="seg mtl-zseg" id="mtlZoomSeg" data-k="zoom">
+        <b class="on" data-zoom="1">1:1</b><b data-zoom="0.5">1/2</b><b data-zoom="0.25">1/4</b><b data-zoom="0.125">1/8</b>
+      </div>
+    </div>
+  </div>
+
+  <!-- ② 轨道区：左侧 64px 轨道名，右侧内容区横向滚动，共用同一滚动位置 -->
+  <div class="mtl-body">
+    <div class="mtl-names">
+      <div class="mtl-name mtl-name--ruler"></div>
+      <div class="mtl-name">视频</div>
+      <div class="mtl-name">人脸</div>
+      <div class="mtl-name">剪切</div>
+      <div class="mtl-name">角度</div>
+    </div>
+
+    <div class="mtl-scroll" id="mtlScroll">
+      <div class="mtl-stack" id="mtlStack">
+        <!-- 刻度尺：每 500px 一个数字，由 JS 填 -->
+        <div class="mtl-ruler" id="mtlRuler"></div>
+        <!-- 视频帧条：40 个缩略占位块，由 JS 填 -->
+        <div class="mtl-trk mtl-trk--video" id="mtlVideo"></div>
+        <!-- 人脸标记：25 个色块，由 JS 填 -->
+        <div class="mtl-trk mtl-trk--faces" id="mtlFaces"></div>
+        <!-- 剪切区段：6 段红色区段，由 JS 填 -->
+        <div class="mtl-trk mtl-trk--cut" id="mtlCut"></div>
+        <!-- 角度色带：3 段渐变，由 JS 填 -->
+        <div class="mtl-trk mtl-trk--angle" id="mtlAngle"></div>
+        <!-- 播放头：1px 竖线 + 8px 三角标，由 JS 定位 -->
+        <div class="mtl-head" id="mtlHead"><i></i></div>
+      </div>
+    </div>
+  </div>
+</div>

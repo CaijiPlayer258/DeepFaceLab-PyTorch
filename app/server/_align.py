@@ -339,7 +339,7 @@ def write_dfljpg(path, img_bgr, meta: dict, quality: int = 95):
     return len(blob)
 
 
-# ---------------- 批量补遮罩（提取之后单独一步，与 DFL 的 extract → mask 流程一致） ----------------
+# ---------------- 批量应用遮罩（提取之后单独一步，与 DFL 的 extract → mask 流程一致） ----------------
 
 def read_dfljpg_meta(path):
     """读出 JPEG 里 APP15 段的 dict；没有就返回 None。"""
@@ -363,40 +363,58 @@ def read_dfljpg_meta(path):
                 return None
         i += 2 + seg_len
         if marker == 0xDA:
+            # 扫到 SOS 就停了：但 DFL 的 APP15 通常在文件末尾（EOI 之前），
+            # 所以再按「尾部段」找一次，否则读不到刚写进去的遮罩/landmarks
+            eoi = data.rfind(b"\xff\xd9")
+            if eoi > 0:
+                pos = data.rfind(b"\xff\xef", 0, eoi)
+                if pos > 0 and pos + 4 <= eoi:
+                    seg_len2 = struct.unpack(">H", data[pos + 2:pos + 4])[0]
+                    if pos + 2 + seg_len2 <= eoi:
+                        try:
+                            return pickle.loads(bytes(data[pos + 4:pos + 2 + seg_len2]))
+                        except Exception:
+                            return None
             break
     return None
 
 
 def rewrite_dfljpg_meta(path, meta: dict):
-    """把 APP15 段换成新的 dict（其余字节原样保留）。"""
+    """把 APP15 段换成新的 dict。APP15 追加在 EOI 之前（DFL 的约定）。
+
+    历史坑：
+    1) 以前插在 SOI 之后并重排段序 —— 遇到 JPEG 填充字节(0xFF 0xFF)会把段长读错，
+       扫描数据被复制一遍，文件变大且无法解码；
+    2) 先算 pickle 长度再替换 numpy._core→numpy.core，长度差 1 字节，解码器读坏。
+    现在只做两件事：切掉旧的尾部 APP15，写新的，再补 EOI。
+    """
     data = Path(path).read_bytes()
     if not data.startswith(b"\xff\xd8"):
         raise ValueError("not a jpeg")
+
     pkl = pickle.dumps({k: v for k, v in meta.items() if v is not None}, protocol=2)
-    pkl = pkl.replace(b"numpy._core", b"numpy.core")
+    pkl = pkl.replace(b"numpy._core", b"numpy.core")     # 先替换，再算长度
     if len(pkl) + 2 > 0xFFFF:
         raise ValueError("metadata too large")
     app15 = b"\xff\xef" + struct.pack(">H", len(pkl) + 2) + pkl
-    sos = data.find(b"\xff\xda")
-    if sos <= 0:
-        out = data + app15
-    else:
-        out = data[:2] + app15 + data[sos:]     # 旧 APP15 丢掉，其它段保留
-        # 保留 SOI 之后、SOS 之前除 APP15 外的所有段
-        i = 2
-        while i + 4 <= len(data):
-            if data[i] != 0xFF:
+
+    eoi = data.rfind(b"\xff\xd9")
+    if eoi < 0:
+        raise ValueError("no EOI")
+    body = data[:eoi]
+
+    # 末尾若已有一段 APP15（段长正好顶到 body 末尾），先切掉
+    pos = len(body)
+    while True:
+        pos = body.rfind(b"\xff\xef", 0, pos)
+        if pos < 0:
+            break
+        if pos + 4 <= len(body):
+            seg_len = struct.unpack(">H", body[pos + 2:pos + 4])[0]
+            if pos + 2 + seg_len == len(body):
+                body = body[:pos]
                 break
-            marker = data[i + 1]
-            if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
-                i += 2
-                continue
-            seg_len = struct.unpack(">H", data[i + 2:i + 4])[0]
-            if marker != 0xEF:
-                out += data[i:i + 2 + seg_len]
-            i += 2 + seg_len
-            if marker == 0xDA:
-                out += data[i:]
-                break
+
+    out = body + app15 + b"\xff\xd9"
     Path(path).write_bytes(out)
     return len(out)

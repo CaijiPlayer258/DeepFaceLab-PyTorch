@@ -1,0 +1,101 @@
+# DeepFaceLab-Torch 依赖清单
+# 安装方式: pip install -r requirements.txt
+#
+# PyTorch 需要单独安装（CUDA版本）:
+#   python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+#
+# PyQt-SiliconUI 需要单独安装:
+#   cd PyQt-SiliconUI-main && python -m pip install -e .
+#   或: python setup.py install
+
+# ========== 核心 ==========
+numpy>=1.24.0
+opencv-python>=4.8.0
+Pillow>=10.0.0
+scipy>=1.11.0
+requests>=2.31.0
+certifi
+charset-normalizer
+idna
+urllib3
+pyyaml>=6.0
+
+# ========== PyQt5 GUI ==========
+PyQt5>=5.15.10
+pyperclip>=1.8.0
+
+# ========== 机器学习 / 深度学习 ==========
+torch>=2.0.0
+torchvision>=0.16.0
+tqdm>=4.66.0
+h5py>=3.9.0
+scikit-learn>=1.3.0
+filterpy>=1.4.5
+imagehash>=4.3.0
+numexpr>=2.8.0
+joblib>=1.3.0
+psutil>=5.9.0
+networkx>=3.0
+sympy>=1.12
+numba>=0.57.0
+
+# ========== ONNX 推理 ==========
+onnx>=1.15.0
+onnxruntime-gpu>=1.16.0
+protobuf>=3.20.0
+flatbuffers>=23.0.0
+
+# ========== 视频 / 媒体 ==========
+decord>=0.6.0
+watchdog>=4.0.0
+ffmpeg-python>=0.2.0
+
+# ========== 人脸检测 ==========
+insightface>=0.7.0
+ultralytics>=8.0.0
+facexlib>=0.3.0
+
+# ========== 图像增强 ==========
+albumentations>=2.0.0
+
+# ========== GroundingDINO / SAM2 ==========
+timm>=0.9.0
+transformers>=4.35.0
+safetensors>=0.4.0
+tokenizers>=0.15.0
+huggingface_hub>=0.20.0
+hydra-core>=1.3.0
+omegaconf>=2.3.0
+addict>=2.4.0
+supervision>=0.18.0
+iopath>=0.1.10
+yapf>=0.40.0
+filelock>=3.13.0
+fsspec>=2023.0.0
+jinja2>=3.1.0
+
+# ========== Bilibili 登录 ==========
+brotli>=1.1.0
+qrcode>=7.4.0
+
+# ========== MaskProcessor Web 服务 ==========
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.5.0
+python-multipart>=0.0.6
+onnxruntime>=1.16.0
+segment-anything>=1.0.0
+starlette>=0.27.0
+anyio>=3.7.0
+httpx>=0.25.0
+click>=8.0.0
+h11>=0.14.0
+
+# ========== 工具 ==========
+matplotlib>=3.7.0
+colorama>=0.4.6
+ipdb>=0.13.0
+python-dateutil>=2.9.0
+pathlib2>=2.3.7
+rich>=13.0.0
+typer>=0.9.0
