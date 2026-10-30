@@ -1,0 +1,1038 @@
+/* ==========================================================================
+   MaskProcessor UI — Linear Design Language
+   Background: #0a0a0b  |  Surface: #0d0d0e  |  Elevated: rgba(255,255,255,0.015)
+   Accent: #5b5bd6 → #8b5cf6  |  Font: 'Inter', -apple-system, sans-serif
+   ========================================================================== */
+
+/* --- Font Loading --- */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;550;600&display=swap');
+
+/* --- Reset & Base --- */
+*, *::before, *::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: #0a0a0b;
+  color: rgba(255, 255, 255, 0.8);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  font-weight: 450;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  user-select: none;
+}
+
+/* --- Selection --- */
+::selection {
+  background: rgba(91, 91, 214, 0.35);
+  color: #fff;
+}
+
+/* --- Scrollbar --- */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  transition: background 0.15s ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+::-webkit-scrollbar-thumb:active {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Firefox scrollbar (thin) */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.08) transparent;
+}
+
+/* ==========================================================================
+   Layout — App Shell
+   ========================================================================== */
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  width: 100vw;
+  overflow: hidden;
+  background: #0a0a0b;
+}
+
+/* ==========================================================================
+   Title Bar
+   ========================================================================== */
+
+.title-bar {
+  display: flex;
+  align-items: center;
+  height: 40px;
+  padding: 0 14px;
+  background: #0d0d0e;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+  gap: 10px;
+}
+
+.title-bar__logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 550;
+  color: rgba(255, 255, 255, 0.8);
+  letter-spacing: -0.01em;
+}
+
+.title-bar__logo-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  object-fit: contain;
+}
+
+.title-bar__project-name {
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 12px;
+  letter-spacing: -0.01em;
+}
+
+.title-bar__path-input {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 100px;
+  max-width: 85%;
+  padding: 3px 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 11px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s, color 0.15s;
+}
+.title-bar__path-input:focus {
+  border-color: rgba(91, 91, 214, 0.4);
+  color: rgba(255, 255, 255, 0.8);
+}
+.title-bar__path-input:not(:focus):not(:placeholder-shown) {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.title-bar__change-btn {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  background: linear-gradient(135deg, rgba(91, 91, 214, 0.15), rgba(139, 92, 246, 0.15));
+  border: 1px solid rgba(139, 92, 246, 0.2);
+  border-radius: 4px;
+  color: #8b8be6;
+  font-size: 10px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.title-bar__change-btn:hover {
+  background: linear-gradient(135deg, rgba(91, 91, 214, 0.25), rgba(139, 92, 246, 0.25));
+}
+
+.title-bar__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* ==========================================================================
+   Main Content
+   ========================================================================== */
+
+.main-content {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ==========================================================================
+   Toolbar (left icon bar)
+   ========================================================================== */
+
+.toolbar {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 48px;
+  min-width: 48px;
+  padding: 8px 0;
+  gap: 4px;
+  background: #0d0d0e;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+
+.tool-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.35);
+  cursor: pointer;
+  font-size: 14px;
+  transition: color 0.15s ease, background 0.15s ease;
+  position: relative;
+}
+
+.tool-btn:hover {
+  color: rgba(255, 255, 255, 0.65);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.tool-btn:active {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.tool-btn.active {
+  color: #fff;
+  background: linear-gradient(135deg, rgba(91, 91, 214, 0.25), rgba(139, 92, 246, 0.25));
+  box-shadow: inset 0 0 0 1px rgba(91, 91, 214, 0.3);
+}
+
+.tool-btn.active:hover {
+  background: linear-gradient(135deg, rgba(91, 91, 214, 0.3), rgba(139, 92, 246, 0.3));
+}
+
+.tool-btn__tooltip {
+  position: absolute;
+  left: calc(100% + 6px);
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: rgba(30, 30, 32, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  z-index: 100;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.tool-btn:hover .tool-btn__tooltip {
+  opacity: 1;
+}
+
+.toolbar__separator {
+  width: 20px;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.06);
+  margin: 4px 0;
+}
+
+/* ==========================================================================
+   Center Area
+   ========================================================================== */
+
+.center-area {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ==========================================================================
+   Mode Bar
+   ========================================================================== */
+
+.mode-bar {
+  display: flex;
+  align-items: center;
+  height: 36px;
+  padding: 0 12px;
+  gap: 12px;
+  background: #0d0d0e;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+
+/* ==========================================================================
+   Mode Toggle (segmented control)
+   ========================================================================== */
+
+.mode-toggle {
+  display: flex;
+  padding: 2px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  gap: 1px;
+}
+
+.mode-toggle__btn {
+  padding: 3px 12px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.4);
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease, box-shadow 0.12s ease;
+  white-space: nowrap;
+}
+
+.mode-toggle__btn:hover {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.mode-toggle__btn.active {
+  color: rgba(255, 255, 255, 0.85);
+  background: #0d0d0e;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+/* ==========================================================================
+   Brush Slider
+   ========================================================================== */
+
+.brush-slider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.brush-slider__label {
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.35);
+  min-width: 28px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.brush-slider__input {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 80px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  outline: none;
+  cursor: pointer;
+}
+
+.brush-slider__input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #5b5bd6, #8b5cf6);
+  box-shadow: 0 0 0 2px rgba(91, 91, 214, 0.2);
+  cursor: pointer;
+  transition: box-shadow 0.12s ease, transform 0.12s ease;
+}
+
+.brush-slider__input::-webkit-slider-thumb:hover {
+  box-shadow: 0 0 0 4px rgba(91, 91, 214, 0.25);
+  transform: scale(1.1);
+}
+
+.brush-slider__input::-webkit-slider-thumb:active {
+  box-shadow: 0 0 0 6px rgba(91, 91, 214, 0.15);
+}
+
+.brush-slider__input::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: none;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #5b5bd6, #8b5cf6);
+  cursor: pointer;
+}
+
+.brush-slider__input::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* ==========================================================================
+   Canvas Container
+   ========================================================================== */
+
+.canvas-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  min-height: 0;
+  background: #0a0a0b;
+  background-image:
+    radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.012) 0%, transparent 60%);
+  position: relative;
+  overflow: hidden;
+}
+
+.canvas-container canvas {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 4px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.04), 0 8px 24px rgba(0, 0, 0, 0.4);
+  image-rendering: auto;
+}
+
+.canvas-container__placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: rgba(255, 255, 255, 0.15);
+}
+
+.canvas-container__placeholder-icon {
+  font-size: 32px;
+  opacity: 0.5;
+}
+
+.canvas-container__placeholder-text {
+  font-size: 13px;
+  font-weight: 450;
+  color: rgba(255, 255, 255, 0.15);
+}
+
+/* ==========================================================================
+   Status Bar
+   ========================================================================== */
+
+.status-bar {
+  display: flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 12px;
+  gap: 12px;
+  background: rgba(13, 13, 14, 0.75);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+
+.status-bar__item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 450;
+  color: rgba(255, 255, 255, 0.25);
+}
+
+.status-bar__item--active {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.status-bar__dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.status-bar__dot--success {
+  background: linear-gradient(135deg, #5b5bd6, #8b5cf6);
+}
+
+.status-bar__dot--error {
+  background: #ef4444;
+}
+
+.status-bar__dot--busy {
+  background: #f59e0b;
+}
+
+.status-bar__spacer {
+  flex: 1;
+}
+
+/* ==========================================================================
+   Right Panel
+   ========================================================================== */
+
+.right-panel {
+  width: 220px;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  background: rgba(255, 255, 255, 0.015);
+  border-left: 1px solid rgba(255, 255, 255, 0.06);
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex-shrink: 0;
+}
+
+/* ==========================================================================
+   Panel Section
+   ========================================================================== */
+
+.panel-section {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 12px;
+}
+
+.panel-section:last-child {
+  border-bottom: none;
+}
+
+.panel-section__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.panel-section__title {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: rgba(255, 255, 255, 0.25);
+}
+
+.panel-section__action {
+  font-size: 10px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.2);
+  cursor: pointer;
+  transition: color 0.12s ease;
+  background: none;
+  border: none;
+  font-family: inherit;
+  padding: 0;
+}
+
+.panel-section__action:hover {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+/* ==========================================================================
+   File List
+   ========================================================================== */
+
+.file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.1s ease;
+}
+
+.file-item:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.file-item.active {
+  background: rgba(91, 91, 214, 0.1);
+}
+
+.file-item__thumb {
+  width: 24px;
+  height: 24px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.04);
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.file-item__name {
+  font-size: 12px;
+  font-weight: 450;
+  color: rgba(255, 255, 255, 0.55);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+}
+
+.file-item.active .file-item__name {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.file-item__check {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.file-item__check--done {
+  background: linear-gradient(135deg, #5b5bd6, #8b5cf6);
+  border-color: transparent;
+}
+
+.file-item__check--done::after {
+  content: '';
+  width: 4px;
+  height: 7px;
+  border: solid #fff;
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+  margin-top: -1px;
+}
+
+/* ==========================================================================
+   Model Select (segmented button group)
+   ========================================================================== */
+
+.model-select {
+  display: flex;
+  padding: 2px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  gap: 1px;
+  width: 100%;
+}
+
+.model-select__btn {
+  flex: 1;
+  padding: 4px 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.35);
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: 10px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease, box-shadow 0.12s ease;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.model-select__btn:hover {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.model-select__btn.active {
+  color: rgba(255, 255, 255, 0.8);
+  background: #0d0d0e;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+/* ==========================================================================
+   Input — Linear Style
+   ========================================================================== */
+
+.linen-input {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+  color: rgba(255, 255, 255, 0.75);
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: 12px;
+  font-weight: 450;
+  outline: none;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.linen-input::placeholder {
+  color: rgba(255, 255, 255, 0.15);
+}
+
+.linen-input:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.linen-input:focus {
+  border-color: rgba(91, 91, 214, 0.4);
+  background: rgba(255, 255, 255, 0.03);
+  box-shadow: 0 0 0 2px rgba(91, 91, 214, 0.08);
+}
+
+/* ==========================================================================
+   Generate Button
+   ========================================================================== */
+
+.btn-generate {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 6px;
+  background: linear-gradient(135deg, #5b5bd6, #8b5cf6);
+  color: #fff;
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.12s ease, box-shadow 0.12s ease;
+  position: relative;
+}
+
+.btn-generate:hover {
+  opacity: 0.9;
+  box-shadow: 0 2px 8px rgba(91, 91, 214, 0.25);
+}
+
+.btn-generate:active {
+  opacity: 0.85;
+  transform: translateY(1px);
+}
+
+.btn-generate:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+/* Gradient border variant */
+.btn-generate--bordered {
+  background: transparent;
+  color: rgba(255, 255, 255, 0.75);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-generate--bordered::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 6px;
+  padding: 1px;
+  background: linear-gradient(135deg, #5b5bd6, #8b5cf6);
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+.btn-generate--bordered:hover {
+  color: #fff;
+  opacity: 1;
+  box-shadow: none;
+}
+
+.btn-generate--bordered:hover::before {
+  opacity: 0.9;
+}
+
+/* ==========================================================================
+   Tag Group (BiSeNet face part toggles)
+   ========================================================================== */
+
+.tag-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 10px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+  user-select: none;
+  font-family: 'Inter', -apple-system, sans-serif;
+}
+
+.tag:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.55);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.tag.active {
+  background: rgba(91, 91, 214, 0.12);
+  border-color: rgba(91, 91, 214, 0.25);
+  color: rgba(255, 255, 255, 0.75);
+}
+
+/* ==========================================================================
+   Shortcut Footer
+   ========================================================================== */
+
+.shortcut-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  margin-top: auto;
+  flex-wrap: wrap;
+}
+
+.shortcut-footer__item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.2);
+  font-weight: 450;
+}
+
+.shortcut-footer__key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 9px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.3);
+  font-family: 'Inter', -apple-system, sans-serif;
+}
+
+/* ==========================================================================
+   Loading / Spinner
+   ========================================================================== */
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid rgba(255, 255, 255, 0.06);
+  border-top-color: #5b5bd6;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ==========================================================================
+   Portrait Layout — image taller than wide
+   ========================================================================== */
+
+@media (orientation: portrait) and (max-width: 768px) {
+
+/* Title bar compact */
+.title-bar { padding: 0 8px; gap: 4px; overflow: hidden; }
+.title-bar__logo span { display: none; }
+.title-bar__path-input { min-width: 50px; max-width: 50%; font-size: 10px; padding: 2px 4px; }
+.title-bar__change-btn { font-size: 9px; padding: 2px 5px; flex-shrink: 0; }
+
+/* CSS Grid for precise 2D layout */
+.main-content {
+  display: grid !important;
+  grid-template-columns: 48px 1fr;
+  grid-template-rows: 1fr 130px;
+  grid-template-areas:
+    "toolbar canvas"
+    "bottom  bottom";
+  overflow: hidden;
+}
+
+.toolbar {
+  grid-area: toolbar;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.center-area {
+  grid-area: canvas;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Right panel at bottom, full width */
+.right-panel {
+  grid-area: bottom;
+  width: 100%;
+  min-width: 0;
+  height: 130px;
+  flex-direction: row;
+  overflow: auto;
+  border-left: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.right-panel .panel-section {
+  display: inline-flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  min-width: 120px;
+  max-width: 200px;
+  height: 100%;
+  border-bottom: none;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 6px 10px;
+  overflow-y: auto;
+}
+
+.right-panel .panel-section:last-child {
+  border-right: none;
+}
+
+.right-panel .file-list {
+  max-height: 70px;
+  overflow-y: auto;
+}
+
+/* Status bar — horizontal bar below mode-bar */
+.status-bar {
+  position: static;
+  flex-direction: row;
+  padding: 3px 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-left: none;
+  border-radius: 0;
+  gap: 12px;
+  background: transparent;
+  backdrop-filter: none;
+  pointer-events: auto;
+}
+
+.status-bar .left,
+.status-bar .right {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  writing-mode: horizontal-tb;
+}
+
+.shortcut-footer {
+  display: none;
+}
+
+}
+
+/* ==========================================================================
+   Overlay / Modal Backdrop
+   ========================================================================== */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal {
+  min-width: 360px;
+  max-width: 480px;
+  background: #0d0d0e;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+  padding: 20px;
+}
+
+.modal__title {
+  font-size: 14px;
+  font-weight: 550;
+  color: rgba(255, 255, 255, 0.8);
+  margin-bottom: 8px;
+}
+
+.modal__desc {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.45);
+  margin-bottom: 16px;
+  line-height: 1.5;
+}
+
+.modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+/* ==========================================================================
+   Utility Classes
+   ========================================================================== */
+
+.flex { display: flex; }
+.flex-col { flex-direction: column; }
+.flex-1 { flex: 1; }
+.items-center { align-items: center; }
+.justify-center { justify-content: center; }
+.gap-2 { gap: 2px; }
+.gap-4 { gap: 4px; }
+.gap-8 { gap: 8px; }
+.truncate {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.text-muted { color: rgba(255, 255, 255, 0.25); }
+.text-secondary { color: rgba(255, 255, 255, 0.45); }
+.text-primary { color: rgba(255, 255, 255, 0.8); }

@@ -178,7 +178,7 @@ label.f{display:block;font-size:12px;color:var(--ink-2);margin-bottom:6px;font-w
 .recent{font-size:11.5px;color:var(--ink-3);margin-top:14px}
 .ds-path{max-height:0;opacity:0;overflow:hidden;
   transition:max-height .32s cubic-bezier(.2,.8,.2,1), opacity .24s ease, margin .32s}
-.ds-path.in{max-height:88px;opacity:1;margin-bottom:14px}
+.ds-path.in{max-height:120px;opacity:1;margin-bottom:12px;overflow:visible}
 .ds-work{opacity:0;transform:translateY(10px);transition:opacity .3s ease, transform .3s ease}
 .ds-work.in{opacity:1;transform:none}
 
@@ -191,13 +191,6 @@ label.f{display:block;font-size:12px;color:var(--ink-2);margin-bottom:6px;font-w
 .dsresbar{height:5px;border-radius:999px;background:var(--line);overflow:hidden;margin-top:10px}
 .dsresbar i{display:block;height:100%;width:0;background:var(--brand);border-radius:999px;
   transition:width .2s ease}
-.mcard{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;cursor:pointer;
-  transition:.15s;display:flex;flex-direction:column;gap:10px}
-.mcard:hover{border-color:var(--accent);transform:translateY(-1px);box-shadow:var(--shadow)}
-.mcard .nm{font-size:17px;font-weight:690;letter-spacing:-.02em;display:flex;align-items:center;gap:8px}
-.mcard .meta{font-size:11.5px;color:var(--ink-3);font-family:ui-monospace,Consolas,monospace}
-.mcard .kv{display:flex;flex-wrap:wrap;gap:6px}
-.mcard .acts{display:flex;gap:8px;margin-top:auto;padding-top:4px}
 .mini{font-size:11.5px;padding:6px 12px;border-radius:7px;border:1px solid var(--line-strong);
   background:transparent;color:var(--ink-2);cursor:pointer;font-family:inherit;font-weight:600}
 .mini.pri{background:var(--brand);border-color:var(--brand);color:var(--brand-ink)}
@@ -269,8 +262,6 @@ body { padding: 0; margin: 0; background: var(--panel); overflow: hidden; }
 
 /* 任何宽度下都不许被裁切 */
 .main { overflow-x: auto; }
-.mcard, .tool, .card { min-width: 0; }
-.mcard .nm{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wbtn {
   width: 46px; height: 100%; border: 0; background: transparent;
   color: var(--ink-2); display: grid; place-items: center; cursor: pointer;
@@ -329,7 +320,6 @@ body { padding: 0; margin: 0; background: var(--panel); overflow: hidden; }
 
 /* Linear 的排版习惯：标题轻微负字距，正文不调 */
 .title { letter-spacing: -0.02em; }
-.mcard .nm{ letter-spacing: -0.015em; } .grp { letter-spacing: 0.02em; }
 
 /* ===== 文字不可选择（输入框除外）===== */
 html, body { -webkit-user-select: none; user-select: none; }
@@ -1135,6 +1125,24 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
 /* 控件本身仍然是 30px 高，不被列高带跑 */
 .cfgrow .cc .inp { height: 30px; min-height: 30px; }
 .cfgrow .cc .mgsel { height: 30px; }
+.cfgrow .hotslot {
+  /* 固定 24px 的槽：热标签住在这里，没有标签的行也留着这块空位，
+     说明文字的左边缘才是同一条竖线。 */
+  flex: 0 0 24px;
+  display: flex;
+  align-items: center;
+}
+.cfgrow .hottag {
+  display: inline-block;
+  font-size: 9.5px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 4px;
+  color: var(--brand);
+  background: rgba(93,108,207,.13);
+  pointer-events: none;
+  vertical-align: 1.5px;
+}
 .cfgrow .cc .seg { align-self: center; }
 .cfgrow .cc .inp {
   height: 100%;
@@ -1571,7 +1579,7 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
 .cardhd { margin-bottom: calc(var(--pad-card) * 0.66); }
 
 /* 数据处理页顶部的数据集框：只负责撑满整行，交互和其它路径框一致 */
-.dspathinp { width: 100%; height: 38px; }
+.inp.pathinp.dspathinp { width: 100%; height: 38px; min-height: 38px; padding: 0 12px; cursor: pointer; }
 .dspathinp .val { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dspathinp .tag { flex: none; margin-right: 6px; }
 .dspathinp .iconpill { flex: none; }
@@ -1700,7 +1708,11 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
   color: #fff !important;
 }
 /* 警告色按钮的悬停：filter:brightness 会让红偏亮发粉，这里单独压暗 */
-.modalActs .btn.danger:hover:not(:disabled) { filter: brightness(.92); }
+.modalActs .btn.danger:hover:not(:disabled) {
+  background: var(--bad) !important;     /* 压住 .btn:hover 的近黑底 */
+  color: #fff !important;
+  filter: brightness(.92);
+}
 .modalActs .btn.danger:active:not(:disabled) { filter: brightness(.85); }
 
 /* 路径框：本身就是输入框，点了就能改文字；
@@ -2649,6 +2661,7 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
  *                 white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
  *   .cfgrow .cc { grid-area:1/2; justify-self:end; display:flex; align-items:center;
  *                 gap:8px; padding-left:12px; background:var(--panel); }
+ */
 #p-merge .mgp-grid { padding: 2px; }
 
 /* 右栏变窄时 seg 组允许换行，避免横向溢出把内容推到滚动条底下 */
@@ -2811,6 +2824,11 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
 }
 #p-dataset > .ds-path {
   margin-top: var(--gap-group);
+  /* 常驻顶部：滚动时停在标题下方，用模糊背景把下面的内容隔开 */
+  position: sticky;
+  top: 8px;
+  z-index: 30;
+  backdrop-filter: blur(10px);
 }
 
 
@@ -3575,7 +3593,7 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
   max-height: 62vh;
   object-fit: contain;
 }
-#p-run .pvempty { font-size: 12px; color: var(--ink-3); }
+#p-run .pvempty { font-size: 12px; color: var(--ink-3); letter-spacing: .01em; }
 /* 没在训练时显示「上次保存的样本」：模型里那张 preview.jpg 是 4×5 的拼图，
    只取左上角一格，看着就是单张脸，不会像四张图糊在一起。 */
 #p-run .pvcrop {
@@ -3861,3 +3879,71 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
 
 /* 参数页控件列里的下拉占满整列 */
 .cfgrow .cc .dd { width: 100%; }
+
+/* ============================================================================
+   传输对话框样式（提取运行页） —— 仿资源管理器移动文件
+   ========================================================================== */
+.xferhd{display:flex;align-items:baseline;gap:10px;margin-bottom:6px}
+.xferhd b{font-size:13px;font-weight:600;color:var(--ink)}
+.xferpct{margin-left:auto;font-size:13px;font-variant-numeric:tabular-nums;color:var(--ink-2)}
+#exGraph{width:100%;height:230px;display:block;margin:6px 0 10px;background:transparent}
+.xferft{display:flex;gap:12px;margin-top:10px;font-size:11.5px;color:var(--ink-3)}
+.xferft span:last-child{margin-left:auto;font-variant-numeric:tabular-nums}
+
+/* 危险操作按钮（中断/删除这类）：红色。
+   必须 !important —— .btn 铺了近黑底色且带 !important，否则红色会被压掉。 */
+.btn.danger {
+  background: var(--bad) !important;
+  color: #fff !important;
+  border-color: transparent !important;
+}
+.btn.danger:hover:not(:disabled) { filter: brightness(.92); }
+.btn.danger:active:not(:disabled) { filter: brightness(.86); }
+.btn.danger:disabled { opacity: .55; filter: none; }
+
+
+
+/* ============================================================================
+   侧栏「任务运行中」→ 百分比胶囊（shadcn SidebarMenuBadge 的做法）
+   展开：模块名右侧小胶囊；折叠：挂在图标右上角，像未读数
+   ========================================================================== */
+.nav .navpct{
+  display:none;margin-left:auto;
+  font-size:10.5px;line-height:1;font-variant-numeric:tabular-nums;
+  color:var(--brand);background:rgba(93,108,207,.13);
+  border-radius:999px;padding:3px 0;white-space:nowrap;
+  width:38px;text-align:center;   /* 固定宽度：99% / 100% 切换时不会左右晃 */
+}
+.nav.running .navpct{display:inline-flex;align-items:center}
+.nav.running .lbl{margin-right:2px}
+
+/* 折叠态：胶囊贴到图标右上角 */
+.app.collapsed .nav .navpct{
+  /* 折叠时图标只有 16px，胶囊要更小、并挪到图标右上角外侧，别盖住图标 */
+  position:absolute;right:-4px;top:-3px;margin:0;
+  padding:0;font-size:8px;line-height:13px;
+  width:20px;text-align:center;border-radius:6px;font-variant-numeric:tabular-nums;
+  background:var(--brand);color:#fff;
+  box-shadow:0 0 0 2px var(--surface);
+}
+.app.collapsed .nav{overflow:visible}
+
+/* 折叠态胶囊要相对导航项定位 */
+.nav{position:relative}
+
+/* 数据处理：外层卡片已经有切换条，内层工具卡的标题（过滤器 · 未扫描）是重复信息。
+   用 CSS 盖掉，而不是在 JS 里 hide —— 切换模式时 renderStation 会重建卡片，JS 的 hide 会丢。 */
+/* 只隐藏「内层工具卡」的标题：外层卡片（切换条那层）的 cardhd 必须保留，
+   所以要求两级 .card 祖先 —— 之前写成一级，把切换条也一起藏了。 */
+#dsSteps .card .card .cardhd{display:none}
+
+/* 数字输入（如「强度档位」）：去掉浏览器上下箭头，和其它控件同高 */
+.numin{
+  height:30px;padding:0 10px;border:1px solid var(--line-strong);border-radius:8px;
+  background:var(--surface);color:var(--ink);font-size:12.5px;text-align:right;
+  font-variant-numeric:tabular-nums;outline:none;
+}
+.numin:focus{border-color:var(--brand)}
+.numin::-webkit-outer-spin-button,
+.numin::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.numin{-moz-appearance:textfield;appearance:textfield}

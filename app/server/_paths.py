@@ -31,6 +31,12 @@ def _looks_like_engine(p: Path) -> bool:
 
 def candidates():
     out = []
+    # 引擎代码现在收在 app/ 里（core/samplelib/python/main.py 都在那儿）
+    app_dir = ROOT / "app"
+    if _looks_like_engine(app_dir):
+        out.append(app_dir)
+    if _looks_like_engine(ROOT):
+        out.append(ROOT)
     env = os.environ.get("DFL_ENGINE_ROOT")
     if env:
         out.append(Path(env))
@@ -61,6 +67,11 @@ def engine_root() -> Path:
 
 
 def engine_python() -> Path:
+    """引擎运行时：runtime/engine/python.exe（旧的 app/python 也认）。"""
+    for cand in (ROOT / "runtime" / "engine" / "python.exe",
+                 engine_root() / "python" / "python.exe"):
+        if cand.is_file():
+            return cand
     return engine_root() / "python" / "python.exe"
 
 
@@ -73,8 +84,8 @@ def engine_missing_hint() -> str:
 
 
 def modelhub_dir() -> Path:
-    """modelhub 优先用 4.1 自己的，没有就退回 4.0 的（只读）。"""
-    local = ROOT / "modelhub"
-    if local.is_dir():
-        return local
+    """ONNX 权重目录：根 weights/（含 onnx/），其次 app/modelhub，最后引擎的。"""
+    for cand in (ROOT / "weights", ROOT / "app" / "modelhub", engine_root() / "modelhub"):
+        if (cand / "onnx").is_dir():
+            return cand
     return engine_root() / "modelhub"

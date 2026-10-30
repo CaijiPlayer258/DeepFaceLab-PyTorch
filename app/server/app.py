@@ -28,15 +28,8 @@ ROOT = Path(__file__).resolve().parents[2]
 # 工作区可以用环境变量覆盖（迁移旧工程 / 多工程切换）
 WORKSPACE = Path(os.environ.get("DFL_WORKSPACE") or (ROOT / "workspace"))
 
-# 也可以在项目根放一个 workspace.txt，里面写一行工作区路径（迁移旧工程时用）
-_ws_txt = ROOT / "workspace.txt"
-if not os.environ.get("DFL_WORKSPACE") and _ws_txt.exists():
-    try:
-        _p = Path(_ws_txt.read_text(encoding="utf-8").strip())
-        if _p.is_dir():
-            WORKSPACE = _p
-    except Exception:
-        pass
+# 工作区只有一个来源：环境变量 DFL_WORKSPACE，否则就是本仓库的 workspace。
+# （项目根的 workspace.txt 间接覆盖机制已取消——路径就是路径，不做隐藏跳转。）
 SETTINGS_FILE = WORKSPACE / "settings.json"
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -149,27 +142,6 @@ def _shutdown_cleanup():
     _kill_train_tree()
 
 
-@app.get("/api/merge/videos")
-def merge_videos(dir: str = ""):
-    """列出视频文件。dir 给了就扫它，否则扫工作区。"""
-    exts = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv"}
-    roots = [Path(dir)] if dir else []
-    roots.append(WORKSPACE)
-    out = []
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for f in sorted(root.rglob("*")):
-            if not f.is_file() or f.suffix.lower() not in exts:
-                continue
-            # 合成产物 / 缓存目录不作为素材列出来（否则列表里全是自己的输出）
-            if f.name.endswith("_merged.mp4") or ".merge_" in str(f.parent):
-                continue
-            out.append({"path": str(f), "name": f.name,
-                        "mb": round(f.stat().st_size / 1048576, 1)})
-            if len(out) >= 200:
-                break
-    return {"dir": str(roots[0]), "videos": out}
 
 
 # ============================================================
@@ -474,113 +446,12 @@ def _merge_prepare_worker(video: Path, project: Path):
         _set(running=False, ok=False, error=str(e)[:300], msg="失败", stage="出错")
 
 
-@app.post("/api/merge/prepare")
-def merge_prepare(body: dict):
-    """视频 → 可合成项目（抽帧 + 对齐）。跑在后台，进度用 /status 拉。"""
-    body = body or {}
-    raw = str(body.get("video") or "").strip()
-    if not raw:
-        raise HTTPException(400, "缺少 video")
-    video = Path(raw)
-    if not video.is_file():
-        raise HTTPException(404, "视频不存在: " + raw)
-
-    with _merge_prep_lock:
-        if _merge_prep["running"]:
-            raise HTTPException(409, "正在准备另一个视频")
-        _merge_prep.update({"running": True, "ok": None, "error": "", "pct": 0,
-                            "msg": "启动…", "stage": "准备", "frames": 0,
-                            "aligned": 0, "video": str(video)})
-
-    target = str(body.get("dir") or "").strip()
-    project = Path(target) if target else (WORKSPACE / "merge" / _safe_dirname(video.stem))
-    with _merge_prep_lock:
-        _merge_prep["project"] = str(project)
-
-    threading.Thread(target=_merge_prepare_worker, args=(video, project),
-                     daemon=True).start()
-    return {"ok": True, "project": str(project), "video": str(video)}
 
 
-@app.get("/api/merge/prepare/status")
-def merge_prepare_status():
-    with _merge_prep_lock:
-        return dict(_merge_prep)
 
 
-@app.post("/api/merge/open")
-def merge_open(body: dict):
-    raw = (body or {}).get("path") or ""
-    p = Path(raw)
-
-    # 目录 = DFL 项目（data_dst / aligned / 裸帧目录）
-    if p.is_dir():
-        names, srcdir, kind = _dfl_project_scan(p)
-        if not names:
-            raise HTTPException(404, "目录里没有可用的图: " + raw)
-        _merge_cache.update({
-            "mode": "project", "dir": str(p), "srcdir": srcdir, "names": names,
-            "path": "", "frames": len(names), "fps": 0, "w": 0, "h": 0,
-        })
-        sample = names[:24]
-        lm = sum(1 for n in sample
-                 if _dfljpg_dict(Path(srcdir) / n).get("landmarks") is not None)
-        return {"path": str(p), "name": p.name, "mode": "project", "kind": kind,
-                "frames": len(names), "fps": 0, "width": 0, "height": 0,
-                "with_landmarks": lm, "sampled": len(sample)}
-
-    if not p.is_file():
-        raise HTTPException(404, "路径不存在: " + raw)
-    try:
-        frames, fps, w, h = _video_probe(p)
-    except Exception as e:
-        raise HTTPException(500, "无法解析视频: " + str(e))
-    _merge_cache.update({"mode": "video", "path": str(p), "dir": "", "list": [],
-                         "frames": frames, "fps": fps, "w": w, "h": h})
-    return {"path": str(p), "name": p.name, "mode": "video", "frames": frames,
-            "fps": fps, "width": w, "height": h}
 
 
-@app.get("/api/merge/frame/{idx}")
-def merge_frame(idx: int, w: int = 900):
-    # 项目模式：直接从列表里取那张图
-    if _merge_cache.get("mode") == "project":
-        names = _merge_cache.get("names") or []
-        srcdir = _merge_cache.get("srcdir") or ""
-        if not names:
-            raise HTTPException(409, "还没有打开项目")
-        idx = max(0, min(idx, len(names) - 1))
-        fp = Path(srcdir) / names[idx]
-        if not fp.is_file():
-            raise HTTPException(404, "图片不见了: " + str(fp))
-        try:
-            import cv2
-            img = _imread_any(fp)
-            if img is None:
-                raise RuntimeError("解不开")
-            h0, w0 = img.shape[:2]
-            maxw = max(200, min(w, 1600))
-            if w0 > maxw:
-                img = cv2.resize(img, (maxw, int(h0 * maxw / w0)), interpolation=cv2.INTER_AREA)
-            ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
-            if not ok:
-                raise RuntimeError("编码失败")
-        except Exception as e:
-            raise HTTPException(500, "取图失败: " + str(e))
-        return {"idx": idx, "total": len(names), "name": names[idx],
-                "png": "data:image/jpeg;base64," + _b64.b64encode(buf.tobytes()).decode()}
-
-    path = _merge_cache.get("path")
-    if not path:
-        raise HTTPException(409, "还没有打开视频")
-    total = _merge_cache.get("frames") or 0
-    if total:
-        idx = max(0, min(idx, total - 1))
-    try:
-        png = _video_frame_jpeg(path, idx, maxw=max(200, min(w, 1600)))
-    except Exception as e:
-        raise HTTPException(500, "取帧失败: " + str(e))
-    return {"idx": idx, "png": "data:image/jpeg;base64," + _b64.b64encode(png).decode()}
 
 
 _det_cache = {}
@@ -759,149 +630,34 @@ def _model_dat(name: str):
     return cands[0] if cands else None
 
 
-@app.get("/api/models/{name}/config")
-def model_config_get(name: str):
-    """读一个模型当前保存的训练参数。"""
-    import pickle
-    dat = _model_dat(name)
-    if dat is None:
-        raise HTTPException(404, "找不到模型 " + name)
-    try:
-        data = pickle.loads(dat.read_bytes())
-    except Exception as e:
-        raise HTTPException(500, "读取 _data.dat 失败: " + str(e))
-    opts = data.get("options") or {}
-    return {"name": name, "iter": data.get("iter", 0),
-            "options": {k: v for k, v in opts.items() if isinstance(v, (int, float, str, bool)) or v is None},
-            "readonly": sorted([k for k in opts if k in _CFG_STRUCTURAL])}
 
 
-@app.post("/api/models/{name}/config")
-def model_config_set(name: str, body: dict):
-    """写回训练参数。结构性字段拒绝，其余原样合并。"""
-    import pickle
-    dat = _model_dat(name)
-    if dat is None:
-        raise HTTPException(404, "找不到模型 " + name)
-    patch = (body or {}).get("options") or {}
-    if not patch:
-        raise HTTPException(400, "没有要写入的参数")
-
-    blocked = [k for k in patch if k in _CFG_STRUCTURAL]
-    if blocked:
-        raise HTTPException(400, "这些是创建后不可改的结构参数: " + ", ".join(blocked))
-
-    try:
-        data = pickle.loads(dat.read_bytes())
-    except Exception as e:
-        raise HTTPException(500, "读取 _data.dat 失败: " + str(e))
-
-    opts = data.get("options") or {}
-
-    # 按原字段的类型收敛：界面送上来的都是字符串，"" 表示「这项没填，别动」
-    bad = []
-    clean = {}
-    for k, v in list(patch.items()):
-        cur = opts.get(k)
-        if isinstance(v, str):
-            v = v.strip()
-            if v == "":
-                continue                      # 空着 = 不改这一项
-        try:
-            if isinstance(cur, bool):
-                if isinstance(v, str):
-                    v = v.lower() in ("1", "true", "yes", "on", "开")
-                else:
-                    v = bool(v)
-            elif isinstance(cur, int) and not isinstance(cur, bool):
-                v = int(round(float(v)))
-            elif isinstance(cur, float):
-                v = float(v)
-            elif isinstance(cur, str):
-                v = str(v)
-        except (TypeError, ValueError):
-            bad.append(k)
-            continue
-        clean[k] = v
-    if bad:
-        raise HTTPException(400, "这些参数不是有效数字: " + ", ".join(bad))
-    patch = clean
-    if not patch:
-        return {"ok": True, "name": name, "changed": {}, "count": 0}
-
-    backup = dat.with_suffix(".dat.bak")
-    try:
-        backup.write_bytes(dat.read_bytes())
-    except Exception:
-        pass
-
-    changed = {}
-    for k, v in patch.items():
-        if opts.get(k) != v:
-            changed[k] = {"from": opts.get(k), "to": v}
-        opts[k] = v
-    data["options"] = opts
-    # 非原子写会把 _data.dat 写坏：先落临时文件再换名，中途崩也只是丢弃临时文件
-    try:
-        blob = pickle.dumps(data)
-        tmp = dat.with_suffix(".dat.tmp")
-        tmp.write_bytes(blob)
-        os.replace(str(tmp), str(dat))
-    except Exception as e:
-        raise HTTPException(500, "写入失败: " + str(e))
-    return {"ok": True, "name": name, "changed": changed, "count": len(changed)}
+# 与 4.0 Trainer.py 的 _HOT_KEYS 一一对应：这些参数训练中改会立即生效，
+# 其余（分辨率/架构/维度/batch/优化器/预训练…）必须重启训练。
+_HOT_OPTIONS = {
+    "crash_threshold", "backup_interval", "max_backups",
+    "face_style_power", "bg_style_power",
+    "masked_training", "blur_out_mask", "eyes_mouth_prio", "uniform_yaw",
+    "lr", "lr_cos", "lr_dropout",
+    "random_src_flip", "random_dst_flip", "random_hsv_power",
+    "random_warp", "random_occlusion", "random_noise",
+    "random_color_power", "random_color_alg",
+    "ct_mode",
+    # 刚性形变范围
+    "rotation_range", "scale_range", "t_range",
+    # 眼睛 / 嘴巴缩放、边缘增强
+    "eyes_scale", "mouth_scale", "edge_enhance_power",
+    # Inter code 分布日志间隔
+    "log_code_stats",
+}
 
 
-@app.post("/api/models/{name}/delete")
-def model_delete(name: str):
-    """删掉一个模型的所有文件（权重 / data.dat / 备份目录）。训练中的模型拒绝删。"""
-    import shutil as _sh
-    name = _safe_model_name(name)
-    with _train_job_lock:
-        if _train_job["running"] and _train_job.get("name") == name:
-            raise HTTPException(409, "这个模型正在训练，先停止再删")
-    md = WORKSPACE / "model"
-    paths = sorted(md.glob(name + "_*"))
-    if not paths:
-        raise HTTPException(404, "找不到模型 " + name)
-    removed = []
-    for p in paths:
-        try:
-            if p.is_dir():
-                _sh.rmtree(p, ignore_errors=True)
-            else:
-                p.unlink()
-            removed.append(p.name)
-        except Exception as e:
-            raise HTTPException(500, "删除失败 %s: %s" % (p.name, str(e)[:120]))
-    return {"ok": True, "name": name, "removed": removed, "count": len(removed)}
 
 
-@app.post("/api/models/{name}/export")
-def model_export(name: str):
-    """把一个模型导出成 .dfm（后台跑，前端轮询 /api/models/export/status）。"""
-    md = WORKSPACE / "model"
-    if not (md / (name + "_" + _arch_of(name) + "_data.dat")).exists():
-        # 兜底：直接看有没有 *_{name}_*_data.dat
-        cands = list(md.glob(name + "_*_data.dat"))
-        if not cands:
-            raise HTTPException(404, "找不到模型 " + name)
-    if not _DFL_PY.exists() or not _DFL_TOOL.exists():
-        raise HTTPException(500, "找不到 4.0 的 python 或导出脚本")
-    with _export_job_lock:
-        if _export_job["running"]:
-            raise HTTPException(409, "已经在导出 " + _export_job["name"])
-    arch = _arch_of(name)
-    _threading.Thread(target=_export_worker, args=(name, arch), daemon=True).start()
-    return {"ok": True, "name": name, "arch": arch, "running": True}
 
 
-@app.get("/api/models/export/status")
-def model_export_status():
-    with _export_job_lock:
-        return {"running": _export_job["running"], "name": _export_job["name"],
-                "ok": _export_job["ok"], "error": _export_job["error"],
-                "log": _export_job["log"][-40:]}
+
+
 
 
 # ============================================================
@@ -960,7 +716,7 @@ def _merge_worker(input_dir: str, out_mp4: str, aligned_dir: str, dfm: str,
     merger 包，跑到一半必崩；现在换成直接调 run_export_pipeline。
     """
     import subprocess
-    py = _DFL_ROOT / "python" / "python.exe"
+    py = _engine_python()
     runner = Path(__file__).with_name("_merge_runner.py")
     if not py.is_file():
         raise RuntimeError("找不到 4.0 的 python: %s" % py)
@@ -1061,101 +817,8 @@ _merge_job_lock = _th2.Lock()
 _merge_proc = None          # 当前合成子进程，取消时用
 
 
-@app.post("/api/merge/export")
-def merge_export(body: dict):
-    """把一段帧目录合成成换脸结果。真要跑，不是占位。"""
-    body = body or {}
-    # project 和 input_dir 是同一样东西：合成器里叫「项目」，接口里叫「输入帧目录」
-    input_dir = str(body.get("input_dir") or body.get("project") or "").strip()
-    if not input_dir:
-        raise HTTPException(400, "缺少 input_dir（或 project）")
-    ip = Path(input_dir)
-    if not ip.is_dir():
-        raise HTTPException(404, "输入目录不存在: " + input_dir)
-
-    dfm = str(body.get("dfm") or "").strip()
-    model_name = str(body.get("model") or "").strip()
-    if not dfm and model_name:
-        # 界面传的是模型名（384wf / DFLitetest …），这里落成 .dfm 路径
-        cand = WORKSPACE / "model" / (model_name + ".dfm")
-        if cand.is_file():
-            dfm = str(cand)
-    if not dfm:
-        # 自动挑第一个 .dfm
-        cands = sorted((WORKSPACE / "model").glob("*.dfm"))
-        dfm = str(cands[0]) if cands else ""
-    if not dfm or not Path(dfm).is_file():
-        who = ("模型 %s 还没有导出 .dfm —— 去训练页点「导出」" % model_name) if model_name else "没有可用的 .dfm 模型"
-        raise HTTPException(400, who)
-
-    out_raw = str(body.get("output_dir") or "")
-    aligned_dir = str(body.get("aligned_dir") or "")
-
-    # 对齐集：显式传入 > 输入目录下的 aligned/ > 同级的 <name>_aligned/
-    # 合成靠 DFLJPG 里的元数据定位人脸，没有对齐集就只能瞎猜，所以这里必须定死
-    if not aligned_dir:
-        cands = [ip / "aligned", ip.parent / (ip.name + "_aligned")]
-        for c in cands:
-            if c.is_dir():
-                aligned_dir = str(c)
-                break
-    if not aligned_dir or not Path(aligned_dir).is_dir():
-        raise HTTPException(400,
-            "找不到对齐集（DFLJPG）：期望 %s/aligned 或 %s_aligned。"
-            "先跑一次「抽帧 + 人脸对齐」。" % (ip, ip))
-    if not list(Path(aligned_dir).glob("*.jpg")):
-        raise HTTPException(400, "对齐集是空的: " + aligned_dir)
-
-    if out_raw.lower().endswith(".mp4"):
-        out_mp4 = out_raw
-    elif out_raw:
-        out_mp4 = str(Path(out_raw) / "merged.mp4")
-    else:
-        out_mp4 = str(ip.parent / (ip.name + "_merged.mp4"))
-
-    mask_onnx = str(body.get("xseg_onnx") or "")
-    if not mask_onnx:
-        for c in (WORKSPACE / "model" / "XSegLite" / "xseglite.onnx",
-                  WORKSPACE / "model" / "XSeg" / "XSeg.onnx"):
-            if c.is_file():
-                mask_onnx = str(c)
-                break
-    settings = body.get("settings") or {}
-
-    with _merge_job_lock:
-        if _merge_job["running"]:
-            raise HTTPException(409, "已经在合成")
-        # 先把状态置成 running 再起线程：否则前端刚拿到 ok=True 就来轮询，
-        # 会读到线程启动前的旧状态（running=False / ok=None），当成"已完成"。
-        _merge_job.update({"running": True, "log": [], "ok": None, "error": None,
-                           "out": out_mp4, "pct": 0, "msg": "启动合成…"})
-
-    try:
-        fps = float(body.get("fps") or _merge_cache.get("fps") or 30.0)
-    except Exception:
-        fps = 30.0
-    try:
-        workers = int(body.get("workers") or 0)
-    except Exception:
-        workers = 0
-    _th2.Thread(target=_merge_worker,
-                args=(input_dir, out_mp4, aligned_dir, dfm, settings, mask_onnx, fps, workers,
-                      str(body.get("encoder") or "h264_nvenc"),
-                      str(body.get("hwaccel") if body.get("hwaccel") is not None else "auto")),
-                daemon=True).start()
-    return {"ok": True, "input_dir": input_dir, "aligned_dir": aligned_dir,
-            "output": out_mp4, "output_dir": out_mp4, "dfm": dfm, "settings": settings}
 
 
-@app.get("/api/merge/export/status")
-def merge_export_status():
-    with _merge_job_lock:
-        return {"running": _merge_job["running"], "ok": _merge_job["ok"],
-                "error": _merge_job["error"], "out": _merge_job["out"],
-                "pct": _merge_job.get("pct", 0), "msg": _merge_job.get("msg", ""),
-                "stage": _merge_job.get("stage", -1),
-                "cancelled": _merge_job.get("cancelled", False),
-                "log": _merge_job["log"][-50:]}
 
 
 def _merge_frame_image(idx: int):
@@ -1190,92 +853,12 @@ def _merge_frame_image(idx: int):
     return frame, total
 
 
-@app.get("/api/merge/merged/{idx}")
-def merge_merged_frame(idx: int, w: int = 900):
-    """从「最近一次导出的成片」里取一帧，给工作台的「合成」标签用。"""
-    import cv2
-    out = (_merge_job.get("out") or "").strip()
-    if not out or not Path(out).is_file():
-        # 重启之后 _merge_job 是空的 —— 按当前项目的默认命名找一遍
-        for cand in (str(_merge_cache.get("dir") or "") + "_merged.mp4",
-                     str(_merge_cache.get("dir") or "") + os.sep + "merged.mp4"):
-            if cand and Path(cand).is_file():
-                out = cand
-                break
-    if not out or not Path(out).is_file():
-        raise HTTPException(409, "还没有导出的成片")
-    cap = cv2.VideoCapture(out)
-    if not cap.isOpened():
-        raise HTTPException(500, "打不开成片: " + out)
-    cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(idx)))
-    ok, frame = cap.read()
-    cap.release()
-    if not ok:
-        raise HTTPException(404, "成片里没有第 %d 帧" % idx)
-    h0, w0 = frame.shape[:2]
-    maxw = max(200, min(int(w), 1600))
-    if w0 > maxw:
-        frame = cv2.resize(frame, (maxw, int(h0 * maxw / w0)), interpolation=cv2.INTER_AREA)
-    ok2, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
-    if not ok2:
-        raise HTTPException(500, "编码失败")
-    return {"idx": int(idx), "out": out,
-            "png": "data:image/jpeg;base64," + _b64.b64encode(buf.tobytes()).decode()}
 
 
-@app.post("/api/merge/export/cancel")
-def merge_export_cancel():
-    """终止正在跑的合成子进程。"""
-    global _merge_proc
-    with _merge_job_lock:
-        running = _merge_job["running"]
-    if not running or _merge_proc is None:
-        return {"ok": False, "reason": "no running export"}
-    try:
-        _merge_proc.terminate()
-    except Exception as e:
-        return {"ok": False, "reason": str(e)[:120]}
-    with _merge_job_lock:
-        _merge_job["cancelled"] = True
-        _merge_job["msg"] = "cancelling"
-    return {"ok": True}
 
 
-@app.get("/api/merge/detect/{idx}")
-def merge_detect(idx: int, model: str = "det_500m", thresh: float = 0.5):
-    """对当前帧做人脸检测，返回原图坐标的框。视频 / 项目两种模式都支持。"""
-    frame, _total = _merge_frame_image(idx)
-    det = _get_detector(model)
-    det.thresh = float(thresh)
-    boxes = det.detect(frame)
-    h, w = frame.shape[:2]
-    return {"idx": int(idx), "width": int(w), "height": int(h),
-            "model": model, "boxes": boxes}
 
 
-@app.get("/api/merge/analyze")
-def merge_analyze(step: int = 12, model: str = "det_500m", thresh: float = 0.5):
-    """按步长扫全片，统计每帧的人脸数，给时间轴的人脸轨用。
-    486 帧 / step=12 → 41 次推理，约 20 秒。"""
-    total = int(_merge_cache.get("frames") or 0)
-    step = max(1, min(int(step), 200))
-    det = _get_detector(model)
-    det.thresh = float(thresh)
-
-    marks = []
-    idx = 0
-    scanned = 0
-    while idx < total:
-        try:
-            frame, _n = _merge_frame_image(idx)
-        except HTTPException:
-            break
-        boxes = det.detect(frame)
-        marks.append({"idx": idx, "count": len(boxes),
-                      "box": boxes[0]["box"] if boxes else None})
-        scanned += 1
-        idx += step
-    return {"total": total, "step": step, "scanned": scanned, "marks": marks}
 
 
 # ============================================================
@@ -1286,179 +869,34 @@ def merge_analyze(step: int = 12, model: str = "det_500m", thresh: float = 0.5):
 _mask_state = {"dir": None, "files": [], "index": 0}
 
 
-@app.post("/api/project/open")
-def mask_project_open(body: dict):
-    """打开一个已对齐的人脸集目录，列出图片供遮罩编辑器使用。"""
-    raw = (body or {}).get("path") or ""
-    rel = raw
-    low = rel.lower().replace("/", "\\")
-    for pre in ("workspace\\", "workspace"):
-        if low.startswith(pre):
-            rel = rel[len(pre):].lstrip("\\/")
-            break
-    d = Path(raw) if (raw and Path(raw).is_absolute()) else (WORKSPACE / rel if rel else WORKSPACE / "data_src" / "aligned")
-    if not d.is_dir():
-        raise HTTPException(404, "目录不存在: " + str(d))
-    files = sorted([p for p in d.iterdir()
-                    if p.is_file() and p.suffix.lower() in IMAGE_EXT])
-    resume = 0
-    fp = WORKSPACE / "_mask_progress.json"
-    if fp.is_file():
-        try:
-            memo = json.loads(fp.read_text(encoding="utf-8"))
-            if memo.get("dir") and Path(memo["dir"]) == d:
-                resume = int(memo.get("index") or 0)
-        except Exception:
-            pass
-    _mask_state.update({"dir": str(d), "files": [p.name for p in files], "index": resume})
-    return {"path": str(d), "count": len(files), "resume": resume,
-            "files": [{"name": p.name, "size": p.stat().st_size} for p in files[:500]]}
 
 
-@app.get("/api/image/{index}")
-def mask_image(index: int):
-    """返回当前项目的第 index 张图（base64），以及是否已有遮罩。"""
-    import base64
-    files = _mask_state.get("files") or []
-    if not files:
-        raise HTTPException(409, "还没有打开项目")
-    index = max(0, min(int(index), len(files) - 1))
-    d = Path(_mask_state["dir"])
-    p = d / files[index]
-    if not p.is_file():
-        raise HTTPException(404, "文件不存在: " + files[index])
-    raw = p.read_bytes()
-    ext = p.suffix.lower().lstrip(".")
-    mime = "jpeg" if ext in ("jpg", "jpeg") else ext
-    _mask_state["index"] = index
-    return {"index": index, "name": files[index], "total": len(files),
-            "image": base64.b64encode(raw).decode(),   # 纯 base64，前端自己拼 data URL
-            "mime": mime, "has_mask": True}
 
 
 def _mask_ai_stub():
     raise HTTPException(501, "这个功能要加载 AI 模型（SAM / BiSeNet / XSeg），当前只接了手绘与保存")
 
 
-@app.post("/api/mask/predict")
-def mask_predict(body: dict):
-    _mask_ai_stub()
 
 
-@app.post("/api/mask/text")
-def mask_text(body: dict):
-    _mask_ai_stub()
 
 
-@app.post("/api/mask/bisenet")
-def mask_bisenet(body: dict):
-    _mask_ai_stub()
 
 
-@app.post("/api/model/preload")
-def mask_preload(body: dict | None = None):
-    return {"ok": True, "note": "模型预加载未接"}
 
 
-@app.get("/api/image/{index}/mask")
-def mask_existing(index: int):
-    """读这张图已有的 XSeg 遮罩。DFLJPG 里的遮罩段暂时不解析，返回空当新图处理。"""
-    return {"mask": None}
 
 
-@app.post("/api/progress/save")
-def mask_progress_save(body: dict | None = None):
-    """记住看到第几张，下次进来接着干。落盘，重启也还在。"""
-    body = body or {}
-    idx = int(body.get("index") or 0)
-    _mask_state["index"] = idx
-    try:
-        (WORKSPACE / "_mask_progress.json").write_text(
-            json.dumps({"index": idx, "dir": _mask_state.get("dir") or ""}, ensure_ascii=False),
-            encoding="utf-8")
-    except Exception:
-        pass
-    return {"ok": True, "index": idx}
 
 
-@app.get("/api/progress/load")
-def mask_progress_load():
-    """读上次的进度；文件里还有上次打开的目录，前端可以据此恢复。"""
-    idx = _mask_state.get("index") or 0
-    d = ""
-    fp = WORKSPACE / "_mask_progress.json"
-    if fp.is_file():
-        try:
-            data = json.loads(fp.read_text(encoding="utf-8"))
-            idx = int(data.get("index") or idx)
-            d = data.get("dir") or ""
-        except Exception:
-            pass
-    return {"index": idx, "dir": d}
 
 
-@app.post("/api/mask/save")
-def mask_save(body: dict):
-    """把画好的遮罩存成 PNG，写到 _masks/<同名>.png。"""
-    import base64
-    files = _mask_state.get("files") or []
-    if not files:
-        raise HTTPException(409, "还没有打开项目")
-    idx = int((body or {}).get("index", _mask_state.get("index") or 0))
-    data = (body or {}).get("mask") or ""
-    if "," in data:
-        data = data.split(",", 1)[1]
-    try:
-        raw = base64.b64decode(data)
-    except Exception:
-        raise HTTPException(400, "遮罩数据不是合法 base64")
-    d = Path(_mask_state["dir"]) / "_masks"
-    d.mkdir(exist_ok=True)
-    out = d / (Path(files[idx]).stem + ".png")
-    out.write_bytes(raw)
-    return {"ok": True, "path": str(out)}
 
 
-@app.get("/api/mask/models")
-def mask_models(kind: str = "XSegLite"):
-    """扫描 workspace/model/<kind>/ 下的 .onnx / .engine，供遮罩绘制页的模型下拉用。
-    4.0 的 _refresh_xseg_file_list() 就是这个逻辑：优先 .engine（TRT 最快）。"""
-    base = WORKSPACE / "model" / (kind if kind in ("XSeg", "XSegLite") else "XSegLite")
-    files = []
-    if base.is_dir():
-        for f in sorted(base.iterdir()):
-            if f.is_file() and f.suffix.lower() in (".onnx", ".engine"):
-                files.append({"name": f.name, "path": str(f),
-                              "mb": round(f.stat().st_size / 1048576, 1),
-                              "trt": f.suffix.lower() == ".engine"})
-    files.sort(key=lambda x: (not x["trt"], x["name"]))
-    return {"kind": kind, "dir": str(base), "files": files}
 
 
-@app.post("/api/merge/project")
-def merge_project(body: dict):
-    """看一眼目录是不是能用的 DFL 项目：有几张帧、有没有 aligned、带不带 landmarks。"""
-    raw = str((body or {}).get("path") or "").strip()
-    p = Path(raw)
-    if not p.is_dir():
-        raise HTTPException(404, "不是目录: " + raw)
-    names, srcdir, kind = _dfl_project_scan(p)
-    aligned = p / "aligned"
-    sample = names[:24]
-    lm = sum(1 for n in sample
-             if _dfljpg_dict(Path(srcdir) / n).get("landmarks") is not None)
-    return {
-        "path": str(p), "kind": kind, "total": len(names),
-        "has_aligned": aligned.is_dir(),
-        "with_landmarks": lm,          # 采样 24 张的结果，不是全量
-        "sampled": len(sample),
-        "sample": names[:6],
-    }
 
 
-@app.get("/api/merge/info")
-def merge_info():
-    return dict(_merge_cache)
 
 
 
@@ -1498,109 +936,9 @@ async def _no_cache(request, call_next):
     return resp
 
 
-# ---------------- B 站扫码登录 ----------------
-from . import biliauth
-
-BILI = biliauth.CookieStore(WORKSPACE)
-_bili_session = {"key": "", "created": 0}
-
-
-@app.post("/api/bili/qr")
-def bili_qr():
-    try:
-        d = biliauth.generate()
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"生成二维码失败：{e}")
-    _bili_session["key"] = d["key"]
-    _bili_session["created"] = int(__import__("time").time())
-    return {"ok": True, "key": d["key"], "qr": d["qr_png"]}
-
-
-@app.post("/api/bili/poll")
-def bili_poll(payload: dict = None):
-    key = (payload or {}).get("key") or _bili_session.get("key")
-    if not key:
-        raise HTTPException(status_code=400, detail="还没有生成二维码")
-    try:
-        r = biliauth.poll(key)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"轮询失败：{e}")
-
-    if r.get("status") == "ok" and r.get("cookie"):
-        cookie = r["cookie"]
-        BILI.save(cookie)
-        info = biliauth.fetch_user_info(cookie)
-        if info:
-            BILI.save_info(info)
-        _bili_session["key"] = ""
-        return {"status": "ok", "name": info.get("name", ""), "uid": info.get("uid", 0),
-                "avatar": info.get("avatar", "")}
-    return {"status": r.get("status", "pending"), "message": r.get("message", "")}
-
-
-# ============================================================
-# B 站下载：真的往 workspace/raw 写文件（用 ffmpeg 生成等价小片）
-# 现在是「可用的占位」：文件名、时长、体积按画质档变化，落盘后提取器能直接用
-# ============================================================
-@app.post("/api/bili/download")
-def bili_download(body: dict):
-    """把一个视频「下载」到 workspace/raw/。返回真实落盘路径和大小。"""
-    import subprocess
-    import imageio_ffmpeg
-    body = body or {}
-    bvid = str(body.get("bvid") or "").strip()
-    title = str(body.get("title") or "").strip() or bvid or "untitled"
-    quality = str(body.get("quality") or "best")
-
-    raw = WORKSPACE / "raw"
-    raw.mkdir(parents=True, exist_ok=True)
-
-    safe = "".join(c for c in title if c not in r'\/:*?"<>|').strip()[:60] or "video"
-    name = (bvid + "_" if bvid else "") + safe + ".mp4"
-    out = raw / name
-    if out.exists():
-        return {"ok": True, "path": str(out), "size": out.stat().st_size, "skipped": True}
-
-    # 画质决定时长（30/20/12 秒），顺便决定文件体积
-    secs = {"best": 30, "1080": 20, "720": 12}.get(quality, 20)
-    size = {"best": "1280x720", "1080": "1280x720", "720": "960x540"}.get(quality, "1280x720")
-
-    exe = imageio_ffmpeg.get_ffmpeg_exe()
-    cmd = [exe, "-v", "error", "-y",
-           "-f", "lavfi", "-i", "color=c=0x202024:s=%s:d=%d:r=24" % (size, secs),
-           "-f", "lavfi", "-i", "sine=frequency=440:duration=%d" % secs,
-           "-c:v", "libx264", "-preset", "ultrafast", "-crf", "32",
-           "-c:a", "aac", "-b:a", "64k", "-shortest", str(out)]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=120, creationflags=_NO_WINDOW)
-    except Exception as e:
-        raise HTTPException(500, "生成失败: " + str(e))
-    if proc.returncode != 0 or not out.exists():
-        raise HTTPException(500, "ffmpeg 退出码 %d: %s" % (
-            proc.returncode, (proc.stderr or b"").decode("utf-8", "replace")[:200]))
-    return {"ok": True, "path": str(out), "size": out.stat().st_size,
-            "seconds": secs, "quality": quality}
-
-
-@app.get("/api/bili/me")
-def bili_me():
-    cookie = BILI.load()
-    if not cookie or "SESSDATA" not in cookie:
-        return {"logged_in": False}
-    info = BILI.load_info()
-    if not info:
-        info = biliauth.fetch_user_info(cookie)
-        if info:
-            BILI.save_info(info)
-    return {"logged_in": bool(info), "name": info.get("name", ""),
-            "uid": info.get("uid", 0), "avatar": info.get("avatar", "")}
-
-
-@app.post("/api/bili/logout")
-def bili_logout():
-    BILI.clear()
-    _bili_session["key"] = ""
-    return {"ok": True}
+# ---------------- B 站扫码登录（已拆到 routes_bili.py） ----------------
+from .routes_bili import router as _bili_router
+app.include_router(_bili_router)
 
 
 # ---------------- 数据处理：真实扫描 ----------------
@@ -1639,337 +977,13 @@ def _dhash(img, size=8) -> int:
     return v
 
 
-# ---------------- 数据集体检（One Shot） ----------------
-# 扫描在 **4.0 的 python** 里跑（_scan_runner.py）：
-#   ① 那边带着完整的 numpy/cv2/numba，4.1 只负责起进程、转进度
-#   ② 以后人脸 embedding / 聚类也能接在同一条流水线上
-# 协议：@@P <done> <total> <stage> 进度、@@R <json> 结果、@@ERR <msg> 错误。
-_oneshot_job = {"running": False, "done": 0, "total": 0, "stage": "", "result": None,
-                "error": None, "dir": "", "started": 0.0}
-_oneshot_lock = threading.Lock()
+# ---------------- 数据集体检（One Shot）（已拆到 routes_oneshot.py） ----------------
 
+# ---------------- 面部 68 点（已拆到 routes_face.py） ----------------
+from .routes_face import router as _face_router
+app.include_router(_face_router)
 
-@app.post("/api/dataset/oneshot")
-def dataset_oneshot(payload: dict):
-    payload = payload or {}
-    target = str(payload.get("dir") or "data_src")
-    if os.path.isabs(target) or ".." in target.replace("\\", "/").split("/") or ":" in target:
-        raise HTTPException(400, "非法的数据集目录: " + target)
-    root = WORKSPACE / target
-    if (root / "aligned").is_dir():
-        root = root / "aligned"
-    if not root.is_dir():
-        raise HTTPException(404, "目录不存在：%s" % root)
-
-    with _oneshot_lock:
-        if _oneshot_job["running"]:
-            raise HTTPException(409, "已经在扫了")
-
-    level = str(payload.get("level") or "strict")
-    score_pct = float(payload.get("score_pct", 5.0) if payload.get("score_pct") is not None else 5.0)
-    bucket_floor = int(payload.get("bucket_floor", 0) or 0)
-    total_files = len(_list_images(root))
-
-    with _oneshot_lock:
-        _oneshot_job.update({"running": True, "done": 0, "total": total_files,
-                             "stage": "scan", "result": None, "error": None,
-                             "dir": target, "started": time.time()})
-
-    def _work():
-        import subprocess
-        py = _DFL_ROOT / "python" / "python.exe"
-        runner = Path(__file__).resolve().parent / "_scan_runner.py"
-        if not py.is_file() or not runner.is_file():
-            with _oneshot_lock:
-                _oneshot_job["running"] = False
-                _oneshot_job["error"] = "找不到引擎 python 或 _scan_runner.py"
-            return
-        env = dict(os.environ)
-        env["PYTHONIOENCODING"] = "utf-8"
-        cmd = [str(py), str(runner), "--dir", str(root),
-               "--level", level,
-               "--score-pct", str(score_pct), "--bucket-floor", str(bucket_floor)]
-        try:
-            proc = subprocess.Popen(cmd, cwd=str(_DFL_ROOT), env=env,
-                                    creationflags=_NO_WINDOW,
-                                    stdin=subprocess.DEVNULL,
-                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                    text=True, encoding="utf-8", errors="replace", bufsize=1)
-            for line in proc.stdout:
-                line = line.rstrip("\n")
-                if line.startswith("@@P "):
-                    parts = line.split()
-                    if len(parts) >= 3:
-                        with _oneshot_lock:
-                            _oneshot_job["done"] = int(parts[1])
-                            _oneshot_job["total"] = int(parts[2])
-                            if len(parts) >= 4:
-                                _oneshot_job["stage"] = parts[3]
-                elif line.startswith("@@ERR "):
-                    with _oneshot_lock:
-                        _oneshot_job["error"] = line[6:]
-                elif line.startswith("@@R "):
-                    try:
-                        data = json.loads(line[4:])
-                    except Exception as e:
-                        with _oneshot_lock:
-                            _oneshot_job["error"] = "结果解析失败: %s" % e
-                        continue
-                    with _oneshot_lock:
-                        _oneshot_job["result"] = data
-            proc.wait()
-            with _oneshot_lock:
-                _oneshot_job["running"] = False
-                if _oneshot_job["result"] is None and not _oneshot_job["error"]:
-                    _oneshot_job["error"] = "扫描进程退出码 %s" % proc.returncode
-        except Exception as e:
-            with _oneshot_lock:
-                _oneshot_job["running"] = False
-                _oneshot_job["error"] = "%s: %s" % (type(e).__name__, e)
-
-    threading.Thread(target=_work, daemon=True).start()
-    return {"ok": True, "total": total_files}
-
-
-@app.get("/api/dataset/oneshot/status")
-def dataset_oneshot_status():
-    with _oneshot_lock:
-        j = dict(_oneshot_job)
-    j["elapsed"] = round(time.time() - j["started"], 1) if j.get("started") else 0
-    return j
-
-
-@app.post("/api/dataset/scan")
-def dataset_scan(payload: dict):
-    """只统计不落盘：返回会被处理掉的文件清单。"""
-    mode = payload.get("mode", "blur")
-    target = payload.get("dir") or "data_src"
-    root = WORKSPACE / target
-    if (root / "aligned").is_dir():
-        root = root / "aligned"          # DFL 惯例：对齐结果放在 aligned 子目录
-    if not root.exists():
-        raise HTTPException(status_code=404, detail=f"目录不存在：{root}")
-
-    from PIL import Image
-    files = _list_images(root)
-    hits, bad = [], []
-
-    if mode == "blur":
-        thr = float(payload.get("threshold", 10.0))
-        for p in files:
-            try:
-                v = _lap_var(Image.open(p))
-                if v < thr:
-                    hits.append({"name": p.name, "score": round(v, 2)})
-            except Exception:
-                bad.append(p.name)
-    elif mode == "bad":
-        for p in files:
-            try:
-                with Image.open(p) as im:
-                    im.verify()
-            except Exception:
-                hits.append({"name": p.name, "score": 0})
-    elif mode == "dup":
-        thr = int(payload.get("threshold", 6))
-        seen = []
-        for p in files:
-            try:
-                h = _dhash(Image.open(p))
-            except Exception:
-                continue
-            dup = None
-            for (h2, name) in seen:
-                if bin(h ^ h2).count("1") <= thr:
-                    dup = name
-                    break
-            if dup:
-                hits.append({"name": p.name, "score": 0, "dup_of": dup})
-            else:
-                seen.append((h, p.name))
-    else:
-        raise HTTPException(status_code=400, detail="未知模式")
-
-    return {"total": len(files), "hits": hits[:2000], "count": len(hits), "unreadable": bad[:200]}
-
-
-def _within(base: Path, p: Path) -> bool:
-    """p 是否真的在 base 里面（挡住 ../ 和绝对路径替换基路径）。"""
-    try:
-        base_r = base.resolve()
-        p_r = p.resolve()
-    except Exception:
-        return False
-    try:
-        p_r.relative_to(base_r)
-        return True
-    except ValueError:
-        return False
-
-
-@app.post("/api/dataset/apply")
-def dataset_apply(payload: dict):
-    """把命中的文件移到 _trash（可恢复）。
-
-    注意：这个装饰器以前被错挂在 _within(base, p) 上面，FastAPI 于是把两个 Path
-    参数当成路径参数 —— 任何调用都返回 422，清理功能从来没通过。
-    """
-    mode = payload.get("mode", "blur")
-    target = str(payload.get("dir") or "data_src")
-    # 只允许 workspace 下的相对目录名：绝对路径会把基路径整个替换掉
-    if os.path.isabs(target) or ".." in target.replace("\\", "/").split("/") or ":" in target:
-        raise HTTPException(400, "非法的数据集目录: " + target)
-    names = payload.get("names") or []
-    root = WORKSPACE / target
-    if (root / "aligned").is_dir():
-        root = root / "aligned"
-    trash = root / "_trash"
-    trash.mkdir(exist_ok=True)
-    items = []
-    for n in names:
-        n = str(n)
-        if not n or "/" in n or "\\" in n or n in (".", "..") or ":" in n:
-            continue
-        src = root / n
-        if not src.exists() or not _within(root, src):
-            continue
-        dst = trash / n
-        if not _within(trash, dst):
-            continue
-        i = 1
-        while dst.exists():
-            dst = trash / (src.stem + f"_{i}" + src.suffix)
-            i += 1
-        src.rename(dst)
-        items.append({"name": n, "trash": dst.name})
-    return {"ok": True, "moved": len(items), "items": items, "trash": str(trash)}
-
-
-@app.post("/api/dataset/restore")
-def dataset_restore(payload: dict):
-    """把刚移走的文件放回去（撤销）。"""
-    target = str(payload.get("dir") or "data_src")
-    if os.path.isabs(target) or ".." in target.replace("\\", "/").split("/") or ":" in target:
-        raise HTTPException(400, "非法的数据集目录: " + target)
-    items = payload.get("items") or []
-    root = WORKSPACE / target
-    if (root / "aligned").is_dir():
-        root = root / "aligned"
-    trash = root / "_trash"
-    back = 0
-    for it in items:
-        tn = str(it.get("trash", ""))
-        nm = str(it.get("name", ""))
-        if not tn or not nm:
-            continue
-        if "/" in tn or "\\" in tn or ":" in tn or "/" in nm or "\\" in nm or ":" in nm:
-            continue
-        src = trash / tn
-        dst = root / nm
-        if not src.exists() or not _within(trash, src) or not _within(root, dst):
-            continue
-        if dst.exists():
-            continue
-        src.rename(dst)
-        back += 1
-    return {"ok": True, "restored": back}
-
-
-# ---------------- 面部 68 点 ----------------
-def _face_path() -> Path:
-    return WORKSPACE / "face68.json"
-
-
-@app.get("/api/face")
-def face_get():
-    try:
-        return {"points": json.loads(_face_path().read_text(encoding="utf-8"))}
-    except Exception:
-        return {"points": None}
-
-
-@app.post("/api/face")
-def face_save(payload: dict):
-    pts = payload.get("points")
-    if not isinstance(pts, list) or len(pts) != 68:
-        raise HTTPException(status_code=400, detail="需要 68 个点")
-    WORKSPACE.mkdir(parents=True, exist_ok=True)
-    _face_path().write_text(json.dumps(pts, ensure_ascii=False), encoding="utf-8")
-    return {"ok": True}
-
-
-@app.delete("/api/face")
-def face_clear():
-    try:
-        _face_path().unlink()
-    except Exception:
-        pass
-    return {"ok": True}
-
-
-# ---------------- 账号（B 站） ----------------
-AUTH_FILE = None      # 运行时按工作区解析
-
-
-def _auth_path() -> Path:
-    global AUTH_FILE
-    if AUTH_FILE is None:
-        AUTH_FILE = WORKSPACE / "auth.json"
-    return AUTH_FILE
-
-
-def _auth_read() -> dict:
-    try:
-        return json.loads(_auth_path().read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-@app.get("/api/auth")
-def auth_state():
-    a = _auth_read()
-    return {
-        "logged_in": bool(a.get("uid")),
-        "uid": a.get("uid", 0),
-        "name": a.get("name", ""),
-        "avatar": a.get("avatar", ""),
-        "since": a.get("since", 0),
-        "onboarded": bool(a.get("onboarded")),
-    }
-
-
-@app.post("/api/auth/login")
-def auth_login(payload: dict):
-    """真正的扫码流程接上之前，先用它写入一次登录态。"""
-    WORKSPACE.mkdir(parents=True, exist_ok=True)
-    data = {
-        "uid": int(payload.get("uid") or 0),
-        "name": payload.get("name") or "",
-        "avatar": payload.get("avatar") or "",
-        "since": int(__import__("time").time()),
-        "onboarded": True,
-    }
-    _auth_path().write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"ok": True, **data}
-
-
-@app.post("/api/auth/skip")
-def auth_skip():
-    WORKSPACE.mkdir(parents=True, exist_ok=True)
-    a = _auth_read()
-    a["onboarded"] = True
-    _auth_path().write_text(json.dumps(a, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"ok": True}
-
-
-@app.post("/api/auth/logout")
-def auth_logout():
-    try:
-        _auth_path().unlink()
-    except Exception:
-        pass
-    return {"ok": True}
-
+# ---------------- 账号（已拆到 routes_account.py） ----------------
 
 # ---------------- 模型库 ----------------
 MODEL_DIR = WORKSPACE / "model"
@@ -2342,27 +1356,8 @@ def _gpu_cached(ttl=5.0):
     return _SPEC_CACHE["gpu"]
 
 
-@app.get("/api/model_spec")
-def model_spec():
-    """新建模型页要用的全部下拉/范围/推荐值，一次拿全。"""
-    tables = _spec_tables()
-    gpus = _gpu_cached()
-    rec = _recommend_for(max([g["free_gb"] for g in gpus], default=0.0))
-    out = dict(tables)
-    out["recommend"] = rec
-    out["gpu"] = max(gpus, key=lambda g: g["free_gb"]) if gpus else None
-    return out
 
 
-@app.get("/api/gpu")
-def gpu_info():
-    gpus = _gpu_cached()
-    best = max(gpus, key=lambda g: g["free_gb"]) if gpus else None
-    rec = _recommend_for(best["free_gb"] if best else 0.0)
-    presets = []
-    for k, v in _PRESETS.items():
-        presets.append({kk: vv for kk, vv in v.items() if kk != "weights_gb"} | {"key": k})
-    return {"gpus": gpus, "best": best, "recommend": rec, "presets": presets}
 
 
 _BAD_NAME_CHARS = set('/\\:*?"<>|') | {chr(i) for i in range(32)}
@@ -2379,105 +1374,6 @@ def _safe_model_name(name: str) -> str:
     return name
 
 
-@app.post("/api/models/create")
-def model_create(body: dict):
-    """按档位建一个模型（写一份 iter=1 的 data.dat，4.0 见到就当作已有模型）。"""
-    import pickle as _pk
-    body = body or {}
-    name = _safe_model_name(body.get("name"))
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    dat_path = MODEL_DIR / (name + "_SAEHD_data.dat")
-    if dat_path.exists():
-        raise HTTPException(409, "已经有同名模型：" + name + "（换个名字，或直接去训练页继续练）")
-
-    gpus = _gpu_list()
-    free = max([g["free_gb"] for g in gpus], default=0.0)
-    rec = _recommend_for(free)
-
-    preset_key = str(body.get("preset") or "").strip()
-    if preset_key not in _PRESETS:
-        preset_key = rec["preset"]
-    p = dict(_PRESETS[preset_key])
-
-    def _pick(key, cast, fallback):
-        v = body.get(key)
-        if v is None or v == "":
-            return fallback
-        try:
-            return cast(v)
-        except Exception:
-            return fallback
-
-    # 架构字符串：优先用「架构 + 子分支 + 算子」三段式（和 4.0 的 GUI 同一套规则），
-    # 也允许直接传 archi。合法性交给 4.0 的 parse_archi_string 判，不在 4.1 里另写一份。
-    spec = _archi_spec()
-    archi_display = str(body.get("archi_display") or "").strip()
-    if archi_display:
-        archi = spec.build_archi_string(archi_display,
-                                        str(body.get("subarchi") or ""),
-                                        str(body.get("kernel_label") or spec.default_kernel_label()))
-        if spec.parse_archi_string(archi) is None:
-            raise HTTPException(400, "架构组合不合法：" + archi)
-    else:
-        archi = str(body.get("archi") or p["archi"])
-        if spec.parse_archi_string(archi) is None:
-            raise HTTPException(400, "架构写法不合法：" + archi)
-
-    def _clamp(v, lo, hi, step):
-        v = max(lo, min(hi, int(v)))
-        return int(round(v / float(step)) * step)
-
-    options = {
-        "resolution": _clamp(_pick("resolution", int, p["resolution"]), 64, 640, 32),
-        "face_type": str(body.get("face_type") or "wf"),
-        "archi": archi,
-        "ae_dims": _clamp(_pick("ae_dims", int, p["ae_dims"]), 64, 1024, 8),
-        "e_dims": _clamp(_pick("e_dims", int, p["e_dims"]), 16, 256, 8),
-        "d_dims": _clamp(_pick("d_dims", int, p["d_dims"]), 16, 256, 8),
-        "d_mask_dims": _clamp(_pick("d_mask_dims", int, p["d_mask_dims"]), 8, 128, 8),
-        "batch_size": _pick("batch_size", int, rec["batch_size"]),
-        "target_iter": max(0, _pick("target_iter", int, 0)),
-        "optimizer": str(body.get("optimizer") or "adabelief"),
-        "lr": float(body.get("lr") or 5e-05),
-        "lr_dropout": "n",
-        "masked_training": True,
-        "eyes_mouth_prio": False,
-        "uniform_yaw": False,
-        "ct_mode": "none",
-        "random_warp": True,
-        "gan_power": 0.0,
-        "true_face_power": 0.0,
-        "pretrain": False,
-        "use_fast_generator": True,
-        "models_opt_on_gpu": True,
-    }
-    for k in ("src", "dst"):
-        v = str(body.get(k) or "").strip()
-        if v:
-            options[k] = v
-
-    data = {"iter": 1, "options": options, "loss_history": [],
-            "sample_for_preview": None, "choosed_gpu_indexes": None}
-    tmp = dat_path.with_name(dat_path.name + ".tmp")
-    tmp.write_bytes(_pk.dumps(data, protocol=4))
-    os.replace(str(tmp), str(dat_path))
-
-    # 顺手写 4.0 的参数缓存：模型库和下次启动都不用再解析 data.dat
-    try:
-        st = dat_path.stat()
-        cache = {"version": 1, "iter": 1, "options": options,
-                 "choosed_gpu_indexes": None, "loss_count": 0,
-                 "src_size": st.st_size, "src_mtime_ns": st.st_mtime_ns}
-        Path(str(dat_path) + ".params").write_bytes(_pk.dumps(cache, protocol=4))
-    except Exception:
-        pass
-
-    return {"ok": True, "name": name, "preset": preset_key,
-            "dat": str(dat_path),
-            "options": {k: options[k] for k in
-                        ("resolution", "batch_size", "archi", "face_type",
-                         "ae_dims", "e_dims", "d_dims", "d_mask_dims")},
-            "note": p["note"]}
 
 
 # ============================================================
@@ -2496,7 +1392,7 @@ _last_preview_state = {"body": None, "iter": 0, "at": 0.0}
 def _train_worker(name: str, cpu_only: bool):
     import re
     import subprocess
-    py = _DFL_ROOT / "python" / "python.exe"
+    py = _engine_python()
     main_py = _DFL_ROOT / "main.py"
     env = dict(**__import__("os").environ)
     env["DFL_SILENT_INPUT"] = "1"
@@ -2674,25 +1570,6 @@ def _repair_option_strings(name: str) -> list:
     return fixed
 
 
-@app.post("/api/train/start")
-def train_start(body: dict):
-    body = body or {}
-    name = str(body.get("name") or "").strip()
-    if not name:
-        raise HTTPException(400, "缺少模型名")
-    dat = _model_dat(name)
-    if dat is None:
-        raise HTTPException(404, "找不到模型 %s —— 先用「新建模型」建一个，或检查 workspace/model 里有没有 %s_SAEHD_data.dat" % (name, name))
-    if not (_DFL_ROOT / "python" / "python.exe").is_file():
-        raise HTTPException(500, "找不到 4.0 的引擎（%s）—— 见 app/server/_paths.py：可以写 engine.txt 或设 DFL_ENGINE_ROOT" % _DFL_ROOT)
-    with _train_job_lock:
-        if _train_job["running"]:
-            raise HTTPException(409, "已经在训练 " + _train_job["name"])
-    fixed = _repair_option_strings(name)
-    if fixed:
-        print("[trainer] 修好了参数里的说明文字: " + ", ".join(fixed), flush=True)
-    _th3.Thread(target=_train_worker, args=(name, bool(body.get("cpu_only"))), daemon=True).start()
-    return {"ok": True, "name": name, "running": True}
 
 
 def _webui_post(path: str, payload: dict | None = None, timeout: float = 3.0):
@@ -2740,366 +1617,20 @@ def _kill_train_tree(force_after: float = 0.0):
     return True
 
 
-@app.post("/api/train/save")
-def train_save():
-    """立即保存：让 4.0 在下一个迭代结束后落盘（不打断训练）。"""
-    with _train_job_lock:
-        if not _train_job["running"]:
-            raise HTTPException(409, "现在没有在训练")
-        _train_job["saving"] = True
-        _train_job["saving_until"] = time.time() + 20
-    try:
-        _webui_post("/request-save")
-    except Exception as e:
-        with _train_job_lock:
-            _train_job["saving"] = False
-        raise HTTPException(503, "训练还没加载完（WebUI 未就绪）：%s" % str(e)[:120])
-    return {"ok": True, "msg": "已请求保存，下一个迭代后落盘"}
 
 
-@app.post("/api/train/pause")
-def train_pause():
-    """暂停：挂起训练进程（psutil suspend），迭代停在原地，显存不释放。"""
-    global _train_proc
-    with _train_job_lock:
-        if not _train_job["running"]:
-            raise HTTPException(409, "现在没有在训练")
-        if _train_job["paused"]:
-            return {"ok": True, "paused": True}
-    proc = _train_proc
-    if proc is None or proc.poll() is not None:
-        raise HTTPException(409, "训练进程不在")
-    try:
-        import psutil
-        p = psutil.Process(proc.pid)
-        p.suspend()
-        for c in p.children(recursive=True):
-            try:
-                c.suspend()
-            except Exception:
-                pass
-    except Exception as e:
-        raise HTTPException(500, "挂起失败：%s" % str(e)[:120])
-    with _train_job_lock:
-        _train_job["paused"] = True
-    return {"ok": True, "paused": True}
 
 
-@app.post("/api/train/resume")
-def train_resume():
-    global _train_proc
-    with _train_job_lock:
-        if not _train_job["running"]:
-            raise HTTPException(409, "现在没有在训练")
-        if not _train_job["paused"]:
-            return {"ok": True, "paused": False}
-    proc = _train_proc
-    if proc is None or proc.poll() is not None:
-        raise HTTPException(409, "训练进程不在")
-    try:
-        import psutil
-        p = psutil.Process(proc.pid)
-        for c in p.children(recursive=True):
-            try:
-                c.resume()
-            except Exception:
-                pass
-        p.resume()
-    except Exception as e:
-        raise HTTPException(500, "恢复失败：%s" % str(e)[:120])
-    with _train_job_lock:
-        _train_job["paused"] = False
-    return {"ok": True, "paused": False}
 
 
-@app.post("/api/train/stop")
-def train_stop():
-    """停止：先请 4.0 保存并退出（/request-quit），超时再强杀整棵树。"""
-    with _train_job_lock:
-        running = _train_job["running"]
-        _train_job["stopping"] = True
-    if not running:
-        n = _sweep_orphan_trainers("(停止时发现遗留)")
-        return {"ok": True, "msg": ("已清理 %d 个遗留训练进程" % n) if n else "没有在训练"}
-    # 挂起状态下整个进程（包括 WebUI 线程）都冻着，先恢复再发指令 ——
-    # 否则每一次 /request-quit 都会超时，白等 90 秒最后强杀。
-    with _train_job_lock:
-        paused = _train_job["paused"]
-    if paused:
-        try:
-            import psutil
-            if _train_proc:
-                p_ = psutil.Process(_train_proc.pid)
-                for c_ in p_.children(recursive=True):
-                    try:
-                        c_.resume()
-                    except Exception:
-                        pass
-                p_.resume()
-        except Exception:
-            pass
-        with _train_job_lock:
-            _train_job["paused"] = False
-        time.sleep(0.5)
-
-    graceful = False
-    for attempt in range(6):
-        try:
-            _webui_post("/request-quit", timeout=4.0)
-            graceful = True
-            break
-        except Exception:
-            time.sleep(1.5)
-
-    # 等它自己收尾（保存 + 退出）；最多 90 秒，然后再强杀
-    for _ in range(90):
-        if _train_proc is None or _train_proc.poll() is not None:
-            break
-        time.sleep(1)
-    if _train_proc is not None and _train_proc.poll() is None:
-        _kill_train_tree()
-        return {"ok": True, "graceful": False, "msg": "已强制结束（没等到它自己退出）"}
-    return {"ok": True, "graceful": graceful,
-            "msg": "已保存并退出" if graceful else "已结束"}
 
 
-@app.get("/api/train/preview")
-def train_preview(wait: float = 0.0):
-    """把 4.0 WebUI 的实时预览转出来。
-
-    训练进程会在 127.0.0.1:6790 起一个监控服务：
-      GET /request-preview  → 让它下一轮吐一张
-      GET /preview          → pop 语义，取走就没了
-
-    wait=N 会**一直等到有新图**（最多 N 秒）再返回。前端点「刷新」时用它，
-    否则拿到的是上一次的缓存 —— 看起来就是「点了没反应 / 有滞后」。
-
-    返回体在最外层补三个字段（4.0 原样透传 previews/labels）：
-      fresh  这次是不是真的拿到了新图
-      iter   这张图对应的迭代数（拿到新图时记录）
-      age_s  这张图距今多少秒
-    """
-    import json as _json
-    import time as _time
-    import urllib.request
-
-    port = WEBUI_PORT
-    base = "http://127.0.0.1:%d" % port
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-
-    def _get(path, timeout=1.2):
-        req = urllib.request.Request(base + path, headers={"User-Agent": "dfl41"})
-        with opener.open(req, timeout=timeout) as r:
-            return r.read()
-
-    def _pack(raw, fresh):
-        try:
-            d = _json.loads(raw)
-        except Exception:
-            d = {"previews": [], "labels": {}}
-        d["fresh"] = bool(fresh)
-        d["iter"] = int(_last_preview_state.get("iter") or 0)
-        at = float(_last_preview_state.get("at") or 0)
-        d["age_s"] = round(time.time() - at, 1) if at else None
-        return Response(content=_json.dumps(d).encode("utf-8"),
-                        media_type="application/json",
-                        headers={"Cache-Control": "no-store"})
-
-    deadline = time.time() + max(0.0, min(float(wait or 0.0), 25.0))
-    requested = False
-    raw = None
-
-    while True:
-        if not requested:
-            try:
-                _get("/request-preview", timeout=0.8)
-                requested = True
-            except Exception:
-                # 训练没在跑（或还没起 WebUI）：别让前端干等
-                cached = _last_preview_state.get("body")
-                if cached:
-                    return _pack(cached, False)
-                return _pack(b'{"previews":[],"labels":{}}', False)
-        try:
-            d = _json.loads(_get("/preview"))
-            if d.get("previews"):
-                raw = _json.dumps(d).encode("utf-8")
-                _last_preview_state.update({"body": raw,
-                                            "iter": _train_job.get("iter") or 0,
-                                            "at": time.time()})
-                return _pack(raw, True)
-        except Exception:
-            pass
-        if time.time() >= deadline:
-            break
-        _time.sleep(0.2)
-
-    cached = _last_preview_state.get("body")
-    if cached:
-        return _pack(cached, False)
-    return _pack(b'{"previews":[],"labels":{}}', False)
 
 
-@app.get("/api/train/status")
-def train_status():
-    with _train_job_lock:
-        j = _train_job
-        it = int(j.get("iter") or 0)
-        rate = float(j.get("it_s") or 0.0)
-        started = float(j.get("started_at") or 0.0)
-        target = int(j.get("target") or 0)
-        elapsed = (time.time() - started) if (started and j["running"]) else 0.0
-        eta = None
-        if target and rate > 0 and it < target:
-            eta = int((target - it) / rate)
-        return {"running": j["running"], "name": j["name"],
-                "iter": it, "ok": j["ok"],
-                "error": j["error"], "log": j["log"][-30:],
-                "it_s": rate, "elapsed_s": int(elapsed),
-                "target_iter": target, "eta_s": eta,
-                "iter_seen": bool(j.get("iter_seen")),
-                "paused": bool(j.get("paused")),
-                "saving": bool(j.get("saving")) and time.time() < float(j.get("saving_until") or 0),
-                "stopping": bool(j.get("stopping")),
-                "last_backup_iter": j.get("last_backup_iter") or 0,
-                "lr": j.get("lr") or 0.0,
-                "loss_src": j.get("loss_src"),
-                "loss_dst": j.get("loss_dst"),
-                "history": j.get("history") or [],
-                "has_preview": bool(_last_preview_state.get("body")),
-                "preview_iter": _last_preview_state.get("iter") or 0}
 
 
-@app.get("/api/models/{name}/stats")
-def model_stats(name: str):
-    """训练页右侧那几条：显存、利用率、磁盘、上次保存、下次自动、备份数。
-
-    以前这些数字是写死在 HTML 里的（"9.2 / 12 GB"、"98%"、"3 / 5 份"），
-    页面看起来一直很健康，其实和真相无关。这里按模型现场算。
-    """
-    import pickle as _pk
-    name = _safe_model_name(name)
-    dat = _model_dat(name)
-    if dat is None:
-        raise HTTPException(404, "找不到模型 " + name)
-
-    opts = {}
-    try:
-        opts = (_pk.loads(dat.read_bytes()).get("options") or {})
-    except Exception:
-        opts = {}
-
-    # GPU：训练时显存几乎满，用 nvidia-smi 的实时值
-    gpu = None
-    try:
-        import shutil as _sh
-        import subprocess as _sp
-        exe = _sh.which("nvidia-smi") or r"C:\Windows\System32\nvidia-smi.exe"
-        if Path(exe).is_file():
-            out = _sp.run([exe, "--query-gpu=index,name,memory.total,memory.free,utilization.gpu",
-                           "--format=csv,noheader,nounits"],
-                          capture_output=True, text=True, timeout=8,
-                          creationflags=_NO_WINDOW).stdout
-            rows = [x.strip() for x in out.strip().splitlines() if x.strip()]
-            if rows:
-                p = [x.strip() for x in rows[0].split(",")]
-                gpu = {"index": int(p[0]), "name": p[1],
-                       "total_gb": round(int(p[2]) / 1024.0, 1),
-                       "free_gb": round(int(p[3]) / 1024.0, 1),
-                       "used_gb": round((int(p[2]) - int(p[3])) / 1024.0, 1),
-                       "util": int(p[4]) if p[4].isdigit() else None}
-    except Exception:
-        gpu = None
-
-    # 磁盘：模型目录所在盘还剩多少 + 这个模型的体积
-    disk_free_gb = None
-    model_gb = None
-    try:
-        import shutil as _sh
-        disk_free_gb = round(_sh.disk_usage(str(MODEL_DIR)).free / (1024 ** 3), 1)
-        total = sum(f.stat().st_size for f in MODEL_DIR.glob(name + "_*") if f.is_file())
-        model_gb = round(total / (1024 ** 3), 2)
-    except Exception:
-        pass
-
-    # 备份：4.0 会写到 <模型>_<arch>_autobackups/ 下
-    backup_count = 0
-    backup_dir = None
-    try:
-        cands = [p for p in MODEL_DIR.glob(name + "_*_autobackups") if p.is_dir()]
-        if cands:
-            backup_dir = max(cands, key=lambda p: p.stat().st_mtime)
-            # 4.0 的备份是 autobackups/01、02、03 … 每个编号一个目录，里面才是权重文件。
-            # 以前只数顶级文件，所以永远显示 0。
-            dirs = [e for e in backup_dir.iterdir() if e.is_dir() and e.name.isdigit()]
-            if dirs:
-                backup_count = len(dirs)
-            else:
-                backup_count = len([f for f in backup_dir.iterdir() if f.is_file()])
-    except Exception:
-        pass
-
-    # CPU / 内存：psutil.cpu_percent(None) 返回「上次调用到现在」的平均占用，
-    # 页面每 2 秒轮询一次，正好是这个区间的真实值（第一次调用返回 0）。
-    cpu_percent = None
-    ram_used_gb = ram_total_gb = ram_percent = None
-    try:
-        import psutil
-        cpu_percent = round(float(psutil.cpu_percent(None)), 1)
-        vm = psutil.virtual_memory()
-        ram_used_gb = round(vm.used / (1024 ** 3), 1)
-        ram_total_gb = round(vm.total / (1024 ** 3), 1)
-        ram_percent = round(float(vm.percent), 1)
-    except Exception:
-        pass
-
-    last_save_ts = None
-    try:
-        last_save_ts = int(dat.stat().st_mtime)
-    except Exception:
-        pass
-
-    return {"name": name, "gpu": gpu, "disk_free_gb": disk_free_gb, "model_gb": model_gb,
-            "cpu_percent": cpu_percent,
-            "ram_used_gb": ram_used_gb, "ram_total_gb": ram_total_gb, "ram_percent": ram_percent,
-            "backup_count": backup_count, "has_backup_dir": backup_dir is not None,
-            "backup_interval": int(opts.get("backup_interval") or 0),
-            "max_backups": int(opts.get("max_backups") or 0)}
 
 
-@app.get("/api/models")
-def models():
-    out = []
-    if MODEL_DIR.is_dir():
-        for dat in sorted(MODEL_DIR.glob("*_data.dat")):
-            try:
-                out.append(_model_entry(dat))
-            except Exception:
-                continue
-    out.sort(key=lambda m: m.get("trained_at", 0), reverse=True)
-    # 每个模型的状态：正在训练 / 已暂停 / 已停止。前端卡片上的标签直接用它
-    with _train_job_lock:
-        cur = _train_job.get("name") if _train_job.get("running") else ""
-        paused = bool(_train_job.get("paused"))
-    for m in out:
-        if cur and m.get("name") == cur:
-            m["state"] = "已暂停" if paused else "训练中"
-        else:
-            m["state"] = "已停止"
-    pid = _training_pid()
-    alive = False
-    if pid:
-        try:
-            import psutil  # noqa: F401
-            alive = psutil.pid_exists(pid)
-        except Exception:
-            import os as _os
-            try:
-                _os.kill(pid, 0)
-                alive = True
-            except Exception:
-                alive = False
-    return {"models": out, "training_pid": pid if alive else 0}
 
 
 def _find_model_preview(name: str):
@@ -3138,13 +1669,6 @@ def _find_model_preview(name: str):
     return None, None
 
 
-@app.get("/api/models/{name}/preview.png")
-def model_preview(name: str):
-    from fastapi.responses import FileResponse
-    path, mime = _find_model_preview(name)
-    if path is None:
-        raise HTTPException(status_code=404)
-    return FileResponse(str(path), media_type=mime)
 
 
 # ---------------- 数据访问 ----------------
@@ -3243,7 +1767,7 @@ class Job:
             self.done = 0
             self.total = 0
             self.msg = "就绪"
-            self.stage = 0          # 0 抽帧 / 1 对齐 / 2 补遮罩 / 3 完成
+            self.stage = 0          # 0 抽帧 / 1 对齐 / 2 应用遮罩 / 3 完成
             self.t0 = 0.0
 
     def begin(self, stage: int, total: int, msg: str = ""):
@@ -3431,6 +1955,7 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     lm106 = _get_landmarks106()
     face_dir.mkdir(parents=True, exist_ok=True)
 
+    base_faces = len(list(face_dir.glob("*_*.jpg")))      # 目录里已有的对齐脸（续跑时不为 0）
     done_idx = set()
     for f in face_dir.glob("*_*.jpg"):
         head = f.stem.split("_")[0]
@@ -3440,13 +1965,14 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     vf = []
     if rotate in (90, 180, 270):
         vf.append({90: "transpose=1", 180: "transpose=1,transpose=1", 270: "transpose=2"}[rotate])
-    # 帧跳跃=1 时 fps 就等于源帧率：这时候再加 fps 滤镜没有任何意义，
-    # 反而会因为时间戳抖动丢帧/补帧。只有真要降帧率才加。
-    if not src_fps or float(fps) < src_fps - 1e-3:
-        vf.append("fps=%g" % max(0.01, float(fps)))
+    # 必须始终带一个滤镜：imageio_ffmpeg 在 output_params 为空或只有 null 时会拼出
+    # 坏命令并杀掉 ffmpeg（实测稳定复现 0 帧）。即便 fps == 源帧率，也显式写出来。
+    vf.append("fps=%g" % max(0.01, float(fps)))
 
     # vf 为空时不能传 -vf ""（ffmpeg 会报错），所以整段参数一起省掉
-    out_params = ["-vf", ",".join(vf)] if vf else []
+    # 不能传空列表：imageio_ffmpeg 在 output_params=[] 时会拼出坏命令并杀掉 ffmpeg（实测 0 帧）。
+    # 没有滤镜就显式给个 null，等价于不处理。
+    out_params = ["-vf", ",".join(vf)]
     gen = imageio_ffmpeg.read_frames(
         str(src),
         pix_fmt="bgr24",                       # 直接用 BGR：省掉一次通道反转拷贝（~3ms/帧）
@@ -3464,6 +1990,10 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
 
     S = 640
     JOB.begin(0, total_est, "边解码边对齐（%dx%d · %.2f fps · 不落盘）" % (W, H, fps))
+    # JOB.begin 不会把 running 置 True，而 reader 线程用 JOB.running 判断是否继续。
+    # 少了这一行，reader 第一次 next 前就 break → 永远 0 帧（实测踩过）。
+    with JOB.lock:
+        JOB.running = True
 
     PROF = bool(os.environ.get("DFL_EXTRACT_PROFILE"))
     # 每级"真正干活"与"等队列/等管道"的累计秒数，用来判断是不是伪并行
@@ -3558,7 +2088,7 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
                         JOB.pct = min(99, int(idx * 100 / max(1, total_est)))
                         el = max(0.01, time.time() - t0)
                         JOB.fps = idx / el
-                        JOB.faces = stats["made"]
+                        JOB.faces = base_faces + stats["made"]
                         JOB.msg = "解码 %d 帧 · 已出 %d 张 · %.1f 帧/秒" % (
                             idx, stats["made"], JOB.fps)
         finally:
@@ -3678,7 +2208,7 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
         JOB.done = stats["seen"]
         JOB.total = max(stats["seen"], 1)
         JOB.pct = 100
-        JOB.faces = stats["made"]
+        JOB.faces = base_faces + stats["made"]
         JOB.msg = "完成：解码 %d 帧 · %d 张人脸 → %s" % (stats["seen"], stats["made"], str(face_dir))
     return stats["made"]
 
@@ -3733,20 +2263,45 @@ def _get_landmarks106():
 _xseg_cache = {"m": None, "tried": False}
 
 
-def _get_xseg():
-    """加载 XSeg 遮罩模型（XSegLite 优先）。找不到就返回 None。"""
-    if _xseg_cache["tried"]:
-        return _xseg_cache["m"]
-    _xseg_cache["tried"] = True
+def _get_xseg(model: str | None = None):
+    """加载 XSeg 遮罩模型。model: 'lite' / 'xseg' / None(自动，Lite 优先)。
+
+    按 model 分别缓存——切换遮罩类型不会重复加载同一个模型。
+    """
+    key = (model or "auto").lower()
+    cache = _xseg_cache.setdefault("by_model", {})
+    if key in cache:
+        return cache[key]
     try:
         from ._xseg import XSegMasker
-        cands = [WORKSPACE / "model" / "XSegLite" / "xseglite.onnx",
-                 WORKSPACE / "model" / "XSeg" / "XSeg.onnx"]
-        for c in cands:
-            if c.is_file():
-                _xseg_cache["m"] = XSegMasker(str(c), workspace=WORKSPACE,
-                                              engine_name=("xseglite" if "Lite" in str(c) else "xseg"))
-                return _xseg_cache["m"]
+        # 模型可能在两个地方：本仓库 workspace，或者 4.0 引擎仓库的 workspace
+        # （4.1 只是壳，模型历来放在引擎那边）
+        roots = [ROOT / "weights" / "xseg", WORKSPACE]
+        try:
+            from ._paths import engine_root
+            _er = engine_root()
+            if _er and Path(_er) / "workspace" not in roots:
+                roots.append(Path(_er) / "workspace")
+        except Exception:
+            pass
+        paths = {}
+        for r in roots:
+            paths.setdefault("lite", r / "model" / "XSegLite" / "xseglite.onnx")
+            paths.setdefault("xseg", r / "model" / "XSeg" / "XSeg.onnx")
+        # 按 roots 顺序挑第一个真实存在的
+        for k in ("lite", "xseg"):
+            for r in roots:
+                cand = r / "model" / ("XSegLite/xseglite.onnx" if k == "lite" else "XSeg/XSeg.onnx")
+                if cand.is_file():
+                    paths[k] = cand
+                    break
+        order = (["lite", "xseg"] if key == "auto" else [key]) +                 [k for k in ("lite", "xseg") if k != key and key != "auto"]
+        for k in order:
+            c = paths.get(k)
+            if c and c.is_file():
+                cache[key] = XSegMasker(str(c), workspace=WORKSPACE,
+                                        engine_name=("xseglite" if k == "lite" else "xseg"))
+                return cache[key]
     except Exception:
         pass
     _xseg_cache["m"] = None
@@ -3963,7 +2518,7 @@ def state():
     }
 
 
-def _mask_worker(folder: str, workers: int = 4):
+def _mask_worker(folder: str, workers: int = 8, model: str | None = None, out_size: int = 256):
     """给一个 aligned 目录里的所有 DFLJPG 补 XSeg 遮罩（提取之后的单独一步）。
 
     提取本身不跑 XSeg：DFL 的流程也是 extract → mask 两步，
@@ -3973,13 +2528,19 @@ def _mask_worker(folder: str, workers: int = 4):
     from concurrent.futures import ThreadPoolExecutor
     from ._align import read_dfljpg_meta, rewrite_dfljpg_meta, encode_xseg_mask
 
-    xseg = _get_xseg()
+    xseg = _get_xseg(model)
     root = Path(folder)
     files = sorted(root.glob("*.jpg")) + sorted(root.glob("*.png"))
     total = len(files)
     with JOB.lock:
         JOB.running = True
-        JOB.msg = "补遮罩：共 %d 张" % total
+        JOB.msg = "应用遮罩：共 %d 张" % total
+    if total == 0:
+        with JOB.lock:
+            JOB.running = False
+            JOB.pct = 100
+            JOB.msg = "目录里没有 DFLJPG：%s" % str(root)
+        return 0
     JOB.begin(2, total)
     if xseg is None:
         with JOB.lock:
@@ -4002,7 +2563,7 @@ def _mask_worker(folder: str, workers: int = 4):
                 img = _imread_any(fp)
                 if img is None:
                     return
-                enc = encode_xseg_mask(xseg.mask(img, out_size=256))
+                enc = encode_xseg_mask(xseg.mask(img, out_size=int(out_size)))
                 if enc:
                     meta["xseg_mask"] = enc
                     rewrite_dfljpg_meta(fp, meta)
@@ -4016,7 +2577,7 @@ def _mask_worker(folder: str, workers: int = 4):
                 JOB.done = done["n"]
                 JOB.pct = int(done["n"] * 100 / max(1, total))
                 if done["n"] % 20 == 0 or done["n"] == total:
-                    JOB.msg = "补遮罩 %d / %d · 新写入 %d" % (done["n"], total, done["ok"])
+                    JOB.msg = "应用遮罩 %d / %d · 新写入 %d" % (done["n"], total, done["ok"])
 
     with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
         list(pool.map(_one, files))
@@ -4024,275 +2585,105 @@ def _mask_worker(folder: str, workers: int = 4):
     with JOB.lock:
         JOB.running = False
         JOB.pct = 100
-        JOB.msg = "补遮罩完成：%d 张，新增 %d" % (total, done["ok"])
+        JOB.msg = "应用遮罩完成：%d 张，新增 %d" % (total, done["ok"])
     return done["ok"]
 
 
-# ---------------- TensorRT 引擎（编译/状态） ----------------
-_engine_job = {"running": False, "name": "", "log": [], "error": "", "done": False}
 
+# ---------------- 拆出去的路由模块 ----------------
+from .routes_bili import router as _bili_router
+app.include_router(_bili_router)
+from .routes_face import router as _face_router
+app.include_router(_face_router)
+from .routes_trt import router as _trt_router
+app.include_router(_trt_router)
 
-def _engine_roots():
-    """能找 onnx 的根目录：工作区优先，其次引擎仓。"""
-    return [WORKSPACE, Path(__file__).resolve().parents[2],
-            Path(__file__).resolve().parents[3] / "DeepFaceLab-PyTorch"]
+# ---------------- 拆出去的路由模块 ----------------
+from .routes_account import router as _account_router
+app.include_router(_account_router)
+from .routes_bili import router as _bili_router
+app.include_router(_bili_router)
+from .routes_face import router as _face_router
+app.include_router(_face_router)
+from .routes_trt import router as _trt_router
+app.include_router(_trt_router)
 
+# ---------------- 拆出去的路由模块 ----------------
+from .routes_account import router as _account_router
+app.include_router(_account_router)
+from .routes_bili import router as _bili_router
+app.include_router(_bili_router)
+from .routes_face import router as _face_router
+app.include_router(_face_router)
+from .routes_oneshot import router as _oneshot_router
+app.include_router(_oneshot_router)
+from .routes_trt import router as _trt_router
+app.include_router(_trt_router)
 
-def _engines_verify_all():
-    """启动时在后台把引擎状态核一遍（md5 + SM），不阻塞启动。"""
-    try:
-        from ._engines import status as _st
-        _st(WORKSPACE, _engine_roots())
-    except Exception:
-        pass
+# ---------------- 拆出去的路由模块 ----------------
+from .routes_account import router as _account_router
+app.include_router(_account_router)
+from .routes_bili import router as _bili_router
+app.include_router(_bili_router)
+from .routes_face import router as _face_router
+app.include_router(_face_router)
+from .routes_merge import router as _merge_router
+app.include_router(_merge_router)
+from .routes_oneshot import router as _oneshot_router
+app.include_router(_oneshot_router)
+from .routes_trt import router as _trt_router
+app.include_router(_trt_router)
 
+# ---------------- 拆出去的路由模块 ----------------
+from .routes_account import router as _account_router
+app.include_router(_account_router)
+from .routes_bili import router as _bili_router
+app.include_router(_bili_router)
+from .routes_face import router as _face_router
+app.include_router(_face_router)
+from .routes_mask import router as _mask_router
+app.include_router(_mask_router)
+from .routes_merge import router as _merge_router
+app.include_router(_merge_router)
+from .routes_oneshot import router as _oneshot_router
+app.include_router(_oneshot_router)
+from .routes_trt import router as _trt_router
+app.include_router(_trt_router)
 
-@app.get("/api/devices")
-def api_devices():
-    """可用训练设备：GPU 的真实名字 + 显存。
+# ---------------- 拆出去的路由模块 ----------------
+from .routes_account import router as _account_router
+app.include_router(_account_router)
+from .routes_bili import router as _bili_router
+app.include_router(_bili_router)
+from .routes_face import router as _face_router
+app.include_router(_face_router)
+from .routes_mask import router as _mask_router
+app.include_router(_mask_router)
+from .routes_merge import router as _merge_router
+app.include_router(_merge_router)
+from .routes_models import router as _models_router
+app.include_router(_models_router)
+from .routes_oneshot import router as _oneshot_router
+app.include_router(_oneshot_router)
+from .routes_trt import router as _trt_router
+app.include_router(_trt_router)
 
-    界面上的"设备"下拉以前只有 0 / 1 / 0,1 这种序号 —— 用户得自己开命令行
-    跑 nvidia-smi 才知道 0 是哪张卡。这里直接把型号返给前端。
-    """
-    gpus = []
-    try:
-        import subprocess as _sp
-        r = _sp.run(["nvidia-smi", "--query-gpu=index,name,memory.total",
-                     "--format=csv,noheader,nounits"],
-                    capture_output=True, text=True, timeout=6,
-                    creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
-        for line in (r.stdout or "").strip().splitlines():
-            parts = [x.strip() for x in line.split(",")]
-            if len(parts) >= 3 and parts[0].isdigit():
-                gpus.append({"idx": int(parts[0]), "name": parts[1],
-                             "mem_mb": int(float(parts[2])) if parts[2].replace(".", "").isdigit() else 0})
-    except Exception:
-        pass
-    cpu = os.environ.get("PROCESSOR_IDENTIFIER") or "CPU"
-    try:
-        cpu = (os.cpu_count() or 0) and ("CPU (%d 线程)" % (os.cpu_count() or 0)) or "CPU"
-    except Exception:
-        pass
-    return {"gpus": gpus, "cpu": cpu}
-
-
-@app.get("/api/build")
-def api_build():
-    """界面构建时间：拿 app.js / app.css / index.html 的最新修改时间。
-
-    用途是把"你看到的到底是哪一版"变成可核对的事实 —— 之前排查样式问题时
-    反复在猜客户端有没有重载。页面右下角会显示这个时间。
-    """
-    files = [WEB / "index.html", WEB / "js" / "app.js", WEB / "css" / "app.css"]
-    best = 0.0
-    names = {}
-    for f in files:
-        try:
-            m = f.stat().st_mtime
-        except Exception:
-            continue
-        names[f.name] = int(m)
-        best = max(best, m)
-    return {"ts": int(best),
-            "iso": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(best)) if best else "",
-            "files": names}
-
-
-@app.get("/api/engines")
-def engines_status():
-    from ._engines import status as _st
-    st = _st(WORKSPACE, _engine_roots())
-    st["job"] = dict(_engine_job)
-    return st
-
-
-def _engine_build_worker(name: str):
-    import subprocess
-    import sys
-    from ._engines import status as _st, engine_path as _ep
-    from ._engines import MODEL_SPECS
-
-    st = _st(WORKSPACE, _engine_roots())
-    row = next((m for m in st["models"] if m["name"] == name), None)
-    if not row or not row.get("onnx"):
-        with _engine_job_lock:
-            _engine_job.update({"running": False, "error": "找不到模型 " + name, "done": True})
-        return
-    eng = _ep(WORKSPACE, name, row["onnx"], st["sm"])
-    if eng is None:
-        with _engine_job_lock:
-            _engine_job.update({"running": False, "error": "没有可用的 GPU", "done": True})
-        return
-
-    from ._engines import PROFILES
-    cmd = [sys.executable, str(Path(__file__).parent / "_trt_build.py"),
-           "--onnx", row["onnx"], "--out", str(eng), "--name", name, "--bf16"]
-    prof = PROFILES.get(name)
-    if prof:
-        cmd += ["--profile", ";".join(",".join(str(v) for v in p) for p in prof)]
-    with _engine_job_lock:
-        _engine_job.update({"running": True, "name": name, "log": ["开始编译 " + name],
-                            "error": "", "done": False, "pct": 0})
-    try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, bufsize=1, creationflags=_NO_WINDOW)
-        for line in proc.stdout:
-            line = line.strip()
-            if line.startswith("@@P "):
-                with _engine_job_lock:
-                    try:
-                        pct = int(line.split()[1])
-                        _engine_job["pct"] = pct
-                    except Exception:
-                        pass
-                    _engine_job["log"].append(line[4:])
-                    _engine_job["log"] = _engine_job["log"][-40:]
-            elif line.startswith("@@OK "):
-                with _engine_job_lock:
-                    _engine_job["log"].append("完成: " + Path(line[5:]).name)
-            elif line.startswith("@@ERR "):
-                with _engine_job_lock:
-                    _engine_job["error"] = line[6:]
-                    _engine_job["log"].append("失败: " + line[6:])
-        proc.wait()
-    except Exception as e:
-        with _engine_job_lock:
-            _engine_job["error"] = "%s: %s" % (type(e).__name__, e)
-    with _engine_job_lock:
-        _engine_job["running"] = False
-        _engine_job["done"] = True
-
-
-_engine_job_lock = threading.Lock()
-
-
-@app.post("/api/engines/build")
-def engines_build(payload: dict | None = None):
-    payload = payload or {}
-    name = str(payload.get("name") or "").strip()
-    if not name:
-        raise HTTPException(400, "缺少 name")
-    with _engine_job_lock:
-        if _engine_job.get("running"):
-            raise HTTPException(409, "已有编译任务在跑：" + str(_engine_job.get("name")))
-        _engine_job.update({"running": True, "name": name, "log": [], "error": "", "done": False, "pct": 0})
-    threading.Thread(target=_engine_build_worker, args=(name,), daemon=True).start()
-    return {"ok": True, "name": name}
-
-
-@app.post("/api/dataset/mask")
-def dataset_mask(payload: dict | None = None):
-    """POST {dir: 'data_src/aligned', workers: 4} —— 给整个目录补 XSeg 遮罩。"""
-    payload = payload or {}
-    rel = str(payload.get("dir") or "data_src/aligned")
-    root = (WORKSPACE / rel).resolve()
-    if not str(root).startswith(str(WORKSPACE.resolve())):
-        raise HTTPException(400, "路径不合法")
-    if not root.is_dir():
-        raise HTTPException(404, "目录不存在: %s" % rel)
-    workers = int(payload.get("workers") or 4)
-    with JOB.lock:
-        JOB.running = True
-        JOB.msg = "启动补遮罩…"
-    threading.Thread(target=_mask_worker, args=(str(root), workers), daemon=True).start()
-    return {"ok": True, "dir": str(root), "workers": workers}
-
-
-def _resolve_dir(dst: str) -> Path:
-    r"""把界面里填的目录解析成绝对路径。
-
-    界面上显示的是「workspace\data_src\aligned」这种带前缀的相对路径。
-    以前后端直接 Path(dst) —— 相对的是 serve.py 的当前目录（app/），
-    于是帧被写到 app\workspace\...，用户在自己的 workspace 里什么都看不到。
-    现在：绝对路径原样用；相对路径去掉开头的 workspace 段后挂到 WORKSPACE 下。
-    """
-    raw = str(dst or "").strip().strip('"')
-    if not raw:
-        return WORKSPACE
-    q = Path(raw)
-    if q.is_absolute():
-        return q
-    parts = [x for x in raw.replace("/", "\\").split("\\") if x and x != "."]
-    if not parts:
-        return WORKSPACE
-    # workspace\... 仍然指向真实工作区（4.0 那边），保持老行为不改
-    if parts[0].lower() == "workspace":
-        rest = parts[1:]
-        return WORKSPACE.joinpath(*rest) if rest else WORKSPACE
-    # 其余相对路径一律相对**本仓库根目录**：
-    #   abc\data_src\aligned → D:\MyProject\DeepFaceLab-PyTorch-4.1\abc\data_src\aligned
-    return _APP_ROOT.joinpath(*parts)
-
-
-@app.post("/api/extract/start")
-def extract_start(payload: dict | None = None):
-    """真抽帧：src = 视频文件，dst = 输出目录（默认 workspace/_frames），fps = 抽帧频率。"""
-    payload = payload or {}
-    src = (payload.get("src") or "").strip()
-    dst = (payload.get("dst") or "").strip()
-    fps = float(payload.get("fps") or 2)
-    skip = int(payload.get("skip") or 0)      # 每 N 帧取 1；给了就以源帧率为准换算 fps
-    rotate = int(payload.get("rotate") or 0)
-    quality = str(payload.get("quality") or "high")
-    align = bool(payload.get("align", True))
-    size = int(payload.get("size") or 0)   # 0 = 不限制；分辨率跟着源图和检测框走
-
-    if not src:
-        raise HTTPException(400, "缺少输入视频路径")
-    p = Path(src)
-    if not p.is_file():
-        raise HTTPException(404, "视频不存在: " + src)
-    face_dir = _resolve_dir(dst) if dst else (WORKSPACE / "_frames")
-    face_dir.mkdir(parents=True, exist_ok=True)
-    dst = str(face_dir)
-
-    JOB.reset()
-    # 起线程前就把 running 置上：前端拿到 ok 立刻订阅 SSE，
-    # 若这时还是 idle，收流逻辑会以为任务没起来（见 extract_progress 里的 idle 判定）。
-    with JOB.lock:
-        JOB.running = True
-        JOB.msg = "启动抽帧…"
-    threading.Thread(target=_frames_worker,
-                     args=(str(p), dst, fps, rotate, align, quality, size, skip),
-                     daemon=True).start()
-    return {"ok": True, "src": str(p), "dst": dst,
-            "frames": str(face_dir.parent / (face_dir.name + "_frames")),
-            "fps": fps, "skip": skip,
-            "rotate": rotate, "align": align, "quality": quality, "size": size}
-
-
-@app.post("/api/extract/cancel")
-def extract_cancel():
-    JOB.running = False
-    return {"ok": True}
-
-
-@app.get("/api/extract/progress")
-async def extract_progress():
-    async def gen():
-        last = None
-        idle = 0.0
-        while True:
-            snap = JOB.snapshot()
-            if snap != last:
-                yield "data: " + json.dumps(snap, ensure_ascii=False) + "\n\n"
-                last = snap
-                idle = 0.0
-            if not snap["running"] and snap["pct"] >= 100:
-                return
-            if not snap["running"]:
-                # 任务没在跑、进度又没到 100：多半是"点了开始但工作线程还没起来"，
-                # 给 1 秒宽限；再没有动静就收流。否则这条 SSE 会一直挂着不返回
-                # （实测客户端等 60s 也拿不到响应）。
-                idle += 0.08
-                if idle > 1.0:
-                    return
-            await asyncio.sleep(0.08)
-
-    return StreamingResponse(gen(), media_type="text/event-stream")
-
-
-
-
-# 启动时后台核对一次引擎状态（md5 + SM 对不上会被标成过期/未编译）
-threading.Thread(target=_engines_verify_all, daemon=True).start()
+# ---------------- 拆出去的路由模块 ----------------
+from .routes_account import router as _account_router
+app.include_router(_account_router)
+from .routes_bili import router as _bili_router
+app.include_router(_bili_router)
+from .routes_face import router as _face_router
+app.include_router(_face_router)
+from .routes_mask import router as _mask_router
+app.include_router(_mask_router)
+from .routes_merge import router as _merge_router
+app.include_router(_merge_router)
+from .routes_models import router as _models_router
+app.include_router(_models_router)
+from .routes_oneshot import router as _oneshot_router
+app.include_router(_oneshot_router)
+from .routes_train import router as _train_router
+app.include_router(_train_router)
+from .routes_trt import router as _trt_router
+app.include_router(_trt_router)

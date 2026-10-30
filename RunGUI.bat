@@ -10,7 +10,7 @@ rem Electron must not run in plain-node mode
 set "ELECTRON_RUN_AS_NODE="
 
 set "ELECTRON=desktop\node_modules\electron\dist\electron.exe"
-set "PY=%CD%\_python\Scripts\pythonw.exe"
+set "PY=%CD%\runtime\server\Scripts\pythonw.exe"
 
 if not exist "%ELECTRON%" goto no_electron
 if not exist "%PY%" goto no_python
@@ -33,7 +33,7 @@ exit /b 1
 echo [ERROR] Portable Python runtime not found.
 echo.
 echo   Missing: %PY%
-echo   The _python folder must sit next to this script.
+echo   The runtime\server folder must sit next to this script.
 echo.
 pause
 exit /b 1

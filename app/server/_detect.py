@@ -220,33 +220,54 @@ class TinyMogDet:
 
     def _forward(self, canvas):
         S = self.input_size
-        blob = np.empty((1, 3, S, S), np.float32)
-        blob[0] = canvas[:, :, ::-1].transpose(2, 0, 1)
-        blob -= 127.5
-        blob *= (1.0 / 128.0)
-        outs = self.sess.run(None, {self.input_name: blob})
+        outs = None
+        # 优先走 GPU 预处理：640² 的 BGR→RGB + CHW + 归一化在 numpy 里要 1ms 以上
+        if getattr(self.sess, "run_tensor", None) is not None:
+            try:
+                import torch
+                t = torch.from_numpy(np.ascontiguousarray(canvas)).cuda()
+                t = t.permute(2, 0, 1).flip(0).float()
+                t = (t - 127.5) * (1.0 / 128.0)
+                outs = self.sess.run_tensor({self.input_name: t})
+            except Exception:
+                outs = None
+        if outs is None:
+            blob = np.empty((1, 3, S, S), np.float32)
+            blob[0] = canvas[:, :, ::-1].transpose(2, 0, 1)
+            blob -= 127.5
+            blob *= (1.0 / 128.0)
+            outs = self.sess.run(None, {self.input_name: blob})
 
         scores_list, boxes_list, kps_list = [], [], []
         for idx, stride in enumerate(self.STEPS):
             scores = outs[idx * 3].reshape(-1)
-            bboxes = outs[idx * 3 + 1].reshape(-1, 4) * stride
-            kps = outs[idx * 3 + 2].reshape(-1, 10) * stride
             key = stride
             if key not in self._centers_cache:
                 self._centers_cache[key] = self._centers(stride, S)
             centers = self._centers_cache[key]
-            n = min(len(scores), len(centers))
-            scores, bboxes, kps, centers = scores[:n], bboxes[:n], kps[:n], centers[:n]
 
-            keep = np.where(scores >= self.thresh)[0]
+            # 只在命中阈值的索引上取值：不再整表 stack / where 两遍
+            keep = np.flatnonzero(scores >= self.thresh)
             if keep.size == 0:
                 continue
+            n = min(len(scores), len(centers))
+            keep = keep[keep < n]
+            if keep.size == 0:
+                continue
+            bboxes = outs[idx * 3 + 1].reshape(-1, 4)[keep] * stride
+            kps = outs[idx * 3 + 2].reshape(-1, 10)[keep] * stride
             c = centers[keep]
-            b = np.stack([c[:, 0] - bboxes[keep][:, 0], c[:, 1] - bboxes[keep][:, 1],
-                          c[:, 0] + bboxes[keep][:, 2], c[:, 1] + bboxes[keep][:, 3]], axis=-1)
-            k = kps[keep].reshape(-1, 5, 2).copy()
-            k[:, :, 0] += c[:, 0][:, None]
-            k[:, :, 1] += c[:, 1][:, None]
+
+            b = np.empty((keep.size, 4), np.float32)
+            b[:, 0] = c[:, 0] - bboxes[:, 0]
+            b[:, 1] = c[:, 1] - bboxes[:, 1]
+            b[:, 2] = c[:, 0] + bboxes[:, 2]
+            b[:, 3] = c[:, 1] + bboxes[:, 3]
+
+            k = kps.reshape(-1, 5, 2)
+            k[:, :, 0] += c[:, 0:1]
+            k[:, :, 1] += c[:, 1:2]
+
             scores_list.append(scores[keep])
             boxes_list.append(b)
             kps_list.append(k)

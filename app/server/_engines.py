@@ -28,6 +28,8 @@ MODEL_SPECS = [
     ("tinymog",  ["modelhub/onnx/TinyMog/TinyMog.onnx"], False),
     ("retinaface_10g", ["modelhub/onnx/RetinaFace/det_10g.onnx"], False),
     ("insightface_2d106", ["modelhub/onnx/InsightFace2d106/InsightFace2D106.onnx"], False),
+    # 人脸特征（身份聚类用）：13 MB，比 r50 快 5 倍
+    ("arcface_mbf", ["modelhub/onnx/ArcFace/w600k_mbf.onnx"], False),
 ]
 
 # 动态维（batch）的模型必须给优化档位，否则 TRT 拒绝构建：
@@ -43,6 +45,8 @@ PROFILES = {
     # 检测/关键点模型也是动态输入（batch 或 H/W），我们永远只喂固定尺寸 → 单档位
     "retinaface_10g": [(1, 3, 640, 640), (1, 3, 640, 640), (1, 3, 640, 640)],
     "insightface_2d106": [(1, 3, 192, 192), (1, 3, 192, 192), (1, 3, 192, 192)],
+    # 特征提取按 bs=32 跑；min 给 1，单张时也能用同一份引擎
+    "arcface_mbf": [(1, 3, 112, 112), (32, 3, 112, 112), (32, 3, 112, 112)],
 }
 
 _MD5_CACHE = {}
@@ -92,12 +96,13 @@ def trt_version():
         return "0"
 
 
-def engine_path(workspace, name, onnx_path, sm=None):
+def engine_path(workspace, name, onnx_path, sm=None, precision="bf16"):
+    """precision: bf16（默认）/ int8。文件名里带精度，两种引擎可以并存。"""
     sm = sm or sm_tag()
     if sm is None:
         return None
-    return engine_dir(workspace) / ("%s_%s_sm%d_trt%s.bf16.engine"
-                                    % (name, md5_of(onnx_path), sm, trt_version()))
+    return engine_dir(workspace) / ("%s_%s_sm%d_trt%s.%s.engine"
+                                    % (name, md5_of(onnx_path), sm, trt_version(), precision))
 
 
 def find_models(workspace, roots):
@@ -182,9 +187,10 @@ def _md5_direct(path):
     return h.hexdigest()[:12]
 
 
-def try_engine(workspace, name, onnx_path, sm=None):
+def try_engine(workspace, name, onnx_path, sm=None, precision="bf16", use_graph=True):
     """有匹配的引擎（MD5 + SM 都对）就返回 TrtSession，否则 None。
 
+    precision 可以是单个值或列表：按顺序找，先用 int8、没有再退 bf16。
     这是运行时的唯一入口：拿到 None 就继续走 onnxruntime，行为完全不变。
     """
     try:
@@ -192,11 +198,13 @@ def try_engine(workspace, name, onnx_path, sm=None):
         if sm is None:
             return None
         md5 = md5_fresh(name, onnx_path)
-        p = engine_dir(workspace) / ("%s_%s_sm%d_trt%s.bf16.engine"
-                                     % (name, md5, sm, trt_version()))
-        if not p.is_file():
-            return None
-        from ._trt_session import TrtSession
-        return TrtSession(str(p))
+        precs = [precision] if isinstance(precision, str) else list(precision)
+        for prec in precs:
+            p = engine_dir(workspace) / ("%s_%s_sm%d_trt%s.%s.engine"
+                                         % (name, md5, sm, trt_version(), prec))
+            if p.is_file():
+                from ._trt_session import TrtSession
+                return TrtSession(str(p), use_graph=use_graph)
+        return None
     except Exception:
         return None

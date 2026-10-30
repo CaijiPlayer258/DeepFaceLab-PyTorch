@@ -1,0 +1,201 @@
+/* ============================================================
+   合成工作室 · 页内二级页（人脸库 / 导出设置）
+   与 app.css 的 .mg* 体系同源：
+     行 = 68px + 1fr 网格；控件复用 .seg / .mgsel / .mgtiny / .inp.pathinp
+   页面自身滚动，高度不超出 #p-merge 容器。
+   ============================================================ */
+
+/* ---------- 一、页面容器：默认隐藏，.on 时占满剩余高度 ---------- */
+.mgpage { display: none; }
+.mgpage.on {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  box-sizing: border-box;
+  overflow: hidden;               /* 只让内部 .mgp-scroll 滚 */
+}
+/* 有二级页时，主视图（左右栏 + 舞台 / 时间轴）让位
+   若两个 .mgpage 不是 #p-merge 的直接子元素，改下面两条选择器即可 */
+#p-merge.mgp-on > .mgbody,
+#p-merge.mgp-on > .mgtl { display: none; }
+
+/* ---------- 二、页头：标题 + 计数 + 主按钮 ---------- */
+.mgp-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+.mgp-tt { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.mgp-tt b { font-size: 13.5px; font-weight: 600; color: var(--ink-1); white-space: nowrap; }
+.mgp-sub { font-size: 11px; color: var(--ink-3); white-space: nowrap; }
+.mgp-count {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.mgp-count b { font-size: 12.5px; font-weight: 600; color: var(--ink-1); }
+.mgp-btn {
+  flex: 0 0 auto;
+  height: 32px;
+  padding: 0 16px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+/* ---------- 三、内部滚动区（容器查询的锚点） ---------- */
+.mgp-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+}
+.mgp-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.mgp-scroll::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 3px; }
+.mgp-scroll::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- 四、人脸缩略图网格 ---------- */
+/* 列数随容器宽度自适应：72px 起步的缩略图，容器约 520px 宽时正好 6 列，
+   更宽时自动加列（缩略图保持 72~90px，不会被拉成巨幅） */
+.mgp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  gap: 8px;
+  align-content: start;
+}
+
+/* 缩略图：72×72 圆角 8，棋盘格占位底 */
+.mgp-face {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  min-width: 72px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  box-sizing: border-box;
+  background:
+    linear-gradient(45deg, var(--panel-2) 25%, transparent 25%, transparent 75%, var(--panel-2) 75%) 0 0 / 16px 16px,
+    linear-gradient(45deg, var(--panel-2) 25%, transparent 25%, transparent 75%, var(--panel-2) 75%) 8px 8px / 16px 16px,
+    var(--panel);
+  transition: border-color .14s ease, transform .14s ease;
+}
+.mgp-face:hover { border-color: var(--accent); }
+/* 序号角标 */
+.mgp-face i {
+  position: absolute;
+  left: 4px;
+  bottom: 4px;
+  padding: 0 4px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, .55);
+  color: #fff;
+  font-size: 10px;
+  font-style: normal;
+  line-height: 15px;
+}
+/* [hidden] 兜底：author 的 display 会压掉 UA 的 display:none */
+.mgp-grid[hidden], .mgp-empty[hidden] { display: none !important; }
+/* 空态 */
+.mgp-empty { margin: 0; padding: 48px 4px; text-align: center; }
+
+/* ---------- 五、导出设置：三组卡片 ---------- */
+.mgp-sec {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-2);
+}
+/* 卡片间距走设计 token 24px；要与合成页 10px 节奏对齐时改这一个变量 */
+.mgp-sec + .mgp-sec { margin-top: var(--mgp-card-gap, 24px); }
+.mgp-hd {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: var(--ink-3);
+  letter-spacing: .02em;
+}
+.mgp-hd::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* 行：68px 标签 + 1fr 控件（与 #p-merge .mgrow 同一套网格，防止加载顺序影响） */
+.mgpage .mgrow {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 5px 0;
+}
+.mgpage .mgrow .f {
+  font-size: 11.5px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.mgpage .seg { justify-self: start; }
+.mgpage .seg b { padding: 4px 9px; font-size: 11.5px; }
+.mgpage .mgnum { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.mgpage .mgtiny { width: 58px; flex: 0 0 58px; height: 24px; text-align: center; }
+.mgpage .mgunit { font-size: 10px; color: var(--ink-3); white-space: nowrap; }
+
+/* 输出路径行：压缩到与 seg/数字同高（.inp 默认 39px 太高） */
+.mgpage .inp.pathinp {
+  min-height: 30px;
+  height: 30px;
+  padding: 0 4px 0 8px;
+  border-radius: 8px;
+  background: var(--panel);
+}
+.mgpage .inp.pathinp .pathval { font-size: 11.5px; }
+.mgpage .inp.pathinp .pill.iconpill {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  margin-left: auto;
+}
+.mgpage .inp.pathinp .pill.iconpill .ic { width: 14px; height: 14px; }
+
+/* ---------- 六、底部固定动作区 ---------- */
+.mgp-foot {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  box-sizing: border-box;
+}
+.mgp-go { width: 100%; height: 34px; padding: 0 18px; font-size: 13px; }
+.mgp-status {
+  font-size: 11px;
+  color: var(--ink-3);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

@@ -24,12 +24,14 @@ class _Info:
 
 
 class TrtSession:
-    def __init__(self, engine_path, device_id: int = 0):
+    def __init__(self, engine_path, device_id: int = 0, use_graph: bool = True):
         import tensorrt as trt
         import torch
 
         self._torch = torch
         self.device_id = int(device_id)
+        # 图重放只在「单线程 + 延迟密集」的模型上划算；多线程/算力密集一律关掉
+        self.use_graph = bool(use_graph)
         logger = trt.Logger(trt.Logger.WARNING)
         with open(str(engine_path), "rb") as f:
             self.engine = trt.Runtime(logger).deserialize_cuda_engine(f.read())
@@ -76,11 +78,60 @@ class TrtSession:
             self._local.st = st
         return st
 
+    def _graph_for(self, shape):
+        """按输入形状缓存一张 CUDA Graph：缓冲区固定、只 replay。
+        捕获失败返回 None（调用方回退到普通执行）。"""
+        cache = getattr(self, "_graph_cache", None)
+        if cache is None:
+            cache = self._graph_cache = {}
+        return cache.get(tuple(shape))
+
+    def run_tensor(self, feed: dict):
+        """同 run()，但输入是已经躺在 GPU 上的 torch.Tensor（跳过 numpy 转换与 H2D）。"""
+        t = self._torch
+        st = self._state()
+        ctx = st["ctx"]
+        name = self.input_names[0]
+        x = feed[name]
+        if x.dim() == 3:
+            x = x.unsqueeze(0)
+        x = x.contiguous()
+        with t.cuda.device(self.device_id):
+            ctx.set_input_shape(name, tuple(x.shape))
+            ctx.set_tensor_address(name, int(x.data_ptr()))
+            outs = []
+            for oname in self.output_names:
+                shape = tuple(ctx.get_tensor_shape(oname))
+                dtype = self._to_torch.get(self.engine.get_tensor_dtype(oname), t.float32)
+                buf = t.empty(shape, dtype=dtype, device="cuda")
+                ctx.set_tensor_address(oname, int(buf.data_ptr()))
+                outs.append(buf)
+            cur = t.cuda.current_stream(self.device_id)
+            st["stream"].wait_stream(cur)
+            ok = ctx.execute_async_v3(stream_handle=st["stream"].cuda_stream)
+            cur.wait_stream(st["stream"])
+            cur.synchronize()
+        if not ok:
+            raise RuntimeError("TensorRT 执行失败")
+        return [o.cpu().numpy() for o in outs]
+
     def run(self, _names, feed: dict):
         t = self._torch
         st = self._state()
         ctx = st["ctx"]
         torch = t
+        name0 = self.input_names[0]
+        key = tuple(np.ascontiguousarray(feed[name0]).shape)
+        g = self._graph_for(key)
+        if g is not None and self.use_graph and getattr(self, "_graph_ok", True):
+            try:
+                with torch.cuda.device(self.device_id):
+                    g["x"].copy_(torch.from_numpy(np.ascontiguousarray(feed[name0])).view_as(g["x"]), non_blocking=True)
+                    g["graph"].replay()
+                    torch.cuda.synchronize(self.device_id)
+                return [b.cpu().numpy() for b in g["outs"]]
+            except Exception:
+                self._graph_ok = False
         with torch.cuda.device(self.device_id):
             name = self.input_names[0]
             arr = np.ascontiguousarray(feed[name])
@@ -101,6 +152,23 @@ class TrtSession:
             ok = ctx.execute_async_v3(stream_handle=st["stream"].cuda_stream)
             cur.wait_stream(st["stream"])
             cur.synchronize()
+
+            # 首次见到这个形状：把这次执行捕获成图，下次直接 replay
+            if g is None and self.use_graph and getattr(self, "_graph_ok", True):
+                try:
+                    gx = torch.empty_like(x)
+                    gx.copy_(x)
+                    ctx.set_tensor_address(name, int(gx.data_ptr()))
+                    ctx.execute_async_v3(stream_handle=st["stream"].cuda_stream)
+                    st["stream"].synchronize()
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        ctx.execute_async_v3(stream_handle=torch.cuda.current_stream().cuda_stream)
+                    torch.cuda.synchronize(self.device_id)
+                    ctx.set_tensor_address(name, int(gx.data_ptr()))
+                    self._graph_cache[key] = {"graph": graph, "x": gx, "outs": outs}
+                except Exception:
+                    self._graph_ok = False
         if not ok:
             raise RuntimeError("TensorRT 执行失败")
         return [o.cpu().numpy() for o in outs]

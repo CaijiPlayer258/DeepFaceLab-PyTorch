@@ -1,12 +1,61 @@
 /* DeepFaceLab 4.1 — 前端。所有数据都来自本地 /api，界面本身不含任何算法。 */
+/* ==========================================================================
+   分节目录（纯注释，代码没有拆成多文件，理由见 app/docs/08-SERVER-MAP.md）：
+   用 Ctrl+F 搜下面任一条标题即可跳转；分区横幅本身保留在原文里。
+
+     · hash 路由（#p-key）
+     · 顶栏面包屑
+     · 语言
+     · 数据（全部来自 /api/state）
+     · 合成工作室：真实视频预览（后端 /api/merge/*）
+     · 素材准备：视频 → 抽帧 + 对齐 → 可合成项目
+     · 检测视图：RetinaFace 出框，画在 canvas 叠加层上
+     · 面部 68 点：编辑器保存过就用保存的
+     · 路径框拖放
+     · 3D 人脸编辑器（debug 页）
+     · 隐私幕布：68 点人脸会跟着鼠标看
+     · 隐私幕布：3D 头部模型只用来算 68 个特征点
+     · 账号
+     · B 站扫码登录
+     · 通用确认弹层
+     · 主页：根据真实数据推下一步
+     · 下载进程：按实际任务渲染
+     · 视频列表：内置全选 / 计数 / 下载
+     · 模拟：分段拉取（B 站接口一次只给 20 条，且要限流）
+     · 模拟：下载推进
+     · 角度可视化：坐标轴 + 散点 / 格子图
+     · 参数设置（照 4.0 training_config_page 的分组）
+     · 训练页控制按钮：暂停 / 继续 · 立即保存 · 停止
+     · 训练中（骨架：数据先用真实模型 + 模拟值）
+     · 训练预览：单图 + 手动刷新
+     · 通知调试
+     · 侧边栏「工具」分组
+     · 折叠态：工具组飞出层
+     · 远程访问（把整个界面开到 0.0.0.0）
+     · 占位数据：形状与 4.0 的 cutSegments / angleSegments 一致
+     · 渲染
+     · 对外 API
+     · 播放（占位驱动；4.0 由 video 元素驱动）
+     · 交互
+     · 初始化
+     · 合成器参数记忆
+     · 事件绑定
+     · 1.45 设备下拉：显示真名而不是序号
+     · 1.5 界面构建时间
+     · 2. 参数页搜索
+     · 3. 训练页「继续训练」置顶
+     · 挂钩页面切换
+   ========================================================================== */
+
 (function () {
   "use strict";
 
   var PAGE_IDS = {
-    home: "p-home", extract: "p-extract", dataset: "p-dataset", train: "p-train",
+    home: "p-home", extract: "p-extract", "extract-run": "p-extract-run", dataset: "p-dataset", train: "p-train",
     run: "p-run", "train-cfg": "p-train-cfg",
     "tool-mask": "p-tool-mask", "tool-bili": "p-tool-bili",
     "tool-color": "p-tool-color", "tool-angle": "p-tool-angle", "tool-engine": "p-tool-engine",
+    "tool-perf": "p-tool-perf", "dataset-run": "p-dataset-run",
     "bili-jobs": "p-bili-jobs",
     debug: "p-debug",
     merge: "p-merge", settings: "p-settings", about: "p-about"
@@ -50,7 +99,7 @@
   };
 
   /* 子页面归属哪个导航项 */
-  var NAV_ALIAS = { run: "train", "train-cfg": "train", debug: "about" };
+  var NAV_ALIAS = { run: "train", "train-cfg": "train", "extract-run": "extract", "dataset-run": "dataset", debug: "about" };
 
   function renderCrumbs(key) {
     var box = $("crumbs");
@@ -100,14 +149,14 @@
 
   /* 每个导航组的最后位置：点「训练器」应回到上次待的界面，而不是永远回列表 */
   var LAST_PAGE = {};
-  var PAGE_GROUP = { run: "train", "train-cfg": "train", "tool-mask": "tools",
+  var PAGE_GROUP = { run: "train", "train-cfg": "train", "extract-run": "extract", "dataset-run": "dataset", "tool-mask": "tools",
                      "tool-bili": "tools", "tool-color": "tools", "tool-angle": "tools",
                      debug: "about" };
 
   function groupOf(key) { return PAGE_GROUP[key] || key; }
 
   /* 子页记忆：从侧边栏回到「训练器 / B 站下载」时，恢复上次停留的子页 */
-  var SUB_PARENT = { run: "train", "train-cfg": "train", "bili-jobs": "tool-bili" };
+  var SUB_PARENT = { run: "train", "train-cfg": "train", "extract-run": "extract", "dataset-run": "dataset", "bili-jobs": "tool-bili" };
   var SUB_MEMORY = {};
   window.SUB_MEMORY = SUB_MEMORY;
 
@@ -148,6 +197,7 @@
     if (key === "dataset") { renderSteps(); syncDatasetBadge(); }
     if (key === "train") bindTrainerTop();
     if (key === "train-cfg") {
+      if (window.markHotRows) window.markHotRows();
       var cb = document.getElementById("cfgBox");
       if (cb && !cb.children.length) {
         var cm = window.__cfgModel || (MODELS && MODELS[0]) || null;
@@ -660,33 +710,42 @@
   window.toast = toast;
 
   var MODULES = [
-    { n: "过滤器", d: "模糊 · 坏图 · 重复",
-      modes: ["模糊筛选", "重复图", "坏图"],
-      modeDesc: ["按清晰度阈值挑出糊片", "相似度聚类，每组留一张", "打不开或没检出人脸"],
+    { n: "过滤器", d: "模糊 · 人脸身份 · 重复",
+      modes: ["模糊", "人脸身份", "重复图"],
+      modeDesc: ["高频/低频能量比 E(b0)/E(b2) 判清晰度，按分位淘汰最差一批（顺带清掉打不开的文件）",
+                 "ArcFace 特征向量聚类，同一组≈同一个人（顺带清掉打不开的文件）",
+                 "感知哈希(phash)检测高度相似，剔除重复帧（顺带清掉打不开的文件）"],
       out: "" },
     { n: "排序器", d: "清晰度 · 角度 · 时间",
-      modes: ["清晰度", "角度", "时间"],
-      modeDesc: ["越清晰排越前", "按偏航角从小到大", "按拍摄时间先后"],
+      modes: ["清晰度", "角度", "原序", "感知哈希", "直方图"],
+      modeDesc: ["越清晰排越前（blur）", "按偏航角从小到大（pose/yaw）",
+                 "恢复原始文件顺序（reset）", "按感知哈希相近度排序（phash）",
+                 "按直方图相似度排序（histogram）"],
       out: "" },
-    { n: "遮罩应用", d: "XSeg 推理 · 平滑",
-      modes: ["XSeg 推理", "遮罩平滑"],
-      modeDesc: ["用训练好的遮罩模型推理", "羽化边缘，去掉锯齿"],
+    { n: "应用遮罩", d: "XSeg 推理",
+      modes: ["XSeg 推理"],
+      modeDesc: ["用训练好的遮罩模型推理"],
       out: "" }
   ];
 
   /* 三段流水线同时展开：模块 → 模式 → 参数，各自独立成节 */
   var STEP_SEL = [0, 0, 0];      /* 每节选中的模式 */
+  var PARAM_SEL = {};           /* "模块-模式-参数序号" → 选中下标 */
+  var PARAM_VAL = {};           /* 同上 → 数字输入的值 */
 
   /* 每个模块 + 模式的参数组（"模块-模式" 索引） */
   var PARAM_MAP = {
-    "0-0": [["强度档位", ["10%", "30%", "60%"]], ["处理方式", ["移到 _trash", "直接删除"]]],
-    "0-1": [["相似阈值", ["90%", "95%", "98%"]], ["处理方式", ["移到 _trash", "直接删除"]]],
-    "0-2": [["判定阈值", ["低", "中", "高"]], ["处理方式", ["移到 _trash", "直接删除"]]],
-    "1-0": [["目标分辨率", ["256", "384", "512"]]],
-    "1-1": [["分组数", ["8", "16", "32"]]],
-    "1-2": [["分段数", ["10", "20", "40"]]],
-    "2-0": [["模型", ["XSeg", "XSegLite"]], ["阈值", ["0.3", "0.5", "0.7"]]],
-    "2-1": [["平滑强度", ["1", "2", "3"]]]
+    "0-0": [],   /* blur：能量比 + 分位，无可调参数 */
+
+    /* faceid / repeated —— 默认值照抄 4.0 Qt GUI（位置聚类已移除，4.0 时期几乎没人用） */
+    "0-1": [["邻域半径", { num: true, val: 0.314, min: 0.05, max: 1, step: 0.01 }],
+            ["最小样本", { num: true, val: 2, min: 2, max: 50, step: 1 }]],
+    "0-2": [["相似度阈值", { num: true, val: 0.98, min: 0.5, max: 1, step: 0.01 }]],
+
+    "1-0": [],   /* 排序没有分辨率参数 */
+    "1-1": [],
+    "1-2": [],
+    "2-0": [["遮罩类型", ["XSegLite", "XSeg"]], ["遮罩尺寸", ["256", "512"]]],
   };
 
   /* 用训练参数页那套：分组卡片 + 行（标签 / 说明 / 右侧控件） */
@@ -724,7 +783,8 @@
     hd.innerHTML = "<b>" + m.n + "</b><span class=\"hint\">" + hintText + "</span>";
     card.appendChild(hd);
 
-    /* 行 1：模式选择 */
+    /* 行 1：模式选择 —— 只有一个模式时这一行是废话，不渲染 */
+    if (m.modes.length > 1) {
     var r1 = document.createElement("div");
     r1.className = "cfgrow";
     r1.innerHTML = '<span class="cl">模式</span><span class="cd">' + (m.modeDesc[k] || "") + '</span><span class="cc"></span>';
@@ -734,26 +794,49 @@
       card.replaceWith(fresh);
     }));
     card.appendChild(r1);
+    }
 
     /* 行 2..n：参数 */
-    (PARAM_MAP[i + "-" + k] || PARAM_MAP[i + "-0"] || []).forEach(function (g) {
+    (PARAM_MAP[i + "-" + k] || PARAM_MAP[i + "-0"] || []).forEach(function (g, gi) {
       var row = document.createElement("div");
       row.className = "cfgrow";
+      var key = i + "-" + k + "-" + gi;
       row.innerHTML = '<span class="cl">' + g[0] + '</span><span class="cd"></span><span class="cc"></span>';
-      row.querySelector(".cc").appendChild(makeSeg(g[1], 0));
+      var cc = row.querySelector(".cc");
+      if (g[1] && g[1].num) {           /* 数字输入：小数/整数都行 */
+        var spec = g[1];
+        var wrap = document.createElement("span");
+        wrap.style.display = "inline-flex";
+        wrap.style.alignItems = "center";
+        wrap.style.gap = "6px";
+        var inp = document.createElement("input");
+        inp.type = "number";
+        inp.className = "numin mono";
+        inp.min = spec.min; inp.max = spec.max; inp.step = spec.step || 1;
+        inp.value = (PARAM_VAL[key] !== undefined) ? PARAM_VAL[key] : spec.val;
+        inp.style.width = "84px";
+        inp.addEventListener("input", function () {
+          var v = parseFloat(inp.value);
+          PARAM_VAL[key] = isNaN(v) ? spec.val : v;
+        });
+        wrap.appendChild(inp);
+        if (spec.unit) {
+          var u = document.createElement("span");
+          u.textContent = spec.unit;
+          u.style.fontSize = "12px";
+          u.style.color = "var(--ink-3)";
+          wrap.appendChild(u);
+        }
+        cc.appendChild(wrap);
+      } else {
+        cc.appendChild(makeSeg(g[1], PARAM_SEL[key] || 0, function (idx) {
+          PARAM_SEL[key] = idx;
+        }));
+      }
       card.appendChild(row);
     });
 
-    /* 结果区（只有第一站有真实数据） */
-    if (i === 0) {
-      var res = document.createElement("div");
-      res.className = "dsres";
-      res.innerHTML =
-        '<div class="dsresnum" data-res="num">—</div>' +
-        '<div class="dsreslbl" data-res="lbl">等待扫描</div>' +
-        '<div class="dsresbar"><i data-res="a"></i></div>';
-      card.appendChild(res);
-    }
+    /* 结果区改到二级界面（#p-dataset-run），这里不再内联 */
 
     /* 底部动作 */
     var acts = document.createElement("div");
@@ -762,6 +845,7 @@
       ' data-step="' + i + '">开始处理</button>';
     acts.querySelector("button").addEventListener("click", function () {
       if (i === 0) { dsRun(); return; }
+      if (i === 2) { dsMask(); return; }
       toast(MODULES[i].n, "这一节的后端还没接", "info");
     });
     card.appendChild(acts);
@@ -769,11 +853,45 @@
     return card;
   }
 
+  var DS_TAB = 0;          /* 数据处理当前选中的工具 */
+
   function renderSteps() {
     var box = $("dsSteps");
     if (!box) return;
     box.innerHTML = "";
-    MODULES.forEach(function (m, i) { box.appendChild(renderStation(i)); });
+
+    /* 一张卡片 + 顶部左上的切换条（原来三个卡片并排，布局重复度太高） */
+    var card = document.createElement("div");
+    card.className = "card";
+
+    var hd = document.createElement("div");
+    hd.className = "cardhd";
+    var seg = makeSeg(MODULES.map(function (m) { return m.n; }), DS_TAB, function (idx) {
+      DS_TAB = idx;
+      renderSteps();
+    });
+    hd.appendChild(seg);
+    card.appendChild(hd);
+
+    /* 直接把工具卡片嵌进来，只去掉它自己的卡片外壳 ——
+       之前把子节点搬进容器，原有的 .card 内边距/布局丢了，行被挤成竖排 */
+    var only = renderStation(DS_TAB);
+    only.style.border = "0";
+    only.style.padding = "0";
+    only.style.margin = "0";
+    only.style.background = "transparent";
+    only.dataset.station = String(DS_TAB);
+    if (!reduced()) {
+      only.animate(
+        [{ opacity: 0, transform: "translateY(4px)" }, { opacity: 1, transform: "none" }],
+        { duration: 160, easing: PAGE_EASE });
+    }
+    /* 卡片头已经在顶部切换条里了，这里再显示一遍工具名是重复信息 */
+    var hdInner = only.querySelector(".cardhd");
+    if (hdInner) hdInner.style.display = "none";
+    card.appendChild(only);
+
+    box.appendChild(card);
     if (window.I18N) window.I18N.refresh();
     bindDropPaths();
     bindPickPaths();
@@ -781,31 +899,129 @@
   }
   window.renderSteps = renderSteps;
 
+  /* 第 3 站：应用遮罩（XSeg 推理） */
+  function dsMask() {
+    var model = (PARAM_SEL["2-0-0"] === 1) ? "xseg" : "lite";
+    var res = (PARAM_SEL["2-0-1"] === 1) ? 512 : 256;
+    /* 直接读输入框的实际内容——用户手动输入时 DSB.dir 不会跟着变，这里不能信它 */
+    var inp = document.getElementById("dsPathVal");
+    var dir = String((inp && inp.value) || (window.DSB && DSB.dir) || "data_src").trim();
+    var btn = document.querySelector('#dsSteps .step:nth-child(3) .btn');
+    if (btn) { btn.disabled = true; btn.textContent = "应用遮罩中…"; }
+    toast("应用遮罩", dir + " · " + (model === "xseg" ? "XSeg" : "XSegLite") + " · " + res + "px · 8 线程", "info");
+    dsRunShow("正在应用遮罩");
+    fetch("/api/dataset/mask", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dir: dir, workers: 8, model: model, res: res })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (d && d.ok === false) throw new Error(d.detail || "启动失败");
+      toast("应用遮罩已开始", "共 " + (d.workers || 8) + " 线程 · " + (d.res || res) + "px", "success");
+      maskPoll(btn);
+    }).catch(function (e) {
+      toast("应用遮罩失败", String((e && e.message) || e), "error");
+      if (btn) { btn.disabled = false; btn.textContent = "开始处理"; }
+    });
+  }
+  /* 轮询应用遮罩进度，直接显示在按钮上 */
+  function maskPoll(btn) {
+    var tick = function () {
+      fetch("/api/dataset/mask/progress").then(function (r) { return r.json(); }).then(function (p) {
+        var pct = p.pct || 0;
+        var num = document.getElementById("maskPct");
+        var lbl = document.getElementById("maskLbl");
+        var bar = document.getElementById("maskBar");
+        setNavRunning("dataset", !!p.running, pct);
+        dsRunPaint({ pct: pct, msg: p.msg, done: p.done, total: p.total,
+                     speed: p.speed, eta: p.eta, running: p.running });
+        if (num) num.textContent = pct + "%";
+        if (lbl) {
+          /* 速度一直留着（结束后是平均值），剩余时间只在运行时显示 */
+          var sp = (p.speed > 0) ? " · " + p.speed + " 张/秒" : "";
+          var eta = (p.running && p.eta > 0) ? " · 剩 " + Math.round(p.eta) + " 秒" : "";
+          lbl.textContent = (p.msg || (p.running ? "运行中…" : "等待开始")) + sp + eta;
+        }
+        if (bar) bar.style.width = pct + "%";
+        if (btn) {
+          if (p.running) {
+            btn.disabled = true;
+            btn.textContent = "应用中…";
+          } else {
+            btn.disabled = false;
+            btn.textContent = "开始处理";
+            toast("应用遮罩完成", p.msg || "已完成", "success");
+            return;
+          }
+        }
+        setTimeout(tick, 500);
+      }).catch(function () { setTimeout(tick, 1000); });
+    };
+    setTimeout(tick, 400);
+  }
+  window.maskPoll = maskPoll;
+
+  /* 手动改路径框 → 同步 DSB.dir（选目录那条路已经会写） */
+  (function () {
+    var el = document.getElementById("dsPathVal");
+    if (!el || el.dataset.dsBound) return;
+    el.dataset.dsBound = "1";
+    el.addEventListener("input", function () {
+      if (window.DSB) DSB.dir = String(el.value || "").trim();
+    });
+    el.addEventListener("change", function () {
+      if (window.DSB) DSB.dir = String(el.value || "").trim();
+    });
+  })();
+
+  window.dsMask = dsMask;
+
   function runStep(i) {
-    if (i !== 0) {
-      toast(MODULES[i].n, "这一节的后端还没接", "info");
+    var k = STEP_SEL[i] || 0;
+
+    /* ---------- 过滤器 ---------- */
+    if (i === 0) {
+      var mode = k === 1 ? "faceid" : (k === 2 ? "repeated" : "blur");
+      var body = { mode: mode, dir: "data_src" };
+      if (mode === "blur") body.percent = PARAM_VAL["0-0-0"] !== undefined ? PARAM_VAL["0-0-0"] : 10;
+      else if (mode === "repeated") body.similarity = PARAM_VAL["0-2-0"] !== undefined ? PARAM_VAL["0-2-0"] : 0.98;
+      else {
+        body.eps = PARAM_VAL["0-1-0"] !== undefined ? PARAM_VAL["0-1-0"] : 0.314;
+        body.min_samples = PARAM_VAL["0-1-1"] !== undefined ? PARAM_VAL["0-1-1"] : 2;
+      }
+      toast("开始扫描", (mode === "blur" ? "模糊" : "重复图") + " · 正在统计…", "info");
+      dsRunShow(mode === "blur" ? "正在扫描清晰度" : (mode === "repeated" ? "正在查找重复图" : "正在聚类人脸身份"));
+      fetch("/api/dataset/scan", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      }).then(function (r) { return r.json(); }).then(function (d) {
+        toast("扫描完成", "共 " + d.total + " 张，命中 " + d.count + " 张", d.count ? "success" : "info");
+        dsRunPaint({ pct: 100, msg: "共 " + d.total + " 张，命中 " + d.count + " 张",
+                     done: d.total, total: d.total, speed: 0, eta: 0, running: false });
+      }).catch(function (e) {
+        toast("扫描失败", String((e && e.message) || e), "error");
+      });
       return;
     }
-    var k = STEP_SEL[0];
-    var mode = k === 1 ? "dup" : (k === 2 ? "bad" : "blur");
-    toast("开始扫描", MODULES[0].modes[k] + " · 正在统计…", "info");
-    fetch("/api/dataset/scan", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: mode, dir: "data_src", threshold: mode === "dup" ? 6 : 10 })
-    }).then(function (r) { return r.json(); }).then(function (d) {
-      toast("扫描完成", "共 " + d.total + " 张，命中 " + d.count + " 张", d.count ? "success" : "info");
-      var sec0 = document.querySelectorAll("#dsSteps .step")[0];
-      if (sec0) {
-        var num = sec0.querySelector('[data-res="num"]');
-        var lbl = sec0.querySelector('[data-res="lbl"]');
-        var bar = sec0.querySelector('[data-res="a"]');
-        if (num) num.textContent = d.count;
-        if (lbl) lbl.textContent = "张将被移走 · 共 " + d.total + " 张";
-        if (bar) bar.style.width = (d.total ? Math.max(2, d.count / d.total * 100) : 0) + "%";
-      }
-    }).catch(function (e) {
-      toast("扫描失败", String((e && e.message) || e), "error");
-    });
+
+    /* ---------- 排序器 ---------- */
+    if (i === 1) {
+      var BY = ["blur", "yaw", "origname", "phash", "hist"];
+      var by = BY[k] || "blur";
+      toast("开始排序", MODULES[1].modes[k] + " · 正在处理…", "info");
+      dsRunShow("正在排序");
+      fetch("/api/dataset/sort", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ by: by, dir: "data_src" })
+      }).then(function (r) { return r.json(); }).then(function (d) {
+        toast("排序完成", "已重排 " + d.count + " 张", "success");
+        dsRunPaint({ pct: 100, msg: "已按「" + MODULES[1].modes[k] + "」重排 " + d.count + " 张",
+                     done: d.count, total: d.count, speed: 0, eta: 0, running: false });
+      }).catch(function (e) {
+        toast("排序失败", String((e && e.message) || e), "error");
+      });
+      return;
+    }
+
+    toast(MODULES[i].n, "这一节的后端还没接", "info");
   }
 
   function dsModeKey() {
@@ -946,33 +1162,245 @@
     return Math.floor(m / 60) + " 小时 " + (m % 60) + " 分";
   }
 
-  var STAGE_NAME = ["抽帧", "人脸对齐", "补遮罩", "完成"];
+  var STAGE_NAME = ["抽帧", "人脸对齐", "应用遮罩", "完成"];
+
+  /* 速度曲线：横轴 = 进度（0~100%），纵轴 = 帧/秒，带刻度和网格 */
+  var EX_HIST = [];          /* [{pct, fps}] */
+
+  function drawSpeedGraph() {
+    var cv = document.getElementById("exGraph");
+    if (!cv || !cv.getContext) return;
+    var dpr = window.devicePixelRatio || 1;
+    var W = cv.clientWidth || 640;
+    var H = cv.clientHeight || 180;
+    if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
+      cv.width = Math.round(W * dpr);
+      cv.height = Math.round(H * dpr);
+    }
+    var g = cv.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, W, H);
+
+    /* 颜色/字体都跟随主题，别写死 rgba(0,0,0)：深色模式会看不见 */
+    var cs = getComputedStyle(document.documentElement);
+    var cInk3 = (cs.getPropertyValue("--ink-3") || "#8b8b98").trim();
+    var cLine = (cs.getPropertyValue("--line") || "rgba(0,0,0,.08)").trim();
+    var cBrand = (cs.getPropertyValue("--brand") || "#5d6ccf").trim();
+    var cFont = (cs.getPropertyValue("--font") || "system-ui").trim();
+
+    var padL = 58, padR = 14, padT = 12, padB = 24;
+    var plotW = W - padL - padR, plotH = H - padT - padB;
+
+    var peak = 1;
+    EX_HIST.forEach(function (p) { if (p.fps > peak) peak = p.fps; });
+    if (EX_D && EX_D.fps > peak) peak = EX_D.fps;
+    /* 顶部留 20% 余量：曲线不会顶到框，视觉上不憋 */
+    var maxFps = Math.max(10, Math.ceil(peak * 1.2 / 10) * 10);
+
+    /* 网格 + 纵轴刻度（0 / 一半 / 最大值） */
+    g.font = "10px " + cFont;
+    g.textAlign = "right";
+    g.textBaseline = "middle";
+    [0, 0.25, 0.5, 0.75, 1].forEach(function (k) {
+      var y = padT + plotH * (1 - k);
+      g.strokeStyle = cLine;
+      g.lineWidth = 1;
+      g.beginPath(); g.moveTo(padL, y + 0.5); g.lineTo(W - padR, y + 0.5); g.stroke();
+      g.fillStyle = cInk3;
+      g.fillText(String(Math.round(maxFps * k)), padL - 10, y);
+    });
+
+    /* 横轴刻度（0% 25% 50% 75% 100%） */
+    g.textAlign = "center";
+    g.textBaseline = "top";
+    [0, 25, 50, 75, 100].forEach(function (pct) {
+      var x = padL + plotW * pct / 100;
+      g.strokeStyle = cLine;
+      g.beginPath(); g.moveTo(x + 0.5, padT); g.lineTo(x + 0.5, padT + plotH); g.stroke();
+      g.fillStyle = cInk3;
+      g.fillText(pct + "%", x, padT + plotH + 6);
+    });
+
+    if (EX_HIST.length < 1) return;
+
+    /* 末端用缓动中的实时值补一个点：两包 SSE 之间线条也会继续长 */
+    var pts = EX_HIST.slice();
+    var lastPct = pts.length ? pts[pts.length - 1].pct : -1;
+    if (EX_D && EX_D.pct > lastPct + 0.05) {
+      pts.push({ pct: EX_D.pct, fps: EX_D.fps });
+    }
+    if (pts.length < 2) return;
+
+    function pt(p) {
+      return [padL + plotW * Math.min(100, Math.max(0, p.pct)) / 100,
+              padT + plotH * (1 - Math.min(1, p.fps / maxFps))];
+    }
+
+    /* 填充 */
+    g.beginPath();
+    var first = pt(pts[0]);
+    g.moveTo(first[0], padT + plotH);
+    pts.forEach(function (p) { var q = pt(p); g.lineTo(q[0], q[1]); });
+    var last = pt(pts[pts.length - 1]);
+    g.lineTo(last[0], padT + plotH);
+    g.closePath();
+    g.fillStyle = "rgba(93,108,207,0.14)";
+    g.fill();
+
+    /* 折线 */
+    g.beginPath();
+    pts.forEach(function (p, i) { var q = pt(p); i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); });
+    g.strokeStyle = cBrand;
+    g.lineWidth = 1.8;
+    g.lineJoin = "round";
+    g.stroke();
+  }
+
+  /* 数值缓动：SSE 每 ~0.5s 推一次，直接赋值会一跳一跳。
+     这里用 rAF 把显示值平滑逼近目标值，图表末端也跟着动。 */
+  var EX_T = null;                       /* 目标值 */
+  var EX_D = { pct: 0, fps: 0, faces: 0, done: 0, faceRate: 0 };
+  var EX_RAF = 0;
+
+  function exEase(cur, target, k) {
+    var d = target - cur;
+    if (Math.abs(d) < 0.01) return target;
+    return cur + d * k;
+  }
+
+  function exTick() {
+    if (!EX_T) { EX_RAF = 0; return; }
+    try {
+    var k = 0.06;   /* 追平约 0.6 秒，视觉上是滑过去的 */
+    EX_D.pct = exEase(EX_D.pct, EX_T.pct, k);
+    EX_D.fps = exEase(EX_D.fps, EX_T.fps, k);
+    EX_D.faces = exEase(EX_D.faces, EX_T.faces, k);
+    EX_D.done = exEase(EX_D.done, EX_T.done, k);
+    EX_D.faceRate = exEase(EX_D.faceRate, EX_T.faceRate, k);
+
+    if ($("exFps")) $("exFps").textContent = EX_D.fps.toFixed(1);
+    if ($("exFaceRate")) $("exFaceRate").textContent = EX_D.faceRate.toFixed(1);
+    if ($("exFaces")) $("exFaces").textContent = Math.round(EX_D.faces);
+    if ($("exFiles")) $("exFiles").textContent = Math.round(EX_D.done);
+    if ($("exFilesTotal")) $("exFilesTotal").textContent = "/ " + (EX_T.total || 0);
+
+    drawSpeedGraph();
+
+    var settled = Math.abs(EX_D.pct - EX_T.pct) < 0.4 &&
+                  Math.abs(EX_D.fps - EX_T.fps) < 0.2 &&
+                  Math.abs(EX_D.done - EX_T.done) < 1;
+    if (settled && !EX_T.running) { EX_RAF = 0; return; }
+    EX_RAF = requestAnimationFrame(exTick);
+    } catch (err) {
+      /* 绘制/取值出错也不能让循环停摆，否则界面就“冻”住了 */
+      console.error("exTick", err);
+      EX_RAF = requestAnimationFrame(exTick);
+    }
+  }
+
+  function exKick() {
+    if (!EX_RAF) EX_RAF = requestAnimationFrame(exTick);
+  }
+
+  /* ---------- 数据处理运行页 ---------- */
+  function dsRunEl(id) { return document.getElementById(id); }
+
+  function dsRunShow(title) {
+    var card = dsRunEl("dsRunCard");
+    if (card) card.classList.remove("hide");
+    var t = dsRunEl("dsRunTitle");
+    if (t) t.textContent = title || "正在处理";
+    var st = dsRunEl("btnDsRunStop");
+    if (st) { st.classList.remove("hide"); st.disabled = false; st.textContent = "中断"; st.dataset.mode = "stop"; }
+    if (dsRunEl("dsRunBar")) dsRunEl("dsRunBar").style.width = "0%";
+    if (dsRunEl("dsRunMsg")) dsRunEl("dsRunMsg").textContent = "准备中…";
+    if (dsRunEl("dsRunDone")) dsRunEl("dsRunDone").textContent = "0";
+    if (dsRunEl("dsRunTotal")) dsRunEl("dsRunTotal").textContent = "/ 0";
+    if (dsRunEl("dsRunSpeed")) dsRunEl("dsRunSpeed").textContent = "0";
+    if (dsRunEl("dsRunElapsed")) dsRunEl("dsRunElapsed").textContent = "0";
+    if (dsRunEl("dsRunEta")) dsRunEl("dsRunEta").textContent = "—";
+    if (dsRunEl("dsRunRate")) dsRunEl("dsRunRate").textContent = "";
+    go("dataset-run");
+  }
+
+  function dsRunPaint(p) {
+    if (!p) return;
+    if (dsRunEl("dsRunBar")) dsRunEl("dsRunBar").style.width = (p.pct || 0) + "%";
+    if (dsRunEl("dsRunMsg")) dsRunEl("dsRunMsg").textContent = p.msg || "";
+    if (dsRunEl("dsRunDone")) dsRunEl("dsRunDone").textContent = p.done || 0;
+    if (dsRunEl("dsRunTotal")) dsRunEl("dsRunTotal").textContent = "/ " + (p.total || 0);
+    if (dsRunEl("dsRunSpeed")) dsRunEl("dsRunSpeed").textContent = (p.speed || 0).toFixed ? (p.speed || 0).toFixed(1) : (p.speed || 0);
+    if (dsRunEl("dsRunRate")) {
+      var bits = [];
+      if (p.speed) bits.push(p.speed + " 张/秒");
+      if (p.eta) bits.push("剩 " + Math.round(p.eta) + " 秒");
+      dsRunEl("dsRunRate").textContent = bits.join(" · ");
+    }
+    if (!p.running) {
+      var t = dsRunEl("dsRunTitle");
+      if (t) t.textContent = "处理完成";
+      var st = dsRunEl("btnDsRunStop");
+      if (st) { st.dataset.mode = "back"; st.classList.remove("danger"); st.textContent = "返回"; }
+    }
+  }
+  window.dsRunPaint = dsRunPaint;
+  window.dsRunShow = dsRunShow;
+
+  /* 侧栏「任务运行中」标记：百分比胶囊（展开时在右侧，折叠时贴图标角） */
+  function setNavRunning(key, on, pct) {
+    document.querySelectorAll('.nav[data-go="' + key + '"]').forEach(function (n) {
+      var pill = n.querySelector(".navpct");
+      if (!on) {
+        n.classList.remove("running");
+        if (pill) pill.remove();
+        return;
+      }
+      if (!pill) {
+        pill = document.createElement("span");
+        pill.className = "navpct";
+        n.appendChild(pill);
+      }
+      var v = (pct === null || pct === undefined) ? "" : (Math.round(pct) + "%");
+      if (pill.textContent !== v) pill.textContent = v;
+      n.classList.add("running");
+    });
+  }
+  window.setNavRunning = setNavRunning;
 
   function setExtractUI(s) {
-    if ($("exBar")) $("exBar").style.width = (s.pct || 0) + "%";
-    /* 四个数分开算，别再混着叫"抽帧速度"：
-         帧速度   = 解码速度（含被跳过的帧）
-         人脸速度 = 每秒产出多少张对齐脸 = faces / 已用秒数
-         已对齐   = 累计张数
-         已处理帧 = done / total */
-    var frameRate = s.fps || 0;
+    if (!s.running) {
+      /* 结束：运行视图仍可查看，但侧栏点「提取器」应回到参数页 */
+      delete SUB_MEMORY["extract"];
+      if (LAST_PAGE["extract"] === "extract-run") LAST_PAGE["extract"] = "extract";
+      /* 结束：标题改「提取完成」，按钮从「中断提取」变成「返回」 */
+      var hd0 = document.querySelector("#exProgress .xferhd b");
+      if (hd0) hd0.textContent = "提取完成";
+      var sb0 = document.getElementById("btnExStop");
+      if (sb0) {
+        sb0.dataset.mode = "back";
+        sb0.classList.remove("danger", "pri", "hide");
+        sb0.disabled = false;
+        sb0.textContent = "返回";
+      }
+    }
+    /* 显示值不再直接写 DOM：把它交给缓动循环，避免每 0.5s 一跳 */
     var faceRate = (s.elapsed > 0.5 && s.faces) ? (s.faces / s.elapsed) : 0;
-    if ($("exFps")) $("exFps").textContent = frameRate.toFixed(1);
-    if ($("exFaceRate")) $("exFaceRate").textContent = faceRate.toFixed(1);
-    if ($("exFaces")) $("exFaces").textContent = Math.round(s.faces || 0);
-    if ($("exFiles")) $("exFiles").textContent = s.done || 0;
-    if ($("exFilesTotal")) $("exFilesTotal").textContent = "/ " + (s.total || 0);
-    if ($("exCounter")) {
-      var txt = s.total ? (s.done + " / " + s.total + " · " + s.pct + "%") : "就绪";
-      if (s.running && s.eta > 0) txt += " · 剩 " + fmtEta(s.eta);
-      if (s.running && s.elapsed > 0) txt += " · 已用 " + fmtEta(s.elapsed);
-      $("exCounter").textContent = txt;
+    EX_T = {
+      pct: s.pct || 0, fps: s.fps || 0, faces: s.faces || 0,
+      done: s.done || 0, total: s.total || 0,
+      faceRate: faceRate, running: !!s.running
+    };
+    if (typeof s.fps === "number") {
+      var lastP = EX_HIST.length ? EX_HIST[EX_HIST.length - 1].pct : -1;
+      if (s.pct > lastP || EX_HIST.length === 0) {
+        EX_HIST.push({ pct: s.pct || 0, fps: s.fps || 0 });
+        if (EX_HIST.length > 600) EX_HIST.shift();
+      }
     }
     var st = document.getElementById("exStage");
     if (st) st.textContent = s.running ? (STAGE_NAME[s.stage] || "") : "";
-    /* 后端那句 msg 是最准的状态：抽帧 → 对齐 → 完成 */
-    var msgEl = document.getElementById("exMsg");
-    if (msgEl && s.msg) msgEl.textContent = s.msg;
+    setNavRunning("extract", !!s.running, s.pct || 0);
+    exKick();
   }
 
   var EX_DST = "";   /* 本次提取的真实输出目录（后端解析后的绝对路径） */
@@ -989,12 +1417,79 @@
               (s.faces ? (s.faces + " 张人脸") : ((s.total || 0) + " 个文件")) +
               (EX_DST ? " → " + EX_DST : ""));
 
+
+
   if (btnEx) { btnEx.disabled = false; btnEx.textContent = "开始提取"; }
-        setTimeout(function () { showProgress(false); }, 900);
+        setTimeout(function () {
+          var p = $("exProgress");
+          if (p) p.classList.remove("hide");
+        }, 400);
       }
     };
     es.onerror = function () { if (es) { es.close(); es = null; } };
   }
+
+  /* 提取运行页：中断提取（只有一个按钮，放在进度下面） */
+  (function () {
+    var stop = document.getElementById("btnExStop");
+    if (!stop || stop.dataset.bound) return;
+    stop.dataset.bound = "1";
+    stop.addEventListener("click", function () {
+      if (stop.dataset.mode === "back") {          /* 任务已结束：直接回参数页 */
+        var p = document.getElementById("exProgress");
+        if (p) p.classList.add("hide");
+        var b0 = document.getElementById("btnExtract");
+        if (b0) { b0.disabled = false; b0.textContent = "开始提取"; }
+        go("extract");
+        return;
+      }
+      stop.disabled = true;
+      stop.textContent = "正在中断…";
+      fetch("/api/extract/cancel", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+        .catch(function () {})
+        .finally(function () {
+          stop.disabled = false;
+          stop.textContent = "返回";
+          stop.dataset.mode = "back";
+          stop.classList.remove("danger");
+          var b = document.getElementById("btnExtract");
+          if (b) { b.disabled = false; b.textContent = "开始提取"; }
+        });
+    });
+  })();
+
+  /* 速度测试页 */
+  (function () {
+    var btn = document.getElementById("btnPerf");
+    if (!btn || btn.dataset.bound) return;
+    btn.dataset.bound = "1";
+    btn.addEventListener("click", function () {
+      var body = document.getElementById("perfBody");
+      var hint = document.getElementById("perfHint");
+      btn.disabled = true; btn.textContent = "测速中…";
+      if (hint) hint.textContent = "正在跑，别动";
+      fetch("/api/perf/bench", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (!d.ok) throw new Error(d.detail || "测速失败");
+          var html = "", sum = 0;
+          (d.rows || []).forEach(function (row) {
+            var ms = (row.ms === null || row.ms === undefined) ? "—" : row.ms.toFixed(3) + " ms";
+            if (row.ms) sum += row.ms;
+            html += '<div class="cfgrow"><span class="cl">' + row.k + '</span>' +
+                    '<span class="cd">' + (row.note || "") + '</span>' +
+                    '<span class="cc" style="font-family:var(--mono)">' + ms + '</span></div>';
+          });
+          html += '<div class="cfgrow"><span class="cl">合计</span><span class="cd">一张脸跑完全链路</span>' +
+                  '<span class="cc" style="font-family:var(--mono)">' + sum.toFixed(3) + ' ms</span></div>';
+          if (body) body.innerHTML = html;
+          if (hint) hint.textContent = "40,646 张 ≈ " + (sum * 40646 / 1000 / 60).toFixed(1) + " 分钟";
+        })
+        .catch(function (e) { if (hint) hint.textContent = String((e && e.message) || e); })
+        .finally(function () { btn.disabled = false; btn.textContent = "重新测速"; });
+    });
+  })();
+
 
   if (btnEx) {
     btnEx.addEventListener("click", function () {
@@ -1002,22 +1497,39 @@
       btnEx.disabled = true;
       btnEx.textContent = "正在提取…";
       showProgress(true);
-      var inEl = document.querySelector("#p-extract .pathval");
-      var ins = document.querySelectorAll("#p-extract .pathval");
-      var src = ins[0] ? String(ins[0].value || "").trim() : "";
-      var dst = ins[1] ? String(ins[1].value || "").trim() : "";
+      /* 上一轮结束会留下「提取完成」，新任务要复位 */
+      var hd = document.querySelector("#exProgress .xferhd b");
+      if (hd) hd.textContent = "正在提取人脸";
+      EX_T = { pct: 0, fps: 0, faces: 0, done: 0, total: 0, faceRate: 0, running: true };
+      EX_D = { pct: 0, fps: 0, faces: 0, done: 0, faceRate: 0 };
+      EX_HIST.length = 0;
+      exKick();
+      var sb = document.getElementById("btnExStop");
+      if (sb) {
+        sb.dataset.mode = "stop";
+        sb.classList.remove("hide");
+        sb.classList.add("danger");
+        sb.disabled = false;
+        sb.textContent = "中断提取";
+      }
+      go("extract-run");
+      /* 用 id 取，别依赖 .pathval 的先后顺序 */
+      var srcEl = document.getElementById("exSrc");
+      var dstEl = document.getElementById("exDst");
+      var src = srcEl ? String(srcEl.value || "").trim() : "";
+      var dst = dstEl ? String(dstEl.value || "").trim() : "";
       /* 帧跳跃 N 表示每 N 帧取一张 —— 源视频 24 fps 时，fps 参数就是 24/N */
-      var skipInp = document.querySelector("#p-extract .num input, #p-extract input.num");
+      var skipInp = document.getElementById("exSkip");
       var skip = skipInp ? Math.max(1, parseInt(skipInp.value, 10) || 1) : 1;
       /* 不再假设源是 24fps：把"每 N 帧取 1"直接交给后端，由它按源视频真实帧率换算 */
 
       /* 质量档 / 检测角度 / 帧跳跃：三个都是真参数，一起发给后端 */
-      var qSeg = document.querySelector("#p-extract .prow.compact .pc:nth-child(1) .seg");
+      var qSeg = document.getElementById("exDetSeg");
       var qOn = qSeg ? qSeg.querySelector("b.on") : null;
       /* 检测器：RetinaFace(det_10g) 准，TinyMog 快。质量档不再影响分辨率。 */
       var quality = qOn && /TinyMog/i.test(qOn.textContent) ? "fast" : "high";
 
-      var aSeg = document.querySelector("#p-extract .prow.compact .pc:nth-child(2) .seg");
+      var aSeg = document.getElementById("exAngleSeg");
       var aOn = aSeg ? aSeg.querySelector("b.on") : null;
       var rotate = aOn ? (parseInt(aOn.textContent, 10) || 0) : 0;
 
@@ -1080,20 +1592,6 @@
   function el(id) { return document.getElementById(id); }
   function fmt(n) { try { return Number(n).toLocaleString("en-US"); } catch (e) { return String(n); } }
   var BS = "&#92;";
-
-  function modelCard(m) {
-    var d = document.createElement("div");
-    d.className = "mcard";
-    var cls = (m.state === "训练中") ? "ok" : "n";
-    var meta = (m.arch || "—") + (m.iter ? " · iter " + fmt(m.iter) : "");
-    d.innerHTML =
-      '<div class="nm">' + m.name + ' <span class="tag ' + cls + '">' + m.state + '</span></div>' +
-      '<div class="meta">' + meta + '</div>' +
-      '<div class="kv"><span class="tag n">' + m.export + '</span></div>' +
-      '<div class="acts"><button class="mini pri">训练</button>' +
-      '<button class="mini">参数</button><button class="mini">删除</button></div>';
-    return d;
-  }
 
   function sparkSVG(spark) {
     var s = (spark && spark.src) || [];
@@ -3772,6 +4270,47 @@
 
   window.__filterFreezeRows = filterFreezeRows;   /* mount() 在另一段 IIFE 里 */
 
+  /* 训练中：给能热改的行挂一个「热」标记（只在这个模型真的在训练时才显示） */
+  function markHotRows() {
+    var box = $("cfgBox");
+    if (!box) return;
+    var m = window.__cfgModel;
+    var lt = window.__lastTrain;
+    var live = !!(lt && lt.running && m && lt.name === m.name);
+    /* 训练在跑时主按钮的语义变了：不是「开始训练」，而是「应用参数」 */
+    var startBtn = $("cfgStart");
+    if (startBtn) startBtn.textContent = live ? "应用参数" : "开始训练";
+    box.querySelectorAll(".cfgrow").forEach(function (row) {
+      var lb = row.querySelector(".cl");
+      if (!lb) return;
+      /* 每一行都留一个固定宽的槽：有没有「热」都占同样的位置，
+         这样说明文字的左边缘在整页是一条竖线（不然只有带热字的行被顶出去）。 */
+      var slot = row.querySelector(".hotslot");
+      if (!slot) {
+        slot = document.createElement("span");
+        slot.className = "hotslot";
+        lb.insertAdjacentElement("afterend", slot);
+      }
+      var k = row.getAttribute("data-k");
+      var tag = slot.querySelector(".hottag");
+      var want = !!(live && window.HOT_KEYS && k && window.HOT_KEYS[k]);
+      if (!want) {
+        if (tag) tag.remove();
+        row.classList.remove("hot");
+        return;
+      }
+      row.classList.add("hot");
+      if (!tag) {
+        var s = document.createElement("span");
+        s.className = "hottag";
+        s.textContent = "热";
+        s.title = "训练中改这一项会立即生效";
+        slot.appendChild(s);
+      }
+    });
+  }
+  window.markHotRows = markHotRows;
+
   function openCfg(m) {
     var box = $("cfgBox");
     if (!box) return;
@@ -3839,6 +4378,7 @@
           inp.className = "inp";
           inp.value = r.v;
           if (r.k) inp.dataset.cfg = r.k;
+          inp.dataset.v0 = String(inp.value);
           cc.appendChild(inp);
         } else if (r.t === "seg") {
           var seg = document.createElement("div");
@@ -3848,7 +4388,7 @@
             var b = document.createElement("b");
             b.textContent = o;
             b.dataset.v = o;                       /* 业务值取这个，别取 textContent（会被翻译） */
-            if (i === 0) b.className = "on";
+            if (i === 0) { b.className = "on"; seg.dataset.v0 = String(o); }
             b.addEventListener("click", function () {
               Array.prototype.forEach.call(seg.children, function (x) { x.classList.remove("on"); });
               b.classList.add("on");
@@ -3874,10 +4414,15 @@
              结果是下拉框空着、提交时 face_type 变空串。 */
           sel.value = String(r.v);
           if (sel.selectedIndex < 0) sel.selectedIndex = 0;
+          sel.dataset.v0 = String(sel.value);
         } else if (r.t === "sw") {
           var sw = document.createElement("div");
           sw.className = "sw" + (r.v ? " on" : "");
           if (r.k) sw.dataset.cfg = r.k;
+          sw.dataset.v0 = sw.classList.contains("on") ? "1" : "0";
+          /* data-bound 必须打上：TrainExtra.mount() 会给「所有没绑过的 .sw」再挂一个
+             click → 两个监听各 toggle 一次，等于抵消 —— 表现就是"开关拨不动"。 */
+          sw.setAttribute("data-bound", "1");
           sw.addEventListener("click", function () { sw.classList.toggle("on"); });
           cc.appendChild(sw);
         }
@@ -3950,6 +4495,8 @@
               }
             }
           });
+          /* 回填完真实参数，把「初始值」重记一遍：之后只有用户真改过的才算改过 */
+          if (window.syncCfgBaseline) window.syncCfgBaseline();
           var hint = document.getElementById("cfgHint");
           if (hint) {
             /* 先记下原始文案：openCfg 每重画一次都会拉一遍配置，直接往后追加会叠成
@@ -3969,6 +4516,8 @@
     if (window.TrainExtra && typeof window.TrainExtra.mount === "function") {
       try { window.TrainExtra.mount(); } catch (e) {}
     }
+    /* 补充区的行是上面 mount() 才插进来的，第一次标记扫不到 —— 渲染完再补一次 */
+    setTimeout(function () { if (window.markHotRows) window.markHotRows(); }, 0);
   }
   window.openCfg = openCfg;
 
@@ -4087,7 +4636,7 @@
         if ($("runIter")) $("runIter").textContent = Number(idleIter).toLocaleString("en-US");
         if ($("runTarget")) {
           var tg = d.target_iter || (rm && rm.target_iter) || 0;
-          $("runTarget").textContent = tg ? Number(tg).toLocaleString("en-US") : "不限";
+          $("runTarget").textContent = tg ? Number(tg).toLocaleString("en-US") : "∞";
         }
         if ($("runSpeed")) {
           $("runSpeed").textContent = (!d.running && !window.__trainStarting) ? "—"
@@ -4293,14 +4842,7 @@
     var empty = document.getElementById("pvEmpty");
     var crop = document.getElementById("pvCrop");
     var src = st.imgs && st.imgs[idx] ? st.imgs[idx] : "";
-    if (crop) {
-      /* 没在训练、也没有实时图时，用模型里存的那张网格图裁一格当「上次的样子」 */
-      var useCrop = !src && idx === 0 && st.static;
-      crop.style.display = useCrop ? "" : "none";
-      if (useCrop) {
-        crop.style.backgroundImage = "url('" + st.static + "')";
-      }
-    }
+    if (crop) crop.style.display = "none";
     if (img) {
       if (src) {
         img.src = src;
@@ -4309,21 +4851,15 @@
       } else {
         img.removeAttribute("src");
         img.style.display = "none";
-        var hasCrop = !!(idx === 0 && st.static);
         if (empty) {
-          empty.style.display = hasCrop ? "none" : "";
-          empty.textContent = "这一类还没有图 —— 点「刷新」拉一张";
+          empty.style.display = "";
+          empty.textContent = "还没有预览图 —— 训练跑起来后点「刷新」";
         }
       }
     }
     var hint = document.getElementById("prevHint");
     if (hint) {
       var bits = [];
-      var cropped = !(st.imgs && st.imgs[idx]) && idx === 0 && st.static;
-      if (cropped) {
-        bits.push("上次保存的样本");
-        if (st.modelIter) bits.push(_num(st.modelIter) + " iter");
-      }
       if (st.imgs && st.imgs[idx]) {
         if (st.iter) bits.push(_num(st.iter) + " iter");
         if (st.at) {
@@ -4405,7 +4941,7 @@
       $("runStage").className = "tag t-blue";
     }
     if ($("runIter")) $("runIter").textContent = "0";
-    if ($("runTarget")) $("runTarget").textContent = "不限";
+    if ($("runTarget")) $("runTarget").textContent = "∞";
     if ($("runSpeed")) $("runSpeed").textContent = "测速中…";
     if ($("runElapsed")) $("runElapsed").textContent = "—";
     if ($("runEta")) { $("runEta").textContent = ""; $("runEta").style.display = "none"; }
@@ -4415,6 +4951,88 @@
     window.__lastTrain = null;
   }
   window.trainStartingUi = trainStartingUi;
+
+  /* 与 4.0 的 _HOT_KEYS 对齐：训练中改这些会立即生效 */
+  var HOT_KEYS = {
+    crash_threshold: 1, backup_interval: 1, max_backups: 1,
+    face_style_power: 1, bg_style_power: 1,
+    masked_training: 1, blur_out_mask: 1, eyes_mouth_prio: 1, uniform_yaw: 1,
+    lr: 1, lr_cos: 1, lr_dropout: 1,
+    random_src_flip: 1, random_dst_flip: 1, random_hsv_power: 1,
+    random_warp: 1, random_occlusion: 1, random_noise: 1,
+    random_color_power: 1, random_color_alg: 1,
+    ct_mode: 1,
+    rotation_range: 1, scale_range: 1, t_range: 1,
+    eyes_scale: 1, mouth_scale: 1, edge_enhance_power: 1,
+    log_code_stats: 1
+  };
+  window.HOT_KEYS = HOT_KEYS;
+
+  /* 把参数页上改过的值收集成一个 patch（「保存」和「开始训练」共用） */
+  /* 回填真实参数之后，把「初始值」重记一遍：只有和它不同的项才算改过 */
+  function syncCfgBaseline() {
+    var box = $("cfgBox");
+    if (!box) return;
+    box.querySelectorAll("[data-cfg]").forEach(function (el) {
+      if (el.tagName === "INPUT") el.dataset.v0 = String(el.value);
+      else if (el.tagName === "SELECT") el.dataset.v0 = String(el.value);
+      else if (el.classList.contains("sw")) el.dataset.v0 = el.classList.contains("on") ? "1" : "0";
+      else if (el.classList.contains("seg")) {
+        var on = el.querySelector("b.on");
+        if (on) el.dataset.v0 = String(on.dataset.v !== undefined ? on.dataset.v : on.textContent.trim());
+      }
+    });
+  }
+  window.syncCfgBaseline = syncCfgBaseline;
+
+  function collectCfgPatch() {
+    var box = $("cfgBox");
+    var patch = {};
+    if (!box) return patch;
+    var STRUCT = ["resolution","archi","e_dims","ae_dims","d_dims","d_mask_dims",
+                  "face_type","models_opt_on_gpu","gan_power","true_face_power",
+                  "face_style_power","src","dst","name"];
+    box.querySelectorAll("[data-cfg]").forEach(function (el) {
+      var k = el.dataset.cfg;
+      if (!k || STRUCT.indexOf(k) >= 0) return;
+      if (el.tagName === "INPUT") {
+        var v = el.value.trim();
+        if (v === "") return;
+        patch[k] = !isNaN(Number(v)) ? Number(v) : v;
+      } else if (el.tagName === "SELECT") {
+        patch[k] = el.value;
+      } else if (el.classList.contains("sw")) {
+        patch[k] = el.classList.contains("on");
+      } else if (el.classList.contains("seg")) {
+        var on = el.querySelector("b.on");
+        if (on) {
+          var sv = (on.dataset.v !== undefined ? on.dataset.v : on.textContent.trim());
+          var mm = /^([0-9.]+)\s*[（(].*[）)]$/.exec(String(sv));
+          patch[k] = mm ? mm[1] : sv;
+        }
+      }
+      /* 只报真的改过的：没动过的行不写回、也不热推。
+         以前保存会把整页默认值一起推过去，模型里没有的键
+         （crash_threshold / max_backups / log_code_stats…）就被写成 UI 默认值。 */
+      if (Object.prototype.hasOwnProperty.call(patch, k)) {
+        /* 没有基线 = 这一行不是我们画的（或还没回填完）。以当前值为基线并跳过，
+           宁可这一次不报，也不要把界面默认值当成用户的修改写进模型。 */
+        if (el.dataset.v0 === undefined) {
+          el.dataset.v0 = el.classList.contains("sw")
+            ? (el.classList.contains("on") ? "1" : "0")
+            : String(patch[k]);
+          delete patch[k];
+        } else {
+          var nowV = el.classList.contains("sw")
+            ? (el.classList.contains("on") ? "1" : "0")
+            : String(patch[k]);
+          if (nowV === String(el.dataset.v0)) delete patch[k];
+        }
+      }
+    });
+    return patch;
+  }
+  window.collectCfgPatch = collectCfgPatch;
 
   function openRun(m) {
     /* 进页面先把占位文案清掉：没连上后端时不该显示 "1.82 it/s · 正式训练" 这种假数据 */
@@ -4451,14 +5069,13 @@
     /* 预览只放一张，按分类切换；刷新是手动的 —— 自动刷新会打断观察
        （刚看清遮罩边缘，图就被下一轮换掉了）。进入页面时先拉一次，
        之后只有点「刷新」才更新。 */
+    /* 不再拿模型里那张 4×5 拼图当占位：没拉到实时图就空着，提示去刷新 */
     window.__pv = { imgs: [], labels: [], iter: 0, at: 0, idx: 0,
-                    static: (m && m.preview_url) || "",
-                    bs: (m && m.batch_size) || 4,
-                    modelIter: (m && m.iter) || 0 };
+                    bs: (m && m.batch_size) || 4, modelIter: (m && m.iter) || 0 };
     /* 没在训练时，运行条读模型里保存的值 —— 显示 0 iter / 一堆破折号看着像没加载出来 */
     if (m && m.iter && !(window.__lastTrain && window.__lastTrain.running)) {
       if ($("runIter")) $("runIter").textContent = _num(m.iter);
-      if ($("runTarget")) $("runTarget").textContent = m.target_iter ? _num(m.target_iter) : "不限";
+      if ($("runTarget")) $("runTarget").textContent = m.target_iter ? _num(m.target_iter) : "∞";
       if ($("runSpeed")) $("runSpeed").textContent = "—";
       var sp = (m.spark && m.spark.src) || [];
       var dp = (m.spark && m.spark.dst) || [];
@@ -4819,6 +5436,46 @@
     document.addEventListener("keydown", function (e) { if (e.key === "Escape") close(); });
   })();
 
+  /* 「保存」：只写参数，不动训练。训练中改的增强类参数会被后端热推给 4.0，立即生效。 */
+  var cfgSave = $("cfgSave");
+  if (cfgSave) cfgSave.addEventListener("click", function () {
+    var m = window.__cfgModel || (window.MODELS || [])[0] || MODELS[0];
+    if (!m) { toast("保存失败", "还没选中模型", "error"); return; }
+    var patch = collectCfgPatch();
+    if (!Object.keys(patch).length) { toast("没有改动", "参数还是原来的值", "info"); return; }
+    cfgSave.disabled = true;
+    cfgSave.textContent = "保存中…";
+    fetch("/api/models/" + encodeURIComponent(m.name) + "/config", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ options: patch })
+    }).then(function (r) {
+      return r.json().then(function (d) {
+        if (!r.ok) throw new Error(d.detail || "保存失败");
+        return d;
+      });
+    }).then(function (d) {
+      cfgSave.disabled = false;
+      cfgSave.textContent = "保存";
+      var hot = d.hot || [], cold = d.need_restart || [];
+      if (d.hot_applied) {
+        toast("已保存 · " + hot.length + " 项即时生效",
+          (cold.length ? "要重启训练才生效：" + cold.slice(0, 4).join("、") : "全部立即生效"),
+          "success");
+      } else if (hot.length && d.hot_error) {
+        toast("已保存，但没推给训练进程", String(d.hot_error).slice(0, 90), "error");
+      } else if (!d.count) {
+        toast("没有改动", "参数和文件里的一致", "info");
+      } else {
+        toast("已保存", cold.length ? ("要重启训练才生效：" + cold.slice(0, 4).join("、")) : "下次启动训练时生效",
+          "success");
+      }
+    }).catch(function (e) {
+      cfgSave.disabled = false;
+      cfgSave.textContent = "保存";
+      toast("保存失败", String((e && e.message) || e).slice(0, 110), "error");
+    });
+  });
+
   var cfgStart = $("cfgStart");
   if (cfgStart) cfgStart.addEventListener("click", function () {
     var m = window.__cfgModel || (window.MODELS || [])[0] || MODELS[0];
@@ -4841,32 +5498,12 @@
     /* 把页面上改过的值收集起来，写回模型的 _data.dat。
        结构性字段（分辨率 / 架构 / 各维度 / face_type）创建后写不进去，
        传上去后端会整单拒绝 —— 之前"点开始训练没反应"就是死在这一步。 */
-    var STRUCT = ["resolution","archi","e_dims","ae_dims","d_dims","d_mask_dims",
-                  "face_type","models_opt_on_gpu","gan_power","true_face_power",
-                  "face_style_power","src","dst","name"];
-    var patch = {};
-    box.querySelectorAll("[data-cfg]").forEach(function (el) {
-      var k = el.dataset.cfg;
-      if (!k || STRUCT.indexOf(k) >= 0) return;
-      if (el.tagName === "INPUT") {
-        var v = el.value.trim();
-        if (v === "") return;                 /* 空着 = 不改这项，别把 "" 写进 _data.dat */
-        patch[k] = !isNaN(Number(v)) ? Number(v) : v;
-      } else if (el.tagName === "SELECT") {
-        patch[k] = el.value;
-      } else if (el.classList.contains("sw")) {
-        patch[k] = el.classList.contains("on");
-      } else if (el.classList.contains("seg")) {
-        /* 取 data-v（原始值），不能取 textContent —— 英文界面下会写进 "Fast" 这种 */
-        var on = el.querySelector("b.on");
-        if (on) {
-          var sv = (on.dataset.v !== undefined ? on.dataset.v : on.textContent.trim());
-          /* "1.0（关闭）" 这种带说明的选项值不能原样写进 .dat —— 4.0 会 float() 崩掉 */
-          var mm = /^([0-9.]+)\s*[（(].*[）)]$/.exec(String(sv));
-          patch[k] = mm ? mm[1] : sv;
-        }
-      }
-    });
+    var patch = collectCfgPatch();
+
+    /* 训练已经在跑：这次点击只当作「应用参数」，别再去 startTraining ——
+       那会拿 409「已经在训练」当失败，弹一条「训练未启动」，让人以为参数没生效。 */
+    var lt0 = window.__lastTrain;
+    var liveNow = !!(lt0 && lt0.running && m && lt0.name === m.name);
 
     cfgStart.disabled = true;
     fetch("/api/models/" + encodeURIComponent(m.name) + "/config", {
@@ -4879,6 +5516,23 @@
       });
     }).then(function (d) {
       cfgStart.disabled = false;
+      if (liveNow) {
+        /* 训练中：已经热推了，就地提示，不跳页面、不重启 */
+        if (d.count) {
+          toast(d.hot_applied ? "已应用 · 立即生效" : "已保存",
+            d.hot_applied
+              ? ("改动 " + d.count + " 项，" + (d.need_restart && d.need_restart.length
+                  ? (d.need_restart.length + " 项要重启才生效") : "全部即时生效"))
+              : (d.need_restart && d.need_restart.length
+                  ? ("要重启训练才生效：" + d.need_restart.slice(0, 4).join("、"))
+                  : "下次启动训练时生效"),
+            "success");
+        } else {
+          toast("没有改动", "参数还是原来的值", "info");
+        }
+        if (window.markHotRows) window.markHotRows();
+        return;
+      }
       if (d.count) toast("参数已保存", m.name + " · 改动 " + d.count + " 项", "success");
       openRun(m);
       if (window.trainStartingUi) window.trainStartingUi();
@@ -5729,7 +6383,7 @@
       rows: [
         { k: "masked_training", l: "遮罩训练", t: "sw", v: 1, d: "启用后只在遮罩区域内计算损失" },
         { k: "blur_out_mask", l: "遮罩羽化", t: "sw", v: 0, d: "对输入的 mask 外周做高斯模糊" },
-        { k: "prioritize_mouth_eyes", l: "嘴眼优先", t: "sw", v: 0, d: "优先训练嘴部和眼部区域" },
+        { k: "eyes_mouth_prio", l: "嘴眼优先", t: "sw", v: 0, d: "优先训练嘴部和眼部区域" },
         { k: "backup_interval", l: "备份间隔", t: "num", v: "1000", d: "每 N 次迭代自动保存一次，0 = 关闭" }
       ]
     },
@@ -5746,7 +6400,7 @@
         { k: "mouth_scale", l: "嘴巴范围", t: "num", v: "1.0", d: "配合嘴眼优先，1.0 = 原始范围，0.25~2.0" },
         { k: "random_src_flip", l: "SRC翻转", t: "sw", v: 0, d: "src 图像随机水平翻转" },
         { k: "random_dst_flip", l: "DST翻转", t: "sw", v: 0, d: "dst 图像随机水平翻转" },
-        { k: "uniform_yaw_distribution", l: "均匀偏航", t: "sw", v: 0, d: "侧脸少的 faceset 用，让 yaw 分布均匀" }
+        { k: "uniform_yaw", l: "均匀偏航", t: "sw", v: 0, d: "侧脸少的 faceset 用，让 yaw 分布均匀" }
       ]
     },
     {
@@ -6104,25 +6758,9 @@
     return true;
   };
 
-  /* 挂钩 openCfg：每次重渲染后把补齐块补回去（openCfg 会清空 cfgBox） */
-  api.init = function () {
-    if (typeof window.openCfg === "function" && !window.openCfg.__trainExtra) {
-      var orig = window.openCfg;
-      var wrapped = function () {
-        var ret = orig.apply(this, arguments);
-        try { api.mount(); } catch (e) { /* 静默：补齐块失败不影响原页面 */ }
-        return ret;
-      };
-      wrapped.__trainExtra = true;
-      window.openCfg = wrapped;
-    }
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", function () { api.mount(); });
-    } else {
-      api.mount();
-    }
-    return api;
-  };
+  /* 渲染完由 openCfg 直接调 TrainExtra.mount()（见 openCfg 末尾）。
+     这里以前还包了一层 window.openCfg，但那份包装从来没被调用过
+     —— 留着只会让人以为有两套挂载机制，已经删掉。 */
 
   window.TRAIN_EXTRA_GROUPS = EXTRA_GROUPS;
   window.TRAIN_EXTRA_SELECT_GROUPS = EXTRA_SELECT_GROUPS;
@@ -7050,3 +7688,101 @@
 
   window.openOneShot = openOneShot;
 })();
+
+
+  /* ---------- 引擎编译页 ----------
+     后端早就有 /api/engines 和 /api/engines/build，但前端从来没调用过，
+     所以页面永远是空表格（用户看到的「并没有」）。 */
+  (function () {
+    var tbody = document.getElementById("engList");
+    if (!tbody || tbody.dataset.bound) return;
+    tbody.dataset.bound = "1";
+
+    var stateText = { ready: "已编译", stale: "需重编", missing: "未编译" };
+    var stateCls = { ready: "ok", stale: "warn", missing: "" };
+
+    function row(m) {
+      var st = stateText[m.state] || m.state || "—";
+      var cls = stateCls[m.state] || "";
+      var canBuild = m.state !== "ready";
+      return '<tr>' +
+        '<td>' + m.name + '</td>' +
+        '<td class="mono" style="font-size:11px;color:var(--ink-3)">' + (m.md5 || "—") + '</td>' +
+        '<td class="eng-num">' + (m.size_mb != null ? m.size_mb + ' MB' : '—') + '</td>' +
+        '<td class="eng-num">' + (m.engine_mb != null ? m.engine_mb + ' MB' : '—') + '</td>' +
+        '<td><span class="tag ' + cls + '">' + st + '</span></td>' +
+        '<td class="eng-num"><button class="mini" data-eng="' + m.name + '"' +
+          (canBuild ? '' : ' disabled') + '>' + (m.state === 'ready' ? '已就绪' : '编译') + '</button></td>' +
+        '</tr>';
+    }
+
+    /* 只在内容真的变了才写 DOM —— 每 2.5 秒无条件重写整张表会让标题和行闪烁 */
+    var lastRows = "", lastSm = "";
+
+    function paint(st) {
+      var html = (st.models || []).map(row).join("") ||
+        '<tr><td colspan="6" class="hint">没有可编译的模型</td></tr>';
+      if (html !== lastRows) { tbody.innerHTML = html; lastRows = html; }
+
+      var sm = document.getElementById("engSm");
+      var job = st.job || {};
+      var text = job.running
+        ? ('正在编译 ' + (job.name || "") + ' · ' + (job.pct || 0) + '%')
+        : ('GPU SM ' + (st.sm || "?") + ' · 引擎目录 ' + (st.dir || ""));
+      if (sm && sm.textContent !== text) { sm.textContent = text; }
+    }
+
+    function load() {
+      return fetch("/api/engines").then(function (r) { return r.json(); })
+        .then(paint).catch(function () {});
+    }
+
+    function build(name) {
+      fetch("/api/engines/build", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name })
+      }).then(function (r) { return r.json(); }).then(function () {
+        toast("开始编译", name, "info");
+        load();
+      }).catch(function (e) {
+        toast("编译失败", String((e && e.message) || e), "error");
+      });
+    }
+
+    tbody.addEventListener("click", function (e) {
+      var b = e.target.closest("button[data-eng]");
+      if (b && !b.disabled) build(b.getAttribute("data-eng"));
+    });
+
+    var all = document.getElementById("engAll");
+    if (all) {
+      all.addEventListener("click", function () {
+        fetch("/api/engines").then(function (r) { return r.json(); }).then(function (st) {
+          var todo = (st.models || []).filter(function (m) { return m.state !== "ready"; });
+          if (!todo.length) { toast("全部编译", "所有引擎都已就绪", "info"); return; }
+          var i = 0;
+          (function next() {
+            if (i >= todo.length) { load(); return; }
+            var name = todo[i++].name;
+            fetch("/api/engines/build", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name: name })
+            }).then(function () {
+              var t = setInterval(function () {
+                fetch("/api/engines").then(function (r) { return r.json(); }).then(function (s) {
+                  paint(s);
+                  if (!(s.job && s.job.running)) { clearInterval(t); next(); }
+                });
+              }, 1500);
+            });
+          })();
+        });
+      });
+    }
+
+    load();
+    setInterval(function () {
+      var page = document.getElementById("p-tool-engine");
+      if (page && page.offsetParent !== null) load();
+    }, 2500);
+  })();

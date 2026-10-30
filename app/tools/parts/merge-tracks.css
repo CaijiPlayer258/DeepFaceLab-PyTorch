@@ -1,0 +1,269 @@
+/* ============================================================
+   合成工作室 · PR 风格多轨时间轴（片段）
+   合并位置：app/web/css/app.css 末尾（或独立引入）
+   硬约束：整条时间轴总高 = 30(顶栏) + 108(轨道区) + 2(边框) = 140px ≤ 150px
+           轨道区内部滚动，页面不出现横向滚动条
+   ============================================================ */
+
+.mtl {
+  --mtl-bar-h: 30px;      /* 顶栏 */
+  --mtl-ruler-h: 14px;    /* 刻度尺 */
+  --mtl-track-h: 22px;    /* 每轨 22px */
+  --mtl-name-w: 64px;     /* 轨道名列固定 64px */
+  --mtl-sb-h: 6px;        /* 横向滚动条 */
+
+  position: relative;
+  display: block;
+  flex: none;                     /* 在 #p-merge 的 flex 列里不被压缩，恒定 140px */
+  max-height: 150px;              /* 硬约束兜底 */
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+.mtl, .mtl * { box-sizing: border-box; }
+
+/* ---------- ① 顶栏：帧跳转 / 走带 / 时间码 + 缩放 ---------- */
+.mtl-bar {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  height: var(--mtl-bar-h);
+  padding: 0 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.mtl-jump { display: grid; grid-template-columns: auto auto; align-items: center; gap: 6px; }
+.mtl-lbl { font-size: 11px; color: var(--ink-3); white-space: nowrap; }
+
+.mtl-frame {
+  display: grid;
+  grid-template-columns: auto auto auto;
+  align-items: center;
+  gap: 2px;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--panel-2);
+}
+.mtl-frame-in {
+  width: 44px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--ink-1);
+  font: inherit;
+  font-size: 11.5px;
+  text-align: center;
+  outline: none;
+  font-variant-numeric: tabular-nums;
+}
+.mtl-slash { font-size: 11px; color: var(--line-strong); }
+.mtl-total {
+  min-width: 26px;
+  padding: 0 2px;
+  font-size: 11.5px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.mtl-nav { display: grid; grid-template-columns: repeat(3, auto); align-items: center; gap: 4px; }
+.mtl-nb {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: background .14s ease, color .14s ease, border-color .14s ease;
+}
+.mtl-nb:hover { background: var(--panel-2); border-color: var(--line); color: var(--ink-1); }
+.mtl-nb:active { background: var(--accent-soft); color: var(--accent); }
+.mtl-nb--play { color: var(--accent); }
+.mtl-nb--play:hover { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+
+.mtl-right { display: grid; grid-template-columns: auto auto auto auto; align-items: center; gap: 6px; justify-self: end; }
+.mtl-tc {
+  font-size: 11px;
+  color: var(--ink-3);
+  letter-spacing: .2px;
+  font-variant-numeric: tabular-nums;
+  padding-right: 2px;
+}
+.mtl-zb {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  transition: background .14s ease, color .14s ease;
+}
+.mtl-zb:hover { background: var(--panel-2); color: var(--ink-1); }
+
+/* 缩放档位 seg：高度压到 20px，避免撑高顶栏 */
+.mtl .mtl-zseg { padding: 2px; border-radius: 7px; gap: 1px; }
+.mtl .mtl-zseg b { padding: 2px 6px; border-radius: 5px; font-size: 11px; line-height: 14px; }
+
+/* ---------- ② 轨道区 ---------- */
+.mtl-body {
+  display: grid;
+  grid-template-columns: var(--mtl-name-w) minmax(0, 1fr);
+  height: calc(var(--mtl-ruler-h) + var(--mtl-track-h) * 4 + var(--mtl-sb-h));
+  min-height: 0;
+}
+
+.mtl-names {
+  display: grid;
+  grid-template-rows: var(--mtl-ruler-h) repeat(4, var(--mtl-track-h));
+  padding-bottom: var(--mtl-sb-h);      /* 与右侧滚动条等高对齐 */
+  border-right: 1px solid var(--line);
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.mtl-name {
+  display: grid;
+  align-items: center;
+  justify-items: end;
+  padding-right: 8px;
+  font-size: 11px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.mtl-name--ruler { border-bottom: 1px solid var(--line); }
+
+.mtl-scroll {
+  position: relative;
+  overflow-x: auto;
+  overflow-y: hidden;
+  min-width: 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+.mtl-scroll::-webkit-scrollbar { height: var(--mtl-sb-h); }
+.mtl-scroll::-webkit-scrollbar-track { background: transparent; }
+.mtl-scroll::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 999px; }
+
+.mtl-stack {
+  position: relative;
+  width: 100%;
+  height: calc(var(--mtl-ruler-h) + var(--mtl-track-h) * 4);
+  min-width: 100%;
+}
+
+/* 刻度尺：每 500px 一个数字 */
+.mtl-ruler {
+  position: relative;
+  height: var(--mtl-ruler-h);
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.mtl-tk { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line-strong); }
+.mtl-tk b {
+  position: absolute;
+  left: 3px;
+  top: 1px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 12px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 轨道行 */
+.mtl-trk {
+  position: relative;
+  height: var(--mtl-track-h);
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  overflow: hidden;
+}
+.mtl-trk:hover { background: color-mix(in srgb, var(--panel-2) 60%, transparent); }
+.mtl-trk--angle { border-bottom: none; }
+
+/* 轨道区色块：位置由 JS 写 left / width */
+.mtl-blk { position: absolute; top: 2px; height: calc(var(--mtl-track-h) - 5px); border-radius: 4px; }
+
+/* 视频帧条：40 个缩略占位块 */
+.mtl-blk--video {
+  background: linear-gradient(180deg, var(--panel-2), var(--line));
+  border: 1px solid var(--line);
+}
+.mtl-blk--video::after {                     /* 缩略图占位斜纹 */
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border-radius: 2px;
+  background: repeating-linear-gradient(115deg, transparent 0 4px,
+    color-mix(in srgb, var(--line-strong) 45%, transparent) 4px 5px);
+}
+
+/* 人脸标记：25 个 accent 色块 */
+.mtl-blk--face {
+  top: 4px;
+  height: calc(var(--mtl-track-h) - 9px);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+/* 剪切区段：6 段红系区段 */
+.mtl-blk--cut {
+  top: 2px;
+  height: calc(var(--mtl-track-h) - 5px);
+  background: repeating-linear-gradient(45deg, transparent 0 3px,
+    color-mix(in srgb, #ef4444 14%, transparent) 3px 6px);
+  border-left: 2px solid color-mix(in srgb, #ef4444 65%, transparent);
+  border-right: 2px solid color-mix(in srgb, #ef4444 65%, transparent);
+  border-radius: 3px;
+}
+
+/* 角度色带：3 段渐变 */
+.mtl-blk--angle {
+  top: 3px;
+  height: calc(var(--mtl-track-h) - 7px);
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--accent) 78%, transparent),
+    color-mix(in srgb, var(--accent) 22%, transparent));
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, transparent);
+  border-radius: 4px;
+}
+
+/* 播放头：1px 竖线 + 8px 三角标 */
+.mtl-head {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  background: var(--accent);
+  z-index: 5;
+  pointer-events: none;
+  will-change: left;
+}
+.mtl-head i {
+  position: absolute;
+  top: 0;
+  left: -4px;
+  width: 8px;
+  height: 7px;
+  background: var(--accent);
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+}
+
+/* 拖动播放头时禁用选中 */
+.mtl.is-dragging .mtl-trk { cursor: ew-resize; }
+.mtl.is-dragging { user-select: none; }

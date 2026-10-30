@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>Mask Processor</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="app-shell">
+
+    <!-- ====================================================================
+         Title Bar
+         ==================================================================== -->
+    <div class="title-bar">
+      <div class="title-bar__logo">
+        <img class="title-bar__logo-icon" src="logo.png" alt="M">
+        <span>Mask Processor</span>
+      </div>
+      <input class="title-bar__path-input" id="workspace-path" type="text" value="workspace\data_src\aligned" placeholder='e.g. C:\workspace\data_src\aligned' spellcheck="false">
+      <button class="title-bar__change-btn" onclick="app.changeWorkspace()">Change</button>
+    </div>
+
+    <!-- ====================================================================
+         Main Content
+         ==================================================================== -->
+    <div class="main-content">
+
+      <!-- ================================================================
+           Left Toolbar
+           ================================================================ -->
+      <div class="toolbar">
+        <button class="tool-btn active" data-tool="sam" title="SAM Click (S)">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="8" cy="8" r="3"/>
+            <path d="M8 2v2M8 12v2M2 8h2M12 8h2"/>
+          </svg>
+          <span class="tool-btn__tooltip">SAM (S)</span>
+        </button>
+        <button class="tool-btn" data-tool="brush" title="Brush (R)">
+          &#9998;
+          <span class="tool-btn__tooltip">Brush (R)</span>
+        </button>
+        <button class="tool-btn" data-tool="pen" title="Pen (N)">
+          &#10016;
+          <span class="tool-btn__tooltip">Pen (N)</span>
+        </button>
+        <div style="flex:1;"></div>
+        <button class="tool-btn" onclick="app.undo()" title="Undo (Ctrl+Z)" style="margin-top:auto;">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M4 7l3-3M4 7l3 3"/>
+            <path d="M4 7h6a3 3 0 0 1 3 3v1"/>
+          </svg>
+          <span class="tool-btn__tooltip">Undo</span>
+        </button>
+      </div>
+
+      <!-- ================================================================
+           Center Area
+           ================================================================ -->
+      <div class="center-area">
+
+        <!-- Mode Bar -->
+        <div class="mode-bar">
+          <div class="mode-toggle">
+            <button class="mode-toggle__btn active" data-mode="draw">Draw</button>
+            <button class="mode-toggle__btn" data-mode="exclude">Exclude</button>
+          </div>
+
+          <div class="brush-slider">
+            <span class="brush-slider__label" id="brush-size-label">16</span>
+            <input class="brush-slider__input" type="range" id="brush-size"
+                   min="4" max="100" value="16">
+          </div>
+
+          <span class="tool-hint" id="tool-hint"
+                style="margin-left:8px;font-size:10px;color:rgba(255,255,255,0.3);"></span>
+        </div>
+
+        <!-- Canvas -->
+        <div class="canvas-container">
+          <canvas id="mask-canvas"></canvas>
+        </div>
+
+        <!-- Status Bar -->
+        <div class="status-bar">
+          <span class="status-bar__item">
+            <span class="status-bar__dot status-bar__dot--success"></span>
+            <span id="fg-count">FG: 0</span>
+          </span>
+          <span class="status-bar__item">
+            <span class="status-bar__dot status-bar__dot--error"></span>
+            <span id="bg-count">BG: 0</span>
+          </span>
+          <span class="status-bar__spacer"></span>
+          <span class="status-bar__item ctrl-hint" id="status-message"></span>
+          <span class="status-bar__item" id="coord-display">x: 0 y: 0</span>
+        </div>
+      </div>
+
+      <!-- ================================================================
+           Right Panel
+           ================================================================ -->
+      <div class="right-panel">
+
+        <!-- Files -->
+        <div class="panel-section">
+          <div class="panel-section__header">
+            <span class="panel-section__title">FILES</span>
+            <span class="panel-section__action" id="file-count">0</span>
+          </div>
+          <div class="file-list"></div>
+        </div>
+
+        <!-- SAM Model -->
+        <div class="panel-section">
+          <div class="panel-section__header">
+            <span class="panel-section__title">SAM</span>
+            <span class="panel-section__action"
+                  style="font-size:9px;background:rgba(91,91,214,0.15);
+                         color:#8b8be6;padding:1px 5px;border-radius:3px;">
+              active
+            </span>
+          </div>
+          <div class="model-select">
+            <button class="model-select__btn" data-model="vit_b">vit_b</button>
+            <button class="model-select__btn active" data-model="vit_l">vit_l</button>
+            <button class="model-select__btn" data-model="vit_h">vit_h</button>
+          </div>
+        </div>
+
+        <!-- Grounded SAM2 -->
+        <div class="panel-section">
+          <div class="panel-section__header">
+            <span class="panel-section__title">GROUNDED SAM2</span>
+          </div>
+          <input class="linen-input" id="gs-prompt" value="face."
+                 placeholder='Enter prompt (e.g. &quot;face.&quot;)'>
+          <button class="btn-generate" style="margin-top:6px;"
+                  onclick="generateTextMask()">Generate</button>
+        </div>
+
+        <!-- BiSeNet -->
+        <div class="panel-section">
+          <div class="panel-section__header">
+            <span class="panel-section__title">BISENET</span>
+          </div>
+          <div class="tag-group">
+            <button class="tag active" data-part="face">Face</button>
+            <button class="tag active" data-part="hair">Hair</button>
+            <button class="tag" data-part="eyes">Eyes</button>
+            <button class="tag" data-part="mouth">Mouth</button>
+            <button class="tag" data-part="skin">Skin</button>
+            <button class="tag" data-part="nose">Nose</button>
+          </div>
+          <button class="btn-generate" style="margin-top:6px;"
+                  onclick="generateBiSeNet()">Generate</button>
+        </div>
+
+        <!-- XSeg -->
+        <div class="panel-section">
+          <div class="panel-section__header">
+            <span class="panel-section__title">XSEG</span>
+          </div>
+          <div style="display:flex;gap:6px;margin-bottom:4px;">
+            <div class="model-select" style="flex:1;">
+              <button data-xres="256" class="model-select__btn active">256</button>
+              <button data-xres="512" class="model-select__btn">512</button>
+            </div>
+          </div>
+          <button class="btn-generate" onclick="generateXSeg()">Generate XSeg</button>
+          <button class="btn-generate" style="margin-top:4px;" onclick="generateXSegLite()">Generate XSegLite</button>
+        </div>
+
+        <!-- Load Mask & Opacity -->
+        <div class="panel-section">
+          <div class="panel-section__header">
+            <span class="panel-section__title">MASK</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+            <span style="font-size:10px;color:rgba(255,255,255,0.45);">Resolution:</span>
+            <div class="model-select" id="mask-res-group" style="flex:1;">
+              <button data-res="256" class="model-select__btn">256</button>
+              <button data-res="512" class="model-select__btn">512</button>
+              <button data-res="1024" class="model-select__btn active">1024</button>
+            </div>
+          </div>
+          <button class="btn-generate" onclick="loadExistingMask()" style="margin-bottom:4px;">Load from DFLJPG</button>
+          <button class="btn-generate" onclick="commitMask()" style="background:linear-gradient(135deg,rgba(91,214,150,0.15),rgba(91,91,214,0.15));border-color:rgba(91,214,150,0.2);color:#5bd696;">Commit &amp; Save</button>
+          <div style="display:flex;align-items:center;gap:6px;margin-top:6px;">
+            <span style="font-size:10px;color:rgba(255,255,255,0.45);">Opacity:</span>
+            <input type="range" id="opacity-slider" min="5" max="100" value="35"
+                   style="flex:1;height:3px;-webkit-appearance:none;background:rgba(255,255,255,0.1);border-radius:2px;outline:none;">
+            <span id="opacity-label" style="font-size:10px;color:rgba(255,255,255,0.5);min-width:28px;">35%</span>
+          </div>
+        </div>
+
+        <!-- Shortcut Footer -->
+        <div class="shortcut-footer">
+          <span class="shortcut-footer__item">
+            <span class="shortcut-footer__key">S</span> SAM
+          </span>
+          <span class="shortcut-footer__item">
+            <span class="shortcut-footer__key">R</span> Brush
+          </span>
+          <span class="shortcut-footer__item">
+            <span class="shortcut-footer__key">N</span> Pen
+          </span>
+          <span class="shortcut-footer__item">
+            <span class="shortcut-footer__key">D</span>/<span class="shortcut-footer__key">E</span> Mode
+          </span>
+          <span class="shortcut-footer__item">
+            <span class="shortcut-footer__key">&#8984;Z</span> Undo
+          </span>
+          <span class="shortcut-footer__item">
+            <span class="shortcut-footer__key">&#8984;S</span> Save
+          </span>
+          <span class="shortcut-footer__item">
+            <span class="shortcut-footer__key">&#8670;</span>/<span class="shortcut-footer__key">&#8671;</span> Prev/Next
+          </span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====================================================================
+       Scripts — loaded in dependency order (no modules)
+       ==================================================================== -->
+  <script src="js/api.js?v=9"></script>
+  <script src="js/canvas.js?v=9"></script>
+  <script src="js/tools/point.js?v=9"></script>
+  <script src="js/tools/brush.js?v=9"></script>
+  <script src="js/tools/pen.js?v=9"></script>
+  <script src="js/app.js?v=9"></script>
+  <script>
+    (function () {
+      'use strict';
+
+      // ====================================================================
+      // Global inline functions — referenced by onclick handlers in the HTML
+      // ====================================================================
+
+      /** Generate a mask from the Grounded SAM2 prompt. */
+      window.generateTextMask = async function () {
+        var prompt = document.getElementById('gs-prompt').value;
+        if (!prompt) return;
+
+        app.pushHistory();
+        app.canvas.setMask(null);
+        app.canvas.setLoading(50, 'GroundedSAM2...');
+        try {
+          var result = await API.textToMask(app.currentIndex, prompt);
+          app.canvas.clearLoading();
+          if (result.mask) mergeMaskB64(result.mask);
+        } catch (err) {
+          app.canvas.clearLoading();
+          app.setStatus('Error: ' + err.message);
+        }
+      };
+
+      /** Generate a mask from selected BiSeNet face parts. */
+      window.generateBiSeNet = async function () {
+        var parts = [];
+        document.querySelectorAll('.tag.active').forEach(function (el) {
+          parts.push(el.dataset.part);
+        });
+        if (parts.length === 0) return;
+
+        app.pushHistory();
+        app.canvas.setMask(null);
+        app.canvas.ensureMask();
+        app.canvas.setLoading(50, 'BiSeNet...');
+        try {
+          var result = await API.parseFace(app.currentIndex, parts);
+          app.canvas.clearLoading();
+          if (!result.masks) return;
+
+          var res = app.canvas.maskResolution || 256;
+          var fgParts = {face:1, skin:1, eyes:1, mouth:1, nose:1, brows:1};
+
+          // Merge each part into canvas mask
+          for (var key in result.masks) {
+            var b64 = result.masks[key];
+            if (!b64) continue;
+            // Decode via Image and resize to mask resolution
+            var data = await new Promise(function (resolve) {
+              var img = new Image();
+              img.onload = function () {
+                var c = document.createElement('canvas');
+                c.width = res; c.height = res;
+                var ctx = c.getContext('2d');
+                ctx.drawImage(img, 0, 0, res, res);
+                var imageData = ctx.getImageData(0, 0, res, res);
+                resolve(imageData.data);
+              };
+              img.src = 'data:image/png;base64,' + b64;
+            });
+            // Write to canvas mask
+            var isDraw = fgParts[key] === 1;
+            var maskData = app.canvas.mask.data;
+            for (var i = 0; i < res * res; i++) {
+              if (data[i * 4] > 128) {
+                if (isDraw) {
+                  maskData[i] = Math.min(1, maskData[i] + 0.5);
+                } else {
+                  maskData[i] = Math.max(-1, maskData[i] - 0.5);
+                }
+              }
+            }
+          }
+          app.canvas.renderNow();
+          app._updateCounts();
+          app.setStatus('BiSeNet mask applied');
+        } catch (err) {
+          console.error('BiSeNet error:', err);
+          app.setStatus('BiSeNet error: ' + err.message);
+        }
+      };
+
+      /** Get selected XSeg resolution. */
+      function getXSegRes() {
+        var el = document.querySelector('#mask-res-group .active') || document.querySelector('[data-xres].active');
+        if (el && el.dataset.xres) return parseInt(el.dataset.xres, 10);
+        return 256;
+      }
+
+      /** Generate XSeg mask. */
+      window.generateXSeg = async function () {
+        app.pushHistory();
+        app.canvas.setMask(null);
+        try {
+          app.canvas.setLoading(40, 'XSeg...');
+          var result = await API.xsegPredict(app.currentIndex);
+          app.canvas.clearLoading();
+          if (result.mask) app._applyMaskB64(result.mask);
+        } catch (err) {
+          app.canvas.clearLoading();
+          app.setStatus('XSeg error: ' + err.message);
+        }
+      };
+
+      /** Merge a base64 mask into the canvas (avoids overwriting user edits). */
+      function mergeMaskB64(b64) {
+        var img = new Image();
+        img.onload = function () {
+          var res = app.canvas.maskResolution || 256;
+          var c = document.createElement('canvas');
+          c.width = res; c.height = res;
+          var ctx = c.getContext('2d');
+          ctx.drawImage(img, 0, 0, res, res);
+          var pixels = ctx.getImageData(0, 0, res, res).data;
+          app.canvas.ensureMask();
+          if (app.canvas.mask && app.canvas.mask.data) {
+            var existing = app.canvas.mask.data;
+            for (var i = 0; i < res * res; i++) {
+              var v = pixels[i * 4] / 255;
+              if (v > 0.1) existing[i] = 1.0;
+            }
+            app.canvas.renderNow();
+          }
+        };
+        img.src = 'data:image/png;base64,' + b64;
+      }
+
+      /** Generate XSegLite mask. */
+      window.generateXSegLite = async function () {
+        app.pushHistory();
+        app.canvas.setMask(null);
+        try {
+          app.canvas.setLoading(40, 'XSegLite...');
+          var result = await API.xseglitePredict(app.currentIndex);
+          app.canvas.clearLoading();
+          if (result.mask) mergeMaskB64(result.mask);
+        } catch (err) {
+          app.canvas.clearLoading();
+          app.setStatus('XSegLite error: ' + err.message);
+        }
+      };
+
+      /** Commit (flatten + save) the current mask. */
+      window.commitMask = async function () {
+        if (!app.canvas.mask) {
+          app.setStatus('Nothing to commit');
+          return;
+        }
+        // Animate exclude (red) areas fading out, then save
+        app.canvas.fadeExclude();
+        // Wait for fade to complete before encoding
+        await new Promise(function (r) { setTimeout(r, 350); });
+        // Flatten negatives to 0 for the save
+        var data = app.canvas.mask.data;
+        for (var ci = 0; ci < data.length; ci++) {
+          if (data[ci] < 0) data[ci] = 0;
+        }
+        var b64 = app._maskToB64();
+        if (!b64) return;
+        try {
+          app.canvas.setLoading(60, 'Committing...');
+          var result = await API.saveMask(app.currentIndex, b64);
+          app.canvas.clearLoading();
+          if (result.success) {
+            app.canvas.flash();
+            app.canvas.renderNow();
+            app._updateCounts();
+            app.history = [];
+            app.setStatus('Mask committed & saved');
+          }
+        } catch (err) {
+          app.canvas.clearLoading();
+          app.setStatus('Commit error: ' + err.message);
+        }
+      };
+
+      /** Load existing mask from DFLJPG. */
+      window.loadExistingMask = async function () {
+        try {
+          var result = await API.loadExistingMask(app.currentIndex);
+          if (result.mask) {
+            app.canvas.setMask(null);  // clear before loading
+            app._applyMaskB64(result.mask);
+            app.setStatus('Mask loaded from DFLJPG');
+          } else {
+            app.setStatus('No mask found in DFLJPG');
+          }
+        } catch (err) {
+          app.setStatus('Load error: ' + err.message);
+        }
+      };
+
+      // ---- Opacity slider -------------------------------------------------
+      document.getElementById('opacity-slider').addEventListener('input', function () {
+        var val = parseInt(this.value, 10);
+        document.getElementById('opacity-label').textContent = val + '%';
+        app.canvas.setOpacity(val / 100);
+      });
+
+      // ====================================================================
+      // Tag toggle (BiSeNet face part chips)
+      // ====================================================================
+      document.querySelectorAll('.tag').forEach(function (el) {
+        el.addEventListener('click', function () {
+          el.classList.toggle('active');
+        });
+      });
+
+      // ====================================================================
+      // Model select (SAM variants)
+      // ====================================================================
+      document.querySelectorAll('.model-select__btn').forEach(function (el) {
+        el.addEventListener('click', function () {
+          if (!el.dataset.model && !el.dataset.res && !el.dataset.xres) return;
+          var parent = el.parentElement;
+          var active = parent.querySelector('.active');
+          if (active) active.classList.remove('active');
+          el.classList.add('active');
+        });
+      });
+
+      // ====================================================================
+      // Mask resolution
+      // ====================================================================
+      document.querySelectorAll('#mask-res-group .model-select__btn').forEach(function (el) {
+        el.addEventListener('click', async function () {
+          var res = parseInt(el.dataset.res, 10);
+          if (!res || !app.canvas) return;
+          // Commit current mask before switching resolution
+          if (app.canvas.mask && app.currentIndex >= 0) {
+            var saveData = app.canvas.mask.data;
+            for (var ci = 0; ci < saveData.length; ci++) {
+              if (saveData[ci] < 0) saveData[ci] = 0;
+            }
+            var b64 = app._maskToB64();
+            if (b64) {
+              try { await API.saveMask(app.currentIndex, b64); } catch (_) {}
+            }
+          }
+          app.canvas.maskResolution = res;
+          // Reload current image to refresh canvas with new resolution
+          if (app.files.length > 0) {
+            await app.navigateTo(app.currentIndex);
+          }
+          app.setStatus('Mask resolution: ' + res + 'x' + res);
+        });
+      });
+
+      // ====================================================================
+      // Boot
+      // ====================================================================
+
+      /** Global App instance — referenced from onclick and shortcuts. */
+      var app = new App();
+      window.app = app;
+
+      // Preload all models in background (doesn't block UI)
+      API.preloadModels();
+
+    })();
+  </script>
+</body>
+</html>

@@ -10,8 +10,8 @@ const fs = require("fs");
 
 const ROOT = path.resolve(__dirname, "..");
 const PY_CANDIDATES = [
-  path.join(ROOT, "_python", "Scripts", "pythonw.exe"),
-  path.join(ROOT, "_python", "Scripts", "python.exe")
+  path.join(ROOT, "runtime", "server", "Scripts", "pythonw.exe"),
+  path.join(ROOT, "runtime", "server", "Scripts", "python.exe")
 ];
 const PY = PY_CANDIDATES.find((p) => fs.existsSync(p)) || PY_CANDIDATES[1];
 const SERVE = path.join(ROOT, "app", "serve.py");

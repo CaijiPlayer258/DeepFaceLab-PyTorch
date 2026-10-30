@@ -1,0 +1,112 @@
+/* ============================================================
+ * 4.1 训练参数 · 补齐片段样式
+ * ------------------------------------------------------------
+ * 只补「训练参数补齐块」用得到的少量规则，其余全部复用 app.css 已有的
+ * .card / .cardhd / .cfgrow / .seg / .sw / .mgsel / .cfgpath / .inp
+ *
+ * 作用域锁在 [data-part="train-extra"]（由 train-params.js 生成的包装层），
+ * 因此不会影响主页/提取器/数据处理/合成器的任何现有行 —— 可以安全并行合并。
+ *
+ * 目标形态：行 = grid 两列 68px + minmax(0,1fr)，gap 10px，align-items center。
+ * 行内第三个节点 .cd（说明）与 .cc（控件）都放在第 2 列：
+ *   .cd 靠左，超长省略号；.cc 靠右，自带卡片底色 —— 叠在同一格里也不会串字。
+ * ============================================================ */
+
+[data-part="train-extra"] .card + .card { margin-top: 14px; }
+
+/* ---- 行：68px 标签列 + 1fr 内容列 ---- */
+[data-part="train-extra"] .cfgrow {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+}
+[data-part="train-extra"] .cfgrow:last-child { border-bottom: 0; }
+
+/* 标签列：定宽 68px，不折行，超长省略（全称在 title 里） */
+[data-part="train-extra"] .cfgrow .cl {
+  width: auto;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 说明：占第 2 列、靠左 */
+[data-part="train-extra"] .cfgrow .cd {
+  grid-area: 1 / 2;
+  justify-self: stretch;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 控件：同占第 2 列、靠右；自带底色盖住说明的溢出部分 */
+[data-part="train-extra"] .cfgrow .cc {
+  grid-area: 1 / 2;
+  justify-self: end;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 12px;
+  background: var(--panel);
+}
+
+/* ---- 控件尺寸：与合成页 .mgtiny / .mgsel 对齐，别各长各的 ---- */
+[data-part="train-extra"] .cfgrow .cc .inp {
+  width: 104px;
+  min-height: 28px;
+  font-size: 12px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+[data-part="train-extra"] .cfgrow .cc .seg b { padding: 4px 10px; font-size: 12px; }
+[data-part="train-extra"] .cfgrow .cc .mgsel { width: 152px; height: 28px; }
+[data-part="train-extra"] .cfgrow .cc .sw { flex: 0 0 auto; }
+
+/* ---- 路径行：控件铺满第 2 列，不再靠右 ---- */
+[data-part="train-extra"] .cfgrow.cfgpathrow { padding: 6px 0; }
+[data-part="train-extra"] .cfgrow.cfgpathrow .cc {
+  justify-self: stretch;
+  padding-left: 0;
+  background: none;
+}
+[data-part="train-extra"] .cfgpath {
+  width: 100%;
+  min-height: 32px;
+}
+[data-part="train-extra"] .cfgpath .val {
+  font-size: 12px;
+  color: var(--ink-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- 窄窗：说明整行让位，只留标签 + 控件 ---- */
+@media (max-width: 760px) {
+  [data-part="train-extra"] .cfgrow .cd { display: none; }
+}
+
+/* ============================================================
+ * 附：如果之后要全站统一（audit.md 第五节 P0），
+ * 可以直接用下面这段替换 app.css L1061-1067 的 .cfgrow 规则，
+ * 再把 .cl 的 width:130px 删掉、.cc 加 background/padding-left：
+ *
+ *   .cfgrow { display:grid; grid-template-columns:68px minmax(0,1fr);
+ *             gap:10px; align-items:center; padding:7px 0;
+ *             border-bottom:1px solid var(--line); }
+ *   .cfgrow .cl { min-width:0; font-size:12.5px; color:var(--ink-2);
+ *                 white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+ *   .cfgrow .cd { grid-area:1/2; min-width:0; font-size:11.5px; color:var(--ink-3);
+ *                 white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+ *   .cfgrow .cc { grid-area:1/2; justify-self:end; display:flex; align-items:center;
+ *                 gap:8px; padding-left:12px; background:var(--panel); }
+ * ============================================================ */

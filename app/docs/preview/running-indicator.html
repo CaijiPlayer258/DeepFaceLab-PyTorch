@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>侧栏「运行中」指示器 · 方案对比</title>
+<style>
+  :root{
+    --bg:#fbfbfc; --surface:#fff; --line:#e8e8ee; --ink:#1c1c22; --ink-2:#5a5a66;
+    --ink-3:#8b8b98; --brand:#5d6ccf; --brand-soft:rgba(93,108,207,.14);
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#141418; --surface:#1b1b21; --line:#2a2a33; --ink:#ececf2; --ink-2:#a8a8b6;
+           --ink-3:#75758a; --brand-soft:rgba(93,108,207,.22); }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:36px;background:var(--bg);color:var(--ink);font-family:var(--font);
+       -webkit-font-smoothing:antialiased}
+  h1{font-size:20px;font-weight:650;margin:0 0 6px}
+  .sub{color:var(--ink-3);font-size:13px;margin-bottom:28px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(430px,1fr));gap:22px}
+  .opt{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:18px 18px 16px}
+  .opthd{display:flex;align-items:baseline;gap:8px;margin-bottom:4px}
+  .opthd b{font-size:14px}
+  .tag{font-size:11px;color:var(--brand);background:var(--brand-soft);border-radius:999px;padding:2px 8px}
+  .desc{font-size:12px;color:var(--ink-3);line-height:1.6;margin:2px 0 14px}
+  .pair{display:flex;gap:16px;align-items:flex-start}
+  .side{width:196px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px 8px}
+  .side.mini{width:64px;padding:10px 8px}
+  .nav{display:flex;align-items:center;gap:10px;height:34px;padding:0 10px;border-radius:8px;
+       color:var(--ink-2);font-size:13px;position:relative}
+  .nav.on{background:var(--brand-soft);color:var(--ink)}
+  .mini .nav{justify-content:center;padding:0}
+  .ic{width:16px;height:16px;flex:0 0 16px;color:currentColor}
+  .lbl{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cap{font-size:11px;color:var(--ink-3);text-align:center;margin-top:6px}
+
+  /* ① 呼吸圆点 */
+  .v1 .running .lbl::after{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;
+    background:var(--brand);margin-left:8px;vertical-align:middle;animation:pulse 1.4s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:.35;transform:scale(.85)}50%{opacity:1;transform:scale(1)}}
+
+  /* ② Loader2 转圈（shadcn 惯例） */
+  .v2 .spin{width:13px;height:13px;flex:0 0 13px;border:1.6px solid var(--brand-soft);
+    border-top-color:var(--brand);border-radius:50%;animation:spin 900ms linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* ③ 图标流光（现方案折叠态） */
+  .v3 .glow{animation:glow 1.6s ease-in-out infinite}
+  @keyframes glow{0%,100%{filter:drop-shadow(0 0 0 rgba(93,108,207,0));color:var(--ink-3)}
+    50%{filter:drop-shadow(0 0 7px rgba(93,108,207,.9));color:var(--brand)}}
+
+  /* ④ 图标右下角小转圈 */
+  .v4 .dotwrap{position:relative;display:inline-flex}
+  .v4 .dotspin{position:absolute;right:-3px;bottom:-3px;width:8px;height:8px;border-radius:50%;
+    border:1.5px solid var(--brand-soft);border-top-color:var(--brand);animation:spin 800ms linear infinite}
+
+  /* ⑤ 底部细进度线 */
+  .v5 .nav .prog{position:absolute;left:8px;right:8px;bottom:3px;height:2px;border-radius:2px;
+    background:var(--brand-soft);overflow:hidden}
+  .v5 .nav .prog i{position:absolute;inset:0 38% 0 0;background:var(--brand);border-radius:2px}
+  .v5.mini .nav .prog{left:12px;right:12px}
+
+  /* ⑥ 右侧百分比胶囊 */
+  .v6 .pct{margin-left:auto;font-size:11px;font-variant-numeric:tabular-nums;color:var(--brand);
+    background:var(--brand-soft);border-radius:999px;padding:1px 7px}
+  .v6 .mini .nav{position:relative}
+  .v6 .mini .pct{position:absolute;right:-2px;top:-2px;margin:0;font-size:9px;padding:0 4px}
+</style>
+</head>
+<body>
+<h1>侧栏「任务运行中」指示器 · 6 个方案</h1>
+<div class="sub">左侧是展开态，右侧是折叠态。带 <span class="tag">推荐</span> 的是按 shadcn / Radix 惯例更贴切的做法。</div>
+
+<div class="grid">
+
+  <div class="opt v1">
+    <div class="opthd"><b>① 呼吸圆点</b><span class="tag">当前实现</span></div>
+    <div class="desc">模块名右侧一个 6px 圆点，1.4s 缩放+透明度循环。轻量，但语义偏「有新消息」。折叠态靠图标发光。</div>
+    <div class="pair">
+      <div><div class="side v1"><div class="nav on running"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.5"/></svg><span class="lbl">提取器</span></div></div><div class="cap">展开</div></div>
+      <div><div class="side mini v1"><div class="nav on running"><svg class="ic glow" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.5"/></svg></div></div><div class="cap">折叠</div></div>
+    </div>
+  </div>
+
+  <div class="opt v2">
+    <div class="opthd"><b>② Loader2 转圈</b><span class="tag">推荐</span></div>
+    <div class="desc">同名右侧一个转圈指示器（900ms/圈），shadcn 体系里 <code>Loader2 + animate-spin</code> 就是「进行中」的标准符号。折叠态同样用转圈图标。</div>
+    <div class="pair">
+      <div><div class="side v2"><div class="nav on"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.5"/></svg><span class="lbl">提取器</span><span class="spin"></span></div></div><div class="cap">展开</div></div>
+      <div><div class="side mini v2"><div class="nav on"><span class="spin"></span></div></div><div class="cap">折叠</div></div>
+    </div>
+  </div>
+
+  <div class="opt v4">
+    <div class="opthd"><b>③ 图标角标转圈</b><span class="tag">推荐</span></div>
+    <div class="desc">不占文字位置：图标右下角叠一个 8px 小转圈。展开/折叠都用同一套（折叠时更容易看见）。信息量最小。</div>
+    <div class="pair">
+      <div><div class="side v4"><div class="nav on"><span class="dotwrap"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.5"/></svg><i class="dotspin"></i></span><span class="lbl">提取器</span></div></div><div class="cap">展开</div></div>
+      <div><div class="side mini v4"><div class="nav on"><span class="dotwrap"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.5"/></svg><i class="dotspin"></i></span></div></div><div class="cap">折叠</div></div>
+    </div>
+  </div>
+
+  <div class="opt v5">
+    <div class="opthd"><b>④ 底部细进度线</b></div>
+    <div class="desc">模块底部 2px 进度线，直接显示真实进度（不用额外元素）。折叠态也保留，能看出「还剩多少」。</div>
+    <div class="pair">
+      <div><div class="side v5"><div class="nav on"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.5"/></svg><span class="lbl">提取器</span><span class="prog"><i></i></span></div></div><div class="cap">展开</div></div>
+      <div><div class="side mini v5"><div class="nav on"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.5"/></svg><span class="prog"><i></i></span></div></div><div class="cap">折叠</div></div>
+    </div>
+  </div>
+
+  <div class="opt v6">
+    <div class="opthd"><b>⑤ 百分比胶囊</b></div>
+    <div class="desc">右侧一个极小的百分比胶囊（<code>SidebarMenuBadge</code> 的用法）。折叠态挂在图标右上角，像未读数。</div>
+    <div class="pair">
+      <div><div class="side v6"><div class="nav on"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.5"/></svg><span class="lbl">提取器</span><span class="pct">62%</span></div></div><div class="cap">展开</div></div>
+      <div><div class="side mini v6"><div class="nav on"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.5"/></svg><span class="pct">62%</span></div></div><div class="cap">折叠</div></div>
+    </div>
+  </div>
+
+  <div class="opt v3">
+    <div class="opthd"><b>⑥ 图标流光</b><span class="tag">当前折叠态</span></div>
+    <div class="desc">整颗图标发出品牌色光晕，1.6s 呼吸。视觉存在感最强，但深色模式下容易糊，且不能表达进度。</div>
+    <div class="pair">
+      <div><div class="side"><div class="nav on"><svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.5"/></svg><span class="lbl">提取器</span></div></div><div class="cap">展开（无变化）</div></div>
+      <div><div class="side mini"><div class="nav on"><svg class="ic glow" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.5"/></svg></div></div><div class="cap">折叠</div></div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
