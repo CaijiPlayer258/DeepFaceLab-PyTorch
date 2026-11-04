@@ -31,8 +31,11 @@ def _looks_like_engine(p: Path) -> bool:
 
 def candidates():
     out = []
-    # 引擎代码现在收在 app/ 里（core/samplelib/python/main.py 都在那儿）
-    app_dir = ROOT / "app"
+    # 引擎代码收在 app/engine/（core / samplelib / main.py 都在那儿）
+    engine_dir = ROOT / "app" / "engine"
+    if _looks_like_engine(engine_dir):
+        out.append(engine_dir)
+    app_dir = ROOT / "app"          # 老布局：main.py 直接放在 app/ 下
     if _looks_like_engine(app_dir):
         out.append(app_dir)
     if _looks_like_engine(ROOT):
@@ -83,9 +86,22 @@ def engine_missing_hint() -> str:
             % tried)
 
 
+def weights_dir() -> Path:
+    """权重根目录：$DFL_WEIGHTS_DIR > <仓库根>/weights。
+
+    代码与模型分离后，.onnx/.pth 一律放这里，不进版本库。
+    """
+    env = os.environ.get("DFL_WEIGHTS_DIR")
+    if env:
+        return Path(env)
+    return ROOT / "weights"
+
+
 def modelhub_dir() -> Path:
-    """ONNX 权重目录：根 weights/（含 onnx/），其次 app/modelhub，最后引擎的。"""
-    for cand in (ROOT / "weights", ROOT / "app" / "modelhub", engine_root() / "modelhub"):
+    """ONNX 权重目录：引擎的 modelhub 优先（包内 __file__ 相对寻址），其次根 weights/。"""
+    # 引擎那份优先：modelhub 的 python 包用 Path(__file__).parent 找 .onnx，
+    # 只有代码与权重在同一个目录时才成立。weights/ 留作外部补充。
+    for cand in (engine_root() / "modelhub", ROOT / "app" / "engine" / "modelhub", ROOT / "weights"):
         if (cand / "onnx").is_dir():
             return cand
     return engine_root() / "modelhub"

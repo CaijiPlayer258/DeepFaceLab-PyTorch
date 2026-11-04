@@ -17,6 +17,36 @@ from pathlib import Path
 # Windows 上统一用 CREATE_NO_WINDOW（POSIX 下是 0，无副作用）。
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
+
+def _install_no_window():
+    """全局兜底：这个进程派生的任何子进程都不弹控制台窗口。
+
+    以前只有显式传了 creationflags 的地方才安静，剩下十几处（nvidia-smi、
+    ffmpeg、人脸身份聚类用的引擎 python…）都会闪一个黑框 —— 点一下「人脸身份」
+    就弹窗，就是这么来的。这里统一打补丁，调用点不用再记得传参。
+    """
+    import subprocess as _sp
+
+    if os.name != "nt" or getattr(_sp, "_dfl_nowindow", False):
+        return
+    _orig_run = _sp.run
+    _orig_popen_init = _sp.Popen.__init__
+
+    def run(*a, **kw):
+        kw.setdefault("creationflags", _NO_WINDOW)
+        return _orig_run(*a, **kw)
+
+    def popen_init(self, *a, **kw):
+        kw.setdefault("creationflags", _NO_WINDOW)
+        return _orig_popen_init(self, *a, **kw)
+
+    _sp.run = run
+    _sp.Popen.__init__ = popen_init
+    _sp._dfl_nowindow = True
+
+
+_install_no_window()
+
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -477,8 +507,8 @@ def _get_detector(name="det_500m"):
         if "tinymog" in _det_cache:
             return _det_cache["tinymog"]
         from ._detect import TinyMogDet
-        from ._paths import modelhub_dir
-        for p in (modelhub_dir() / "onnx" / "TinyMog" / "TinyMog.onnx",
+        from ._paths import modelhub_dir, weights_dir
+        for p in (weights_dir() / "onnx" / "TinyMog" / "TinyMog.onnx",
                   ROOT / "modelhub" / "onnx" / "TinyMog" / "TinyMog.onnx"):
             if p.is_file():
                 det = TinyMogDet(str(p), workspace=WORKSPACE, engine_name="tinymog")
@@ -490,8 +520,8 @@ def _get_detector(name="det_500m"):
     if file_name in _det_cache:
         return _det_cache[file_name]
     from ._detect import RetinaFaceDet
-    from ._paths import modelhub_dir
-    hub = modelhub_dir() / "onnx" / "RetinaFace"
+    from ._paths import modelhub_dir, weights_dir
+    hub = weights_dir() / "onnx" / "RetinaFace"
     cand = [hub / (file_name + ".onnx"),
             ROOT / "modelhub" / "onnx" / "RetinaFace" / (file_name + ".onnx")]
     for p in cand:
@@ -635,7 +665,7 @@ def _model_dat(name: str):
 # 与 4.0 Trainer.py 的 _HOT_KEYS 一一对应：这些参数训练中改会立即生效，
 # 其余（分辨率/架构/维度/batch/优化器/预训练…）必须重启训练。
 _HOT_OPTIONS = {
-    "crash_threshold", "backup_interval", "max_backups",
+    "crash_threshold", "backup_interval", "max_backups", "accum_steps",
     "face_style_power", "bg_style_power",
     "masked_training", "blur_out_mask", "eyes_mouth_prio", "uniform_yaw",
     "lr", "lr_cos", "lr_dropout",
@@ -702,18 +732,325 @@ def _merge_settings_to_config(settings: dict) -> dict:
         "blur_mask_modifier": settings.get("blur_mask_modifier",
                                            settings.get("blur_mask", 0)),
     }
+    # 4.1 的键名有两代：界面现在发 erode_mask / blur_mask，别处会发 mask_erode /
+    # mask_feather。两条都认，并且用别名给的值覆盖归一键 —— routes_merge 那边的
+    # _settings_val 会先补一个默认 0 的 erode_mask_modifier，只转发别名的话，别名
+    # 给的数会被那个 0 盖掉，等于没传。
+    for _alias, _key in (("erode_mask", "erode_mask_modifier"),
+                         ("mask_erode", "erode_mask_modifier"),
+                         ("blur_mask", "blur_mask_modifier"),
+                         ("mask_feather", "blur_mask_modifier")):
+        _v = settings.get(_alias)
+        if _v is None or (isinstance(_v, str) and not _v.strip()):
+            continue
+        cfg[_key] = _v
+        if _alias in ("mask_erode", "mask_feather"):
+            cfg[_alias] = _v            # 原样带上，_merge_runner 自己也归一这两个名字
+    # face_type：4.1 的界面有这一项（mgFaceType），以前到这儿就丢了，
+    # 导出日志里根本看不到它。
+    _ft = settings.get("face_type")
+    if _ft is not None and str(_ft).strip():
+        cfg["face_type"] = _ft
     if settings.get("face_margin") is not None:
         cfg["face_margin"] = settings["face_margin"]
     return cfg
 
 
+def _merge_source_video(input_dir: str = "") -> str:
+    """这批帧的源视频（导出时取音轨用）；对不上就返回 ""，绝不瞎猜路径。
+
+    两个来源，都要能证明「就是这批帧」才用：
+      · /api/merge/open 打开视频 → _merge_cache["path"]（项目模式下被清成 ""）
+      · /api/merge/prepare 抽帧 → _merge_prep["video"]，配 _merge_prep["project"]
+    """
+    exts = (".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv")
+
+    def _as_video(p) -> str:
+        text = str(p or "").strip()
+        if not text:
+            return ""
+        try:
+            pp = Path(text)
+        except (OSError, ValueError):
+            return ""
+        if pp.suffix.lower() not in exts or not pp.is_file():
+            return ""
+        return str(pp)
+
+    def _stem_hit(video: str) -> bool:
+        """帧目录名和视频名对得上：prepare 的产物就是 <workspace>/merge/<视频名>/。"""
+        name = Path(str(input_dir).strip()).name if str(input_dir or "").strip() else ""
+        stem = Path(video).stem
+        if not name or not stem:
+            return False
+        return name == stem or name.startswith(stem + "_")
+
+    try:
+        cache = dict(_merge_cache)
+    except Exception:                                     # noqa: BLE001
+        cache = {}
+
+    hit = _as_video(cache.get("path"))        # 视频模式：path 就是原片
+    if hit and _stem_hit(hit):
+        return hit
+
+    with _merge_prep_lock:
+        prep = dict(_merge_prep)
+    hit = _as_video(prep.get("video"))        # prepare 的项目：源视频只记在这儿
+    if not hit:
+        return ""
+    proj = str(prep.get("project") or "").strip()
+    mine = str(input_dir or "").strip() or str(cache.get("dir") or "").strip()
+    if proj and mine:
+        try:
+            if os.path.normcase(os.path.abspath(proj)) == os.path.normcase(os.path.abspath(mine)):
+                return hit
+        except (OSError, ValueError):
+            pass
+    return hit if _stem_hit(hit) else ""
+
+
+# ---------- 多模型导出（models 清单 → --settings <临时 JSON>） ----------
+# 契约在 _merge_runner.py 那边：--settings 吃 {"models":[{"name","dfm","faces"}]}。
+# 这边只干两件事：把 4.1 的 models 列表翻成那份 JSON，决定命令行给 --dfm 还是 --settings。
+
+
+def _merge_log(msg: str):
+    """往合成任务日志里追一行（前端日志面板读的就是 _merge_job["log"]）。"""
+    try:
+        with _merge_job_lock:
+            log = _merge_job.get("log")
+            if not isinstance(log, list):
+                log = []
+                _merge_job["log"] = log
+            log.append(str(msg))
+            if len(log) > 400:
+                del log[:-400]
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
+def _merge_models_raw(models, settings):
+    """models 的原始值：优先 models 实参，其次 settings["models"]。
+
+    routes_merge 有两条接法（单独一个 models 字段 / 塞进 settings 一起给），两种都认。
+    只认一种的话另一边会静默退回单模型 —— 用错模型出片，比直接失败更难查。
+    """
+    raw = models
+    if raw is None and isinstance(settings, dict):
+        raw = settings.get("models")
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        try:
+            raw = json.loads(text)
+        except Exception:
+            raise RuntimeError("多模型清单不是合法 JSON：%s" % text[:120])
+    if isinstance(raw, dict):
+        raw = raw.get("models") if "models" in raw else [raw]
+    if not isinstance(raw, (list, tuple)):
+        return None
+    out = []
+    for e in raw:
+        if e is None or (isinstance(e, str) and not e.strip()):
+            continue
+        out.append(dict(e) if isinstance(e, dict) else {"dfm": e})
+    return out
+
+
+def _merge_faces_of(who: str, raw) -> list:
+    """faces → 升序去重的 int 列表；空列表 = 这个模型兜底吃没被点名的脸。"""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return []
+    if isinstance(raw, bool):
+        raise RuntimeError("%s 的 faces 是布尔值，看不懂: %r" % (who, raw))
+    if isinstance(raw, (int, str)):
+        raw = [raw]
+    if isinstance(raw, (set, frozenset)):
+        raw = sorted(raw)
+    if not isinstance(raw, (list, tuple)):
+        raise RuntimeError("%s 的 faces 要是一个数组（人脸序号），收到 %s"
+                           % (who, type(raw).__name__))
+    out = set()
+    for f in raw:
+        if isinstance(f, bool):
+            raise RuntimeError("%s 的 faces 里有布尔值: %r" % (who, f))
+        if isinstance(f, int):
+            n = f
+        else:
+            try:
+                n = int(str(f).strip())
+            except (TypeError, ValueError):
+                raise RuntimeError("%s 的 faces 里有非整数: %r" % (who, f))
+        if n < 0:
+            raise RuntimeError("%s 的 faces 里有负数（脸序号从 0 起）: %d" % (who, n))
+        out.add(int(n))
+    return sorted(out)
+
+
+def _merge_dfm_dir() -> Path:
+    """按名字找 .dfm 的目录：workspace/model（训练页点「导出」就写这儿）。"""
+    return Path(WORKSPACE) / "model"
+
+
+def _merge_dfm_by_name(name: str, model_dir: Path) -> Path:
+    """只给了名字 → <名字>.dfm，其次 <名字>-<迭代>.dfm（取迭代最高的那个）。
+
+    找不到就报错。以前这种地方会悄悄退回"第一个 .dfm"，结果拿别的模型出片、
+    谁都没发现 —— 宁可失败，也不能静默换模型。
+    """
+    hits = []
+    try:
+        for p in model_dir.iterdir():
+            if not p.is_file() or p.suffix.lower() != ".dfm":
+                continue
+            if p.stem == name:
+                return p
+            if p.stem.startswith(name + "-"):
+                hits.append(p)
+    except OSError:
+        hits = []
+    if not hits:
+        raise RuntimeError("模型「%s」没有 .dfm：%s 下既没有 %s.dfm 也没有 %s-*.dfm —— "
+                           "先去训练页点「导出」" % (name, model_dir, name, name))
+
+    def _iter(p):
+        try:
+            return int(p.stem.rsplit("-", 1)[-1])
+        except (TypeError, ValueError):
+            return -1
+
+    hits.sort(key=_iter)
+    return hits[-1]
+
+
+def _merge_abs_dfm(raw_dfm, who: str) -> Path:
+    """给出的 dfm 路径 → 存在的路径（相对路径按仓库根 / 模型目录补全）。"""
+    p = Path(str(raw_dfm).strip())
+    if not p.is_absolute():
+        for base in (_APP_ROOT, Path(WORKSPACE), _merge_dfm_dir(), Path.cwd()):
+            try:
+                c = Path(base) / p
+            except (OSError, ValueError):
+                continue
+            if c.is_file():
+                p = c
+                break
+    if not p.is_file():
+        raise RuntimeError("%s 的 dfm 不存在：%s" % (who, p))
+    return p
+
+
+def _merge_model_plan(models, settings, dfm: str = ""):
+    """models 清单 → [{"name","dfm","faces"}]（dfm 已解析成绝对路径）；None = 单模型。
+
+    传了 dfm 就只认那条路径；只给 name 才去 workspace/model 找 <name>.dfm /
+    <name>-*.dfm。同一个 .dfm 出现两次 → 合成一项、faces 取并集。
+    """
+    raw = _merge_models_raw(models, settings)
+    if not raw:
+        return None
+    model_dir = _merge_dfm_dir()
+    plan, seen = [], {}
+    for i, e in enumerate(raw):
+        name = str(e.get("name") or "").strip()
+        raw_dfm = ""
+        for k in ("dfm", "dfm_path", "dfmPath", "path", "file", "dfm_file"):
+            v = e.get(k)
+            if v is not None and str(v).strip():
+                raw_dfm = str(v).strip()
+                break
+        who = ("models[%d]「%s」" % (i, name)) if name else ("models[%d]" % i)
+        if raw_dfm:
+            path = _merge_abs_dfm(raw_dfm, who)
+        elif name:
+            path = _merge_dfm_by_name(name, model_dir)
+        else:
+            raise RuntimeError("%s 既没有 name 也没有 dfm 路径 —— 不知道要用哪个模型" % who)
+        faces = _merge_faces_of(who, e.get("faces", e.get("face", e.get("indices"))))
+        try:
+            key = os.path.normcase(str(path.resolve()))
+        except OSError:
+            key = os.path.normcase(str(path))
+        hit = seen.get(key)
+        if hit is not None:
+            hit["faces"] = sorted(set(hit["faces"]) | set(faces))
+            continue
+        ent = {"name": name or path.stem, "dfm": str(path), "faces": faces}
+        seen[key] = ent
+        plan.append(ent)
+    return plan
+
+
+def _merge_plan_label(plan) -> str:
+    """「张元英[face 0], 韩素希[face 1]」—— 日志里点清谁换了哪张脸。"""
+    parts = []
+    for m in plan or []:
+        faces = m.get("faces") or []
+        if not faces:
+            tag = "全部脸"
+        elif len(faces) == 1:
+            tag = "face %d" % int(faces[0])
+        else:
+            tag = "face " + ",".join(str(int(f)) for f in faces)
+        parts.append("%s[%s]" % (m.get("name") or Path(m.get("dfm") or "").stem, tag))
+    return ", ".join(parts)
+
+
+def _merge_single_label(dfm, settings) -> str:
+    """单模型日志里的名字：settings 里点过名就用名字，否则用 .dfm 的文件名。"""
+    if isinstance(settings, dict):
+        for k in ("model", "model_name", "dfm_name"):
+            v = str(settings.get(k) or "").strip()
+            if v:
+                return v
+    return Path(str(dfm or "")).stem or "（未命名模型）"
+
+
+def _merge_write_models(plan) -> str:
+    """整份 {"models":[...]} 落到系统 temp → 返回路径（调用方跑完负责删）。"""
+    import tempfile
+    payload = {"models": [{"name": str(m["name"]), "dfm": str(m["dfm"]),
+                           "faces": [int(f) for f in (m.get("faces") or [])]}
+                          for m in plan]}
+    fd, path = tempfile.mkstemp(prefix="dfl_merge_models_", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+    except BaseException:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    return path
+
+
+def _merge_models_args(plan, dfm):
+    """→ (命令行片段, 临时清单路径)。
+
+    多模型：["--settings", <temp json>] —— 整份清单走文件，命令行上不用塞中文 JSON；
+    单模型：["--dfm", dfm]，和改动前逐字一致。
+    """
+    if plan:
+        path = _merge_write_models(plan)
+        return ["--settings", path], path
+    return ["--dfm", dfm], ""
+
+
 def _merge_worker(input_dir: str, out_mp4: str, aligned_dir: str, dfm: str,
                   settings: dict, mask_onnx: str, fps: float = 25.0, workers: int = 0,
-                  encoder: str = "h264_nvenc", hwaccel: str = "auto"):
+                  encoder: str = "h264_nvenc", hwaccel: str = "auto", models=None):
     """跑 _merge_runner.py（4.0 的 python + MergeStudio 导出管线）。
 
-    以前这里是 `main.py merge`，而 mainscripts/Merger.py 依赖一个不存在的
+    以前这里是 "main.py merge"，而 mainscripts/Merger.py 依赖一个不存在的
     merger 包，跑到一半必崩；现在换成直接调 run_export_pipeline。
+
+    models（可选）= [{name, dfm, faces}]：多模型导出。给了就整份写成系统 temp 里的
+    JSON，命令行用 runner 的 --settings <文件>；没给就只有一次 --dfm，命令行与线上
+    逐字一致。单项有 dfm 就只认那条路径，只有 name 时按 workspace/model 找
+    <name>.dfm / <name>-*.dfm，找不到直接报错（绝不静默退回单模型）。
     """
     import subprocess
     py = _engine_python()
@@ -725,33 +1062,56 @@ def _merge_worker(input_dir: str, out_mp4: str, aligned_dir: str, dfm: str,
     if not (_DFL_ROOT / "MergeStudio").is_dir():
         raise RuntimeError("4.0 根目录下没有 MergeStudio: %s" % _DFL_ROOT)
 
-    cmd = [str(py), str(runner),
-           "--frames", input_dir,
-           "--aligned", aligned_dir,
-           "--dfm", dfm,
-           "--out", out_mp4,
-           "--config", json.dumps(_merge_settings_to_config(settings), ensure_ascii=False),
-           "--dfl-root", str(_DFL_ROOT),
-           "--fps", str(float(fps or 25.0))]
+    # 多模型清单：先解析 —— 少一个 dfm 要在起进程之前就炸，
+    # 别等跑到合成阶段才发现某张脸没换。
+    try:
+        plan = _merge_model_plan(models, settings, dfm)
+    except Exception as e:                              # noqa: BLE001
+        _merge_log("多模型导出失败: %s" % (str(e)[:300] or e.__class__.__name__))
+        raise
+
+    mode_word = "多模型导出" if plan else "单模型导出"
+    mode_detail = _merge_plan_label(plan) if plan else _merge_single_label(dfm, settings)
+
+    cmd_tail = ["--out", out_mp4,
+                "--config", json.dumps(_merge_settings_to_config(settings), ensure_ascii=False),
+                "--dfl-root", str(_DFL_ROOT),
+                "--fps", str(float(fps or 25.0))]
+    # 音轨：_merge_runner 会把 --source-video 的音轨合进成片。拿不到源视频就不传，
+    # 让它在输出/帧目录旁边按 <名字>.mp4 自己找，找不到就静音出片。
+    src_video = _merge_source_video(input_dir)
+    if src_video:
+        cmd_tail += ["--source-video", src_video]
     if mask_onnx:
-        cmd += ["--xseg", mask_onnx]
+        cmd_tail += ["--xseg", mask_onnx]
     if workers and int(workers) > 0:
-        cmd += ["--workers", str(int(workers))]
-    cmd += ["--encoder", str(encoder or "h264_nvenc")]
-    cmd += ["--image-format", str((settings or {}).get("image_format") or "jpg")]
-    cmd += ["--hwaccel", str(hwaccel if hwaccel is not None else "auto")]
+        cmd_tail += ["--workers", str(int(workers))]
+    cmd_tail += ["--encoder", str(encoder or "h264_nvenc")]
+    cmd_tail += ["--image-format", str((settings or {}).get("image_format") or "jpg")]
+    cmd_tail += ["--hwaccel", str(hwaccel if hwaccel is not None else "auto")]
     # 4.0 根下没有 ffmpeg/，用 4.1 自带的 imageio-ffmpeg（只读引用）
     try:
         import imageio_ffmpeg as _iff
         _ff = _iff.get_ffmpeg_exe()
         if _ff and Path(_ff).is_file():
-            cmd += ["--ffmpeg", _ff]
+            cmd_tail += ["--ffmpeg", _ff]
     except Exception:
         pass
+
+    # 清单最后才落盘：上面任何一步抛异常都不该在 temp 里留文件
+    model_args, settings_file = _merge_models_args(plan, dfm)
+    cmd = [str(py), str(runner),
+           "--frames", input_dir,
+           "--aligned", aligned_dir] + model_args + cmd_tail
 
     with _merge_job_lock:
         _merge_job.update({"running": True, "log": [], "ok": None, "error": None,
                            "out": out_mp4, "pct": 0, "msg": "启动合成…"})
+        _merge_job["log"].append("%s: %s" % (mode_word, mode_detail))
+        if settings_file:
+            _merge_job["log"].append("模型清单（--settings）: %s" % settings_file)
+        if src_video:
+            _merge_job["log"].append("源视频（音轨来源）: %s" % src_video)
     try:
         env_note = "PYTHONIOENCODING=utf-8"
         import os as _os
@@ -800,6 +1160,11 @@ def _merge_worker(input_dir: str, out_mp4: str, aligned_dir: str, dfm: str,
         with _merge_job_lock:
             _merge_job["running"] = False
             _merge_job["ok"] = ok
+            _merge_job["log"].append("%s%s: %s"
+                                     % (mode_word,
+                                        "完成" if ok else ("失败（退出码 %s）"
+                                                           % proc.returncode),
+                                        mode_detail))
             if ok:
                 _merge_job["pct"] = 100
                 _merge_job["msg"] = "合成完成"
@@ -810,8 +1175,14 @@ def _merge_worker(input_dir: str, out_mp4: str, aligned_dir: str, dfm: str,
             _merge_job["running"] = False
             _merge_job["ok"] = False
             _merge_job["error"] = str(e)
-
-
+        _merge_log("%s失败: %s" % (mode_word, str(e)[:300]))
+    finally:
+        # 清单只给子进程用一次：跑完（成功/失败/取消）就把 temp 里的 JSON 删掉
+        if settings_file:
+            try:
+                os.unlink(settings_file)
+            except OSError:
+                pass
 import threading as _th2
 _merge_job_lock = _th2.Lock()
 _merge_proc = None          # 当前合成子进程，取消时用
@@ -1478,6 +1849,22 @@ def _train_worker(name: str, cpu_only: bool):
                 _train_job["log"].append(line[:400])
                 if len(_train_job["log"]) > 300:
                     _train_job["log"] = _train_job["log"][-300:]
+                # 显存不够是最常见的启动失败：4.0 只往 stdout 打一坨 Python traceback，
+                # 用户看到的是 "CUDA out of memory" 原文，不知道该怎么办。这里翻译成人话，
+                # 顺便给出几条真正能降显存的开关。
+                if not _train_job.get("oom_hint"):
+                    _low = line.lower()
+                    if ("out of memory" in _low or "cuda error: out of memory" in _low
+                            or "cublas_status_alloc_failed" in _low):
+                        _train_job["oom_hint"] = (
+                            "显存不足（CUDA OutOfMemory）。可以按这个顺序试：\n"
+                            "1) 把分辨率降一档，或把批次大小减半\n"
+                            "2) 打开「梯度检查点」use_gradient_checkpointing（用时间换显存，通常省 30~50%）\n"
+                            "3) 关掉「优化器GPU」models_opt_on_gpu（优化器状态挪回内存，约省 参数个数×8 字节）\n"
+                            "4) 关掉预览（预览要额外做一次完整前向）\n"
+                            "5) 关掉其它占显存的程序（浏览器硬件加速、视频播放器）"
+                        )
+                        _train_job["error"] = _train_job["oom_hint"]
                 if "正在创建备份" in line:
                     # 4.0 打这行时正在备份，当前 iter 就是备份点
                     _train_job["last_backup_iter"] = _train_job["iter"]
@@ -1685,21 +2072,26 @@ def _version() -> str:
 
 
 def _count_images(folder: Path) -> int:
+    """只数**这一层**的图片，不递归。
+
+    训/合成用的都是 aligned 根目录下的那批（DFL 只扫一层），
+    以前这里用 rglob，分组之后根目录空了还照样报 1204 张，
+    和训练器实际看到的 0 张对不上。
+    """
     if not folder.is_dir():
         return 0
-    n = 0
-    for p in folder.rglob("*"):
-        if p.is_file() and p.suffix.lower() in IMAGE_EXT:
-            n += 1
-    return n
+    return sum(1 for p in folder.iterdir()
+               if p.is_file() and p.suffix.lower() in IMAGE_EXT)
 
 
 def _dataset(name: str) -> dict:
-    d = WORKSPACE / name
+    root = WORKSPACE / name
+    d = root / "aligned" if (root / "aligned").is_dir() else root
     return {
         "name": name,
-        "path": str(d),
-        "exists": d.is_dir(),
+        "path": str(root),
+        "aligned": str(d),
+        "exists": root.is_dir(),
         "count": _count_images(d) if d.is_dir() else 0,
     }
 
@@ -2019,6 +2411,38 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
         cv[:nh, :nw] = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
         return cv, sc
 
+    BATCH_106 = max(1, min(8, int(os.environ.get("DFL_EXTRACT_106_BATCH") or 8)))
+    _pending = []          # [(path, crop, meta), ...] 攒够一批再跑 2D106
+
+    def _flush():
+        """把攒下的脸一次性做 2D106，再统一落盘。"""
+        if not _pending:
+            return 0
+        crops = [c for _, c, _ in _pending]
+        lms = [None] * len(crops)
+        if lm106 is not None:
+            try:
+                lms = lm106.landmarks68_batch(crops)
+            except Exception:
+                lms = [None] * len(crops)
+        wrote = 0
+        for (pth, crop, meta_f), lm68 in zip(_pending, lms):
+            if lm68 is not None:
+                try:
+                    from ._align import transform_points as _tp
+                    meta_f["landmarks"] = np.round(lm68, 4).tolist()
+                    meta_f["source_landmarks"] = np.round(
+                        _tp(lm68, np.array(meta_f["image_to_face_mat"]), invert=True), 4).tolist()
+                except Exception:
+                    pass
+            try:
+                write_dfljpg(pth, crop, meta_f)
+                wrote += 1
+            except Exception:
+                continue
+        _pending.clear()
+        return wrote
+
     def _emit(idx, img, faces):
         n = 0
         for k, fc in enumerate(faces):
@@ -2041,21 +2465,9 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
                     meta_f["yaw"], meta_f["pitch"], meta_f["roll"] = _y, _p, _r
             except Exception:
                 pass
-            if lm106 is not None:
-                try:
-                    lm68 = lm106.landmarks68(crop)
-                    if lm68 is not None:
-                        from ._align import transform_points as _tp
-                        meta_f["landmarks"] = np.round(lm68, 4).tolist()
-                        meta_f["source_landmarks"] = np.round(
-                            _tp(lm68, np.array(meta_f["image_to_face_mat"]), invert=True), 4).tolist()
-                except Exception:
-                    pass
-            try:
-                write_dfljpg(face_dir / ("%06d_%d.jpg" % (idx, k)), crop, meta_f)
-                n += 1
-            except Exception:
-                continue
+            _pending.append((face_dir / ("%06d_%d.jpg" % (idx, k)), crop, meta_f))
+            if len(_pending) >= BATCH_106:
+                n += _flush()
         return n
 
     def _reader():
@@ -2097,7 +2509,7 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     # TinyMog 的 batch 维是动态的：攒一批一起推理，能把每帧的固定开销摊薄。
     # RetinaFace 的引擎是单图 profile，老老实实一张一张来。
     # TinyMog 引擎的优化 profile 是 batch 1..4，超过 4 会被 TRT 拒绝（实测 batch=8 直接报错）
-    BATCH = min(4, int(os.environ.get("DFL_EXTRACT_BATCH") or (4 if need_canvas else 1)))
+    BATCH = min(8, int(os.environ.get("DFL_EXTRACT_BATCH") or (8 if need_canvas else 1)))
 
     def _detect_batch(batch):
         """batch: list[(idx, img)] → list[list[face]]"""
@@ -2171,6 +2583,10 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
             item = q_detect.get()
             cost["get2"] += _t() - t_a
             if item is None:
+                n = _flush()          # 收尾：把最后不满 8 张的一批也写掉
+                if n:
+                    with lock:
+                        stats["made"] += n
                 return
             idx, img, faces = item
             t_e = _t()
@@ -2230,16 +2646,17 @@ def _five_from_box(box):
     ]
 
 
+_lm106_cache = {"m": None, "tried": False}
+
+
 def _get_landmarks106():
     """加载 insightface 2D106（模型在引擎仓的 modelhub 里）。找不到就返回 None。
 
-    **默认关闭**：特征点只干两件事 —— 对齐（已由 5 点完成）、嘴/眼遮罩；
-    而 5 点对齐已经把眼睛和嘴巴摆到规范位置，模板 68 点就够用。
-    需要真 68 点（例如让 4.0 的 sort_by_yaw 也工作在 4.1 数据上）：DFL_LANDMARKS106=1
+    **强制启用**：写入 DFL 图片的 68 点必须是 2D106 的真实检测点。
+    5 点只用于求对齐矩阵；写进图片的 68 点必须来自 2D106 的检测结果。
+    并让 4.0 的 sort_by_yaw / 错脸检测都能在 4.1 数据上工作。
     """
     import os as _os
-    if _os.environ.get("DFL_LANDMARKS106") != "1":
-        return None
     if _lm106_cache["tried"]:
         return _lm106_cache["m"]
     _lm106_cache["tried"] = True
@@ -2687,3 +3104,9 @@ from .routes_train import router as _train_router
 app.include_router(_train_router)
 from .routes_trt import router as _trt_router
 app.include_router(_trt_router)
+
+from .routes_convert import router as _convert_router
+app.include_router(_convert_router)
+
+from .routes_errface import router as _errface_router
+app.include_router(_errface_router)

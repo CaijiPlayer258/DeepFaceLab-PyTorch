@@ -86,6 +86,12 @@ def _xor(data: bytes) -> bytes:
     return bytes(data[i] ^ k[i % len(k)] for i in range(len(data)))
 
 
+try:
+    from core.biliauth import cookie_store as _core_store      # 4.0 那套（app/ui/user/），B站下载也在用
+except Exception:
+    _core_store = None
+
+
 class CookieStore:
     """存 workspace/auth/bilibili_cookie.txt，机器密钥 XOR + base64。"""
 
@@ -95,11 +101,17 @@ class CookieStore:
         self.info_path = self.dir / "bilibili_info.json"
 
     def save(self, cookie: str):
+        if _core_store is not None:
+            # 统一到 4.0 的存储，避免 4.1 与下载模块各存一份导致"清了还不退出"
+            _core_store.save_cookie(cookie)
+            return
         self.dir.mkdir(parents=True, exist_ok=True)
         enc = base64.b64encode(_xor(cookie.strip().encode("utf-8"))).decode()
         self.cookie_path.write_text(enc, encoding="utf-8")
 
     def load(self) -> str:
+        if _core_store is not None:
+            return _core_store.load_cookie()
         try:
             raw = self.cookie_path.read_text(encoding="utf-8").strip()
             return _xor(base64.b64decode(raw)).decode("utf-8", "ignore")
@@ -107,6 +119,12 @@ class CookieStore:
             return ""
 
     def clear(self):
+        if _core_store is not None:
+            _core_store.clear_all()
+            for p in (self.cookie_path, self.info_path):
+                try: p.unlink()
+                except Exception: pass
+            return
         for p in (self.cookie_path, self.info_path):
             try:
                 p.unlink()

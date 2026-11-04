@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>B2 螺旋迷幻</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;background:#04050a;overflow:hidden}
+  canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+  .tag{position:fixed;left:16px;bottom:14px;color:#4a4a58;letter-spacing:.06em;
+    font:12px/1.4 -apple-system,"Segoe UI",system-ui,sans-serif}
+</style></head>
+<body>
+<canvas id="gl"></canvas>
+<div class="tag">B2 螺旋迷幻</div>
+<script>
+(function () {
+  var canvas = document.getElementById("gl");
+  var gl = canvas.getContext("webgl", { antialias: false, alpha: false });
+  if (!gl) { document.body.style.background = "#0a1020"; return; }
+
+  var VS = "attribute vec2 aPos; varying vec2 vUv;\n" +
+    "void main(){ vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }";
+
+  var FS = "\n\nprecision highp float;\nuniform float uTime;\nuniform vec2 uRes;\nvarying vec2 vUv;\n\nfloat hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.0-2.0*f);\n  return mix(mix(hash(i),hash(i+vec2(1.,0.)),u.x), mix(hash(i+vec2(0.,1.)),hash(i+vec2(1.,1.)),u.x), u.y);\n}\nfloat fbm(vec2 p){\n  float v=0.0,a=0.5;\n  for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=0.5; }\n  return v;\n}\nvec2 toP(){ return (vUv - 0.5) * vec2(uRes.x/uRes.y, 1.0); }\nfloat vignette(vec2 p, float k){ return smoothstep(k, 0.08, length(p)); }\n// 余弦调色板（Inigo Quilez），迷幻感来源\nvec3 pal(float t){ return 0.5 + 0.5 * cos(6.28318 * (vec3(0.0, 0.33, 0.67) + t)); }\n\nvoid main(){\n  vec2 p = toP();\n  float t = uTime * 0.06;\n  float r = length(p);\n  float ang = atan(p.y, p.x);\n\n  // 螺旋扭曲\n  float swirl = r * 3.2 + fbm(p * 1.1 + t) * 1.1 + t * 1.4;\n  vec2 sp = vec2(cos(ang + swirl), sin(ang + swirl)) * r;\n\n  float q = fbm(sp * 1.8 + vec2(t * 0.6, -t * 0.3));\n  float v = fbm(sp * 3.0 + q * 1.6 - t * 0.5);\n  float fil = pow(1.0 - abs(v - 0.5) * 2.0, 13.0);\n\n  // 色相随角度与时间转，产生迷幻流动\n  float hue = fract(ang / 6.28318 + t * 0.10 + q * 0.35 + r * 0.15);\n  vec3 base = pal(hue) * (0.16 + q * 0.55);\n  vec3 line = pal(fract(hue + 0.35)) * fil * 1.5;\n\n  vec3 col = base + line;\n  float a = (0.30 + q * 0.55 + fil * 0.9) * vignette(p * vec2(0.9, 1.0), 1.15);\n  gl_FragColor = vec4(col * a, a);\n}";
+
+  function compile(type, src) {
+    var sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(sh));
+    return sh;
+  }
+
+  var prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+
+  var buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+  var loc = gl.getAttribLocation(prog, "aPos");
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+  var uTime = gl.getUniformLocation(prog, "uTime");
+  var uRes = gl.getUniformLocation(prog, "uRes");
+
+  function resize() {
+    var dpr = Math.min(devicePixelRatio || 1, 2);
+    canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+    canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+    gl.viewport(0, 0, canvas.width, canvas.height);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  var t0 = performance.now();
+  function frame() {
+    gl.uniform1f(uTime, (performance.now() - t0) / 1000);
+    gl.uniform2f(uRes, canvas.clientWidth, canvas.clientHeight);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    requestAnimationFrame(frame);
+  }
+  frame();
+})();
+</script>
+</body></html>

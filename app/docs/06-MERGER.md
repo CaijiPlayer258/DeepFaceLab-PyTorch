@@ -70,8 +70,8 @@ staging（硬链接）→ 载入 DFM → 逐帧合成 → ffmpeg 编码 → 清�
 ## 五、怎么验收
 
 ```
-python tools/merge_accept.py                 # 默认样片，跑到「导出启动 + 取消」为止，约 30 秒
-python tools/merge_accept.py 视频.mp4 --keep  # 连导出一起跑完（千帧约 2 分钟）
+python app/tools/merge_accept.py                 # 默认样片，跑到「导出启动 + 取消」为止，约 30 秒
+python app/tools/merge_accept.py 视频.mp4 --keep  # 连导出一起跑完（千帧约 2 分钟）
 ```
 
 它起后端、用 CDP 驱动无头 Edge **真实点击**，逐项断言：导入素材 / 选模型 / 检测出框 /

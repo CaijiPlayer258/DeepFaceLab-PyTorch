@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>V9 three.js 玻璃胶囊</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden;background:#04050a;color:#f2f2f7;
+  font-family:-apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif}
+#gl{position:absolute;inset:0;width:100%;height:100%;display:block}
+.bar{position:absolute;left:0;right:0;top:50%;transform:translateY(-50%);height:150px;
+  display:flex;align-items:center;justify-content:center;gap:20px;
+  background:linear-gradient(180deg, rgba(0,0,0,.12), rgba(0,0,0,.20));
+  backdrop-filter:blur(18px) brightness(.70) saturate(.9);
+  -webkit-backdrop-filter:blur(18px) brightness(.70) saturate(.9);
+  border-top:.5px solid rgba(255,255,255,.16); border-bottom:.5px solid rgba(255,255,255,.10);
+  -webkit-mask-image:linear-gradient(90deg,transparent 0%,#000 16%,#000 84%,transparent 100%);
+  mask-image:linear-gradient(90deg,transparent 0%,#000 16%,#000 84%,transparent 100%)}
+.bar img{width:46px;height:46px;border-radius:12px}
+.bar .t{font-size:16px;letter-spacing:.4px}
+.bar .t b{color:#ff8364}
+.login{position:absolute;left:6vw;top:calc(50% + 100px);font-size:12.5px;letter-spacing:1.2px;color:#c8c8d4;
+  background:none;border:0;border-bottom:1px solid rgba(255,255,255,.24);padding:3px 1px;cursor:pointer}
+</style></head>
+<body>
+<canvas id="gl"></canvas>
+<div class="bar"><img src="../../../web/img/logo.png" alt=""><div class="t">更快、更易、更强的 DeepFake 工作流　<b>PyTorch</b></div></div>
+<button class="login">登入</button>
+
+<script type="module">
+import * as THREE from "../../../web/vendor/three.module.min.js";
+
+const canvas = document.getElementById("gl");
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.setClearColor(0x04050a, 1);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 100);
+camera.position.set(0, 0.3, 15.5);
+
+/* 环境：用几块自发光「灯箱」烘一张 PMREM，玻璃才会有条状高光 */
+const envCanvas = document.createElement("canvas");
+envCanvas.width = 512; envCanvas.height = 256;
+const ectx = envCanvas.getContext("2d");
+const grd = ectx.createLinearGradient(0, 0, 0, 256);
+grd.addColorStop(0.00, "#0d2a52");
+grd.addColorStop(0.22, "#2f8bd8");
+grd.addColorStop(0.40, "#69c8ff");
+grd.addColorStop(0.58, "#4b7bff");
+grd.addColorStop(0.78, "#7a4bff");
+grd.addColorStop(1.00, "#120a24");
+ectx.fillStyle = grd; ectx.fillRect(0, 0, 512, 256);
+const envTex = new THREE.CanvasTexture(envCanvas);
+envTex.mapping = THREE.EquirectangularReflectionMapping;
+envTex.colorSpace = THREE.SRGBColorSpace;
+scene.environment = envTex;
+
+/* 一点直射光，制造条状高光 */
+const key = new THREE.DirectionalLight(0xcdf3ff, 3.2); key.position.set(-3, 10, 8); scene.add(key);
+const rim = new THREE.DirectionalLight(0x7a8cff, 2.2); rim.position.set(8, 0, -6); scene.add(rim);
+
+const mat = new THREE.MeshPhysicalMaterial({
+  color: 0x8fb6ff,
+  metalness: 0,
+  roughness: 0.12,
+  transmission: 1,
+  thickness: 1.6,
+  ior: 1.45,
+  clearcoat: 1,
+  clearcoatRoughness: 0.05,
+  attenuationColor: new THREE.Color(0x7a4bff),
+  attenuationDistance: 3.2,
+  envMapIntensity: 1.5,
+  transparent: false,
+});
+
+/* 背光：柔和的径向光斑，玻璃透过去才有亮部 */
+const glowCanvas = document.createElement("canvas");
+glowCanvas.width = glowCanvas.height = 256;
+const gctx = glowCanvas.getContext("2d");
+const rg = gctx.createRadialGradient(128, 128, 0, 128, 128, 128);
+rg.addColorStop(0.00, "rgba(120,190,255,.95)");
+rg.addColorStop(0.35, "rgba(70,120,255,.55)");
+rg.addColorStop(0.70, "rgba(40,60,180,.18)");
+rg.addColorStop(1.00, "rgba(0,0,0,0)");
+gctx.fillStyle = rg; gctx.fillRect(0, 0, 256, 256);
+const glowTex = new THREE.CanvasTexture(glowCanvas);
+glowTex.colorSpace = THREE.SRGBColorSpace;
+
+const backLight = new THREE.Mesh(
+  new THREE.PlaneGeometry(20, 13),
+  new THREE.MeshBasicMaterial({ map: glowTex, transparent: true, depthWrite: false,
+    blending: THREE.AdditiveBlending, opacity: 0.9 })
+);
+backLight.position.set(0, 0.4, -3.2);
+scene.add(backLight);
+
+const group = new THREE.Group();
+group.rotation.z = -0.16;              // 整体倾斜
+
+const layout = [
+  { x: -4.9, h: 1.9, y:  0.25 },
+  { x: -3.85, h: 2.5, y: -0.15 },
+  { x: -2.85, h: 2.9, y:  0.35 },
+  { x: -1.85, h: 2.1, y: -0.30 },
+  { x: -0.80, h: 2.7, y:  0.15 },
+  { x:  0.25, h: 1.9, y: -0.45 },
+  { x:  1.30, h: 2.8, y:  0.30 },
+  { x:  2.35, h: 2.2, y: -0.10 },
+  { x:  3.40, h: 2.4, y:  0.40 },
+];
+for (const [i, p] of layout.entries()) {
+  const geo = new THREE.CapsuleGeometry(0.62, p.h, 16, 40);
+  const m = mat.clone();
+  m.color = new THREE.Color().setHSL(0.60 - i * 0.005, 0.75, 0.55);
+  const mesh = new THREE.Mesh(geo, m);
+  mesh.position.set(p.x, p.y, (i % 3) * 0.35);
+  group.add(mesh);
+}
+scene.add(group);
+
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.fov = w / h > 1.6 ? 36 : 46;
+  camera.updateProjectionMatrix();
+}
+resize();
+addEventListener("resize", resize);
+
+renderer.setAnimationLoop(() => {
+  group.rotation.z = -0.16 + Math.sin(performance.now() * 0.00018) * 0.02;
+  renderer.render(scene, camera);
+});
+</script>
+</body></htmlconst pmrem = new THREE.PMREMGenerator(renderer);
+pmrem.compileEquirectangularShader();
+const envScene = new THREE.Scene();
+envScene.background = new THREE.Color(0x04060e);
+
+function panel(w, hgt, color, intensity, pos, rot) {
+  const m = new THREE.Mesh(
+    new THREE.PlaneGeometry(w, hgt),
+    new THREE.MeshBasicMaterial({ color: new THREE.Color(color).multiplyScalar(intensity), side: THREE.DoubleSide })
+  );
+  m.position.set(...pos);
+  m.rotation.set(...rot);
+  envScene.add(m);
+}
+panel(26, 5, 0xffffff, 6, [0, 9, 2], [Math.PI / 2, 0, 0]);        // 顶部灯箱
+panel(26, 6, 0x9fe8ff, 3.5, [0, 0, -9], [0, 0, 0]);               // 背后冷光
+panel(26, 5, 0x7a4bff, 3.0, [0, -9, 2], [-Math.PI / 2, 0, 0]);    // 底部紫光
+panel(4, 20, 0xffffff, 4, [-11, 0, 3], [0, Math.PI / 2, 0]);      // 左侧竖条
+const envRT = pmrem.fromScene(envScene, 0.02);
+scene.environment = envRT.texture;
+
+/* 一点直射光，制造条状高光 */
+const key = new THREE.DirectionalLight(0xa8ecff, 6.5); key.position.set(-2, 11, 7); scene.add(key);
+const fill = new THREE.DirectionalLight(0x7a5cff, 2.6); fill.position.set(3, -9, 5); scene.add(fill);
+const rim = new THREE.DirectionalLight(0x66b8ff, 3.0); rim.position.set(9, 2, -6); scene.add(rim);
+scene.add(new THREE.AmbientLight(0x1b2f57, 0.9));
+
+const mat = new THREE.MeshPhysicalMaterial({
+  color: 0x8fb6ff,
+  metalness: 0,
+  roughness: 0.12,
+  transmission: 1,
+  thickness: 1.6,
+  ior: 1.45,
+  clearcoat: 1,
+  clearcoatRoughness: 0.05,
+  attenuationColor: new THREE.Color(0x6a4bff),
+  attenuationDistance: 3.2,
+  envMapIntensity: 2.1,
+  transparent: false,
+});
+
+const group = new THREE.Group();
+group.rotation.z = -0.16;              // 整体倾斜
+
+const layout = [
+  { x: -4.9, h: 1.9, y:  0.25 },
+  { x: -3.85, h: 2.5, y: -0.15 },
+  { x: -2.85, h: 2.9, y:  0.35 },
+  { x: -1.85, h: 2.1, y: -0.30 },
+  { x: -0.80, h: 2.7, y:  0.15 },
+  { x:  0.25, h: 1.9, y: -0.45 },
+  { x:  1.30, h: 2.8, y:  0.30 },
+  { x:  2.35, h: 2.2, y: -0.10 },
+  { x:  3.40, h: 2.4, y:  0.40 },
+];
+for (const [i, p] of layout.entries()) {
+  const geo = new THREE.CapsuleGeometry(0.62, p.h, 16, 40);
+  const m = mat.clone();
+  m.color = new THREE.Color().setHSL(0.60 - i * 0.005, 0.75, 0.55);
+  const mesh = new THREE.Mesh(geo, m);
+  mesh.position.set(p.x, p.y, (i % 3) * 0.35);
+  group.add(mesh);
+}
+scene.add(group);
+
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.fov = w / h > 1.6 ? 36 : 46;
+  camera.updateProjectionMatrix();
+}
+resize();
+addEventListener("resize", resize);
+
+renderer.setAnimationLoop(() => {
+  group.rotation.z = -0.16 + Math.sin(performance.now() * 0.00018) * 0.02;
+  renderer.render(scene, camera);
+});
+</script>
+</body></html>

@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark"><head><meta charset="utf-8">
+<title>转换卡片 · padding 16 / 24 / 36 / 48</title>
+<style>
+:root{
+  --bg:#08080a; --card:#141418; --panel:#1a1a1f; --line:#26262d;
+  --ink:#f2f2f4; --ink-2:#a3a3ad; --ink-3:#6d6d78; --ok:#3ddc84; --brand:#5d6ccf;
+  --shadow:0 1px 2px rgba(0,0,0,.5),0 12px 36px rgba(0,0,0,.55);
+  --font:"Inter","Noto Sans SC","Segoe UI",system-ui,sans-serif;
+  --mono:ui-monospace,"Cascadia Mono",Consolas,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font);
+  display:flex;flex-direction:column;align-items:center;gap:34px;padding:36px 40px 56px}
+.wrap{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:36px 44px}
+.item{display:flex;flex-direction:column;gap:10px}
+.tag{font-size:12px;color:var(--ink-3);text-align:center}
+.tag b{color:var(--ink-2)}
+.card{width:520px;background:var(--card);border:1px solid var(--line);border-radius:14px;
+  padding:var(--pad);box-shadow:var(--shadow)}
+.hd{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
+.hd b{font-size:13px;font-weight:600}
+.hd .sub{font-size:12px;color:var(--ink-3)}
+.st{display:flex;gap:10px;padding:8px 0}
+.st + .st{margin-top:6px}
+.ic{width:24px;height:24px;border-radius:50%;flex:none;display:grid;place-items:center;font-size:11px;
+  color:var(--ok);background-color:var(--card);
+  background-image:linear-gradient(rgba(61,220,132,.14),rgba(61,220,132,.14))}
+.ic.mid{color:#a8b3ee;background-image:linear-gradient(rgba(93,108,207,.18),rgba(93,108,207,.18))}
+.ic.idle{color:var(--ink-3);background-image:none}
+.nm{font-size:13px;color:var(--ink-2);line-height:24px}
+.body{flex:1;min-width:0}
+.rows{margin-top:4px;border:1px solid var(--line);border-radius:12px;background:var(--panel);overflow:hidden}
+.row{display:flex;align-items:center;gap:10px;padding:7px 10px;font-size:12px;border-bottom:1px solid var(--line)}
+.row:last-child{border-bottom:0}
+.row .n{font-family:var(--mono);color:var(--ink-2)}
+.row .c{margin-left:auto;color:var(--ok);font-variant-numeric:tabular-nums}
+</style></head>
+<body>
+<div class="wrap">
+
+  <div class="item">
+    <div class="tag"><b>padding 16px</b> · 当前</div>
+    <div class="card" style="--pad:16px">
+      <div class="hd"><b>model</b><span class="sub">liae-ud · 384</span></div>
+      <div class="st"><div class="ic">✓</div><div class="body"><div class="nm">加载模块</div>
+        <div class="rows">
+          <div class="row"><span class="n">encoder</span><span class="c">32 项</span></div>
+          <div class="row"><span class="n">inter_AB</span><span class="c">8 项</span></div>
+          <div class="row"><span class="n">inter_B</span><span class="c">8 项</span></div>
+          <div class="row"><span class="n">decoder</span><span class="c">24 项</span></div>
+        </div></div></div>
+      <div class="st"><div class="ic mid">2</div><div class="body"><div class="nm">转换模型</div></div></div>
+      <div class="st"><div class="ic idle">3</div><div class="body"><div class="nm">完成</div></div></div>
+    </div>
+  </div>
+
+  <div class="item">
+    <div class="tag"><b>padding 24px</b></div>
+    <div class="card" style="--pad:24px">
+      <div class="hd"><b>model</b><span class="sub">liae-ud · 384</span></div>
+      <div class="st"><div class="ic">✓</div><div class="body"><div class="nm">加载模块</div>
+        <div class="rows">
+          <div class="row"><span class="n">encoder</span><span class="c">32 项</span></div>
+          <div class="row"><span class="n">inter_AB</span><span class="c">8 项</span></div>
+          <div class="row"><span class="n">inter_B</span><span class="c">8 项</span></div>
+          <div class="row"><span class="n">decoder</span><span class="c">24 项</span></div>
+        </div></div></div>
+      <div class="st"><div class="ic mid">2</div><div class="body"><div class="nm">转换模型</div></div></div>
+      <div class="st"><div class="ic idle">3</div><div class="body"><div class="nm">完成</div></div></div>
+    </div>
+  </div>
+
+  <div class="item">
+    <div class="tag"><b>padding 36px</b></div>
+    <div class="card" style="--pad:36px">
+      <div class="hd"><b>model</b><span class="sub">liae-ud · 384</span></div>
+      <div class="st"><div class="ic">✓</div><div class="body"><div class="nm">加载模块</div>
+        <div class="rows">
+          <div class="row"><span class="n">encoder</span><span class="c">32 项</span></div>
+          <div class="row"><span class="n">inter_AB</span><span class="c">8 项</span></div>
+          <div class="row"><span class="n">inter_B</span><span class="c">8 项</span></div>
+          <div class="row"><span class="n">decoder</span><span class="c">24 项</span></div>
+        </div></div></div>
+      <div class="st"><div class="ic mid">2</div><div class="body"><div class="nm">转换模型</div></div></div>
+      <div class="st"><div class="ic idle">3</div><div class="body"><div class="nm">完成</div></div></div>
+    </div>
+  </div>
+
+  <div class="item">
+    <div class="tag"><b>padding 48px</b></div>
+    <div class="card" style="--pad:48px">
+      <div class="hd"><b>model</b><span class="sub">liae-ud · 384</span></div>
+      <div class="st"><div class="ic">✓</div><div class="body"><div class="nm">加载模块</div>
+        <div class="rows">
+          <div class="row"><span class="n">encoder</span><span class="c">32 项</span></div>
+          <div class="row"><span class="n">inter_AB</span><span class="c">8 项</span></div>
+          <div class="row"><span class="n">inter_B</span><span class="c">8 项</span></div>
+          <div class="row"><span class="n">decoder</span><span class="c">24 项</span></div>
+        </div></div></div>
+      <div class="st"><div class="ic mid">2</div><div class="body"><div class="nm">转换模型</div></div></div>
+      <div class="st"><div class="ic idle">3</div><div class="body"><div class="nm">完成</div></div></div>
+    </div>
+  </div>
+</div>
+</body></html>

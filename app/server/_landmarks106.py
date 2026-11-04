@@ -50,6 +50,7 @@ class InsightFace106:
                     providers = ["CPUExecutionProvider"]
             self.sess = ort.InferenceSession(str(model_path), providers=list(providers))
         self.input_name = self.sess.get_inputs()[0].name
+        self._batch_ok = None      # None=没试过；False=引擎是静态 batch=1，退回逐张
 
     def landmarks106(self, face_bgr):
         import cv2
@@ -60,6 +61,40 @@ class InsightFace106:
         blob = np.ascontiguousarray(small[:, :, ::-1].astype(np.float32).transpose(2, 0, 1)[None])
         out = self.sess.run(None, {self.input_name: blob})[0].reshape(106, 2)
         return (out / 2.0 + 0.5) * float(size)
+
+    def landmarks68_batch(self, faces):
+        """批量版：一次 session.run 处理多张脸（模型 batch 维是动态的）。
+
+        单张 1.58ms，批 8 摊到 0.33ms/脸 —— 对齐流水线里按批攒着跑。
+        """
+        import cv2
+        if not faces:
+            return []
+        if self._batch_ok is False:
+            return [self.landmarks68(f) for f in faces]
+        smalls = [cv2.resize(f, (192, 192), interpolation=cv2.INTER_LINEAR) for f in faces]
+        blob = np.stack([s[:, :, ::-1].astype(np.float32).transpose(2, 0, 1) for s in smalls])
+        try:
+            outs = self.sess.run(None, {self.input_name: blob})[0]  # (N,106,2)
+            if outs.shape[0] != len(faces):
+                # 静态 batch=1 的 TRT 引擎只会回 1 条，直接退回逐张
+                self._batch_ok = False
+                return [self.landmarks68(f) for f in faces]
+            self._batch_ok = True
+        except Exception:
+            # TRT 引擎可能是静态 batch=1：记下来，之后都逐张跑
+            self._batch_ok = False
+            return [self.landmarks68(f) for f in faces]
+        w = _weights()
+        res = []
+        for i, f in enumerate(faces):
+            p = outs[i].reshape(-1) / 2.0 + 0.5
+            p = p * float(f.shape[1])
+            if p.shape[0] + 1 != w.shape[0]:
+                res.append(None)
+                continue
+            res.append((np.append(p, 1.0).astype(np.float32) @ w).reshape(68, 2))
+        return res
 
     def landmarks68(self, face_bgr):
         """返回 (68,2) float32，坐标系与输入图一致（512 对齐空间）。"""

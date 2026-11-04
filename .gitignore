@@ -2,7 +2,8 @@
 runtime/
 
 # ── 权重与缓存 ────────────────────────────────────────────────
-weights/
+weights/*
+!weights/manifest.json
 *.onnx
 !app/modelhub/__init__.py
 **/_engines/
@@ -38,4 +39,28 @@ _trash/
 *.onnx.data
 app/modelhub/onnx/
 app/xlib/models/
-app/DFL_GPU_LAB/**/*.npy
+lab/**/*.npy
+# 调试残留（截图 / Electron 临时 profile / 抓包脚本）
+_electron_tmp*/
+_ref/
+_serve*.log
+bg_*.png
+f_*.png
+
+# 登录凭证 / 用户信息：只留本机，不进仓库
+legacy/qt-ui/user/bilibili_cookie.txt
+legacy/qt-ui/user/user_info.json
+legacy/qt-ui/user/*.bak
+
+# GPU 实验目录：本地约 2 GB 的权重/引擎，纯实验，不进仓库
+app/DFL_GPU_LAB/
+
+# 预览原型的假数据截图（mock_dfl_preview.py 生成）
+docs/preview/**/mock_preview_shot*.png
+
+# 权重与代码分离：weights/ 只放模型二进制，manifest.json 入库
+weights/**/*.onnx
+weights/**/*.pth
+weights/**/*.pt
+weights/**/*.engine
+!weights/manifest.json

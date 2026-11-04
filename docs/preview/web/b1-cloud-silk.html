@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>B1 云海 + 水银</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;background:#04050a;overflow:hidden}
+  canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+  .tag{position:fixed;left:16px;bottom:14px;color:#4a4a58;letter-spacing:.06em;
+    font:12px/1.4 -apple-system,"Segoe UI",system-ui,sans-serif}
+</style></head>
+<body>
+<canvas id="gl"></canvas>
+<div class="tag">B1 云海 + 水银</div>
+<script>
+(function () {
+  var canvas = document.getElementById("gl");
+  var gl = canvas.getContext("webgl", { antialias: false, alpha: false });
+  if (!gl) { document.body.style.background = "#0a1020"; return; }
+
+  var VS = "attribute vec2 aPos; varying vec2 vUv;\n" +
+    "void main(){ vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }";
+
+  var FS = "\n\nprecision highp float;\nuniform float uTime;\nuniform vec2 uRes;\nvarying vec2 vUv;\n\nfloat hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.0-2.0*f);\n  return mix(mix(hash(i),hash(i+vec2(1.,0.)),u.x), mix(hash(i+vec2(0.,1.)),hash(i+vec2(1.,1.)),u.x), u.y);\n}\nfloat fbm(vec2 p){\n  float v=0.0,a=0.5;\n  for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=0.5; }\n  return v;\n}\nvec2 toP(){ return (vUv - 0.5) * vec2(uRes.x/uRes.y, 1.0); }\nfloat vignette(vec2 p, float k){ return smoothstep(k, 0.08, length(p)); }\n// 余弦调色板（Inigo Quilez），迷幻感来源\nvec3 pal(float t){ return 0.5 + 0.5 * cos(6.28318 * (vec3(0.0, 0.33, 0.67) + t)); }\n\nvoid main(){\n  vec2 p = toP();\n  float t = uTime * 0.05;\n\n  // 丝绸 / 体积云底\n  float q = fbm(p * 0.85 + vec2(t * 0.5, -t * 0.25));\n  float fold = pow(sin(p.y * 2.2 + q * 2.4 + t * 1.2) * 0.5 + 0.5, 2.2);\n  float cloud = fbm(p * 1.25 + vec2(-t * 0.7, q * 1.2));\n\n  vec3 deep = vec3(0.03, 0.05, 0.14);\n  vec3 mid  = vec3(0.12, 0.28, 0.75);\n  vec3 vio  = vec3(0.52, 0.24, 0.85);\n  vec3 cloudCol = mix(deep, mid, fold);\n  cloudCol = mix(cloudCol, vio, smoothstep(0.45, 0.9, cloud) * 0.65);\n\n  // 水银细纹\n  vec2 w = p;\n  for (int i = 0; i < 3; i++) { w += 0.30 * vec2(fbm(w * 1.7 + t), fbm(w * 1.7 - t + 4.0)); w *= 1.16; }\n  float v = fbm(w * 2.1 + vec2(t * 0.4, 0.0));\n  float fil = pow(1.0 - abs(v - 0.5) * 2.0, 15.0);\n\n  vec3 filCol = mix(vec3(0.55, 0.95, 1.0), vec3(0.85, 0.45, 1.0), smoothstep(0.3, 0.8, vUv.y));\n  vec3 col = cloudCol * (0.40 + cloud * 0.8) + filCol * fil * 1.3;\n\n  float a = (0.32 + fold * 0.5 + cloud * 0.3) * vignette(p * vec2(0.85, 1.05), 1.15);\n  a = max(a, fil * 0.9 * vignette(p, 1.2));\n  gl_FragColor = vec4(col * a, a);\n}";
+
+  function compile(type, src) {
+    var sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(sh));
+    return sh;
+  }
+
+  var prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+
+  var buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+  var loc = gl.getAttribLocation(prog, "aPos");
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+  var uTime = gl.getUniformLocation(prog, "uTime");
+  var uRes = gl.getUniformLocation(prog, "uRes");
+
+  function resize() {
+    var dpr = Math.min(devicePixelRatio || 1, 2);
+    canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+    canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+    gl.viewport(0, 0, canvas.width, canvas.height);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  var t0 = performance.now();
+  function frame() {
+    gl.uniform1f(uTime, (performance.now() - t0) / 1000);
+    gl.uniform2f(uRes, canvas.clientWidth, canvas.clientHeight);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    requestAnimationFrame(frame);
+  }
+  frame();
+})();
+</script>
+</body></html>

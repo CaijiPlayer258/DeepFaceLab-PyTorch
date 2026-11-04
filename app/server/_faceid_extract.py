@@ -33,8 +33,7 @@ _FACEID_MODEL = "w600k_mbf.onnx"
 
 
 def _model_path(name: str | None = None) -> Path:
-    root = Path(__file__).resolve().parents[2] / "weights" / "onnx" / "ArcFace"
-    return root / _FACEID_MODEL
+    return Path(__file__).resolve().parents[2] / "weights" / "onnx" / "ArcFace" / _FACEID_MODEL
 
 
 def make_session(name: str | None = None, cache_dir: str | None = None):
@@ -68,7 +67,7 @@ def _decode(p):
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
-def extract_pipelined(files, session=None, batch: int = 32, workers: int = 8, depth: int = 4):
+def extract_pipelined(files, session=None, batch: int = 32, workers: int = 8, depth: int = 4, progress=None):
     """解码与推理解耦：解码线程组持续产出，主线程只做推理。
 
     实测（1204 张真实人脸）：串行 0.670 ms/张 → 流水 0.38 ms/张。
@@ -116,6 +115,8 @@ def extract_pipelined(files, session=None, batch: int = 32, workers: int = 8, de
             out = sess.run(None, {inp: arr})[0].astype(np.float32)
             embs.append(out)
             names.extend(p.name for p, _im in keep)
+            if progress is not None:
+                progress(len(names), len(files))
     finally:
         stop.set()
 
@@ -123,7 +124,7 @@ def extract_pipelined(files, session=None, batch: int = 32, workers: int = 8, de
     return names, mat, failed
 
 
-def extract_trt_pipelined(files, embedder, batch: int = 32, workers: int = 12, depth: int = 8):
+def extract_trt_pipelined(files, embedder, batch: int = 32, workers: int = 12, depth: int = 8, progress=None):
     """解码 ∥ 直接 TRT 推理。
 
     和 extract_pipelined 的区别：主线程不做任何 numpy 预处理，
@@ -165,6 +166,8 @@ def extract_trt_pipelined(files, embedder, batch: int = 32, workers: int = 12, d
             arr = np.stack([im for _p, im in keep])          # uint8 NHWC，GPU 侧再归一化
             embs.append(embedder.run(arr).astype(np.float32))
             names.extend(p.name for p, _im in keep)
+            if progress is not None:
+                progress(len(names), len(files))
     finally:
         stop.set()
 
@@ -172,7 +175,7 @@ def extract_trt_pipelined(files, embedder, batch: int = 32, workers: int = 12, d
     return names, mat, failed
 
 
-def extract(files, session=None, batch: int = 32, workers: int = 8):
+def extract(files, session=None, batch: int = 32, workers: int = 8, progress=None):
     """返回 (names, embeddings[N,512] float32, failed_names)。"""
     files = [Path(f) for f in files]
     sess = session or make_session()

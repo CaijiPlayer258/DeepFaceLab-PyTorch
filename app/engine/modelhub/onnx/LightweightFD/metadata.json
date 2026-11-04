@@ -1,0 +1,62 @@
+{
+    "model_id": "face_det_lite",
+    "model_name": "Lightweight-Face-Detection",
+    "runtime": "onnx",
+    "precision": "float",
+    "tool_versions": {
+        "qairt": "2.45.0.260326154327",
+        "onnx_runtime": "1.25.0"
+    },
+    "model_files": {
+        "face_det_lite.onnx": {
+            "inputs": {
+                "input": {
+                    "shape": [
+                        1,
+                        1,
+                        480,
+                        640
+                    ],
+                    "dtype": "float32",
+                    "io_type": "image",
+                    "image_metadata": {
+                        "color_format": "grayscale"
+                    },
+                    "value_range": [
+                        0.0,
+                        1.0
+                    ]
+                }
+            },
+            "outputs": {
+                "heatmap": {
+                    "shape": [
+                        1,
+                        1,
+                        60,
+                        80
+                    ],
+                    "dtype": "float32"
+                },
+                "bbox": {
+                    "shape": [
+                        1,
+                        4,
+                        60,
+                        80
+                    ],
+                    "dtype": "float32"
+                },
+                "landmark": {
+                    "shape": [
+                        1,
+                        10,
+                        60,
+                        80
+                    ],
+                    "dtype": "float32"
+                }
+            }
+        }
+    }
+}

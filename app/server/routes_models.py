@@ -16,7 +16,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import FileResponse, StreamingResponse
 
-from .app import (MODEL_DIR, WORKSPACE, _CFG_STRUCTURAL, _DFL_PY, _DFL_TOOL, _HOT_OPTIONS, _NO_WINDOW, _PRESETS, _arch_of, _archi_spec, _export_job, _export_job_lock, _export_worker, _find_model_preview, _gpu_cached, _gpu_list, _model_dat, _model_entry, _recommend_for, _safe_model_name, _spec_tables, _train_job, _train_job_lock, _training_pid, _webui_post)
+from .app import (MODEL_DIR, WORKSPACE, _CFG_STRUCTURAL, _DFL_PY, _DFL_TOOL, _HOT_OPTIONS, _NO_WINDOW, _PRESETS, _arch_of, _archi_parts, _archi_spec, _export_job, _export_job_lock, _export_worker, _find_model_preview, _gpu_cached, _gpu_list, _model_dat, _model_entry, _recommend_for, _safe_model_name, _spec_tables, _train_job, _train_job_lock, _training_pid, _webui_post)
 
 router = APIRouter()
 
@@ -408,6 +408,90 @@ def model_stats(name: str):
             "max_backups": int(opts.get("max_backups") or 0)}
 
 
+# ---------------------------------------------------------------- 纯 .dfm 模型
+# workspace/model 里可能存在「只有 .dfm、没有训练目录」的模型（导出后删了权重，
+# 或者从别人机器上拷来的 .dfm）。以前 /api/models 只扫 *_data.dat，这些文件在
+# 列表里完全隐形 —— 合成器左栏「模型」因此选不到它们，明明有 .dfm 却合成不了。
+# 这里补一遍 *.dfm 扫描：字段和 _model_entry 对齐，数值解析不出来就给 0 / 空，
+# 绝不靠猜。
+_DFM_ITER_RE = re.compile(r"^(?P<base>.+?)-(?P<iter>\d{1,9})$")
+
+
+def _dfm_iter_of(stem: str):
+    """「名字-416」→ (名字, 416)；结尾不是 -数字 就 (名字, 0)，不猜。"""
+    m = _DFM_ITER_RE.match(stem)
+    if m:
+        return m.group("base"), int(m.group("iter"))
+    return stem, 0
+
+
+def _dfm_archi_of(stem: str) -> str:
+    """从文件名里认架构（df / liae-udt / df-udt-l 之类）。
+
+    只认能通过 core/archi_names.parse_archi_string 的组合 —— 那是架构合法性的
+    唯一出处；认不出来就返回空字符串，界面上显示「—」，而不是编一个架构出来。
+    """
+    toks = stem.split("-")
+    try:
+        spec = _archi_spec()
+    except Exception:
+        return ""
+    for i, t in enumerate(toks):
+        if t.strip().lower() not in ("df", "liae", "amp"):
+            continue
+        for n in (1, 2, 3):
+            cand = "-".join(toks[i:i + n]).strip().lower()
+            if not cand:
+                continue
+            try:
+                if spec.parse_archi_string(cand) is not None:
+                    return cand
+            except Exception:
+                return ""
+    return ""
+
+
+def _dfm_only_entry(dfm: Path) -> dict:
+    """只有 .dfm 的模型 → 一条和 _model_entry 同构的记录。"""
+    name = dfm.stem   # 文件名里的数字不是迭代，别解析
+    archi = _dfm_archi_of(dfm.stem)
+    try:
+        trained_at = int(dfm.stat().st_mtime)
+    except Exception:
+        trained_at = 0
+    try:
+        dfm_path = str(dfm.resolve())
+    except Exception:
+        dfm_path = str(dfm)
+    return {
+        "name": name,
+        "archi": archi,
+        "archi_parsed": _archi_parts(archi),
+        "face_type_label": "",
+        "resolution": 0,
+        "face_type": "",
+        "ae_dims": 0,
+        "e_dims": 0,
+        "d_dims": 0,
+        "mask_dims": 0,
+        "batch_size": 0,
+        "bf16": False,
+        "optimizer": "",
+        "iter": 0,   # .dfm 里没有迭代信息，文件名里的数字只是命名的一部分，不要解析
+        "spark": {"src": [], "dst": []},
+        "has_dfm": True,
+        # 合成器左栏按 has_export 决定显示「DFM」还是「导出」按钮：
+        # 已经有 .dfm 的条目没有可导出的权重，必须给 True，否则会凭空多一个假按钮
+        "has_export": True,
+        "weights": "",
+        "trained_at": trained_at,
+        "has_preview": False,
+        "preview_url": None,
+        "dfm": dfm_path,
+        "dfm_only": True,      # 没有训练目录：训练/参数/删除这些操作对它没意义
+    }
+
+
 @router.get("/api/models")
 def models():
     out = []
@@ -415,6 +499,31 @@ def models():
         for dat in sorted(MODEL_DIR.glob("*_data.dat")):
             try:
                 out.append(_model_entry(dat))
+            except Exception:
+                continue
+        # 按名字 / 按 dfm 绝对路径去重：训练目录已经算过的模型不要再追加一条
+        known_names = set()
+        known_paths = set()
+        for m in out:
+            nm = str(m.get("name") or "")
+            if not nm:
+                continue
+            known_names.add(nm.lower())
+            try:
+                known_paths.add(os.path.normcase(str((MODEL_DIR / (nm + ".dfm")).resolve())))
+            except Exception:
+                pass
+        for dfm in sorted(MODEL_DIR.glob("*.dfm")):
+            try:
+                key = os.path.normcase(str(dfm.resolve()))
+                if key in known_paths:
+                    continue
+                entry = _dfm_only_entry(dfm)
+                if entry["name"].lower() in known_names:
+                    continue
+                out.append(entry)
+                known_names.add(entry["name"].lower())
+                known_paths.add(key)
             except Exception:
                 continue
     out.sort(key=lambda m: m.get("trained_at", 0), reverse=True)

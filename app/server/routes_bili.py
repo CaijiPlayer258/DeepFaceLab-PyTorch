@@ -62,42 +62,43 @@ def bili_poll(payload: dict = None):
 # ============================================================
 @router.post("/api/bili/download")
 def bili_download(body: dict):
-    """把一个视频「下载」到 workspace/raw/。返回真实落盘路径和大小。"""
-    import subprocess
+    """真的从 B 站下载一个视频到 workspace/raw/。
+
+    走 4.0 移植过来的 bili_video.download_single_video：DASH 音视频分别拉取，
+    再用 ffmpeg 合并。需要已登录（Cookie 从 biliauth 的加密存储里读）。
+    """
     import imageio_ffmpeg
+    from .bili_video import download_single_video
+
     body = body or {}
     bvid = str(body.get("bvid") or "").strip()
-    title = str(body.get("title") or "").strip() or bvid or "untitled"
-    quality = str(body.get("quality") or "best")
+    if not bvid:
+        raise HTTPException(400, "缺少 bvid")
+
+    cookie = BILI.load()
+    if not cookie:
+        raise HTTPException(401, "未登录 B 站：请先扫码登录")
 
     raw = WORKSPACE / "raw"
     raw.mkdir(parents=True, exist_ok=True)
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
 
-    safe = "".join(c for c in title if c not in r'\/:*?"<>|').strip()[:60] or "video"
-    name = (bvid + "_" if bvid else "") + safe + ".mp4"
-    out = raw / name
-    if out.exists():
-        return {"ok": True, "path": str(out), "size": out.stat().st_size, "skipped": True}
-
-    # 画质决定时长（30/20/12 秒），顺便决定文件体积
-    secs = {"best": 30, "1080": 20, "720": 12}.get(quality, 20)
-    size = {"best": "1280x720", "1080": "1280x720", "720": "960x540"}.get(quality, "1280x720")
-
-    exe = imageio_ffmpeg.get_ffmpeg_exe()
-    cmd = [exe, "-v", "error", "-y",
-           "-f", "lavfi", "-i", "color=c=0x202024:s=%s:d=%d:r=24" % (size, secs),
-           "-f", "lavfi", "-i", "sine=frequency=440:duration=%d" % secs,
-           "-c:v", "libx264", "-preset", "ultrafast", "-crf", "32",
-           "-c:a", "aac", "-b:a", "64k", "-shortest", str(out)]
     try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=120, creationflags=_NO_WINDOW)
+        ok = download_single_video(bvid, cookie, str(raw), ffmpeg_path=ffmpeg)
     except Exception as e:
-        raise HTTPException(500, "生成失败: " + str(e))
-    if proc.returncode != 0 or not out.exists():
-        raise HTTPException(500, "ffmpeg 退出码 %d: %s" % (
-            proc.returncode, (proc.stderr or b"").decode("utf-8", "replace")[:200]))
-    return {"ok": True, "path": str(out), "size": out.stat().st_size,
-            "seconds": secs, "quality": quality}
+        raise HTTPException(500, "下载失败: %s" % e)
+    if not ok:
+        raise HTTPException(500, "下载失败（见服务端日志）")
+
+    # 返回刚写入的文件（按 bvid 前缀找最新的）
+    files = sorted(raw.glob(bvid + "*.mp4"), key=lambda f: f.stat().st_mtime, reverse=True)
+    if not files:
+        cands = sorted(raw.glob("*.mp4"), key=lambda f: f.stat().st_mtime, reverse=True)
+        files = cands[:1]
+    out = files[0] if files else None
+    return {"ok": True,
+            "path": str(out) if out else "",
+            "size": out.stat().st_size if out else 0}
 
 
 @router.get("/api/bili/me")
@@ -119,3 +120,67 @@ def bili_logout():
     BILI.clear()
     _bili_session["key"] = ""
     return {"ok": True}
+
+
+# ============================================================
+# 批量下载 / UP 主视频列表（从 4.0 移植）
+# ============================================================
+@router.post("/api/bili/batch")
+def bili_batch(body: dict):
+    """批量下载：{bvids: [...], workers: 2}"""
+    import imageio_ffmpeg
+    from . import bili_queue
+
+    body = body or {}
+    bvids = [str(b).strip() for b in (body.get("bvids") or []) if str(b).strip()]
+    if not bvids:
+        raise HTTPException(400, "bvids 为空")
+    cookie = BILI.load()
+    if not cookie:
+        raise HTTPException(401, "未登录 B 站")
+
+    raw = WORKSPACE / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+    res = bili_queue.start(bvids, cookie, str(raw),
+                           imageio_ffmpeg.get_ffmpeg_exe(),
+                           workers=int(body.get("workers") or 2))
+    if not res.get("ok"):
+        raise HTTPException(409, res.get("error", "已有任务"))
+    return res
+
+
+@router.get("/api/bili/batch/status")
+def bili_batch_status():
+    from . import bili_queue
+    return bili_queue.snapshot()
+
+
+@router.post("/api/bili/up/videos")
+def bili_up_videos(body: dict):
+    """列某个 UP 主的投稿：{mid, max_pages}"""
+    from .bili_video import fetch_up_videos
+
+    body = body or {}
+    mid = str(body.get("mid") or "").strip()
+    if not mid:
+        raise HTTPException(400, "缺少 mid")
+    cookie = BILI.load()
+    try:
+        items = fetch_up_videos(mid, cookie, max_pages=int(body.get("max_pages") or 1))
+    except Exception as e:
+        raise HTTPException(500, "拉取失败: %s" % e)
+    return {"ok": True, "items": items}
+
+
+@router.get("/api/bili/me/detail")
+def bili_me_detail():
+    """当前登录用户的详细信息"""
+    from .bili_user_info import fetch_user_info
+
+    cookie = BILI.load()
+    if not cookie:
+        raise HTTPException(401, "未登录 B 站")
+    try:
+        return {"ok": True, "user": fetch_user_info(cookie)}
+    except Exception as e:
+        raise HTTPException(500, "获取失败: %s" % e)

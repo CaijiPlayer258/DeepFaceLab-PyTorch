@@ -55,7 +55,8 @@
     run: "p-run", "train-cfg": "p-train-cfg",
     "tool-mask": "p-tool-mask", "tool-bili": "p-tool-bili",
     "tool-color": "p-tool-color", "tool-angle": "p-tool-angle", "tool-engine": "p-tool-engine",
-    "tool-perf": "p-tool-perf", "dataset-run": "p-dataset-run",
+    "train-convert": "p-train-convert",
+    "dataset-run": "p-dataset-run",
     "bili-jobs": "p-bili-jobs",
     debug: "p-debug",
     merge: "p-merge", settings: "p-settings", about: "p-about"
@@ -150,13 +151,13 @@
   /* 每个导航组的最后位置：点「训练器」应回到上次待的界面，而不是永远回列表 */
   var LAST_PAGE = {};
   var PAGE_GROUP = { run: "train", "train-cfg": "train", "extract-run": "extract", "dataset-run": "dataset", "tool-mask": "tools",
-                     "tool-bili": "tools", "tool-color": "tools", "tool-angle": "tools",
+                     "tool-bili": "tools", "tool-color": "tools", "tool-angle": "tools", "train-convert": "train",
                      debug: "about" };
 
   function groupOf(key) { return PAGE_GROUP[key] || key; }
 
   /* 子页记忆：从侧边栏回到「训练器 / B 站下载」时，恢复上次停留的子页 */
-  var SUB_PARENT = { run: "train", "train-cfg": "train", "extract-run": "extract", "dataset-run": "dataset", "bili-jobs": "tool-bili" };
+  var SUB_PARENT = { run: "train", "train-cfg": "train", "train-convert": "train", "extract-run": "extract", "dataset-run": "dataset", "bili-jobs": "tool-bili" };
   var SUB_MEMORY = {};
   window.SUB_MEMORY = SUB_MEMORY;
 
@@ -199,6 +200,7 @@
     if (key === "train-cfg") {
       if (window.markHotRows) window.markHotRows();
       var cb = document.getElementById("cfgBox");
+  setTimeout(function(){ if (window.paintVram) window.paintVram(); }, 0);
       if (cb && !cb.children.length) {
         var cm = window.__cfgModel || (MODELS && MODELS[0]) || null;
         if (cm) openCfg(cm);
@@ -710,11 +712,13 @@
   window.toast = toast;
 
   var MODULES = [
-    { n: "过滤器", d: "模糊 · 人脸身份 · 重复",
-      modes: ["模糊", "人脸身份", "重复图"],
+    { n: "过滤器", d: "模糊 · 身份 · 重复 · 错脸 · 合并",
+      modes: ["模糊", "人脸身份", "重复图", "错脸", "合并子文件夹"],
       modeDesc: ["高频/低频能量比 E(b0)/E(b2) 判清晰度，按分位淘汰最差一批（顺带清掉打不开的文件）",
                  "ArcFace 特征向量聚类，同一组≈同一个人（顺带清掉打不开的文件）",
-                 "感知哈希(phash)检测高度相似，剔除重复帧（顺带清掉打不开的文件）"],
+                 "感知哈希(phash)检测高度相似，剔除重复帧（顺带清掉打不开的文件）",
+      "68 点几何分类判错检（需要数据集用 2D106 真点重提过）",
+                 "把所有子目录（含多层）里的图片搬回根目录，清掉空出来的文件夹；跳过 _trash 和隐藏目录"],
       out: "" },
     { n: "排序器", d: "清晰度 · 角度 · 时间",
       modes: ["清晰度", "角度", "原序", "感知哈希", "直方图"],
@@ -738,9 +742,11 @@
     "0-0": [],   /* blur：能量比 + 分位，无可调参数 */
 
     /* faceid / repeated —— 默认值照抄 4.0 Qt GUI（位置聚类已移除，4.0 时期几乎没人用） */
-    "0-1": [["邻域半径", { num: true, val: 0.314, min: 0.05, max: 1, step: 0.01 }],
+    "0-1": [["邻域半径", { num: true, val: 0.40, min: 0.05, max: 1, step: 0.01 }],
             ["最小样本", { num: true, val: 2, min: 2, max: 50, step: 1 }]],
     "0-2": [["相似度阈值", { num: true, val: 0.98, min: 0.5, max: 1, step: 0.01 }]],
+    "0-3": [["判定阈值", { num: true, val: 0.5, min: 0.1, max: 0.99, step: 0.01 }],
+            ["最差 %（0=按阈值）", { num: true, val: 0, min: 0, max: 50, step: 0.5 }]],
 
     "1-0": [],   /* 排序没有分辨率参数 */
     "1-1": [],
@@ -751,6 +757,31 @@
   /* 用训练参数页那套：分组卡片 + 行（标签 / 说明 / 右侧控件） */
   function segHTML(groups) {
     return groups.map(function (g) { return g; });
+  }
+
+  /* options 超过 3 个时改用下拉：分段控件排到 4 项以上会挤成一排小按钮，
+     一眼看不清也容易点错。只有数据集页的「模式」走这条路 ——
+     配置页的保存逻辑是按 .seg b.on 读取的，不能全局替换。 */
+  function makeSelect(options, sel, onPick) {
+    var sl = document.createElement("select");
+    sl.className = "mgsel";
+    options.forEach(function (o, i) {
+      var op = document.createElement("option");
+      op.value = String(i);
+      op.textContent = o;
+      if (i === sel) op.selected = true;
+      sl.appendChild(op);
+    });
+    sl.addEventListener("change", function () {
+      if (onPick) onPick(Number(sl.value) || 0);
+    });
+    /* 和合成器/参数页同一个下拉组件：enhanceSelects 会把它包成
+       "按钮 + 弹层"（.dd），原生 select 只留作数据源。 */
+    var host = document.createElement("div");
+    host.className = "segbx";
+    host.appendChild(sl);
+    try { if (window.__enhanceSelects) window.__enhanceSelects(host); } catch (e) {}
+    return host;
   }
 
   function makeSeg(options, sel, onPick) {
@@ -788,10 +819,21 @@
     var r1 = document.createElement("div");
     r1.className = "cfgrow";
     r1.innerHTML = '<span class="cl">模式</span><span class="cd">' + (m.modeDesc[k] || "") + '</span><span class="cc"></span>';
-    r1.querySelector(".cc").appendChild(makeSeg(m.modes, k, function (idx) {
+    r1.querySelector(".cc").appendChild(
+      (m.modes.length > 3 ? makeSelect : makeSeg)(m.modes, k, function (idx) {
       STEP_SEL[i] = idx;
       var fresh = renderStation(i);
       card.replaceWith(fresh);
+      /* 只让「模式」下面的参数行弹一下：模式行本身不动，避免整卡片一起闪 */
+      if (!reduced()) {
+        var rows = Array.prototype.slice.call(fresh.querySelectorAll(".cfgrow")).slice(1);
+        rows.forEach(function (r, k) {
+          r.animate(
+            [{ opacity: 0, transform: "translateY(6px)" },
+             { opacity: 1, transform: "none" }],
+            { duration: 170, delay: k * 25, easing: PAGE_EASE });
+        });
+      }
     }));
     card.appendChild(r1);
     }
@@ -910,6 +952,7 @@
     if (btn) { btn.disabled = true; btn.textContent = "应用遮罩中…"; }
     toast("应用遮罩", dir + " · " + (model === "xseg" ? "XSeg" : "XSegLite") + " · " + res + "px · 8 线程", "info");
     dsRunShow("正在应用遮罩");
+    window.__maskT0 = Date.now();
     fetch("/api/dataset/mask", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dir: dir, workers: 8, model: model, res: res })
@@ -931,8 +974,10 @@
         var lbl = document.getElementById("maskLbl");
         var bar = document.getElementById("maskBar");
         setNavRunning("dataset", !!p.running, pct);
+        var elapsed = (Date.now() - (window.__maskT0 || Date.now())) / 1000;
         dsRunPaint({ pct: pct, msg: p.msg, done: p.done, total: p.total,
-                     speed: p.speed, eta: p.eta, running: p.running });
+                     speed: p.speed != null ? p.speed : (elapsed > 0.3 && p.done ? p.done / elapsed : null),
+                     elapsed: elapsed, eta: p.eta, running: p.running });
         if (num) num.textContent = pct + "%";
         if (lbl) {
           /* 速度一直留着（结束后是平均值），剩余时间只在运行时显示 */
@@ -979,16 +1024,20 @@
 
     /* ---------- 过滤器 ---------- */
     if (i === 0) {
-      var mode = k === 1 ? "faceid" : (k === 2 ? "repeated" : "blur");
+      var mode = k === 1 ? "faceid" : (k === 2 ? "repeated" : (k === 3 ? "errface" : "blur"));
       var body = { mode: mode, dir: "data_src" };
       if (mode === "blur") body.percent = PARAM_VAL["0-0-0"] !== undefined ? PARAM_VAL["0-0-0"] : 10;
       else if (mode === "repeated") body.similarity = PARAM_VAL["0-2-0"] !== undefined ? PARAM_VAL["0-2-0"] : 0.98;
       else {
-        body.eps = PARAM_VAL["0-1-0"] !== undefined ? PARAM_VAL["0-1-0"] : 0.314;
+        body.threshold = PARAM_VAL["0-3-0"] !== undefined ? PARAM_VAL["0-3-0"] : 0.5;
+      body.percent = PARAM_VAL["0-3-1"] !== undefined ? PARAM_VAL["0-3-1"] : 0;
+      body.eps = PARAM_VAL["0-1-0"] !== undefined ? PARAM_VAL["0-1-0"] : 0.40;
         body.min_samples = PARAM_VAL["0-1-1"] !== undefined ? PARAM_VAL["0-1-1"] : 2;
       }
-      toast("开始扫描", (mode === "blur" ? "模糊" : "重复图") + " · 正在统计…", "info");
-      dsRunShow(mode === "blur" ? "正在扫描清晰度" : (mode === "repeated" ? "正在查找重复图" : "正在聚类人脸身份"));
+      toast("开始扫描", (mode === "blur" ? "模糊" : (mode === "errface" ? "错脸" : "重复图")) + " · 正在统计…", "info");
+      dsRunShow(mode === "blur" ? "正在扫描清晰度"
+    : (mode === "repeated" ? "正在查找重复图"
+    : (mode === "errface" ? "正在检测错脸" : "正在聚类人脸身份")));
       fetch("/api/dataset/scan", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
@@ -1025,9 +1074,12 @@
   }
 
   function dsModeKey() {
-    var names = MODULES[0].modes[STEP_SEL[0]] || "";
-    if (names.indexOf("重复") >= 0) return "dup";
-    if (names.indexOf("坏图") >= 0) return "bad";
+    /* 以前只认「重复图」，人脸身份和错脸都掉进了 blur —— 选错脸却在删模糊图 */
+    var n = MODULES[0].modes[STEP_SEL[0]] || "";
+    if (n.indexOf("身份") >= 0) return "faceid";
+    if (n.indexOf("重复") >= 0) return "repeated";
+    if (n.indexOf("错脸") >= 0 || n.indexOf("坏图") >= 0) return "errface";
+    if (n.indexOf("合并") >= 0) return "merge";
     return "blur";
   }
 
@@ -1046,71 +1098,259 @@
     if (b && pct != null) b.style.width = Math.max(2, Math.min(100, pct)) + "%";
   }
 
+  function dsDirArg() {
+    /* 后端只认 workspace 下的相对目录；拖进来的绝对路径要先裁掉前缀 */
+    var inp = document.getElementById("dsPathVal");
+    var raw = String((inp && inp.value) || DSB.dir || "data_src").trim();
+    if (!raw) return "data_src";
+    var p = raw.replace(/\//g, "\\");
+    var i = p.toLowerCase().lastIndexOf("workspace\\");
+    if (i >= 0) p = p.slice(i + 10);
+    p = p.replace(/^\\+/, "");
+    if (p.indexOf(":") >= 0) return "data_src";
+    var parts = p.split("\\").filter(Boolean);
+    var k = parts.indexOf("data_src");
+    if (k >= 0) parts = parts.slice(k);
+    return parts.join("/") || "data_src";
+  }
+
+  var DS_TICK = 0;
+
+  function dsTickStop() {
+    if (DS_TICK) { clearInterval(DS_TICK); DS_TICK = 0; }
+  }
+
+  function dsTickStart(msg, total) {
+    dsTickStop();
+    var t0 = Date.now(), pct = 0;
+    DS_TICK = setInterval(function () {
+      /* 单次阻塞请求拿不到中间进度：百分比不装样子，只把「已用时间」走起来 */
+      dsRunPaint({ pct: 0, done: 0, total: total || 0, speed: null,
+                   elapsed: (Date.now() - t0) / 1000, msg: msg, running: true, noSample: true });
+    }, 220);
+  }
+
+  /* 人脸身份：引擎每处理一个 batch 就把进度写进临时文件，这里 400ms 读一次 */
+  var DS_POLL = 0, DS_STAGE = "", DS_T0 = 0, DS_MODE = "";
+
+  function dsPollStop() {
+    if (DS_POLL) { clearInterval(DS_POLL); DS_POLL = 0; }
+  }
+
+  function dsPollStart() {
+    dsPollStop();
+    DS_STAGE = "";
+    DS_T0 = Date.now();
+    DS_POLL = setInterval(function () {
+      fetch("/api/dataset/faceid/progress").then(function (r) { return r.json(); }).then(function (p) {
+        if (!p || !p.ok) return;
+        var stage = p.stage || "";
+        var done = p.done || 0, total = p.total || 0;
+        var sec = (Date.now() - DS_T0) / 1000;
+        if (stage !== DS_STAGE) {
+          DS_STAGE = stage;
+          DS_HIST = [];                    /* 每个阶段各自一条曲线 */
+          dsDrawGraph();
+          if (stage === "embed") dsRunShow(DS_MODE === "blur" ? "正在统计清晰度" : (DS_MODE === "repeated" ? "正在计算哈希" : "特征提取中"));
+          else if (stage === "cluster") dsRunShow("正在聚类");
+          sec = 0; DS_T0 = Date.now();
+        }
+        var pct = total ? done / total * 100 : 0;
+        var spdTxt = (sec > 0.3 && done > 0) ? (Math.round(done / sec) + " 张/秒") : "—";
+        var spd = (stage === "embed" && sec > 0.3 && done > 0) ? done / sec : null;
+        var _msg2 = stage === "cluster" ? "按特征分组…" : (DS_MODE === "blur" ? "计算清晰度…" : (DS_MODE === "repeated" ? "计算感知哈希…" : "提取 ArcFace 特征…"));
+        dsRunPaint({ pct: pct, done: done, total: total, speed: spd, elapsed: sec, running: true, msg: _msg2 });
+      }).catch(function () {});
+    }, 400);
+  }
+
+  /* 运行页明细表：扫完/移完把命中项列出来，用户才知道刚才动了哪些文件。
+     以前只有数字，没有任何明细，文件被静默移进 _trash。 */
+
+
+  function dsRunFinish(msg, done, total, t0) {
+    /* 扫描太快（命中缓存）时只有一两个采样点，曲线会是一根斜线甚至空着；
+       补上起点和终点，形态和提取器一致。 */
+    if (DS_HIST.length < 2) {
+      /* 扫描太快（缓存命中）时只有一两个采样点。补起终点时**用测得的速度铺平**，
+         而不是从 0 起步 —— 否则画出来是一根贴底的水平线接一根竖直尖峰，很怪。 */
+      var _spd = (DS_HIST.length && DS_HIST[0].spd) || 0;
+      DS_HIST = [{ pct: 0, spd: _spd }, { pct: 100, spd: _spd }];
+      dsDrawGraph();
+    }
+    dsTickStop();
+    var sec = t0 ? (Date.now() - t0) / 1000 : 0;
+    dsRunPaint({ pct: 100, done: done, total: total, speed: sec >= 0.3 ? done / sec : null,   /* 太快（缓存命中）时速度没意义，显示 — */
+                 elapsed: sec.toFixed(1), msg: msg, running: false });
+
+  }
+
+  function dsRunFail(msg, e) {
+    dsTickStop();
+    var txt = (e && (e.message || e)) + "";
+    dsRunPaint({ pct: 100, done: 0, total: 0, speed: 0, elapsed: 0,
+                 msg: "失败：" + txt, running: false });
+    toast("处理失败", txt, "error");
+
+  }
+
+  /* 把界面上的参数映射成后端要的 body —— 之前写死 threshold=10、percent 不传，
+     错脸模式永远 0 命中，模糊模式则固定砍 10% */
+  function dsScanBody(mode, dirArg) {
+    var body = { mode: mode, dir: dirArg };
+    function num(k, dft) {
+      var v = (typeof PARAM_VAL !== "undefined" ? PARAM_VAL : {})[k];   /* 同作用域，不要走 window */
+      return (v === undefined || v === null || v === "") ? dft : Number(v);
+    }
+    if (mode === "blur") body.percent = num("0-0-0", 10);
+    else if (mode === "repeated") body.similarity = num("0-2-0", 0.98);
+    else if (mode === "errface") {
+      body.threshold = num("0-3-0", 0.5);
+      body.percent = num("0-3-1", 0);
+    } else if (mode === "faceid") {
+      body.eps = num("0-1-0", 0.40);
+      body.min_samples = num("0-1-1", 2);
+      /* 0 = 只移噪声/杂点（安全，默认）；1 = 只保留最大簇那个身份 */
+      /* 人脸身份：每个身份簇一个目录，全部移动 */
+      body.split_by_identity = true;
+    }
+    return body;
+  }
+
+  /* 「移走命中项」独立出来：扫描完自动接上，不再让用户点第二次 */
+  function dsApply(btn, dirArg, t0) {
+    if (btn) { btn.disabled = true; }
+    dsTickStart("移动到 _trash…", DSB.hits.length);
+    fetch("/api/dataset/apply", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: DSB.mode, dir: dirArg,
+                             names: DSB.hits.map(function (x) { return x.name; }) })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (d && d.detail) throw new Error(String(d.detail));
+      var bad = (d.failed || []).length;
+      /* 不做撤销：移完即结算，状态回到初始 */
+      var _movedHits = DSB.hits.slice();
+      DSB.stage = 0; DSB.last = []; DSB.hits = [];
+      if (btn) { btn.textContent = "开始处理"; btn.disabled = false; }
+      dsPaint(d.moved, "张已移入 _trash", 100);
+      var _mvSec = DS_T0 ? Math.max(0.2, (Date.now() - DS_T0) / 1000) : 0;
+      toast(bad ? "部分未移走" : "已移走 " + d.moved + " 张",
+            "在 _trash 里" + (bad ? " · " + bad + " 张失败" : ""),
+            bad ? "warn" : "success");
+      dsRunFinish("已移走 " + d.moved + " 张", d.moved, d.moved + bad, t0);
+    }).catch(function (e) {
+      if (btn) { btn.textContent = "开始处理"; btn.disabled = false; }
+      dsRunFail("移动失败", e);
+    });
+  }
+
   function dsRun() {
     var mode = dsModeKey();
     DSB.mode = mode;
     var btn = dsBtn();
+    var dirArg = dsDirArg();
+    var t0 = Date.now();
 
-    if (DSB.stage === 2) {                    /* 撤销 */
-      fetch("/api/dataset/restore", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dir: DSB.dir, items: DSB.last || [] })
-      }).then(function (r) { return r.json(); }).then(function (d) {
-        DSB.stage = 0; DSB.last = []; DSB.hits = [];
-        if (btn) btn.textContent = "开始处理";
-        dsPaint("—", "等待扫描", 0);
-        var hdR = document.querySelector("#dsSteps .card .cardhd .hint");
-        if (hdR) hdR.textContent = "未扫描";
-        toast("已撤销", d.restored + " 张回到原目录", "success");
-      }).catch(function (e) { toast("撤销失败", String(e.message || e), "error"); });
-      return;
-    }
 
-    if (DSB.stage === 1) {                    /* 确认移走 */
-      if (btn) { btn.textContent = "正在移动…"; btn.disabled = true; }
-      fetch("/api/dataset/apply", {
+    /* 合并子文件夹：一次性搬完，没有扫描阶段 */
+    if (mode === "merge") {
+      if (btn) btn.disabled = true;
+      dsRunShow("正在合并子文件夹");
+      dsTickStart("把子目录里的图搬回根目录…", 0);
+      fetch("/api/dataset/merge-subdirs", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: DSB.mode, dir: DSB.dir,
-                               names: DSB.hits.map(function (x) { return x.name; }) })
+        body: JSON.stringify({ dir: dirArg })
       }).then(function (r) { return r.json(); }).then(function (d) {
-        DSB.stage = 2;
-        DSB.last = d.items || [];
-        if (btn) { btn.textContent = "撤销（放回 " + d.moved + " 张）"; btn.disabled = false; }
-        dsPaint(d.moved, "张已移入 _trash · 可撤销", 100);
-        toast("处理完成", d.moved + " 张移入 _trash，可撤销", "success");
+        if (d && d.detail) throw new Error(String(d.detail));
+        if (btn) { btn.textContent = "开始处理"; btn.disabled = false; }
+        dsPaint(d.merged, "张已并回根目录", 100);
+        toast("合并完成",
+              "并入 " + d.merged + " 张 · 重名改名 " + (d.renamed || 0) + " 张 · 删除空目录 " +
+              ((d.removed || []).length) + " 个",
+              (d.errors ? "warn" : "success"), 8000);
+        dsRunFinish("合并 " + d.merged + " 张，清理 " + ((d.removed || []).length) + " 个空目录",
+                    d.merged, d.merged, t0);
       }).catch(function (e) {
         if (btn) { btn.textContent = "开始处理"; btn.disabled = false; }
-        toast("移动失败", String(e.message || e), "error");
+        dsRunFail("合并失败", e);
       });
       return;
     }
 
-    /* stage 0：扫描 */
-    if (btn) { btn.textContent = "正在扫描…"; btn.disabled = true; }
+    /* 扫描（扫完直接移走） */
+    if (btn) { btn.disabled = true; }
     dsPaint(null, "正在统计…", 0);
-    var t0 = Date.now();
+    DSB.stage = 0;
+    dsRunShow(MODULES[DS_TAB].n + " · 扫描中");
+    /* 先把总数填上：人脸身份要在引擎进程里跑 6~10 秒，光显示「0 / 0」像是卡死 */
+    var knownTotal = 0;
+    try { knownTotal = parseInt(String(($("dsPathCount") || {}).textContent || "").replace(/[^0-9]/g, ""), 10) || 0; } catch (e) {}
+    if (knownTotal > 0) dsRunPaint({ pct: 2, done: 0, total: knownTotal, speed: null, elapsed: 0,
+                                    msg: "已读取 " + knownTotal + " 张" });
+    if (mode === "faceid" || mode === "blur" || mode === "repeated") { DS_MODE = mode; dsPollStart(); }
+    dsTickStart(mode === "faceid" ? "正在提取人脸特征并聚类…（这一步要跑引擎进程，通常 5~10 秒）"
+               : (mode === "errface" ? "正在读取 68 点并分类…" : "正在统计数据集…"), knownTotal);
     fetch("/api/dataset/scan", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: mode, dir: DSB.dir, threshold: mode === "dup" ? 6 : 10 })
+      body: JSON.stringify(dsScanBody(mode, dirArg))
     }).then(function (r) { return r.json(); }).then(function (d) {
+      dsPollStop();
+      if (d && d.detail) throw new Error(String(d.detail));
       DSB.hits = d.hits || [];
-      var sec = (Date.now() - t0) / 1000;
-      if (!DSB.hits.length) {
+      var sec = ((Date.now() - t0) / 1000).toFixed(1);
+      var hd0 = document.querySelector("#dsSteps .card .cardhd .hint");
+      if (hd0) hd0.textContent = "共 " + d.total + " 张 · 命中 " + (d.count || 0) + " 张";
+      var sk = (d.info && d.info.skipped_n) || 0;
+      var est = (d.info && d.info.estimated_n) || 0;
+      if (mode === "errface" && est > 0) {
+        toast("已现场补点", est + " 张没有元数据的脸，用 2D106 重新检测了关键点", "info", 6000);
+      }
+      if (mode === "errface" && sk > 0) {
+        var first = ((d.info && d.info.skipped) || [])[0];
+        toast("部分图片未参与错脸判定",
+              sk + " 张缺有效 landmarks" + (first ? " · 例：" + first.file + " → " + first.why : ""),
+              "warn", 7000);
+      }
+      if (mode === "faceid" && d.info && d.info.split) {
+        var sp = d.info.split, dirs = sp.by_dir || {};
+        var parts = Object.keys(dirs).sort().map(function (k) { return k + " " + dirs[k] + " 张"; });
+        toast("已按身份分文件夹",
+              (parts.length ? parts.join(" · ") : "没有可分的组") + "（都在 _by_id/ 下）",
+              "success", 9000);
+        DSB.hits = [];
         DSB.stage = 0;
-        if (btn) { btn.textContent = "重新扫描"; btn.disabled = false; }
-        dsPaint(0, "共 " + d.total + " 张，没有命中 · " + sec.toFixed(1) + " 秒", 0);
-        toast("扫描完成", "没有需要处理的图片", "info");
+        if (btn) { btn.textContent = "开始处理"; btn.disabled = false; }
+        dsPaint(sp.moved, "张已分到 _by_id/ 下的 " + Object.keys(dirs).length + " 个目录", 100);
+        dsRunFinish("分成 " + Object.keys(dirs).length + " 组，移走 " + sp.moved + " 张", sp.moved, sp.moved, t0);
         return;
       }
+      if (mode === "faceid" && d.info && d.info.clusters) {
+        var cl = d.info.clusters, ids = Object.keys(cl).length, noisy = d.info.noise || 0;
+        var mainN = (d.info.main && d.info.main.n) || 0;
+        var otherN = Math.max(0, (d.total || 0) - mainN);
+        toast("身份聚类完成",
+              "主体 " + mainN + " 张 · 其他身份 " + otherN + " 张已移出 · " + ids + " 簇" +
+              (noisy ? " · 噪声 " + noisy : ""),
+              otherN ? "warn" : "success", 8000);
+      }
+      if (!DSB.hits.length) {
+        DSB.stage = 0;
+        if (btn) { btn.textContent = "开始处理"; btn.disabled = false; }
+        dsPaint(0, "共 " + d.total + " 张，没有命中 · " + sec + " 秒", 0);
+        toast("扫描完成", "没有需要处理的图片", "info");
+        dsRunFinish("扫描完成 · 没有命中", d.total, d.total, t0);
+        return;
+      }
+      /* 默认移走：扫完立刻进入移动阶段，同一次点击完成 */
       DSB.stage = 1;
-      if (btn) { btn.textContent = "确认移走 " + DSB.hits.length + " 张"; btn.disabled = false; }
-      dsPaint(d.count, "张命中 · 共 " + d.total + " 张 · " + sec.toFixed(1) + " 秒",
-              d.total ? d.count / d.total * 100 : 0);
-      var hd0 = document.querySelector("#dsSteps .card .cardhd .hint");
-      if (hd0) hd0.textContent = "共 " + d.total + " 张 · 命中 " + d.count + " 张";
+      dsRunPaint({ pct: 100, done: d.total, total: d.total, speed: null,
+                   elapsed: (Date.now() - t0) / 1000,
+                   msg: "扫描完成 · 命中 " + d.count + " 张，正在移走…", running: true });
+      dsApply(btn, dirArg, t0);
     }).catch(function (e) {
+      dsPollStop();
       if (btn) { btn.textContent = "开始处理"; btn.disabled = false; }
-      toast("扫描失败", String(e.message || e), "error");
+      dsRunFail("扫描失败", e);
     });
   }
 
@@ -1312,27 +1552,39 @@
     if (t) t.textContent = title || "正在处理";
     var st = dsRunEl("btnDsRunStop");
     if (st) { st.classList.remove("hide"); st.disabled = false; st.textContent = "中断"; st.dataset.mode = "stop"; }
-    if (dsRunEl("dsRunBar")) dsRunEl("dsRunBar").style.width = "0%";
     if (dsRunEl("dsRunMsg")) dsRunEl("dsRunMsg").textContent = "准备中…";
     if (dsRunEl("dsRunDone")) dsRunEl("dsRunDone").textContent = "0";
     if (dsRunEl("dsRunTotal")) dsRunEl("dsRunTotal").textContent = "/ 0";
+    if (dsRunEl("dsRunBar")) dsRunEl("dsRunBar").style.width = "0%";
     if (dsRunEl("dsRunSpeed")) dsRunEl("dsRunSpeed").textContent = "0";
     if (dsRunEl("dsRunElapsed")) dsRunEl("dsRunElapsed").textContent = "0";
     if (dsRunEl("dsRunEta")) dsRunEl("dsRunEta").textContent = "—";
     if (dsRunEl("dsRunRate")) dsRunEl("dsRunRate").textContent = "";
+    DS_HIST = [];                 /* 新一次运行从零开始，别把上一轮的曲线留着 */
+    dsDrawGraph();
     go("dataset-run");
   }
 
   function dsRunPaint(p) {
     if (!p) return;
-    if (dsRunEl("dsRunBar")) dsRunEl("dsRunBar").style.width = (p.pct || 0) + "%";
+    /* 采样：给速度曲线用（最多 240 点，页面开着久了也不会无限涨） */
+    /* 只采「有真实速度」的点：起手那几帧 speed 是 null，采进去曲线会从 0 起飞，
+       画出来就是一条贴底直线接一根竖直尖峰 */
+    if (p.pct != null && !p.noSample && Number(p.speed) > 0) {
+      DS_HIST.push({ pct: p.pct, spd: Number(p.speed) || 0 });
+      if (DS_HIST.length > 240) DS_HIST.shift();
+      dsDrawGraph();
+    }
     if (dsRunEl("dsRunMsg")) dsRunEl("dsRunMsg").textContent = p.msg || "";
+    if (dsRunEl("dsRunBar")) dsRunEl("dsRunBar").style.width = Math.max(0, Math.min(100, p.pct || 0)).toFixed(1) + "%";
     if (dsRunEl("dsRunDone")) dsRunEl("dsRunDone").textContent = p.done || 0;
     if (dsRunEl("dsRunTotal")) dsRunEl("dsRunTotal").textContent = "/ " + (p.total || 0);
-    if (dsRunEl("dsRunSpeed")) dsRunEl("dsRunSpeed").textContent = (p.speed || 0).toFixed ? (p.speed || 0).toFixed(1) : (p.speed || 0);
+    if (dsRunEl("dsRunSpeed")) dsRunEl("dsRunSpeed").textContent = (p.speed == null) ? "—" : dsFmtSpd(p.speed);
+    if (dsRunEl("dsRunElapsed")) dsRunEl("dsRunElapsed").textContent = dsFmtSec(p.elapsed);
+    if (dsRunEl("dsRunEta")) dsRunEl("dsRunEta").textContent = (p.eta ? Math.round(p.eta) + "" : "—");
     if (dsRunEl("dsRunRate")) {
       var bits = [];
-      if (p.speed) bits.push(p.speed + " 张/秒");
+      if (p.speed) bits.push(dsFmtSpd(p.speed) + " 张/秒");
       if (p.eta) bits.push("剩 " + Math.round(p.eta) + " 秒");
       dsRunEl("dsRunRate").textContent = bits.join(" · ");
     }
@@ -1342,9 +1594,108 @@
       var st = dsRunEl("btnDsRunStop");
       if (st) { st.dataset.mode = "back"; st.classList.remove("danger"); st.textContent = "返回"; }
     }
+
   }
   window.dsRunPaint = dsRunPaint;
+
+  var DS_HIST = [];
+
+  /* 速度显示：大数取整，小数一位 —— 之前把 2524.1090146750525 原样贴出来了 */
+  function dsFmtSpd(v) {
+    var n = Number(v) || 0;
+    return n >= 100 ? String(Math.round(n)) : n.toFixed(1);
+  }
+
+  function dsFmtSec(s) {
+    var n = Number(s) || 0;
+    return n < 10 ? n.toFixed(2) : n.toFixed(1);
+  }
+
+  function dsDrawGraph() {
+    var cv = document.getElementById("dsRunGraph");
+    if (!cv || !cv.getContext) return;
+    /* 采样不足（单次阻塞请求）时不画空图表 */
+    cv.style.display = DS_HIST.length >= 1 ? "block" : "none";
+    var dpr = window.devicePixelRatio || 1;
+    var W = cv.clientWidth || 640, H = cv.clientHeight || 180;
+    if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
+      cv.width = Math.round(W * dpr);
+      cv.height = Math.round(H * dpr);
+    }
+    var g = cv.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, W, H);
+
+    var cs = getComputedStyle(document.documentElement);
+    var cInk3 = (cs.getPropertyValue("--ink-3") || "#8b8b98").trim();
+    var cLine = (cs.getPropertyValue("--line") || "rgba(128,128,128,.2)").trim();
+    var cBrand = (cs.getPropertyValue("--brand") || "#5d6ccf").trim();
+    var cFont = (cs.getPropertyValue("--font") || "system-ui").trim();
+
+    var padL = 58, padR = 14, padT = 12, padB = 24;
+    var plotW = W - padL - padR, plotH = H - padT - padB;
+
+    var peak = 1;
+    DS_HIST.forEach(function (p) { if (p.spd > peak) peak = p.spd; });
+    var maxSpd = Math.max(10, Math.ceil(peak * 1.2 / 10) * 10);
+
+    g.font = "10px " + cFont;
+    g.textAlign = "right";
+    g.textBaseline = "middle";
+    [0, 0.25, 0.5, 0.75, 1].forEach(function (k) {
+      var y = padT + plotH * (1 - k);
+      g.strokeStyle = cLine;
+      g.lineWidth = 1;
+      g.beginPath(); g.moveTo(padL, y + 0.5); g.lineTo(W - padR, y + 0.5); g.stroke();
+      g.fillStyle = cInk3;
+      g.fillText(String(Math.round(maxSpd * k)), padL - 10, y);
+    });
+
+    g.textAlign = "center";
+    g.textBaseline = "top";
+    [0, 25, 50, 75, 100].forEach(function (pct) {
+      var x = padL + plotW * pct / 100;
+      g.strokeStyle = cLine;
+      g.beginPath(); g.moveTo(x + 0.5, padT); g.lineTo(x + 0.5, padT + plotH); g.stroke();
+      g.fillStyle = cInk3;
+      g.fillText(pct + "%", x, padT + plotH + 6);
+    });
+
+    if (DS_HIST.length < 2) return;
+    function pt(p) {
+      return [padL + plotW * Math.min(100, Math.max(0, p.pct)) / 100,
+              padT + plotH * (1 - Math.min(1, p.spd / maxSpd))];
+    }
+    g.beginPath();
+    var first = pt(DS_HIST[0]);
+    g.moveTo(first[0], padT + plotH);
+    DS_HIST.forEach(function (p) { var q = pt(p); g.lineTo(q[0], q[1]); });
+    var lastP = pt(DS_HIST[DS_HIST.length - 1]);
+    g.lineTo(lastP[0], padT + plotH);
+    g.closePath();
+    g.fillStyle = "rgba(93,108,207,0.14)";
+    g.fill();
+
+    g.beginPath();
+    DS_HIST.forEach(function (p, i) { var q = pt(p); i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]); });
+    g.strokeStyle = cBrand;
+    g.lineWidth = 1.8;
+    g.lineJoin = "round";
+    g.stroke();
+  }
   window.dsRunShow = dsRunShow;
+
+  /* 「中断 / 返回」：这个按钮以前没绑任何事件，点了没反应 */
+  (function bindDsRunStop() {
+    var st = dsRunEl("btnDsRunStop");
+    if (!st) return;
+    st.addEventListener("click", function () {
+      dsTickStop();
+      if (st.dataset.mode === "back") { go("dataset"); return; }
+      go("dataset");
+      toast("已离开运行页", "扫描/移动会在后台继续完成", "info");
+    });
+  })();
 
   /* 侧栏「任务运行中」标记：百分比胶囊（展开时在右侧，折叠时贴图标角） */
   function setNavRunning(key, on, pct) {
@@ -1459,36 +1810,7 @@
   })();
 
   /* 速度测试页 */
-  (function () {
-    var btn = document.getElementById("btnPerf");
-    if (!btn || btn.dataset.bound) return;
-    btn.dataset.bound = "1";
-    btn.addEventListener("click", function () {
-      var body = document.getElementById("perfBody");
-      var hint = document.getElementById("perfHint");
-      btn.disabled = true; btn.textContent = "测速中…";
-      if (hint) hint.textContent = "正在跑，别动";
-      fetch("/api/perf/bench", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
-        .then(function (r) { return r.json(); })
-        .then(function (d) {
-          if (!d.ok) throw new Error(d.detail || "测速失败");
-          var html = "", sum = 0;
-          (d.rows || []).forEach(function (row) {
-            var ms = (row.ms === null || row.ms === undefined) ? "—" : row.ms.toFixed(3) + " ms";
-            if (row.ms) sum += row.ms;
-            html += '<div class="cfgrow"><span class="cl">' + row.k + '</span>' +
-                    '<span class="cd">' + (row.note || "") + '</span>' +
-                    '<span class="cc" style="font-family:var(--mono)">' + ms + '</span></div>';
-          });
-          html += '<div class="cfgrow"><span class="cl">合计</span><span class="cd">一张脸跑完全链路</span>' +
-                  '<span class="cc" style="font-family:var(--mono)">' + sum.toFixed(3) + ' ms</span></div>';
-          if (body) body.innerHTML = html;
-          if (hint) hint.textContent = "40,646 张 ≈ " + (sum * 40646 / 1000 / 60).toFixed(1) + " 分钟";
-        })
-        .catch(function (e) { if (hint) hint.textContent = String((e && e.message) || e); })
-        .finally(function () { btn.disabled = false; btn.textContent = "重新测速"; });
-    });
-  })();
+  
 
 
   if (btnEx) {
@@ -1655,13 +1977,28 @@
         '<div class="nm">' + m.name + ' <span class="tag n">' + (m.archi || "—") + "</span></div>" +
         '<div class="meta">' + (params.join(" · ") || "—") + "</div>" +
         '<div class="kv">' + kv.join("") + "</div>" +
-        '<div class="acts"><button class="mini pri" data-act="run">训练</button>' +
-        '<button class="mini" data-act="cfg">参数</button>' +
-        '<button class="mini" data-act="export">导出</button>' +
-        '<button class="mini" data-act="del">删除</button></div>' +
+        (m.dfm_only
+          /* 只有 .dfm、没有训练目录：训练/参数/导出/删除全都无从下手，别摆假按钮 */
+          ? '<div class="acts"><span class="tag ok">DFM</span>' +
+            '<span class="hint" style="margin-left:8px">只有 .dfm，没有训练目录</span></div>'
+          : '<div class="acts"><button class="mini pri" data-act="run">训练</button>' +
+            '<button class="mini" data-act="cfg">参数</button>' +
+            '<button class="mini" data-act="export">导出</button>' +
+            '<button class="mini" data-act="del">删除</button></div>') +
       "</div>";
     var runBtn = el.querySelector('[data-act="run"]');
-    if (runBtn) {
+    var _legacy = (m.weights === "npy");
+    if (runBtn && _legacy) {
+      /* 4.0 的老模型（.npy 权重）不能直接训：按钮变成「转换」，点了进转换子页 */
+      runBtn.textContent = "转换";
+      runBtn.addEventListener("click", function (e) {
+        /* 卡片上还有别的委托监听（点了会跳训练界面），这里必须拦下来 */
+        if (e) { e.preventDefault(); e.stopPropagation(); if (e.stopImmediatePropagation) e.stopImmediatePropagation(); }
+        if (window.cvOpen) window.cvOpen(m.name);
+        else { window.__cvPick = m.name; setTimeout(function () { go("train-convert"); }, 0); }
+      });
+    }
+    if (runBtn && !_legacy) {
       /* 已经在训练的模型，按钮就是「回到训练界面」的入口 —— 不能再禁用，
          否则从监控界面退回列表之后就没有路回去了。 */
       if (m.state === "训练中" || m.state === "已暂停") runBtn.textContent = m.state;
@@ -1811,17 +2148,41 @@
 
   /* ---------- 合成工作室：真实视频预览（后端 /api/merge/*） ---------- */
   /* 所有状态都挂在 window 上：之前用模块内 var，出现过「传 300 却按 0 取帧」的诡异串台 */
-  window.__mv = { path: "", frames: 0, fps: 30, opening: false, log: [] };
+  window.__mv = { path: "", video: "", t: 0, frames: 0, fps: 30, opening: false, log: [] };
+
+  /* ---------- 时间轴宿主入口：重进页面 keep / 换素材重建 ---------- */
+  /* 判断依据是 key = (素材路径|总帧数)：
+     相同 → 还是同一个素材，只是又切回合成页，keep：保住播放头和人脸轨；
+     不同 → 换了素材（或帧数变了），整条重建：播放头归零、旧人脸轨清掉。
+     没素材时 total 传 0 —— 以前用 300 兜底，屏幕上那 300 帧是假数据。 */
+  window.__mtlKey = window.__mtlKey || "";
+  function mgTimelineSync(total, fps) {
+    if (!window.MergeTimeline || !window.MergeTimeline.init) return null;
+    var mv = window.__mv || {};
+    total = Math.max(0, Math.floor(parseInt(total, 10) || 0));
+    var useFps = (fps && fps > 0) ? fps : (mv.fps || 30);
+    var key = String(mv.path || "") + "|" + total;
+    var keep = total > 0 && key === window.__mtlKey;
+    var out = null;
+    try {
+      out = window.MergeTimeline.init(total, useFps, { keep: keep });
+    } catch (e) { console.warn("timeline init", e); }
+    window.__mtlKey = key;
+    return out;
+  }
 
   window.mvStage = function (dataUrl) {
     var st = document.getElementById("mgStage");
     if (!st) return false;
-    var img = st.querySelector("img");
+    /* 只认老路径自己插的帧图：否则 #mgPreview（合成 overlay）会被当成它，把帧图画进合成层 */
+    var img = st.querySelector("img.mgfrm");
     if (!img) {
       img = document.createElement("img");
+      img.className = "mgfrm";
       img.alt = "";
       st.appendChild(img);
     }
+    img.style.display = "block";
     img.onload = function () {
       /* 只看「检测」视图时才补画，别的视图不该出现框 */
       var onDet = document.querySelector('#mgViews b[data-v="det"].on');
@@ -1833,17 +2194,24 @@
     return true;
   };
 
+  /* 预览取图的序号保护：快速拖时间轴 / 连续播放时会有多个请求同时在飞，
+     900px 的 JPEG 谁后到谁覆盖 —— 手指停在 240 帧，画面可能停在 180 帧。
+     这里给每个视图一个自增序号，回来时序号不是最新的就直接丢弃。 */
+  var MV_SEQ = { orig: 0, swap: 0, det: 0 };
+
   window.mvMerged = function (n) {
-    var st = window.__mv;
     n = parseInt(n, 10) || 0;
+    var seq = ++MV_SEQ.swap;
     fetch("/api/merge/merged/" + n + "?w=900").then(function (r) {
       return r.json().then(function (d) {
         if (!r.ok) throw new Error(d.detail || "取不到成片");
         return d;
       });
     }).then(function (d) {
+      if (seq !== MV_SEQ.swap) return;      /* 过期响应，丢掉 */
       if (d.png) window.mvStage(d.png);
     }).catch(function (e) {
+      if (seq !== MV_SEQ.swap) return;
       toast("成片预览", String((e && e.message) || e).slice(0, 90), "info");
       var hint = document.getElementById("mgStageHint");
       if (hint) { hint.style.display = ""; hint.textContent = "还没有成片 —— 先导出一次"; }
@@ -1853,10 +2221,14 @@
   window.mvFrame = function (n) {
     var st = window.__mv;
     n = parseInt(n, 10) || 0;
-    if (!st.path) { st.log.push("no-path " + n); return; }
-    fetch("/api/merge/frame/" + n + "?w=900").then(function (r) { return r.json(); })
+    /* 视频模式由 <video> 自己出画面，不再逐帧取 JPEG（帧目录 / 视频流挂了时才走这里） */
+    if (mgVidPath() && !(window.__mgVideo || {}).streamDown) return Promise.resolve();
+    if (!st.path) { st.log.push("no-path " + n); return Promise.resolve(); }
+    var seq = ++MV_SEQ.orig;
+    return fetch("/api/merge/frame/" + n + "?w=900").then(function (r) { return r.json(); })
       .then(function (d) {
         st.log.push("req " + n + " -> " + (d.png ? d.png.length : "none") + " (idx " + d.idx + ")");
+        if (seq !== MV_SEQ.orig) return;    /* 过期响应，丢掉 */
         if (d.png) window.mvStage(d.png);
       })
       .catch(function (err) { st.log.push("err " + n + " " + err.message); });
@@ -1874,10 +2246,18 @@
       st.opening = false;
       if (d.frames == null) { toast("打开失败", d.detail || "未知错误", "error"); return; }
       st.path = d.path; st.frames = d.frames; st.fps = d.fps || 30;
-      if (window.MergeTimeline && window.MergeTimeline.init) {
-        try { window.MergeTimeline.init(d.frames, d.fps || 30); } catch (e) {}
+      /* 有源视频就走 <video> 播放器；纯帧目录（DFL 项目）继续走老的逐帧取图 */
+      var nextVideo = (d.mode === "project") ? "" : (d.video || path);
+      /* 换了素材就不要再续上一个视频的播放位置；同一个文件重开才用 window.__mv.t */
+      if (nextVideo !== (window.__mgVideo || {}).src) st.t = 0;
+      st.video = nextVideo;
+      mgTimelineSync(d.frames, d.fps || 30);
+      if (st.video) {
+        window.mgAttachVideo(st.video);
+      } else {
+        window.mgDetachVideo();
+        window.mvFrame(0);
       }
-      window.mvFrame(0);
       window.mvAnalyze(24);
       var tot = document.getElementById("mtlTotal");
       if (tot) tot.textContent = d.frames;
@@ -1893,6 +2273,8 @@
           x.classList.toggle("on", x.dataset.path === path);
         });
       }
+      /* 视频已打开：用户接下来一定会拖时间轴/暂停看效果，先把模型热起来（多选时逐个） */
+      window.mgWarmSelected();
     }).catch(function (err) {
       st.opening = false;
       toast("打开失败", String((err && err.message) || err), "error");
@@ -1927,9 +2309,17 @@
       if (!r2.ok) throw new Error(d2.detail || "打开失败");
 
       window.__mergeInputDir = p;
-      if (window.MergeTimeline && window.MergeTimeline.init) {
-        try { window.MergeTimeline.init(d2.frames, 30); } catch (e) {}
-      }
+      /* 「打开项目」这条路从来没写过 window.__mv：预览取图一直是 no-path，
+         时间轴也拿不到这次的帧数。顺手补上（keep/重建的 key 也靠它才算得对）。 */
+      var mv = window.__mv;
+      mv.path = d2.path || p;
+      /* 后端若连源视频一起给了就用播放器；只有帧目录就退回逐帧取图 */
+      mv.video = String(d2.video || "");
+      if (mv.video) window.mgAttachVideo(mv.video);
+      else if (window.mgDetachVideo) window.mgDetachVideo();
+      mv.frames = d2.frames || 0;
+      mv.fps = (d2.fps && d2.fps > 0) ? d2.fps : 30;
+      mgTimelineSync(mv.frames, mv.fps);
       window.mvFrame(0);
       var tot = document.getElementById("mtlTotal");
       if (tot) tot.textContent = d2.frames;
@@ -1947,7 +2337,7 @@
   /* ---------- 素材准备：视频 → 抽帧 + 对齐 → 可合成项目 ---------- */
   /* 4.1 的提取器只落对齐脸、不落原帧，而合成必须要有原帧才能把脸贴回去。
      后端 /api/merge/prepare 补了这条路，这里负责把它接进界面。 */
-  window.__mergePrep = { running: false, project: "", timer: null };
+  window.__mergePrep = { running: false, project: "", timer: null, fails: 0 };
 
   function mgPrepLine(text, pct) {
     var box = document.getElementById("mgPrep");
@@ -1990,26 +2380,51 @@
   }
   window.mgShowPrepared = mgShowPrepared;
 
+  /* 点「已就绪项目」= 让服务端把素材真正切过去（POST /api/merge/open）。
+     以前这里只 GET /api/merge/info 读缓存：缓存里还是上一个项目，所以画面和
+     总帧数都不换。以 open 回来的 frames/fps 为准，失败必须说出来。 */
   window.mgOpenPrepared = function (project, frames, aligned) {
     var st = window.__mv;
-    st.path = project || "project";
-    st.frames = frames || 0;
-    window.__mergeInputDir = project || "";
-    fetch("/api/merge/info").then(function (r) { return r.json(); }).then(function (d) {
-      st.frames = d.frames || frames || 0;
-      st.fps = d.fps || 30;
-      if (window.MergeTimeline && window.MergeTimeline.init) {
-        try { window.MergeTimeline.init(st.frames, st.fps); } catch (e) {}
+    if (!project) {
+      toast("打开素材", "这个项目没有路径，打不开", "error");
+      return;
+    }
+    window.__mergeInputDir = project;
+    fetch("/api/merge/open", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: project })
+    }).then(function (r) {
+      return r.json().then(function (d) {
+        if (!r.ok || d.frames == null) throw new Error(d.detail || "打开失败");
+        return d;
+      });
+    }).then(function (d) {
+      st.path = d.path || project;
+      /* 后端若连源视频一起给了就用播放器；只有帧目录就走逐帧取图 */
+      st.video = String(d.video || "");
+      if (st.video) window.mgAttachVideo(st.video);
+      else if (window.mgDetachVideo) window.mgDetachVideo();
+      st.frames = d.frames || 0;
+      st.fps = (d.fps && d.fps > 0) ? d.fps : 30;
+      mgTimelineSync(st.frames, st.fps);
+      /* 重新点开同一个素材时 key 会撞上、走 keep，播放头可能停在上次的位置，
+         这里明确归零，跟下面要取的 0 帧对齐 */
+      if (window.MergeTimeline && window.MergeTimeline.setFrame) {
+        try { window.MergeTimeline.setFrame(0); } catch (e) {}
       }
       var tot = document.getElementById("mtlTotal");
       if (tot) tot.textContent = st.frames;
       mgShowPrepared(project, st.frames);
       window.mvFrame(0);
       if (window.mvAnalyze) window.mvAnalyze(24);
-      toast("素材已就绪", st.frames + " 帧 · " + (aligned || 0) + " 张对齐脸", "success");
-    }).catch(function () {
-      window.mvFrame(0);
-      toast("素材已就绪", (frames || 0) + " 帧", "success");
+      toast("素材已就绪",
+            st.frames + " 帧 · " + (aligned || d.with_landmarks || 0) + " 张对齐脸",
+            "success");
+      /* 素材就绪 = 马上就要合成，趁机让后端把模型载入（多选时逐个，失败静默） */
+      window.mgWarmSelected();
+    }).catch(function (e) {
+      /* 以前 catch 里空着还报「素材已就绪」—— 失败了不能装没事 */
+      toast("打开素材失败", String((e && e.message) || e).slice(0, 110), "error");
     });
   };
 
@@ -2018,8 +2433,9 @@
     var st = window.__mergePrep;
     if (st.running) { toast("正在准备", "等这一段处理完再来", "info"); return; }
     st.running = true;
-    st.project = "";
-    window.__mergeInputDir = "";
+    st.fails = 0;
+    /* 这里不再清 st.project / window.__mergeInputDir：上一次已就绪的项目要留着，
+       准备失败时用户还得回到它。只有下面成功分支才覆盖。 */
     mgPrepLine("抽帧…", 0);
     toast("准备素材", String(video).split(/[\\/]/).pop() + " · 抽帧 + 对齐", "info");
 
@@ -2036,6 +2452,7 @@
       st.timer = setInterval(function () {
         fetch("/api/merge/prepare/status").then(function (r) { return r.json(); })
           .then(function (d) {
+            st.fails = 0;
             mgPrepLine((d.stage ? d.stage + " · " : "") + (d.msg || ""), d.pct);
             if (d.running) return;
             clearInterval(st.timer); st.timer = null; st.running = false;
@@ -2048,7 +2465,15 @@
               mgPrepLine("准备失败：" + String(d.error || "").slice(0, 80), 100);
               toast("准备失败", String(d.error || "未知错误").slice(0, 120), "error");
             }
-          }).catch(function () {});
+          }).catch(function () {
+            /* 状态接口一直连不上时别无限轮询：st.running 会永久卡在 true，
+               之后连准备素材的按钮都点不动。40 次（≈28 秒）后收摊报错。 */
+            st.fails = (st.fails || 0) + 1;
+            if (st.fails <= 40) return;
+            clearInterval(st.timer); st.timer = null; st.running = false; st.fails = 0;
+            mgPrepLine("准备失败：状态轮询中断", 100);
+            toast("准备失败", "状态接口连续 40 次没有响应，已停止等待", "error");
+          });
       }, 700);
     }).catch(function (e) {
       st.running = false;
@@ -2070,9 +2495,12 @@
       }
       var empty = document.getElementById("mgVideosEmpty");
       if (!list.length) {
-        if (empty) { empty.style.display = ""; }
+        /* 空状态看的是 box 里到底有没有行：上面已经按 __mergeInputDir 把「已就绪项目」
+           塞进去了，只按接口返回的 list 判，会把「还没有导入素材」压在那行下面。 */
+        if (empty) empty.style.display = box.children.length ? "none" : "";
         return;
       }
+      /* 下面要追加视频行：先用老规矩把空状态收掉，别让它杵在列表头上 */
       if (empty) empty.style.display = "none";
       list.slice(0, 60).forEach(function (v) {
         var row = document.createElement("div");
@@ -2164,6 +2592,24 @@
     });
   };
 
+  /* 窗口尺寸变了：canvas 的位图尺寸只在 mvDrawBoxes 里算过一次，之后全靠 CSS 拉伸，
+     拉伸完框就错位。防抖 120ms，等布局稳下来再按新尺寸重画一次。 */
+  var MV_RESIZE_T = null;
+  window.addEventListener("resize", function () {
+    if (MV_RESIZE_T) clearTimeout(MV_RESIZE_T);
+    MV_RESIZE_T = setTimeout(function () {
+      MV_RESIZE_T = null;
+      var b = window.__mvBoxes;
+      if (!b) return;
+      var page = document.getElementById("p-merge");
+      if (!page || !page.classList || !page.classList.contains("on")) return;
+      var det = document.querySelector("#mgViews b.on");
+      if (!det || det.getAttribute("data-v") !== "det") return;
+      if (!document.querySelector("#mgStage canvas.mgovl")) return;
+      window.mvDrawBoxes(b.boxes, b.w, b.h);
+    }, 120);
+  });
+
   window.mvAnalyze = function (step) {
     var mv = window.__mv || {};
     if (!mv.path) { toast("先打开视频", "分析需要先选一个视频", "info"); return; }
@@ -2199,9 +2645,11 @@
   window.mvDetect = function (n) {
     var mv = window.__mv || {};
     if (!mv.path) return;
+    var seq = ++MV_SEQ.det;               /* 拖时间轴时检测请求会连发，回来晚的直接丢 */
     fetch("/api/merge/detect/" + n + "?model=" + encodeURIComponent(mgDetectorName()) + "&thresh=0.5")
       .then(function (r) { return r.json(); })
       .then(function (d) {
+        if (seq !== MV_SEQ.det) return;     /* 过期响应，丢掉 */
         if (d.boxes) window.mvDrawBoxes(d.boxes, d.width, d.height);
         else if (d.detail) toast("检测失败", String(d.detail).slice(0, 90), "error");
       })
@@ -2210,6 +2658,561 @@
 
 
   window.MergeVideo = { list: window.mvList, open: window.mvOpen, frame: window.mvFrame, state: window.__mv };
+
+  /* ---------- 真实视频播放器：<video> 播原片，暂停时才取一张合成帧 ---------- */
+  /* 两种模式互不干扰：
+       video 模式   —— window.__mv.video 有值（源文件路径）：<video src="/api/merge/video?path=...">
+                      播原片，播放中不请求预览；拖动结束/暂停才 POST /api/merge/preview。
+       project 模式 —— 只有 DFL 帧目录（window.__mv.path，没有 .video）：继续走老的 mvFrame 逐帧 JPEG。
+     后端（/api/merge/video、/api/merge/preview）在并行开发：404/501/超时一律降级，不弹错误风暴。 */
+  window.__mgVideo = {
+    src: "",           /* 已挂到 <video> 上的源文件路径 */
+    png: "",           /* overlay 上当前那张合成帧 dataURL */
+    wait: null,        /* preview 防抖 timer（120ms） */
+    seq: 0,            /* preview 序号：过期响应直接丢 */
+    blockUntil: 0,     /* 失败冷却到什么时候（3 秒内不再发同类请求） */
+    warned: false,     /* 「轻提示」只给一次，不刷屏 */
+    playing: false,
+    streamDown: false, /* /api/merge/video 挂了（404/501）：退回逐帧预览 */
+    syncing: 0         /* >0：这一拍帧事件来自视频自身，别再回灌 video */
+  };
+
+  var MG_PLAY_SVG = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M5.4 3.6 12.4 8l-7 4.4V3.6Z" fill="currentColor"/></svg>';
+  var MG_PAUSE_SVG = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="4.6" y="3.8" width="2.6" height="8.4" rx="0.8" fill="currentColor"/><rect x="8.8" y="3.8" width="2.6" height="8.4" rx="0.8" fill="currentColor"/></svg>';
+
+  function mgVid() { return document.getElementById("mgVideo"); }
+  function mgPrevImg() { return document.getElementById("mgPreview"); }
+  function mgVidPath() { var mv = window.__mv || {}; return String(mv.video || ""); }
+  /* 只有「真源视频」才走播放器；帧目录（DFL 项目）走老的逐帧图片 */
+  function mgVideoMode() { return !!mgVidPath(); }
+  window.mgVideoMode = mgVideoMode;
+
+  /* 舞台中间的小字提示（传空 = 收起来，不占位） */
+  function mgHint(text) {
+    var h = document.getElementById("mgStageHint");
+    if (!h) return;
+    if (!text) { h.style.display = "none"; return; }
+    h.textContent = text;
+    h.style.display = "";
+  }
+  window.mgHint = mgHint;
+
+  function mgCurView() {
+    var on = document.querySelector('#mgViews b[data-v].on');
+    return on ? on.getAttribute("data-v") : "orig";
+  }
+
+  function mgSetPlayIcon(on) {
+    var b = document.getElementById("mtlPlay");
+    if (b) b.innerHTML = on ? MG_PAUSE_SVG : MG_PLAY_SVG;
+  }
+
+  /* 三态只切叠加层：原图 = 只有 video；检测 = video + 检测框；
+     合成 = video + 预览 overlay（没有 overlay 就退回 video 那一帧，不空屏）。 */
+  function mgApplyView(view) {
+    if (!mgVideoMode()) return;
+    view = view || mgCurView();
+    var st = window.__mgVideo;
+    var p = mgPrevImg();
+    var cv = document.querySelector("#mgStage canvas.mgovl");
+    if (cv) cv.style.display = (view === "det") ? "" : "none";
+    if (p) {
+      var show = (view === "swap") && !!st.png && !st.playing;
+      p.style.display = show ? "block" : "none";
+    }
+    if (view === "det" && window.mvRedrawBoxes) window.mvRedrawBoxes();
+  }
+  window.mgApplyView = mgApplyView;
+
+  /* 只关显示、保留上一帧：播放中/拖动中画面退回 video，停下再贴回来 */
+  function mgHideOverlay() {
+    var p = mgPrevImg();
+    if (p) p.style.display = "none";
+  }
+
+  window.mgShowOverlay = function (src) {
+    var st = window.__mgVideo, p = mgPrevImg();
+    st.png = src || "";
+    if (p && src) p.src = src;
+    mgApplyView(mgCurView());
+    if (src) mgHint("");
+  };
+
+  /* 把 <video> 挂到源文件上（同一个文件不重挂：重进页面时 currentTime 还留着） */
+  window.mgAttachVideo = function (path) {
+    var st = window.__mgVideo, v = mgVid();
+    if (!v || !path) return null;
+    st.src = path;
+    st.streamDown = false;
+    v.style.display = "block";
+    /* 老路径插的帧图要让位：底是 video 画面 */
+    Array.prototype.forEach.call(document.querySelectorAll("#mgStage img"), function (im) {
+      if (im.id !== "mgPreview") im.style.display = "none";
+    });
+    mgBindVideo(v);
+    if (v.getAttribute("data-src") !== path) {
+      v.setAttribute("data-src", path);
+      v.src = "/api/merge/video?path=" + encodeURIComponent(path);
+    }
+    st.playing = false;
+    mgSetPlayIcon(false);
+    mgApplyView(mgCurView());
+    return v;
+  };
+
+  /* 切到帧目录（DFL 项目）时把播放器收掉，回到 mvFrame 那条老路 */
+  window.mgDetachVideo = function () {
+    var st = window.__mgVideo, v = mgVid();
+    st.src = "";
+    st.png = "";
+    st.playing = false;
+    st.streamDown = false;
+    mgHideOverlay();
+    mgSetPlayIcon(false);
+    if (v) {
+      try { v.pause(); } catch (e) {}
+      v.removeAttribute("data-src");
+      v.removeAttribute("src");
+      try { v.load(); } catch (e) {}
+      v.style.display = "none";
+    }
+    /* 检测框 canvas 在视频模式下被藏过（非检测视图），回项目模式要放出来 */
+    var cv = document.querySelector("#mgStage canvas.mgovl");
+    if (cv) cv.style.display = "";
+    mgHint("");
+  };
+
+  /* 播放中按屏幕刷新率推播放头：timeupdate 只有 ~4Hz，只靠它播放头会一跳好几帧 */
+  var MG_HEAD_RAF = null;
+  function mgHeadLoop() {
+    MG_HEAD_RAF = null;
+    var v = mgVid();
+    if (!v || v.paused) return;
+    window.mgSyncTimeline();
+    mgHeadLoopArm();
+  }
+  function mgHeadLoopArm() {
+    if (MG_HEAD_RAF) return;
+    if (typeof requestAnimationFrame !== "function") return;
+    MG_HEAD_RAF = requestAnimationFrame(mgHeadLoop);
+  }
+  function mgHeadLoopStop() {
+    if (MG_HEAD_RAF && typeof cancelAnimationFrame === "function") cancelAnimationFrame(MG_HEAD_RAF);
+    MG_HEAD_RAF = null;
+  }
+
+  /* <video> 事件：播放中只推播放头，停下来才要合成帧 */
+  function mgBindVideo(v) {
+    if (v.getAttribute("data-mgbound")) return;
+    v.setAttribute("data-mgbound", "1");
+
+    v.addEventListener("loadedmetadata", function () {
+      var mv = window.__mv || {};
+      /* 后端没给总帧数就自己按 duration × fps 算，时间轴才有长度可拖 */
+      if (!(mv.frames > 0) && isFinite(v.duration) && v.duration > 0) {
+        mv.frames = Math.round(v.duration * (mv.fps || 30));
+        mgTimelineSync(mv.frames, mv.fps || 30);
+        var tot = document.getElementById("mtlTotal");
+        if (tot) tot.textContent = mv.frames;
+      }
+      mgHint("");
+      window.mgRestoreTime();
+      window.mgSyncTimeline();
+      if (v.paused) window.mgPreviewSoon();
+    });
+
+    v.addEventListener("timeupdate", function () {
+      window.__mv.t = v.currentTime;
+      if (!v.paused) window.mgSyncTimeline();
+    });
+
+    v.addEventListener("play", function () {
+      /* 播放中不请求预览（省性能）：overlay 收起，直接看原片帧 */
+      window.__mgVideo.playing = true;
+      mgHideOverlay();
+      mgHint("");
+      mgSetPlayIcon(true);
+      window.mgSyncTimeline();
+      mgHeadLoopArm();
+    });
+
+    v.addEventListener("pause", function () {
+      window.__mgVideo.playing = false;
+      window.__mv.t = v.currentTime;
+      mgHeadLoopStop();
+      mgSetPlayIcon(false);
+      if (!window.__mgVideo.streamDown) window.mgPreviewSoon();
+    });
+
+    v.addEventListener("seeked", function () {
+      window.__mv.t = v.currentTime;
+      if (!v.paused) return;                  /* 播放中的 seek 不算「停下来」 */
+      if (!window.__mgVideo.streamDown) window.mgPreviewSoon();
+    });
+
+    /* 播到结尾：ended 不一定再补一个 pause，这里手动收尾，静静取一张尾帧 */
+    v.addEventListener("ended", function () {
+      var st = window.__mgVideo;
+      st.playing = false;
+      window.__mv.t = v.currentTime;
+      mgHeadLoopStop();
+      mgSetPlayIcon(false);
+      if (!st.streamDown) window.mgPreviewSoon();
+    });
+
+    v.addEventListener("error", function () {
+      var st = window.__mgVideo;
+      if (!st.src) return;            /* 正在卸载 source（切项目模式），不算失败 */
+      /* /api/merge/video 还没就绪（404/501）或编码浏览器不吃：退回逐帧 JPEG */
+      st.streamDown = true;
+      v.style.display = "none";
+      mgHint("视频流接口不可用 —— 已退回逐帧预览（/api/merge/video）");
+      var f = document.getElementById("mtlFrame");
+      window.mvFrame(parseInt(f ? f.value : 0, 10) || 0);
+    });
+  }
+
+  /* 回到上次停下的位置（window.__mv.t）：重进合成页/刚挂上 source 时用 */
+  window.mgRestoreTime = function () {
+    var v = mgVid();
+    var t = Number((window.__mv || {}).t) || 0;
+    if (!v || !(t > 0)) return;
+    if (isFinite(v.duration) && v.duration > 0) t = Math.min(t, Math.max(0, v.duration - 0.02));
+    if (Math.abs(v.currentTime - t) <= 0.04) return;
+    try { v.currentTime = t; } catch (e) {}
+  };
+
+  /* 视频自己走时钟 → 时间轴只跟着画播放头（syncing 里禁止回灌 video） */
+  window.mgSyncTimeline = function () {
+    var v = mgVid(), st = window.__mgVideo;
+    if (!v || !mgVideoMode()) return;
+    if (!window.MergeTimeline || !window.MergeTimeline.setFrame) return;
+    var fps = (window.__mv || {}).fps || 30;
+    var n = Math.round(v.currentTime * fps);
+    if (window.MergeTimeline.getFrame && window.MergeTimeline.getFrame() === n) return;
+    st.syncing++;
+    try { window.MergeTimeline.setFrame(n); } catch (e) { /* 时间轴还没 init */ }
+    st.syncing--;
+  };
+
+  /* 时间轴 → video：拖动、逐帧、播放头都改成写 currentTime */
+  window.mgVideoSeek = function (n) {
+    var v = mgVid(), st = window.__mgVideo;
+    if (!v || !mgVideoMode()) return;
+    if (st.syncing > 0) return;               /* 这一拍是视频反向同步，别再打回去 */
+    if (st.streamDown) return;                /* 已经退回逐帧预览 */
+    n = Math.max(0, parseInt(n, 10) || 0);
+    var fps = (window.__mv || {}).fps || 30;
+    var t = n / fps;
+    var dur = (isFinite(v.duration) && v.duration > 0) ? v.duration : 0;
+    if (dur > 0 && t > dur - 0.001) t = Math.max(0, dur - 0.001);
+    if (!v.paused) { try { v.pause(); } catch (e) {} }   /* 拖动即暂停：要的是定格 */
+    window.__mv.t = t;
+    mgHideOverlay();
+    if (Math.abs(v.currentTime - t) > 1e-3) {
+      try { v.currentTime = t; } catch (e) {}            /* seeked 里再取预览 */
+    } else {
+      window.mgPreviewSoon();
+    }
+  };
+
+  /* 播放/暂停：视频模式下由 <video> 自己走时钟，时间轴的 setInterval 步进不参与 */
+  window.mgTogglePlay = function () {
+    var v = mgVid();
+    if (!v || !mgVideoMode() || window.__mgVideo.streamDown) return;
+    if (v.paused) {
+      var p = null;
+      try { p = v.play(); } catch (e) { p = null; }
+      if (p && p.catch) p.catch(function () { mgSetPlayIcon(false); });
+    } else {
+      try { v.pause(); } catch (e) {}
+    }
+  };
+
+  /* 右栏当前参数 → 预览请求（字段名和后端契约一致：video / t / model / settings） */
+  function mgPreviewSettings() {
+    var s = {};
+    try {
+      s = (window.MergePages && window.MergePages.settings) ? window.MergePages.settings() : {};
+    } catch (e) { s = {}; }
+    return {
+      mode: s.mode || "overlay",
+      detector: s.detector || "RetinaFace_500m",
+      face_type: s.face_type || "whole_face",
+      mask_source: s.mask_source || "DFM",
+      mask_mode: s.mask_mode || "prd×dst",
+      color_transfer: s.color_transfer || "rct",
+      erode_mask: s.erode_mask || 0,
+      blur_mask: (s.blur_mask == null ? 4 : s.blur_mask)
+    };
+  }
+
+  /* ---------- 合成器预热：趁用户还在看，先让后端把模型读进显存 ---------- */
+  /* 预览接口有 5 秒多的冷启动（第一次「暂停 → 出片」全花在 load model 上）。
+     在几个明显马上要用到模型的时机提前打一枪 POST /api/merge/preview/warm，
+     等用户真暂停时后端已经是热的。后端还在并行开发，没这个接口就是 404 ——
+     一律静默当没发生。原则：fire-and-forget，不 await、不显示 loading、
+     失败不 toast、不碰 /api/merge/preview 的正常流程。 */
+  var MG_WARM_AT = {};          /* 模型名 → 上次请求时间戳，用来做 10 秒去重 */
+  var MG_WARM_GAP = 10000;
+  window.__mgWarm = function (model) {
+    var name = String(model == null ? "" : model).trim();
+    if (!name) {
+      /* 调用点没给名字（打开视频 / 进页面）时，沿用预览那套「当前选中模型」的取法 */
+      try { name = String(mgPreviewModel() || "").trim(); } catch (e) { name = ""; }
+    }
+    if (!name) return;          /* 还没有可选模型（列表没渲染出来）：什么都不做 */
+    var now = Date.now();
+    /* 同一个模型 10 秒内只发一次：进页面、打开视频、切模型经常连着触发三次，
+       重复请求只会让后端把刚载入的权重又丢一遍。换了模型则立刻放行。 */
+    if (MG_WARM_AT[name] && (now - MG_WARM_AT[name]) < MG_WARM_GAP) return;
+    MG_WARM_AT[name] = now;
+    /* 3 秒超时：后端慢/卡住时不留下半开的连接；超时走 catch，什么都不做 */
+    try {
+      var ctrl = (typeof AbortController === "function") ? new AbortController() : null;
+      var timer = ctrl ? setTimeout(function () { try { ctrl.abort(); } catch (e) {} }, 3000) : null;
+      fetch("/api/merge/preview/warm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: name }),
+        signal: ctrl ? ctrl.signal : undefined
+      }).then(function (r) {
+        if (timer) { clearTimeout(timer); timer = null; }
+        return r.json();
+      }).catch(function () {});   /* 404 / 断网 / 超时中止：静默，绝不冒泡 */
+    } catch (e) {}
+  };
+  function mgPreviewModel() {
+    var el = document.querySelector("#mgModels .mgitem.on .nm");
+    var name = el ? String(el.textContent || "").trim() : "";
+    if (name) return name;
+    /* 卡片还没渲染出来时退回右栏参数里的同名项 */
+    try {
+      if (window.MergePages && window.MergePages.settings) {
+        name = String(window.MergePages.settings().model || "").trim();
+      }
+    } catch (e) { name = ""; }
+    return name;
+  }
+
+  /* ---------- 模型多选 + 每个模型负责哪张脸 ---------- */
+  /* 契约：settings.models = [{name, faces:[...]}]，faces 是从 0 起的脸序号，
+     faces=[] 或缺省 = 全部脸。多选只是界面层的事：选中态仍然挂在 .mgitem.on 上，
+     允许多条同时 .on；脸分配记在 MG_FACES[name] 里（只存用户点过徽章的），
+     没点过就按「选中顺序」现算默认值 —— 这样列表轮询重绘也不会把分配弄丢。 */
+  var MG_FACES = {};        /* 模型名 → [脸序号]；[] = 全部脸 */
+  var MG_ANCHOR = null;     /* Shift+点击的上一次落点，范围选择从它开始 */
+  var MG_FACE_N = 3;        /* 徽章循环档位：all → face 0 → face 1 → face 2 → all */
+
+  function mgRows() {
+    var box = el("mgModels");
+    if (!box) return [];
+    return Array.prototype.filter.call(box.children, function (x) {
+      return x.classList && x.classList.contains("mgitem");
+    });
+  }
+  /* 选中项（按列表顺序）：顺序就是脸的默认分配顺序 */
+  function mgSelNames() {
+    return mgRows().filter(function (r) { return r.classList.contains("on"); })
+      .map(function (r) { return String(((r.querySelector(".nm") || {}).textContent) || "").trim(); })
+      .filter(function (n) { return !!n; });
+  }
+  /* 没点过徽章时的默认：第一个选中管全部脸，第二个起依次 face 1、face 2 … */
+  function mgDefaultFaces(pos) { return pos <= 0 ? [] : [pos]; }
+  function mgFacesCur(name) {
+    if (Object.prototype.hasOwnProperty.call(MG_FACES, name)) return MG_FACES[name] || [];
+    var pos = mgSelNames().indexOf(name);
+    return mgDefaultFaces(pos < 0 ? 0 : pos);
+  }
+  function mgFaceKey(faces) { return (!faces || !faces.length) ? "" : String(faces[0]); }
+  function mgFaceStates() {
+    var st = [[]];                                  /* 空数组 = 全部脸 */
+    for (var i = 0; i < MG_FACE_N; i++) st.push([i]);
+    return st;
+  }
+  /* 点徽章循环：all → face 0 → face 1 → face 2 → all */
+  function mgCycleFaces(name) {
+    var cur = mgFaceKey(mgFacesCur(name));
+    var st = mgFaceStates(), at = -1;
+    for (var i = 0; i < st.length; i++) if (mgFaceKey(st[i]) === cur) { at = i; break; }
+    MG_FACES[name] = st[(at + 1) % st.length];       /* at = -1（档位外）也回到 all */
+    mgSyncFaces();
+  }
+  /* 按列表顺序重算徽章：只有选中项显示 */
+  function mgSyncFaces() {
+    mgRows().forEach(function (r) {
+      var bd = r.querySelector(".mgface");
+      var name = String(((r.querySelector(".nm") || {}).textContent) || "").trim();
+      if (!r.classList.contains("on")) { if (bd) bd.hidden = true; return; }
+      if (!bd) return;
+      var faces = mgFacesCur(name);
+      bd.hidden = false;
+      bd.textContent = (!faces || !faces.length) ? "face all" : ("face " + faces[0]);
+      bd.title = "负责哪张脸：点击切换 all → face 0 → face 1 → face 2";
+      bd.dataset.faces = mgFaceKey(faces);
+    });
+  }
+  /* 选中判定：Ctrl/Cmd 切换单条、Shift 从锚点到本条整段、普通点击仍是单选 */
+  function mgPickRow(box, idx, ev) {
+    var rows = Array.prototype.filter.call(box.children, function (x) {
+      return x.classList && x.classList.contains("mgitem");
+    });
+    var row = rows[idx];
+    if (!row) return;
+    var mod = !!(ev && (ev.ctrlKey || ev.metaKey));
+    var shift = !!(ev && ev.shiftKey);
+    if (shift) {
+      var a = (MG_ANCHOR == null) ? idx : MG_ANCHOR;
+      a = Math.max(0, Math.min(rows.length - 1, a));
+      var lo = Math.min(a, idx), hi = Math.max(a, idx);
+      rows.forEach(function (x, i) { x.classList.toggle("on", i >= lo && i <= hi); });
+    } else if (mod) {
+      /* 最后一条不许被切掉：预览/导出总得有个模型可用 */
+      var on = rows.filter(function (x) { return x.classList.contains("on"); }).length;
+      if (row.classList.contains("on") && on <= 1) { MG_ANCHOR = idx; return; }
+      row.classList.toggle("on");
+      MG_ANCHOR = idx;
+    } else {
+      rows.forEach(function (x, i) { x.classList.toggle("on", i === idx); });
+      MG_ANCHOR = idx;
+    }
+    mgSyncFaces();
+    mgWarmSelected();
+  }
+  /* 多选时每个选中的模型都预热一遍（__mgWarm 自带 10 秒去重，重复调用不要钱） */
+  function mgWarmSelected() {
+    var names = mgSelNames();
+    if (!names.length) { try { window.__mgWarm(); } catch (e) {} return; }
+    names.forEach(function (n) { try { window.__mgWarm(n); } catch (e) {} });
+  }
+  window.mgWarmSelected = mgWarmSelected;
+  /* 组装请求用：models=[{name, faces}]，顺序 = 列表里的选中顺序 */
+  function mgModelsPayload() {
+    return mgSelNames().map(function (n) {
+      /* 单模型也带 models，faces=[] 等价于「全部脸」；老字段 model 照旧保留 */
+      return { name: n, faces: (mgFacesCur(n) || []).slice() };
+    });
+  }
+  window.mgModelsPayload = mgModelsPayload;
+
+
+  /* 暂停/拖动结束 → 取一张合成帧。120ms 防抖：拖动会连着「结束」好几次 */
+  window.mgPreviewSoon = function () {
+    var st = window.__mgVideo;
+    if (st.wait) clearTimeout(st.wait);
+    st.wait = setTimeout(function () { st.wait = null; window.mgPreviewNow(); }, 120);
+  };
+
+  window.mgPreviewNow = function () {
+    var st = window.__mgVideo, v = mgVid();
+    if (!v || !mgVideoMode()) return Promise.resolve(null);
+    if (st.streamDown) return Promise.resolve(null);
+    if (!v.paused) return Promise.resolve(null);                  /* 播放中不要预览 */
+    if (Date.now() < st.blockUntil) return Promise.resolve(null);  /* 失败冷却 3 秒 */
+
+    var seq = ++st.seq;
+    var ctrl = (typeof AbortController === "function") ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function () { try { ctrl.abort(); } catch (e) {} }, 5000) : null;
+    var fps = (window.__mv || {}).fps || 30;
+    var body = {
+      video: mgVidPath(),
+      t: Math.round(v.currentTime * 1000) / 1000,
+      model: mgPreviewModel(),
+      /* 多选契约：models=[{name, faces}]；单模型时 faces=[]（= 全部脸，向后兼容） */
+      models: mgModelsPayload(),
+      settings: mgPreviewSettings()
+    };
+
+    return fetch("/api/merge/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: ctrl ? ctrl.signal : undefined
+    }).then(function (r) {
+      return r.json().then(function (d) {
+        if (!r.ok || !d || d.ok !== true) {
+          var err = new Error((d && d.detail) || ("HTTP " + r.status));
+          err.status = r.status;
+          throw err;
+        }
+        return d;
+      });
+    }).then(function (d) {
+      if (timer) clearTimeout(timer);
+      if (seq !== st.seq) return null;            /* 过期响应，丢掉 */
+      st.warned = false;
+      window.__mv.lastPreviewMs = d.ms;
+      if (d.has_face === false || !d.png) {
+        st.png = "";
+        mgHideOverlay();
+        mgHint("这一帧没有检测到人脸");
+        return null;
+      }
+      mgHint("");
+      window.mgShowOverlay(d.png);
+      /* 检测视图下让框跟这一帧对齐 */
+      if (mgCurView() === "det") window.mvDetect(Math.round(v.currentTime * fps));
+      return d;
+    }).catch(function (e) {
+      if (timer) clearTimeout(timer);
+      if (seq !== st.seq) return null;
+      /* 501/404/超时/非 ok：overlay 保持上一帧，3 秒内不再重试，右下角只提示一次 */
+      st.blockUntil = Date.now() + 3000;
+      if (!st.warned) {
+        st.warned = true;
+        var why = (e && e.name === "AbortError") ? "预览请求超时" : String((e && e.message) || e).slice(0, 80);
+        toast("预览不可用", why + " · 稍后自动重试", "info", 2400);
+      }
+      return null;
+    });
+  };
+
+  /* 进合成页：已有视频就把上次停下的时间点接回来（window.__mv.t） */
+  window.mgResumeVideo = function () {
+    var st = window.__mgVideo, v = mgVid();
+    var path = mgVidPath();
+    if (!path || !v) return;
+    if (st.src !== path) { window.mgAttachVideo(path); return; }   /* loadedmetadata 里恢复 t */
+    mgHint("");
+    mgApplyView(mgCurView());
+    if (v.readyState >= 1) window.mgRestoreTime();
+    if (v.paused) window.mgPreviewSoon();
+  };
+
+  /* 视频模式下把播放键/空格拦下来交给 <video>：时间轴那套 setInterval 步进会和视频时钟打架。
+     捕获阶段拦在 #p-merge / window 上，项目模式原样放行（老行为不变）。 */
+  function mgBindTransport() {
+    var page = document.getElementById("p-merge");
+    if (page && !page.getAttribute("data-mgtransport")) {
+      page.setAttribute("data-mgtransport", "1");
+      page.addEventListener("click", function (e) {
+        /* 视频流挂了、退回逐帧预览时，播放键还给时间轴自己处理 */
+        if (!mgVideoMode() || (window.__mgVideo || {}).streamDown) return;
+        var b = (e.target && e.target.closest) ? e.target.closest("#mtlPlay") : null;
+        if (!b) return;
+        e.preventDefault();
+        e.stopPropagation();
+        window.mgTogglePlay();
+      }, true);
+    }
+    if (window.__mgKeyBound) return;
+    window.__mgKeyBound = true;
+    window.addEventListener("keydown", function (e) {
+      if (!mgVideoMode() || (window.__mgVideo || {}).streamDown) return;
+      var pg = document.getElementById("p-merge");
+      if (!pg || !pg.classList || !pg.classList.contains("on")) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      var t = e.target || {};
+      var tag = String(t.tagName || "").toUpperCase();
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t.isContentEditable) return;
+      if (e.key !== " " && e.key !== "Spacebar") return;
+      e.preventDefault();
+      e.stopPropagation();
+      window.mgTogglePlay();
+    }, true);
+  }
+  window.mgBindTransport = mgBindTransport;
+
 
   /* 遮罩绘制：把 MaskProcessor 的 WebUI 直接嵌进来 */
   function mkOpenEditor() {
@@ -2256,23 +3259,31 @@
     var page = $("p-merge");
     if (!page) return;
 
-    /* 时间轴：每次进合成页都重绘一次（元素可能被重建），幂等 */
+    /* 时间轴：每次进合成页都重绘一次（元素可能被重建），幂等。
+       是「重进页面」还是「换素材」交给 mgTimelineSync 的 key=(path|总帧数) 判断：
+       相同 → keep（保住播放头和人脸轨），不同 → 整条重建。
+       没素材时 total 就是 0 —— 以前用 300 兜底，画出来的是假帧。 */
     setTimeout(function () {
       window.mvList();
       var mv = window.__mv || {};
-      if (window.MergeTimeline && window.MergeTimeline.init) {
-        try {
-          window.MergeTimeline.init(mv.path ? mv.frames : 300, mv.fps || 30);
-        } catch (e) { console.warn("timeline init", e); }
-        /* 内容不足一屏时把栈拉满，刻度尺才不会只铺一半 */
-        var st = document.querySelector(".mtl-stack");
-        var sc = document.querySelector(".mtl-scroll");
-        if (st && sc) st.style.width = Math.max(st.scrollWidth, sc.clientWidth) + "px";
-      }
+      mgTimelineSync(mv.path ? (mv.frames || 0) : 0, mv.fps || 30);
+      /* 视频模式：已有的视频要接回上次停下的位置（window.__mv.t） */
+      if (window.mgResumeVideo) window.mgResumeVideo();
+      /* 进合成页时若已经有视频/素材：用户多半马上会暂停看效果，先热身。
+         每次进页面都判一次；重复请求由 __mgWarm 的 10 秒去重挡住 */
+      /* 选模型即加载：不等打开视频。模型选好了、视频还没选，也应该在后台把 DFM 装进显存
+         （多选时每个选中模型都热一遍，__mgWarm 自带 10 秒去重） */
+      window.mgWarmSelected();
+      /* 内容不足一屏时把栈拉满，刻度尺才不会只铺一半 */
+      var st = document.querySelector(".mtl-stack");
+      var sc = document.querySelector(".mtl-scroll");
+      if (st && sc) st.style.width = Math.max(st.scrollWidth, sc.clientWidth) + "px";
     }, 60);
 
     if (page.dataset.bound) return;
     page.dataset.bound = "1";
+    /* 视频模式：播放键 / 空格交给 <video> 的时钟（幂等，重复进入不会重复绑） */
+    if (window.mgBindTransport) window.mgBindTransport();
     page.querySelectorAll(".seg").forEach(function (seg) {
       seg.addEventListener("click", function (e) {
         var b = e.target.closest("b");
@@ -2291,13 +3302,23 @@
         var view = b.dataset.v;
         var f = document.getElementById("mtlFrame");
         var idx = parseInt(f ? f.value : 0, 10) || 0;
-        if (view === "det") {
-          window.mvDetect(idx);
-        } else if (view === "swap") {
-          window.mvMerged(idx);
-        } else {
+        /* 视频模式：三态都在 <video> 上切，不取帧图 */
+        if (window.mgVideoMode && window.mgVideoMode() && !(window.__mgVideo || {}).streamDown) {
           window.mvClearBoxes();
-          window.mvFrame(idx);
+          window.mgApplyView(view);
+          if (view === "det") window.mvDetect(idx);
+          else if (view === "swap") window.mgPreviewSoon();   /* 还没 overlay 就现取一张 */
+          return;
+        }
+        if (view === "det") {
+          /* 检测：先把原图取回来再重检，否则框会画在上一帧/成片上 */
+          window.mvClearBoxes();
+          window.mvFrame(idx).then(function () { window.mvDetect(idx); });
+        } else {
+          /* 原图/合成都不该留框 */
+          window.mvClearBoxes();
+          if (view === "swap") window.mvMerged(idx);
+          else window.mvFrame(idx);
         }
       });
     }
@@ -2443,6 +3464,8 @@
         input_dir: inputDir,
         project: inputDir,
         model: (document.querySelector("#mgModels .mgitem.on .nm") || {}).textContent || "",
+        /* 多选契约：每个选中模型一条 {name, faces}；faces=[] = 全部脸 */
+        models: mgModelsPayload(),
         workers: parseInt(payload.num_workers, 10) || 0,
         encoder: payload.encoder || "h264_nvenc",
         hwaccel: payload.hwaccel === "" ? "off" : (payload.hwaccel || "auto"),
@@ -2466,8 +3489,13 @@
           image_format: payload.image_format || "jpg"
         }
       };
-      if (payload.output_path && /^[A-Za-z]:[\\/]/.test(payload.output_path)) {
-        body.output_dir = payload.output_path;
+      if (payload.output_path) {
+        if (/^[A-Za-z]:[\\/]/.test(payload.output_path)) {
+          body.output_dir = payload.output_path;
+        } else {
+          /* 相对路径后端不收：以前静默丢掉，用户会以为填的已生效 */
+          toast("输出路径被忽略", "只认 Windows 绝对路径，这次按默认命名输出", "warn");
+        }
       }
 
       fetch("/api/merge/export", {
@@ -2510,8 +3538,17 @@
       tlBox.dataset.frameBound = "1";
       tlBox.addEventListener("mtl:frame", function (e) {
         var n = (e.detail && e.detail.frame) || 0;
+        /* 视频模式：播放头只写 video.currentTime；要不要取预览由 video 自己的事件说了算 */
+        if (window.mgVideoMode && window.mgVideoMode() && !(window.__mgVideo || {}).streamDown) {
+          if (document.querySelector('#mgViews b[data-v="det"].on') && window.mvClearBoxes) window.mvClearBoxes();
+          window.mgVideoSeek(n);
+          return;
+        }
         var onSwap = document.querySelector('#mgViews b[data-v="swap"].on');
+        var onDet = document.querySelector('#mgViews b[data-v="det"].on');
+        if (window.mvClearBoxes) window.mvClearBoxes();
         if (onSwap) window.mvMerged(n);
+        else if (onDet) { window.mvFrame(n).then(function () { window.mvDetect(n); }); }
         else window.mvFrame(n);
       });
     }
@@ -2604,6 +3641,8 @@
           if (d.ok) {
             toast("导出完成", name + " 已生成 .dfm", "success");
             loadModels();
+            /* 列表不重绘就一直看不到新出现的 DFM 标记；选中由 renderMerge 按名字保住 */
+            if (window.MODELS) renderMerge(window.MODELS);
           } else {
             if (btn) { btn.disabled = false; btn.textContent = "导出"; }
             toast("导出失败", d.error || "看控制台日志", "error");
@@ -2616,23 +3655,39 @@
   var MERGE_POLL = null;
   function pollMergeExport() {
     if (MERGE_POLL) clearInterval(MERGE_POLL);
+    /* 新一轮导出：把上一轮留下的终态按钮字样（返回设置/重新导出）复位 */
+    var cb0 = document.getElementById("mgpCancel");
+    if (cb0) { cb0.textContent = "取消导出"; cb0.disabled = false; }
     MERGE_POLL = setInterval(function () {
       fetch("/api/merge/export/status").then(function (r) { return r.json(); }).then(function (d) {
         var fill = document.getElementById("mgpFill");
         var pctEl = document.getElementById("mgpPct");
         var frEl = document.getElementById("mgpFrames");
         var msg = document.getElementById("mgpEta");
+        /* 终态语义：后端 ok 是「任务成功」标志，取消时是 ok=false + cancelled=true。
+           以前拿 !running 当成功，取消和失败都画成满格 100%。
+           注意「取消来晚、成片已生成」：后端 ok=true + cancelled=true + phase="done"，
+           成片真实存在，这种情况不算取消（否则会把有产物的一次显示成已取消）。 */
+        var wasCancel = !!d.cancelled && !d.ok;
+        var okAll = !!d.ok && !wasCancel;
         var last = (d.log && d.log.length) ? d.log[d.log.length - 1] : "";
         /* 后端上报的是真实阶段进度（pct / msg / 帧数），进度页直接照它画 */
         var text = d.msg || last;
         var p = Math.max(0, Math.min(100, Number(d.pct) || 0));
+        /* 失败/取消时后端把 pct 归 0、把停下来的位置放进 pct_at_failure，
+           不补这一步，「停在当前 pct」会画成 0%。 */
+        if (!d.running && !okAll && !p) {
+          p = Math.max(0, Math.min(100, Number(d.pct_at_failure) || 0));
+        }
         if (msg) msg.textContent = text ? String(text).slice(0, 60) : "合成中…";
         var fileEl = document.getElementById("mgpFile");
         if (fileEl && d.out && String(d.out) !== "—") {
           fileEl.textContent = String(d.out).split(/[\\/]/).pop();
         }
-        if (fill) fill.style.width = (d.running ? Math.max(2, Math.min(99, p)) : 100) + "%";
-        if (pctEl) pctEl.textContent = (d.running ? p : 100) + "%";
+        /* 只有真成功才满格；取消/失败停在实际位置，且不越过 99% */
+        var shown = okAll ? 100 : Math.max(d.running ? 2 : 0, Math.min(99, p));
+        if (fill) fill.style.width = shown + "%";
+        if (pctEl) pctEl.textContent = shown + "%";
 
         /* 阶段直接用后端的 @@P stage：0 搭目录/载模型 · 3 换脸 · 5 合成 · 6 编码 */
         var srv = Number(d.stage);
@@ -2642,20 +3697,20 @@
         } else {
           stage = p < 20 ? 0 : p < 92 ? 1 : p < 100 ? 2 : 3;
         }
-        if (!d.running) stage = d.ok ? 3 : stage;
+        if (!d.running) stage = okAll ? 3 : stage;
         var done = /Merging frames (\d+)\/(\d+)/.exec(text || "");
         if (frEl) {
           if (done) frEl.textContent = done[1] + " / " + done[2] + " 帧";
-          else if (!d.running && d.ok) frEl.textContent = "完成";
+          else if (!d.running && okAll) frEl.textContent = "完成";
         }
         var steps = document.querySelectorAll("#p-merge .mgpstep");
         for (var i = 0; i < steps.length; i++) {
           steps[i].classList.toggle("on", d.running && i === stage);
-          steps[i].classList.toggle("done", (d.running && i < stage) || (!d.running && d.ok));
+          steps[i].classList.toggle("done", (d.running && i < stage) || (!d.running && okAll));
         }
         var stepInfo = [null, done ? (done[1] + " / " + done[2]) : null,
                         d.running && stage === 2 ? "h264" : null,
-                        (!d.running && d.ok) ? "mp4" : null];
+                        (!d.running && okAll) ? "mp4" : null];
         for (var k = 0; k < steps.length; k++) {
           var sp = steps[k].querySelector("span");
           if (sp && stepInfo[k]) sp.textContent = stepInfo[k];
@@ -2664,10 +3719,19 @@
         if (!d.running) {
           clearInterval(MERGE_POLL); MERGE_POLL = null;
           window.__mergeExporting = false;
-          toast(d.ok ? "合成完成" : "合成失败",
-                d.ok ? ("输出 " + d.out) : String(d.error || "").slice(0, 120),
-                d.ok ? "success" : "error");
-          if (d.ok) {
+          /* 终态文案：成功「完成」· 取消「已取消」· 失败给 d.error 前 60 字（不再只闪 3.6 秒的 toast） */
+          if (msg) {
+            msg.textContent = okAll ? "完成"
+              : (wasCancel ? "已取消" : String(d.error || d.msg || "合成失败").slice(0, 60));
+          }
+          /* 取消按钮在终态变成「返回设置 / 重新导出」，点它回导出设置页 */
+          var cbEnd = document.getElementById("mgpCancel");
+          if (cbEnd) { cbEnd.disabled = false; cbEnd.textContent = okAll ? "返回设置" : "重新导出"; }
+          toast(okAll ? "合成完成" : (wasCancel ? "已取消合成" : "合成失败"),
+                okAll ? ("输出 " + d.out)
+                      : (wasCancel ? "已停在你按取消时的位置" : String(d.error || "").slice(0, 120)),
+                okAll ? "success" : (wasCancel ? "info" : "error"));
+          if (okAll) {
             /* 导出完自动切回工作台并显示成片那一帧，省得用户自己找 */
             try {
               if (window.mgStep) window.mgStep("main");
@@ -2686,6 +3750,10 @@
   function renderMerge(list) {
     var box = el("mgModels");
     if (!box) return;
+    /* 重绘前记住当前选中的模型名：以前每行都按 i===0 重置，
+       轮询一刷新，用户选好的模型就被换成第一个了 */
+    var keepSel = mgSelNames();       /* 多选：整串选中项都要保住，不能只记第一个 */
+    var keepRow = null;
     box.innerHTML = "";
     if (!list.length) {
       box.innerHTML = '<div class="empty-note">还没有可导出的模型</div>';
@@ -2693,26 +3761,49 @@
     }
     var cnt = el("mgModelCount");
     if (cnt) cnt.textContent = list.length;
-    list.forEach(function (m, i) {
+    list.forEach(function (m) {
       var r = document.createElement("div");
-      r.className = "mgitem" + (i === 0 ? " on" : "");
+      r.className = "mgitem";
+      /* 有 .dfm 就是「已导出」：/api/state 给的是 has_export，/api/models 给的是 has_dfm，
+         两个来源都认 —— 否则同一条记录在两个接口里会一个显示 DFM、一个显示「导出」，
+         点了也只会 404。只有 .dfm、没有训练目录的条目本来就没有权重可导出。 */
+      var exported = !!(m.has_export || m.has_dfm);
+      if (m.dfm) r.title = m.dfm;
       r.innerHTML = '<span class="nm">' + m.name + '</span>' +
-        (m.has_export
+        
+        /* 多选徽章：平时 hidden，选中时由 mgSyncFaces 填「face all / face N」，沿用 .tag 风格 */
+        '<span class="tag n mgface" hidden>face all</span>' +
+        (exported
           ? '<span class="tag ok">DFM</span>'
           : '<button class="mini mgexp" title="导出为 .dfm">导出</button>');
-      if (!m.has_export) {
+      if (!exported) {
         var expBtn = r.querySelector(".mgexp");
         if (expBtn) expBtn.addEventListener("click", function (e) {
           e.stopPropagation();
           exportDfm(m.name, expBtn);
         });
       }
-      r.addEventListener("click", function () {
-        Array.prototype.forEach.call(box.children, function (x) { x.classList.remove("on"); });
-        r.classList.add("on");
+      /* 这一行在列表里的下标：Shift 范围选择要用（append 之前取，正好是它自己的位置） */
+      var rowIdx = box.children.length;
+      /* 选中判定全交给 mgPickRow：Ctrl/Cmd 切单条、Shift 选范围、普通点击仍是单选 */
+      r.addEventListener("click", function (e) { mgPickRow(box, rowIdx, e); });
+      /* 徽章：点它只切「管哪张脸」，不碰选中态 */
+      var bdEl = r.querySelector(".mgface");
+      if (bdEl) bdEl.addEventListener("click", function (e) {
+        e.stopPropagation();
+        mgCycleFaces(m.name);
       });
       box.appendChild(r);
+      if (keepSel.indexOf(m.name) >= 0) keepRow = r;   /* 只用来判断「有没有命中」 */
     });
+    /* 按名字恢复整串多选；一个都没命中（模型真的没了）才退回第一个 */
+    Array.prototype.forEach.call(box.children, function (x) {
+      var nm = String(((x.querySelector(".nm") || {}).textContent) || "").trim();
+      if (nm && keepSel.indexOf(nm) >= 0) x.classList.add("on");
+    });
+    if (!keepRow) { keepRow = box.children[0] || null; if (keepRow) keepRow.classList.add("on"); }
+    mgSyncFaces();        /* 徽章跟着恢复后的选中项走 */
+    mgWarmSelected();     /* 渲染完预热：多选时每个选中模型各打一枪（__mgWarm 自带 10 秒去重） */
   }
 
   function renderDatasets(ds) {
@@ -2770,6 +3861,7 @@
       MODELS = d.models || [];
       window.MODELS = MODELS;      /* 重新绑定，别让外部还指着最初那个空数组 */
       renderTrainer(MODELS);
+      renderMerge(MODELS);      /* 合成页的模型列表也吃这份新数据（has_export 才是新的） */
       if (STATE) renderHome(STATE, MODELS);
     }).catch(function (e) { console.warn("models load failed", e); });
   }
@@ -3399,8 +4491,38 @@
   /* ---------- 账号 ---------- */
   var AUTH = { logged_in: false, name: "", onboarded: false };
 
+  /* 头像：优先用 B 站返回的图片，失败或没有就退回首字母 */
+  function paintAvatar(url, name) {
+    var av = $("uAvatar");
+    if (!av) return;
+    var letter = (name || "用户").slice(0, 1).toUpperCase();
+    function fallback() {
+      av.textContent = letter;
+      av.classList.remove("has-img");
+    }
+    var src = (url || "").trim();
+    if (!src) { fallback(); return; }
+    if (src.indexOf("//") === 0) src = "https:" + src;
+    src = src.replace(/^http:/, "https:");
+    var img = new Image();
+    img.alt = "";
+    img.referrerPolicy = "no-referrer";
+    img.onload = function () {
+      av.textContent = "";
+      av.appendChild(img);
+      av.classList.add("has-img");
+    };
+    img.onerror = fallback;
+    img.src = src;
+  }
+
   function applyAuth(a) {
-    AUTH = a || AUTH;
+    /* 允许无参调用：同意协议后要用"当前登录态"重绘一次。
+       以前无参会把 __loggedIn 打成 false，于是又弹回扫码页。 */
+    if (a) AUTH = a;
+    a = AUTH;
+    window.__loggedIn = !!(a && a.logged_in);
+    window.__userName = (a && a.name) || "";
     /* 始终用保存的偏好：默认值是 auto，等价于"没选过就跟随系统" */
     var want = THEME.saved;
     if (want !== THEME.mode) {
@@ -3414,14 +4536,27 @@
       if (AUTH.logged_in) {
         var nm = AUTH.name || "用户";
         $("uName").textContent = nm;
-        $("uAvatar").textContent = nm.slice(0, 1).toUpperCase();
+        paintAvatar(AUTH.avatar, nm);
       }
     }
     var w = $("welcome");
     if (w) {
-      var show = !AUTH.onboarded;
+      /* 未登录当然要看扫码页；已登录但还没同意协议的，也先停在这里读协议 ——
+         协议现在长在欢迎页里，藏在主页面后面等于没给用户看。 */
+      var needLegal = !!AUTH.logged_in && !(window.__legalAccepted && window.__legalAccepted());
+      /* 未登录看扫码页；已登录但还没同意协议的，也先停在这里（协议卡盖在扫码页上） */
+      var show = !AUTH.logged_in || needLegal;
       w.style.display = show ? "grid" : "none";
+      /* 欢迎页一藏起来就停 shader，否则它会在后台空转、拖慢整机 */
+      if (!show && window.__welcome3d && window.__welcome3d.stop) {
+        try { window.__welcome3d.stop(); } catch (e) {}
+      }
       if (show && !BILI.key) setTimeout(biliQr, 120);
+      /* 退出登录后欢迎页重新出现：shader 之前被 stop() 掐了，得重新接上，
+         否则登录页背景是一片静止的深色（看不到动画）。 */
+      if (show && window.__welcome3d && window.__welcome3d.start) {
+        try { window.__welcome3d.start(); } catch (e) {}
+      }
     }
     if ($("hello") && AUTH.logged_in && AUTH.name) {
       $("hello").textContent = greeting() + "，" + AUTH.name;
@@ -3430,6 +4565,8 @@
 
   /* ---------- B 站扫码登录 ---------- */
   var BILI = { timer: 0, key: "", busy: false };
+
+  window.applyAuth = applyAuth;
 
   function biliSetState(text) {
     if ($("wQrState")) $("wQrState").textContent = text;
@@ -3627,6 +4764,17 @@
         ]).then(function () {
           BILI.key = "";
           applyAuth({ logged_in: false, name: "", onboarded: false });
+          /* 退出登录 = 连"我同意过协议"一起作废：下次扫码进来必须重新读一遍。
+             同时把浏览器侧的 cookie 也清掉（后端会删掉 cookie 文件，这里补前端那份）。 */
+          try { localStorage.removeItem("dfl-legal-v3"); } catch (e) {}
+          try {
+            document.cookie.split(";").forEach(function (c) {
+              var k = c.split("=")[0].trim();
+              if (!k) return;
+              document.cookie = k + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/";
+              document.cookie = k + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; domain=" + location.hostname;
+            });
+          } catch (e) {}
           toast("已退出登录", "B 站授权已清除", "info");
         });
       },
@@ -4153,6 +5301,8 @@
     ]},
     { t: "训练参数", rows: [
       { k: "batch_size", l: "批次大小", t: "num", v: "8", d: "每次训练的样本数量" },
+      { k: "target_batch", l: "目标批次", t: "num", v: "0",
+        d: "想要的等效批次；= 批次大小 × 累积次数。0 = 关闭累积" },
       { k: "target_iter", l: "目标迭代数", t: "num", v: "0", d: "0 表示无限训练" },
       { k: "autobackup_hour", l: "自动保存间隔", t: "num", v: "1", d: "4.0 无此项，仅为 UI 占位" },
       { k: "use_bf16", l: "训练精度", t: "seg", o: ["bf16", "fp32"], v: "bf16" },
@@ -4462,6 +5612,10 @@
           var filled = 0;
           box.querySelectorAll("[data-cfg]").forEach(function (el) {
             var k = el.dataset.cfg, v = opts[k];
+            if (k === "target_batch" && (v === undefined || v === null || Number(v) === 0)) {
+              var _b0 = Number(opts.batch_size) || 1, _a0 = Number(opts.accum_steps) || 1;
+              v = _a0 > 1 ? _b0 * _a0 : 0;
+            }
             if (v === undefined) return;
             filled++;
             if (el.tagName === "INPUT") el.value = v;
@@ -4588,7 +5742,128 @@
     if (!d.iter_seen) return { text: "加载中", tone: "blue" };
     return { text: "训练中", tone: "green" };
   }
+
+  /* 显存估算（参考值，误差 ±15%）。
+     模型部分按 参数×字节 精确算，激活按 128px/batch8 的实测值线性缩放，
+     再加上 cuDNN workspace / CUDA context / 碎片这三项测不出来的固定开销。 */
+  /* 显存估算（参考值，误差 ±15%）。
+     锚定在一个实测点上：liae-ud / ae256 / e64 / d64 / bf16 / batch8 / R128
+     真实训练峰值 = 5.7 GB（nvidia-smi 采样）。分成三块：
+       静态  1.26 GB（权重+梯度+优化器动量，实测模型 78.6M 参数 × 16B）
+       固定  2.5  GB（cuDNN workspace + CUDA context + 分配器碎片，测不出来）
+       激活  1.94 GB（随 batch 线性、随分辨率平方）
+     参数个数不去公式推算 —— SAEHD 的 conv 栈宽度和 e_dims 不是线性关系，
+     硬推会得出 "2M 参数" 这种离谱数字（真实 78.6M）。 */
+  function vramEstimate(o) {
+    var R = Number(o.resolution) || 128;
+    var B = Number(o.batch_size) || 1;
+    var ae = Number(o.ae_dims) || 256;
+    var staticGb = 1.26 * Math.pow(R / 128, 2) * Math.max(0.5, ae / 256);
+    var actGb = 1.94 * (B / 8) * Math.pow(R / 128, 2);
+    if (o.use_gradient_checkpointing) actGb *= 0.45;
+    return { total: staticGb + 2.5 + actGb, act: actGb, stat: staticGb };
+  }
+  window.vramEstimate = vramEstimate;
+
+  /* 显卡总量来自现成的 /api/gpu（routes_models.py）。只取一次，缓存在 window。 */
+  function loadGpuInfo(cb) {
+    if (window.GPU_INFO) { cb(window.GPU_INFO); return; }
+    fetch("/api/gpu").then(function (r) { return r.json(); }).then(function (d) {
+      var g = (d && d.gpus && d.gpus[0]) || null;
+      window.GPU_INFO = g;
+      cb(g);
+    }).catch(function () { window.GPU_INFO = null; cb(null); });
+  }
+  window.loadGpuInfo = loadGpuInfo;
+
+  /* 从参数页读当前值：键名是 data-cfg（和 collectCfgPatch 同一套），
+     值可能是 input / select / .sw（开关）/ .seg（分段）四种形态。 */
+  window.CFG_VALS = function () {
+    var out = {};
+    var box = document.getElementById("cfgBox");
+    if (!box) return out;
+    box.querySelectorAll("[data-cfg]").forEach(function (el) {
+      var k = el.dataset.cfg;
+      if (!k) return;
+      if (el.tagName === "INPUT") out[k] = el.value;
+      else if (el.tagName === "SELECT") out[k] = el.value;
+      else if (el.classList.contains("sw")) out[k] = el.classList.contains("on");
+      else if (el.classList.contains("seg")) {
+        var on = el.querySelector("b.on");
+        if (on) out[k] = (on.dataset.v !== undefined ? on.dataset.v : on.textContent.trim());
+      }
+    });
+    return out;
+  };
+
+  function paintVram() {
+    var box = document.getElementById("cfgVram");
+    if (!box) return;
+    var o = (window.CFG_VALS && window.CFG_VALS()) || {};
+    /* 参数页没有 resolution 这一行（分辨率在新建模型时就定了，之后改不了），
+       只能从当前打开的模型里取；取不到就按 128 估，并标注出来。 */
+    var m = window.__cfgModel || {};
+    if (!o.resolution) o.resolution = m.resolution || m.res || 0;
+    var assumed = false;
+    if (!o.resolution) { o.resolution = 128; assumed = true; }
+    box.style.display = "";
+    var r = vramEstimate(o);
+    var gpu = window.GPU_INFO || {};
+    if (!window.GPU_INFO) loadGpuInfo(function () { paintVram(); });
+    var total = gpu.total_gb || 0;
+    var pct = total ? (r.total / total) * 100 : 0;
+    box.className = "vram" + (total && r.total > total ? " bad" : (total && pct > 82 ? " warn" : ""));
+    box.innerHTML = "预计显存 <b>" + r.total.toFixed(1) + " GB</b>" +
+      (total ? " / 显卡 " + total.toFixed(1) + " GB" : "") +
+      (total && r.total > total ? " <b style=\"color:var(--bad)\">放不下，请降低分辨率或批次</b>" : "") +
+      (assumed ? " <span style=\"color:var(--ink-3)\">按 128px 估</span>" : "") +
+      "<span class=\"vh\">参考值，实际 ±15%</span>";
+  }
+  window.paintVram = paintVram;
+
+  /* paintVram 的全局刷新：参数页任何输入/分段切换后重新估算 */
+  document.addEventListener("input", function () {
+    if (document.getElementById("cfgVram")) window.paintVram();
+  }, true);
+  document.addEventListener("click", function (e) {
+    var t = e.target;
+    if (t && t.closest && t.closest("#cfgBox .seg")) setTimeout(function () { window.paintVram(); }, 0);
+  }, true);
+
   window.trainState = trainState;
+
+  /* 训练页的常驻失败横幅。toast 会自己消失，而"要改配置"类的错误必须一直摆着。 */
+  function showRunAlert(title, body, actions) {
+    var box = document.getElementById("runAlert");
+    if (!box) return;
+    var t = document.getElementById("runAlertTitle");
+    var b = document.getElementById("runAlertBody");
+    var a = document.getElementById("runAlertAct");
+    if (t) t.textContent = title || "训练已停止";
+    if (b) b.textContent = String(body || "").slice(0, 600);
+    if (a) {
+      a.innerHTML = "";
+      (actions || []).forEach(function (it) {
+        var btn = document.createElement("button");
+        btn.className = "mini";
+        btn.textContent = it.label;
+        btn.addEventListener("click", it.onClick);
+        a.appendChild(btn);
+      });
+    }
+    box.classList.remove("hide");
+  }
+  window.showRunAlert = showRunAlert;
+
+  function hideRunAlert() {
+    var box = document.getElementById("runAlert");
+    if (box) box.classList.add("hide");
+  }
+  window.hideRunAlert = hideRunAlert;
+  (function () {
+    var x = document.getElementById("runAlertX");
+    if (x) x.addEventListener("click", hideRunAlert);
+  })();
 
   function pollTrain(m) {
     /* 调用点有时不给 m（例如「启动成功后 pollTrain()」），那样右侧统计就永远不刷新。
@@ -4621,7 +5896,22 @@
         if (!d.running && d.ok === false && d.error) {
           var logEl0 = document.getElementById("runLog");
           if (logEl0) logEl0.textContent = String(d.error).slice(0, 400);
+          /* 显存不足这类错误要**主动弹出来**：只写进日志区，用户以为训练正常停了。 */
+          var _errTxt = String(d.error);
+          /* 常驻横幅：OOM 必须让用户看到"要改什么"，不能只是闪一下。 */
+          if (window.showRunAlert) {
+            if (_errTxt.indexOf("显存不足") >= 0) {
+              window.showRunAlert("显存不足，训练已停止", _errTxt);
+            } else if (_errTxt) {
+              window.showRunAlert("训练已停止", _errTxt);
+            }
+          }
+          if (_errTxt.indexOf("显存不足") >= 0 && window.__oomToasted !== _errTxt) {
+            window.__oomToasted = _errTxt;
+            toast("显存不足", _errTxt.split("\n").slice(0, 3).join(" "), "error", 12000);
+          }
         }
+        if (d.running && window.hideRunAlert) window.hideRunAlert();
         /* 真进度：iter / 速度 / 已跑 / 剩余（后端 /api/train/status 里都算好了） */
         function _hms(sec) {
           sec = Math.max(0, Math.round(sec));
@@ -4985,6 +6275,51 @@
   }
   window.syncCfgBaseline = syncCfgBaseline;
 
+  /* 目标批次 → 累积次数：向下取整（不能整除时用警告提示实际等效值） */
+  function accumFromTarget(batchSize, target) {
+    var b = Math.max(1, Math.floor(Number(batchSize) || 1));
+    var t = Math.floor(Number(target) || 0);
+    if (t <= b) return 1;
+    return Math.max(1, Math.floor(t / b));
+  }
+  window.accumFromTarget = accumFromTarget;
+
+  /* 目标批次校验：不能整除时用红字说明实际等效批次，而不是拦着不让存 */
+  function validateTargetBatch() {
+    var box = $("cfgBox");
+    if (!box) return;
+    var bEl = box.querySelector("[data-cfg=batch_size]");
+    var tEl = box.querySelector("[data-cfg=target_batch]");
+    if (!bEl || !tEl) return;
+    var b = Math.max(1, Math.floor(Number(bEl.value) || 1));
+    var t = Math.floor(Number(tEl.value) || 0);
+    var row = tEl.closest(".cfgrow");
+    var cd = row && row.querySelector(".cd");
+    if (!cd) return;
+    var base = "想要的等效批次；= 批次大小 × 累积次数。0 = 关闭累积";
+    var eff = accumFromTarget(b, t) * b;
+    if (t === 0) {
+      cd.textContent = base;
+      cd.style.color = "";
+      return;
+    }
+    if (t < b) {
+      cd.textContent = "目标批次小于批次大小（" + b + "），不会累积；请填 ≥ " + b + " 或直接填 0";
+      cd.style.color = "var(--bad)";
+      return;
+    }
+    if (t % b !== 0) {
+      cd.textContent = "⚠ " + t + " 不能被 " + b + " 整除：实际会按 " +
+                      (eff / b) + " 次累积，等效批次 " + eff + "（不是 " + t + "）";
+      cd.style.color = "var(--warn)";
+      return;
+    }
+    cd.textContent = base + "（当前 " + b + " × " + (eff / b) + " = " + eff + "）";
+    cd.style.color = "";
+  }
+  window.validateTargetBatch = validateTargetBatch;
+
+
   function collectCfgPatch() {
     var box = $("cfgBox");
     var patch = {};
@@ -5030,9 +6365,32 @@
         }
       }
     });
+    /* 目标批次存在 → 换算累积次数（引擎只认 accum_steps） */
+    if (patch.target_batch !== undefined || patch.batch_size !== undefined) {
+      var _cb = $("cfgBox");
+      var _bEl = _cb && _cb.querySelector("[data-cfg=batch_size]");
+      var _tEl = _cb && _cb.querySelector("[data-cfg=target_batch]");
+      var _b2 = patch.batch_size !== undefined ? patch.batch_size : Number((_bEl || {}).value || 1);
+      var _t2 = patch.target_batch !== undefined ? patch.target_batch : Number((_tEl || {}).value || 0);
+      patch.accum_steps = accumFromTarget(_b2, _t2);
+    }
     return patch;
   }
   window.collectCfgPatch = collectCfgPatch;
+
+  /* 委托监听：批次大小 / 目标批次 改动时立刻校验（页面重绘后也不用重新绑） */
+  document.addEventListener("input", function (e) {
+    var el = e.target;
+    if (!el || !el.dataset || (el.dataset.cfg !== "batch_size" && el.dataset.cfg !== "target_batch")) return;
+    validateTargetBatch();
+  }, true);
+  document.addEventListener("change", function (e) {
+    var el = e.target;
+    if (!el || !el.dataset || (el.dataset.cfg !== "batch_size" && el.dataset.cfg !== "target_batch")) return;
+    validateTargetBatch();
+  }, true);
+  window.addEventListener("load", function () { setTimeout(validateTargetBatch, 600); });
+
 
   function openRun(m) {
     /* 进页面先把占位文案清掉：没连上后端时不该显示 "1.82 it/s · 正式训练" 这种假数据 */
@@ -5367,11 +6725,22 @@
   if ($("cpass")) $("cpass").addEventListener("keydown", function (e) { if (e.key === "Enter") tryUnlock(); });
 
 
+  function syncWelcomeCap() {
+    var en = false;
+    try { en = window.I18N && window.I18N.get() === "en"; } catch (e) {}
+    var A = $("wCapA"), B = $("wCapB");
+    if (A) A.textContent = en ? "Scan with the " : "使用";
+    if (B) B.textContent = en ? "app to sign in" : "APP 扫码授权登录";
+  }
+  window.__syncWelcomeCap = syncWelcomeCap;
+  syncWelcomeCap();
+
   document.querySelectorAll("#wLang b").forEach(function (b) {
     b.addEventListener("click", function () {
       var lg = b.getAttribute("data-lang");
       document.querySelectorAll("#wLang b").forEach(function (x) { x.classList.toggle("on", x === b); });
       if (window.I18N) window.I18N.apply(lg);
+      if (window.__syncWelcomeCap) window.__syncWelcomeCap();
     });
   });
 
@@ -5846,6 +7215,9 @@
   }
 
   function ensureVisible(px) {
+    /* 拖动中绝不能自动滚：滚动改 mtlStack 的 rect.left，下一帧 frameAt
+       算出的帧号更大 → 再滚 → 正反馈，播放头会自己"飞"到末尾 */
+    if (S && S.dragging) return;
     var sc = $('mtlScroll');
     if (!sc || !sc.clientWidth) return;
     var pad = 24;
@@ -5993,15 +7365,38 @@
 
     var inp = $('mtlFrame');
     if (inp) {
+      /* 边打边跳：只有「是数字并且不越界」才真的 setFrame，
+         半截输入（''、'-'）、非数字（abc）、超尾帧都不动画面 */
+      inp.addEventListener('input', function () {
+        var v = parseInt(this.value, 10);
+        if (isNaN(v) || v < 0 || v > S.total - 1) return;
+        setFrame(v);
+      });
       inp.addEventListener('change', function () {
         var v = parseInt(this.value, 10);
         if (!isNaN(v)) setFrame(v);
-        else setFrame(S.frame);
+        /* 非法输入以前会原样留在框里：change 末尾一律拨回当前帧 */
+        this.value = String(S.frame);
       });
       inp.addEventListener('keydown', function (e) {
         if (e.key === 'Enter') {
           var v = parseInt(this.value, 10);
           if (!isNaN(v)) setFrame(v);
+          this.value = String(S.frame);
+          this.blur();
+        } else if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          stopPlay();
+          setFrame(S.frame - (e.shiftKey ? 10 : 1));
+          this.value = String(S.frame);
+        } else if (e.key === 'ArrowRight') {
+          e.preventDefault();
+          stopPlay();
+          setFrame(S.frame + (e.shiftKey ? 10 : 1));
+          this.value = String(S.frame);
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          this.value = String(S.frame);
           this.blur();
         }
       });
@@ -6030,12 +7425,41 @@
         applyZoom(b.getAttribute('data-zoom'));
       });
     }
+
+    /* 页面级快捷键：只在合成页激活（#p-merge 带 .on）时生效，且不抢输入控件/可编辑区的键。
+       ←/→ 逐帧（Shift 十帧）；空格播放/暂停。 */
+    document.addEventListener('keydown', function (e) {
+      var page = document.getElementById('p-merge');
+      if (!page || !page.classList || !page.classList.contains('on')) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      var t = e.target || {};
+      var tag = String(t.tagName || '').toUpperCase();
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable) return;
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        stopPlay();
+        setFrame(S.frame - (e.shiftKey ? 10 : 1));
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        stopPlay();
+        setFrame(S.frame + (e.shiftKey ? 10 : 1));
+      } else if (e.key === ' ' || e.key === 'Spacebar') {
+        e.preventDefault();
+        togglePlay();
+      }
+    });
   }
 
-  /* ---------- 初始化 ---------- */
-  function init(totalFrames, fps) {
+  /* ---------- 初始化 ----------
+     opts.keep = true：重进合成页的「续上」——保住播放头 S.frame 和已经算好的
+     人脸轨 S.data.faces，只按新的 total 重排视频轨和刻度；事件不重复绑定。
+     换素材时不要传 keep：人脸轨属于上一个素材，必须清掉，播放头归零。 */
+  function init(totalFrames, fps, opts) {
     var root = $('mergeTracks');
     if (!root) return null;
+    var keep = !!(opts && opts.keep);
+    var oldFrame = S.frame;
+    var oldFaces = (S.data && S.data.faces) ? S.data.faces : null;
     S.total = Math.max(0, Math.floor(isFinite(totalFrames) ? totalFrames : 0));
     if (fps && fps > 0) S.fps = fps;
     if (!S.ready) {
@@ -6044,9 +7468,11 @@
     }
     stopPlay();
     S.data = buildData(S.total);
-    S.frame = 0;
+    if (keep && oldFaces) S.data.faces = oldFaces;
+    /* keep 但没素材（total 0）时没有帧可停，回 0 */
+    S.frame = (keep && S.total > 0) ? clampFrame(oldFrame) : 0;
     renderAll();
-    return setFrame(0);
+    return setFrame(S.frame);
   }
 
   window.MergeTimeline = {
@@ -6064,10 +7490,11 @@
     getFrame: getFrame
   };
 
-  /* 占位自启动：宿主未显式调用 init 时，先按 300 帧渲染一条演示时间轴；
+  /* 占位自启动：宿主未显式调用 init 时先把空轴渲染出来（total 0）。
+     以前这里按 300 帧渲染演示数据 —— 素材还没打开就显示 300 帧，全是假的；
      宿主随后调用 MergeTimeline.init(state.totalFrames) 会整条重绘覆盖。 */
   document.addEventListener('DOMContentLoaded', function () {
-    if (!S.ready) init(300);
+    if (!S.ready) init(0);
   });
 })();
 
@@ -6100,7 +7527,7 @@
        'main' 表示收起所有二级页，回到合成主视图 */
     show: function (name) {
       var target = null;
-      all('.mgpage').forEach(function (el) {
+      all('.mgview').forEach(function (el) {
         var on = el.getAttribute('data-page') === name;
         el.classList.toggle('on', on);
         if (on) {
@@ -6148,7 +7575,7 @@
 
     /* 读取某个 seg 当前选中项的 data-v（没有 data-v 时退化成文字） */
     readSeg: function (key) {
-      var seg = one('.mgpage .seg[data-k="' + key + '"]');
+      var seg = one('#p-merge .mgview .seg[data-k="' + key + '"]');
       if (!seg) return '';
       var on = seg.querySelector('b.on');
       if (!on) return '';
@@ -6199,7 +7626,9 @@
         color_transfer: byId('mgColor'),
         erode_mask: tiny('遮罩腐蚀'),
         blur_mask: tiny('遮罩羽化'),
-        model: (document.querySelector('#mgModels .mgitem.on .nm') || {}).textContent || ''
+        model: (document.querySelector('#mgModels .mgitem.on .nm') || {}).textContent || '',
+        /* 多选契约：models=[{name, faces}]，导出事件 detail 里也带上 */
+        models: mgModelsPayload()
       };
     },
 
@@ -6269,10 +7698,10 @@
 
   /* ---------- 事件绑定 ---------- */
 
-  // seg 点击：只处理 .mgpage 内的，避免和主页面其它 seg 抢事件
+  // seg 点击：只处理 .mgview 内的，避免和主页面其它 seg 抢事件
   function bindSeg() {
     document.addEventListener('click', function (e) {
-      var b = e.target && e.target.closest ? e.target.closest('.mgpage .seg > b') : null;
+      var b = e.target && e.target.closest ? e.target.closest('.mgview .seg > b') : null;
       if (!b) return;
       var seg = b.parentElement;
       all('b', seg).forEach(function (item) { item.classList.toggle('on', item === b); });
@@ -7702,17 +9131,24 @@
     var stateCls = { ready: "ok", stale: "warn", missing: "" };
 
     function row(m) {
-      var st = stateText[m.state] || m.state || "—";
-      var cls = stateCls[m.state] || "";
-      var canBuild = m.state !== "ready";
+      /* 状态列只放一个东西：
+           已编译 → 绿色标签
+           其余   → 按钮本身就是状态（点击即编译）
+         不再「文字 + 按钮」并排，省掉一半宽度。 */
+      var cell;
+      if (m.state === "ready") {
+        cell = '<span class="tag ok">已编译</span>';
+      } else {
+        var text = m.state === "stale" ? "更新" : "编译";
+        var tip = m.state === "stale" ? "引擎需更新，点击重新编译" : "点击编译 " + m.name;
+        cell = '<button class="mini" data-eng="' + m.name + '" title="' + tip + '">' + text + '</button>';
+      }
       return '<tr>' +
         '<td>' + m.name + '</td>' +
         '<td class="mono" style="font-size:11px;color:var(--ink-3)">' + (m.md5 || "—") + '</td>' +
         '<td class="eng-num">' + (m.size_mb != null ? m.size_mb + ' MB' : '—') + '</td>' +
         '<td class="eng-num">' + (m.engine_mb != null ? m.engine_mb + ' MB' : '—') + '</td>' +
-        '<td><span class="tag ' + cls + '">' + st + '</span></td>' +
-        '<td class="eng-num"><button class="mini" data-eng="' + m.name + '"' +
-          (canBuild ? '' : ' disabled') + '>' + (m.state === 'ready' ? '已就绪' : '编译') + '</button></td>' +
+        '<td class="eng-st">' + cell + '</td>' +
         '</tr>';
     }
 
@@ -7750,8 +9186,8 @@
     }
 
     tbody.addEventListener("click", function (e) {
-      var b = e.target.closest("button[data-eng]");
-      if (b && !b.disabled) build(b.getAttribute("data-eng"));
+      var t = e.target.closest("[data-eng]");
+      if (t) build(t.getAttribute("data-eng"));
     });
 
     var all = document.getElementById("engAll");
@@ -7785,4 +9221,344 @@
       var page = document.getElementById("p-tool-engine");
       if (page && page.offsetParent !== null) load();
     }, 2500);
+  })();
+
+
+  /* 合成器的 4 个 select 也走同一个增强：
+     页面是静态 HTML，之前没经过 __enhanceSelects，所以弹层一直是系统原生的。
+     这里在启动时跑一次，并在每次切到「合成器」时再跑一次
+     （合成器的面板可能被重绘，重绘会换掉新的 select 节点）。 */
+  function enhanceMergeSelects() {
+    var host = document.getElementById("p-merge");
+    if (!host || !window.__enhanceSelects) return;
+    try { window.__enhanceSelects(host); } catch (e) { console.warn("[dd] merge enhance failed", e); }
+  }
+
+  (function () {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", function () { setTimeout(enhanceMergeSelects, 0); });
+    } else {
+      setTimeout(enhanceMergeSelects, 0);
+    }
+    /* 给模型卡片用：直接开某个模型的转换 */
+    window.cvOpen = function (name) {
+      window.__cvPick = name;
+      if (typeof window.go === "function") window.go("train-convert");
+      else load();
+    };
+
+    var _go = window.go;
+    if (typeof _go === "function" && !_go.__mergeDd) {
+      var wrapped = function (k) {
+        var r = _go.apply(this, arguments);
+        if (k === "merge") setTimeout(enhanceMergeSelects, 30);
+        return r;
+      };
+      wrapped.__mergeDd = true;
+      window.go = wrapped;
+      window.go = wrapped;
+    }
+  })();
+
+
+  /* ---------------- 工具：模型转换（.npy -> .pth，Stepper） ---------------- */
+  (function () {
+    var $ = function (id) { return document.getElementById(id); };
+    var timer = null;
+
+    function esc(s) {
+      return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
+        return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c];
+      });
+    }
+
+    function renderList(items) {
+      var box = $("cvList");
+      if (!box) return;
+      if (!items.length) {
+        box.innerHTML = '<div class="cvempty">workspace/model 里没有 *_weights.npy。把老版本的 .npy 模型放进去再刷新。</div>';
+        return;
+      }
+      box.innerHTML = items.map(function (it, i) {
+        var tag = it.converted
+          ? '<span class="tag">已转换</span>'
+          : '<button class="mini" data-cv="' + i + '">转换</button>';
+        return '<div class="cvrow"><span class="n">' + esc(it.name) + '</span>' +
+               '<span class="m">' + esc(it.arch || "?") + ' · ' + esc(it.sizeText) + '</span>' +
+               '<span class="sp"></span>' + tag + '</div>';
+      }).join("");
+      window.__cvItems = items;
+      box.querySelectorAll("[data-cv]").forEach(function (b) {
+        b.addEventListener("click", function () { start(items[+b.getAttribute("data-cv")]); });
+      });
+    }
+
+    function load() {
+      fetch("/api/convert/list").then(function (r) { return r.json(); })
+        .then(function (j) {
+          var items = (j && j.items) || [];
+          renderList(items);
+          /* 从模型卡片「转换」按钮进来时，直接开这一个模型 */
+          var pick = window.__cvPick;
+          if (pick) {
+            /* 卡片上的名字是 _cvprobe，转换列表里是 _cvprobe_SAEHD —— 按前缀匹配 */
+            var hit = items.filter(function (it) {
+              return it.name === pick || it.name.indexOf(pick + "_") === 0;
+            })[0];
+            window.__cvPick = "";
+            if (hit && !hit.converted) setTimeout(function () { start(hit); }, 60);
+          }
+        })
+        .catch(function () { renderList([]); });
+    }
+
+    function step(el, cls, mark) {
+      var node = $(el);
+      if (!node) return;
+      node.className = "cvst " + (cls || "");
+      var ic = node.querySelector(".cvic");
+      if (ic) ic.textContent = mark;
+    }
+
+    function paint(st) {
+      var card = $("cvCard");
+      if (!card) return;
+      card.style.display = "";
+      $("cvName").textContent = st.name || "model";
+      $("cvMeta").textContent = st.modules && st.modules.length ? (st.modules.length + " 个模块") : "";
+      $("cvBad").className = "cvbad" + (st.step === "error" ? " on" : "");
+
+      if (st.step === "load") {
+        step("cvS1", "on", "1"); step("cvS2", "", "2"); step("cvS3", "", "3");
+      } else if (st.step === "convert") {
+        step("cvS1", "done", "✓"); step("cvS2", "on open", "2"); step("cvS3", "", "3");
+      } else if (st.step === "done") {
+        step("cvS1", "done", "✓"); step("cvS2", "done", "✓"); step("cvS3", "done", "✓");
+      } else if (st.step === "error") {
+        step("cvS1", "done", "✓"); step("cvS2", "err open", "!"); step("cvS3", "", "3");
+      }
+
+      var rows = $("cvRows");
+      if (rows) {
+        var html = (st.modules || []).map(function (m) {
+          var state = m.state === "ok" ? "ok" : (st.step === "error" && m.state !== "ok" ? "wait" : (m.state === "run" ? "run" : "wait"));
+          var mk = state === "ok" ? "✓" : (state === "run" ? "›" : "·");
+          var cnt = state === "ok" ? "完成" : (state === "run" ? "转换中" : "等待");
+          return '<div class="cvrowi ' + state + '"><span class="mk">' + mk + '</span>' +
+                 '<span class="n">' + esc(m.name) + '</span><span class="c">' + cnt + '</span></div>';
+        }).join("");
+        if (st.step === "error" && st.error) {
+          html += '<div class="cvrowi bad"><span class="mk">!</span><span class="n">' +
+                  esc(st.error) + '</span><span class="c">失败</span></div>';
+        }
+        rows.innerHTML = html;
+      }
+    }
+
+    function poll() {
+      fetch("/api/convert/status").then(function (r) { return r.json(); }).then(function (st) {
+        paint(st);
+        if (st.running) { timer = setTimeout(poll, 400); }
+        else { clearTimeout(timer); timer = null; load(); }
+      }).catch(function () { timer = setTimeout(poll, 900); });
+    }
+
+    function start(it) {
+      $("cvCard").style.display = "";
+      step("cvS1", "on", "1"); step("cvS2", "", "2"); step("cvS3", "", "3");
+      if ($("cvRows")) $("cvRows").innerHTML = "";
+      fetch("/api/convert/start", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: it.name })
+      }).then(function (r) { return r.json(); }).then(function (j) {
+        if (j && j.ok) { if (timer) clearTimeout(timer); timer = setTimeout(poll, 300); }
+        else { paint({ step: "error", name: it.name, error: (j && j.detail) || "启动失败", modules: [] }); }
+      }).catch(function (e) {
+        paint({ step: "error", name: it.name, error: String(e), modules: [] });
+      });
+    }
+
+    var _go = window.go;
+    if (typeof _go === "function" && !_go.__cv) {
+      var wrapped = function (k) {
+        var r = _go.apply(this, arguments);
+        if (k === "train-convert") { setTimeout(load, 30); }
+        return r;
+      };
+      wrapped.__cv = true;
+      window.go = wrapped;
+    }
+    setTimeout(function () { if ($("p-train-convert")) load(); }, 400);
+  })();
+
+  /* ---------- 设置页 · B 站账号（未登录 → 打开欢迎页扫码） ---------- */
+  (function () {
+    function gid(id) { return document.getElementById(id); }
+    function render(d) {
+      var tag = gid("biliTag"), info = gid("biliInfo"), btn = gid("btnBiliAction");
+      if (!tag) return;
+      var on = !!(d && d.logged_in);
+      tag.textContent = on ? "已登录" : "未登录";
+      tag.className = on ? "tag ok" : "tag";
+      if (info) info.textContent = on
+        ? ((d.name || "已登录") + (d.uid ? " · UID " + d.uid : ""))
+        : "登录后可下载 1080P / 会员清晰度";
+      if (btn) { btn.textContent = on ? "退出登录" : "去登录"; btn.dataset.on = on ? "1" : ""; }
+    }
+    function load() {
+      fetch("/api/bili/me").then(function (r) { return r.json(); })
+        .then(render).catch(function () { render(null); });
+    }
+    window.loadBili = load;
+
+    var btn = gid("btnBiliAction");
+    if (btn) btn.addEventListener("click", function () {
+      if (btn.dataset.on === "1") {
+        btn.disabled = true;
+        Promise.all([
+          fetch("/api/bili/logout", { method: "POST" }),
+          fetch("/api/auth/logout", { method: "POST" })
+        ]).then(function () {
+          btn.disabled = false;
+          if (window.toast) window.toast("B 站账号", "已退出登录", "success");
+          location.reload();
+        }).catch(function () { btn.disabled = false; });
+      } else {
+        /* 直接打开欢迎页的扫码界面 */
+        var w = gid("welcome");
+        if (w) { w.style.display = "grid"; if (window.biliQr) window.biliQr(); }
+      }
+    });
+
+    var _goS = window.go;
+    if (typeof _goS === "function" && !_goS.__biliCard) {
+      var wrap = function (k) { var r = _goS.apply(this, arguments); if (k === "settings") setTimeout(load, 40); return r; };
+      wrap.__biliCard = true;
+      window.go = wrap;
+    }
+    setTimeout(load, 900);
+  })();
+
+  /* ---------- 欢迎页：三张卡渐进披露（选中展开，其余压暗） ---------- */
+  (function () {
+    var wrap = document.querySelector(".wfeats");
+    if (!wrap) return;
+    wrap.addEventListener("click", function (e) {
+      var btn = e.target.closest ? e.target.closest("[data-wf]") : null;
+      if (!btn) return;
+      var on = btn.classList.contains("on");
+      wrap.querySelectorAll("[data-wf]").forEach(function (b) { b.classList.remove("on"); });
+      if (!on) btn.classList.add("on");
+    });
+  })();
+
+  /* ---------- 欢迎页：直接显示扫码 ---------- */
+  (function () {
+    var tried = false;
+    function kick() {
+      if (tried) return;
+      var w = document.getElementById("welcome");
+      if (!w || w.style.display === "none") return;
+      tried = true;
+      if (window.biliQr) window.biliQr();
+    }
+    document.addEventListener("DOMContentLoaded", kick);
+    var timer = setInterval(function () {
+      kick();
+      if (tried) clearInterval(timer);
+    }, 400);
+    setTimeout(function () { clearInterval(timer); }, 15000);
+  })();
+
+  /* ---------- 欢迎页：让玻璃条对齐背景图里的条带 ---------- */
+  (function () {
+    var IMG_W = 1193, IMG_H = 576, BAND_T = 224, BAND_B = 384;
+    function sync() {
+      var w = document.getElementById("welcome");
+      if (!w) return;
+      var vw = w.clientWidth || innerWidth;
+      var vh = w.clientHeight || innerHeight;
+      var scale = Math.max(vw / IMG_W, vh / IMG_H);
+      var dh = IMG_H * scale, ox = (vw - IMG_W * scale) / 2, oy = (vh - dh) / 2;
+      w.style.setProperty("--band-top", (oy + BAND_T * scale) + "px");
+      w.style.setProperty("--band-h", ((BAND_B - BAND_T) * scale) + "px");
+    }
+    addEventListener("resize", sync);
+    document.addEventListener("DOMContentLoaded", sync);
+    sync();
+    window.__bandSync = sync;
+  })();
+
+
+  /* ---------- 使用许可 / 免责声明 ---------- */
+  (function () {
+    var KEY = "dfl-legal-v3";   /* 协议位置/流程变了，旧的一次性勾选不再作数 */
+    var gate = document.getElementById("legalGate");
+    var checks = [].slice.call(document.querySelectorAll("[data-legal-check]"));
+    var okBtn = document.getElementById("legalAccept");
+    var noBtn = document.getElementById("legalDecline");
+    if (!gate || !checks.length || !okBtn) return;
+
+    function accepted() {
+      try { return localStorage.getItem(KEY) === "1"; } catch (e) { return false; }
+    }
+    function open() {
+      gate.style.display = "flex";
+      /* 协议在登录页上展示时，把扫码卡和品牌字收起来，只留背景动画 */
+      var wl = document.getElementById("welcome");
+      if (wl) wl.classList.add("legal-on");
+      document.documentElement.classList.add("legal-open");
+    }
+    function close() {
+      gate.style.display = "none";
+      var wl2 = document.getElementById("welcome");
+      if (wl2) wl2.classList.remove("legal-on");
+      document.documentElement.classList.remove("legal-open");
+    }
+
+    function sync() {
+      /* 协议在**扫码登录之后**才弹：没登录时先好好扫码，别一进来就堵着。 */
+      var must = !!window.__loggedIn && !accepted();
+      if (must && gate.style.display === "none") open();
+      if (!must && gate.style.display !== "none") close();
+    }
+    window.__legalSync = sync;
+    window.__legalAccepted = accepted;
+
+    /* 三条都必须勾选 */
+    function refreshOk() {
+      okBtn.disabled = !checks.every(function (c) { return c.checked; });
+    }
+    checks.forEach(function (c) { c.addEventListener("change", refreshOk); });
+    refreshOk();
+
+    okBtn.addEventListener("click", function () {
+      try {
+        localStorage.setItem(KEY, "1");
+        localStorage.setItem(KEY + ".at", new Date().toISOString());
+      } catch (e) {}
+      close();
+      /* 同意之后用当前登录态重绘一次：欢迎页该收起来了，别让用户再扫一次码 */
+      try { if (window.applyAuth) window.applyAuth(); } catch (e) {}
+      if (window.__afterLegal) { var f = window.__afterLegal; window.__afterLegal = null; f(); }
+    });
+
+    noBtn.addEventListener("click", function () {
+      Promise.all([
+        fetch("/api/auth/logout", { method: "POST" }),
+        fetch("/api/bili/logout", { method: "POST" })
+      ]).catch(function () {}).then(function () {
+        try { localStorage.removeItem(KEY); } catch (e) {}
+        try {
+          document.cookie.split(";").forEach(function (c) {
+            var k = c.split("=")[0].trim();
+            if (k) document.cookie = k + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/";
+          });
+        } catch (e) {}
+        location.reload();
+      });
+    });
+
+    setInterval(sync, 600);
+    sync();
   })();

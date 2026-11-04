@@ -1,0 +1,294 @@
+{
+  "version": 1,
+  "note": "权重不进版本库。缺失时：python -m modelhub.fetch --group core|sam",
+  "files": [
+    {
+      "path": "bisenet/model_final.pth",
+      "size": 53289463,
+      "sha256": "468e13ca13a9b43cc0881a9f99083a430e9c0a38abd935431d1c28ee94b26567",
+      "group": "sam"
+    },
+    {
+      "path": "errface/errface_xgb.ubj",
+      "size": 699184,
+      "sha256": "183b73b6f0fc29e26f2bb100081e952f179ca42113d460ce27e0d7e16923c380",
+      "group": "core"
+    },
+    {
+      "path": "grounding_dino/gdino_checkpoints/groundingdino_swinb_cogcoor.pth",
+      "size": 938057991,
+      "sha256": "46270f7a822e6906b655b729c90613e48929d0f2bb8b9b76fd10a856f3ac6ab7",
+      "group": "sam"
+    },
+    {
+      "path": "grounding_dino/gdino_checkpoints/groundingdino_swint_ogc.pth",
+      "size": 693997677,
+      "sha256": "3b3ca2563c77c69f651d7bd133e97139c186df06231157a64c507099c52bc799",
+      "group": "sam"
+    },
+    {
+      "path": "onnx/ArcFace/w600k_mbf.onnx",
+      "size": 13616099,
+      "sha256": "9cc6e4a75f0e2bf0b1aed94578f144d15175f357bdc05e815e5c4a02b319eb4f",
+      "group": "core"
+    },
+    {
+      "path": "onnx/ArcFace/w600k_r50.onnx",
+      "size": 174383860,
+      "sha256": "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43",
+      "group": "core"
+    },
+    {
+      "path": "onnx/BlazeFace/blaze.onnx",
+      "size": 535842,
+      "sha256": "564740c5146673c840257402cee8309161848e48e64d277a862ab4d501adf8a5",
+      "group": "core"
+    },
+    {
+      "path": "onnx/CenterFace/CenterFace.onnx",
+      "size": 7503327,
+      "sha256": "99f4c464ede859548b94c04e35e6a71782b16d2db385b98ac9a085d44506d173",
+      "group": "core"
+    },
+    {
+      "path": "onnx/DamoFD/DamoFD.onnx",
+      "size": 16923827,
+      "sha256": "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91",
+      "group": "core"
+    },
+    {
+      "path": "onnx/DamoFD/DamoFD.onnx.data",
+      "size": 1057504,
+      "sha256": "2efa05e58c0dc7844e5695aca2702e385d07956c7064c8e4125886bb88e1e31a",
+      "group": "core"
+    },
+    {
+      "path": "onnx/FaceEnhancer/FaceEnhancer.onnx",
+      "size": 130467,
+      "sha256": "1ab4c72bc5d9e785e188477ab27add0d6ef3752667e4c1706955c524a55a2ad8",
+      "group": "core"
+    },
+    {
+      "path": "onnx/FaceEnhancer/FaceEnhancer.onnx.data",
+      "size": 132841472,
+      "sha256": "776bb9b0a775661e41a4e3f6fe57576487227287efafe95ab4324297921d8760",
+      "group": "core"
+    },
+    {
+      "path": "onnx/FaceMesh/FaceMesh.onnx",
+      "size": 2332284,
+      "sha256": "d543107cfab6a216501b37667ef1520950410dfe02d4c186e6b154fc91345ee1",
+      "group": "core"
+    },
+    {
+      "path": "onnx/FaceParser/faceparser.onnx",
+      "size": 93632554,
+      "sha256": "5b805bba7b5660ab7070b5a381dcf75e5b3e04199f1e9387232a77a00095102e",
+      "group": "core"
+    },
+    {
+      "path": "onnx/FAN/2DFAN.onnx",
+      "size": 2469344,
+      "sha256": "776fa011e19fa0bc20d59c1ae3982caff9657bc8c2e85daa11dad3842f1afda2",
+      "group": "core"
+    },
+    {
+      "path": "onnx/FAN/2DFAN.onnx.data",
+      "size": 95485952,
+      "sha256": "ff2b631da369fd1ba850cd5dce49d2b632fdc2b12c5186b106fc404733090e75",
+      "group": "core"
+    },
+    {
+      "path": "onnx/FAN/3DFAN.onnx",
+      "size": 2469344,
+      "sha256": "227f0ee7eab01184e89f5ee7d0d6b457b8609f5e3c7b77dbc91e8b5e66dfbbc2",
+      "group": "core"
+    },
+    {
+      "path": "onnx/FAN/3DFAN.onnx.data",
+      "size": 95485952,
+      "sha256": "2875dc20262552715cb2ceb660b22a17fcd6f9844c3fbf50a063de321b8c5e1a",
+      "group": "core"
+    },
+    {
+      "path": "onnx/FastFaceAlign/FastFaceAlign.onnx",
+      "size": 959921,
+      "sha256": "69d90467c00dd5955a68d8ac04912ae9872a16b588678c551c92060b4d33e520",
+      "group": "core"
+    },
+    {
+      "path": "onnx/GenderAge/genderage.onnx",
+      "size": 1322532,
+      "sha256": "4fde69b1c810857b88c64a335084f1c3fe8f01246c9a191b48c7bb756d6652fb",
+      "group": "core"
+    },
+    {
+      "path": "onnx/InsightFace2d106/InsightFace2D106.onnx",
+      "size": 5030888,
+      "sha256": "f001b856447c413801ef5c42091ed0cd516fcd21f2d6b79635b1e733a7109dbf",
+      "group": "core"
+    },
+    {
+      "path": "onnx/InsightFace3D68/1k3d68.onnx",
+      "size": 143607619,
+      "sha256": "df5c06b8a0c12e422b2ed8947b8869faa4105387f199c477af038aa01f9a45cc",
+      "group": "core"
+    },
+    {
+      "path": "onnx/LIA/generator.onnx",
+      "size": 192555477,
+      "sha256": "a4b316e832bc781093d15bb2e87493008430cd8973ec19e67d48906fa2248003",
+      "group": "core"
+    },
+    {
+      "path": "onnx/LightweightFD/face_det_lite.data",
+      "size": 3500032,
+      "sha256": "d0046415a9c1a08efb9c8c47b258ac547985ef83619f4b85288733d093c125e0",
+      "group": "core"
+    },
+    {
+      "path": "onnx/LightweightFD/face_det_lite.onnx",
+      "size": 44923,
+      "sha256": "ac02c478c7f20bdc66cda16792e084b9012614c23896a2d5c588888ee2b76c64",
+      "group": "core"
+    },
+    {
+      "path": "onnx/MobileFaceNet/landmark_detection_56_se_external.onnx",
+      "size": 11448228,
+      "sha256": "8e0c0312390e82a9e7bb1b6d0112fa3839266c2ecf66238ac7e2e3953df1fbaf",
+      "group": "core"
+    },
+    {
+      "path": "onnx/MogFace/MogFace.onnx",
+      "size": 244257365,
+      "sha256": "91651f8138156b8247d0584d21cd67d5c3530b244d8f5d7082fa183e3e58931f",
+      "group": "core"
+    },
+    {
+      "path": "onnx/MTCNN/onet.onnx",
+      "size": 1560867,
+      "sha256": "dc1b7029e6b941c6a78f8e7bf637cc5a795b20edef40b8180803f09eb937d05d",
+      "group": "core"
+    },
+    {
+      "path": "onnx/MTCNN/pnet.onnx",
+      "size": 29037,
+      "sha256": "f31c6196e0c91055ba05d0c906d5b73e8a60071c175dbbd9f8025535a3b33257",
+      "group": "core"
+    },
+    {
+      "path": "onnx/MTCNN/rnet.onnx",
+      "size": 404527,
+      "sha256": "e4ba90fe19048494020dbc7e3b518f15172dbf7f712b0eac14417632cea84700",
+      "group": "core"
+    },
+    {
+      "path": "onnx/OpenSeeFace/lm_model0_opt.onnx",
+      "size": 1902521,
+      "sha256": "43c9c58f03701cc15b8423c49b78af348a6397334d348887e0fda59013275c29",
+      "group": "core"
+    },
+    {
+      "path": "onnx/OpenSeeFace/lm_model1_opt.onnx",
+      "size": 4842329,
+      "sha256": "5bec42b298a24142cdb249a7256d65bc3fc0fbc673fa1752a64f4d7164719c9f",
+      "group": "core"
+    },
+    {
+      "path": "onnx/OpenSeeFace/retinaface_640x640_opt.onnx",
+      "size": 1713525,
+      "sha256": "c8672bf91ca858d7b51e258ac39e41eb2a03309502ccb868e4fa1e4354dd0f89",
+      "group": "core"
+    },
+    {
+      "path": "onnx/PFLD/pfld.onnx",
+      "size": 2987921,
+      "sha256": "7d7bbd5c6a1d9272e58d9773898284a1905d872eba9a662df9b5f20f1ba6f83e",
+      "group": "core"
+    },
+    {
+      "path": "onnx/RetinaFace/det_10g.onnx",
+      "size": 16923827,
+      "sha256": "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91",
+      "group": "core"
+    },
+    {
+      "path": "onnx/RetinaFace/det_500m.onnx",
+      "size": 2524817,
+      "sha256": "5e4447f50245bbd7966bd6c0fa52938c61474a04ec7def48753668a9d8b4ea3a",
+      "group": "core"
+    },
+    {
+      "path": "onnx/S3FD/S3FD.onnx",
+      "size": 89847188,
+      "sha256": "31341edb13ef8684fe510b02a47cfad1071ea6be3ba088347c89bda374efad39",
+      "group": "core"
+    },
+    {
+      "path": "onnx/TinyMog/TinyMog.onnx",
+      "size": 322714,
+      "sha256": "91cbee715a60f096a802161f1bc806df1df457030621d43f9ea849f00707156e",
+      "group": "core"
+    },
+    {
+      "path": "onnx/TinyMog/TinyMog.onnx.data",
+      "size": 2501024,
+      "sha256": "0668e842c93f4997ae124ceba9fa6fd143226431ffa55ed81fd53f4c630b4646",
+      "group": "core"
+    },
+    {
+      "path": "onnx/ULFD/ULFD.onnx",
+      "size": 1483994,
+      "sha256": "340a0265825fe7040abf29c08e2af9441d149c485aac89e43ebdd74ee75b3bc9",
+      "group": "core"
+    },
+    {
+      "path": "onnx/YoloV11nFace/yolov11n-face.onnx",
+      "size": 10481560,
+      "sha256": "7b4b3a098ac15a5ccd0d048e7949b63275e4a9657c374ad9e4730632d9f01829",
+      "group": "core"
+    },
+    {
+      "path": "onnx/YoloV5Face/YoloV5Face.onnx",
+      "size": 28282217,
+      "sha256": "907c295f79eba1b0f4be59bcf5d8aabe4e2a9002ec44c5d1c518b97eb9fb13da",
+      "group": "core"
+    },
+    {
+      "path": "onnx/YoloV8Face/yolov8n-face.onnx",
+      "size": 12265830,
+      "sha256": "3e3c37a6625a37158cb03ad7d4565de51f94253c79c7e0eee0e107c41daebf05",
+      "group": "core"
+    },
+    {
+      "path": "sam/sam_vit_b_01ec64.pth",
+      "size": 375042383,
+      "sha256": "ec2df62732614e57411cdcf32a23ffdf28910380d03139ee0f4fcbe91eb8c912",
+      "group": "sam"
+    },
+    {
+      "path": "sam2/checkpoints/sam2.1_hiera_base_plus.pt",
+      "size": 323606802,
+      "sha256": "a2345aede8715ab1d5d31b4a509fb160c5a4af1970f199d9054ccfb746c004c5",
+      "group": "sam"
+    },
+    {
+      "path": "sam2/checkpoints/sam2.1_hiera_large.pt",
+      "size": 898083611,
+      "sha256": "2647878d5dfa5098f2f8649825738a9345572bae2d4350a2468587ece47dd318",
+      "group": "sam"
+    },
+    {
+      "path": "sam2/checkpoints/sam2.1_hiera_small.pt",
+      "size": 184416285,
+      "sha256": "6d1aa6f30de5c92224f8172114de081d104bbd23dd9dc5c58996f0cad5dc4d38",
+      "group": "sam"
+    },
+    {
+      "path": "sam2/checkpoints/sam2.1_hiera_tiny.pt",
+      "size": 156008466,
+      "sha256": "7402e0d864fa82708a20fbd15bc84245c2f26dff0eb43a4b5b93452deb34be69",
+      "group": "sam"
+    }
+  ]
+}

@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>模型转换页 · 方案 A（按模块）</title>
+<style>
+:root{
+  --bg:#0f0f12; --card:#17171c; --panel:#1d1d24; --line:#2a2a33; --line2:#35353f;
+  --ink:#ececf2; --ink2:#a8a8b6; --ink3:#75758a; --brand:#5d6ccf; --brand-soft:rgba(93,108,207,.16);
+  --ok:#4caf7d; --bad:#e05a5a;
+  --font:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  --mono:ui-monospace,"Cascadia Mono",Consolas,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;padding:34px 40px 60px;background:var(--bg);color:var(--ink);font-family:var(--font);-webkit-font-smoothing:antialiased}
+h1{font-size:20px;font-weight:650;margin:0 0 6px}
+.sub{color:var(--ink3);font-size:13px;margin-bottom:22px}
+.state{color:var(--ink3);font-size:12px;margin:24px 0 10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px;max-width:860px}
+.hd{display:flex;align-items:baseline;gap:10px}
+.hd b{font-size:15px;font-weight:650}
+.hd .meta{font-size:12px;color:var(--ink3)}
+.ov{display:flex;align-items:center;gap:10px;margin:12px 0 2px}
+.ovbar{flex:1;height:4px;border-radius:999px;background:var(--line2);overflow:hidden}
+.ovbar i{display:block;height:100%;background:var(--brand);border-radius:999px}
+.ovpct{font-size:11.5px;color:var(--ink2);font-variant-numeric:tabular-nums;min-width:44px;text-align:right}
+
+.steps{display:flex;flex-direction:column;margin-top:8px}
+.step{display:flex;gap:14px;padding:13px 0;position:relative}
+.step:not(:last-child)::before{content:"";position:absolute;left:11px;top:38px;bottom:-2px;width:1px;background:var(--line2)}
+.sicon{width:24px;height:24px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;
+  font-size:11px;border:1px solid var(--line2);background:var(--panel);color:var(--ink3);z-index:1;font-variant-numeric:tabular-nums}
+.step.done .sicon{background:rgba(76,175,125,.15);border-color:rgba(76,175,125,.5);color:var(--ok)}
+.step.run  .sicon{background:var(--brand-soft);border-color:var(--brand);color:var(--brand)}
+.step.err  .sicon{background:rgba(224,90,90,.14);border-color:rgba(224,90,90,.5);color:var(--bad)}
+.sbody{flex:1;min-width:0}
+.st{font-size:12.5px;margin-bottom:6px;display:flex;align-items:center;gap:8px}
+.st .pill{font-size:10px;padding:1px 6px;border-radius:5px;background:var(--line2);color:var(--ink3)}
+.sd{font-size:11.5px;color:var(--ink3);line-height:1.75}
+.sd code{font-family:var(--mono);font-size:11px;color:var(--ink2);background:var(--panel);
+  border:1px solid var(--line);border-radius:5px;padding:1px 5px}
+
+/* 模块清单 */
+.mods{margin-top:9px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.mod{display:flex;align-items:center;gap:10px;padding:7px 11px;font-size:11.5px;
+  border-bottom:1px solid var(--line);background:var(--panel)}
+.mod:last-child{border-bottom:0}
+.mod .n{font-family:var(--mono);color:var(--ink);min-width:86px}
+.mod .s{color:var(--ink3);flex:1}
+.mod .c{font-variant-numeric:tabular-nums;color:var(--ink3)}
+.mod.ok .c{color:var(--ok)}
+.mod.run{background:rgba(93,108,207,.10)}
+.mod.run .c{color:var(--brand)}
+.mod .mk{width:14px;text-align:center;color:var(--ink3)}
+.mod.ok .mk{color:var(--ok)}
+.mod.run .mk{color:var(--brand)}
+.mod.err .mk{color:var(--bad)}
+.mod.err{background:rgba(224,90,90,.08)}
+.mod.err .c{color:var(--bad)}
+
+.foot{display:flex;align-items:center;gap:8px;margin-top:15px;padding-top:13px;border-top:1px solid var(--line);
+  font-size:11.5px;color:var(--ink3)}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--brand);display:inline-block}
+</style></head>
+<body>
+<h1>模型转换 · 方案 A（按模块展开）</h1>
+<div class="sub">第 2 步列出这个模型真实拥有的模块，逐个显示转换进度。下面分别给 ​LIAE 和 DF 两种架构。</div>
+
+<div class="state">① LIAE（liae-ud · 384）· 转换中</div>
+<div class="card">
+  <div class="hd"><b>_smoketrain</b><span class="meta">liae-ud · 384 · 来自 .npy（TF）</span></div>
+  <div class="ov"><div class="ovbar"><i style="width:58%"></i></div><span class="ovpct">58%</span></div>
+
+  <div class="steps">
+    <div class="step done">
+      <div class="sicon">✓</div>
+      <div class="sbody">
+        <div class="st">加载模块 <span class="pill">已完成</span></div>
+        <div class="sd">读取 <code>saehd_weights.npy</code>，识别架构 <b>liae-ud</b>，共 <b>4</b> 个模块 / <b>96</b> 项权重</div>
+      </div>
+    </div>
+
+    <div class="step run">
+      <div class="sicon">2</div>
+      <div class="sbody">
+        <div class="st">转换模型 <span class="pill">进行中</span></div>
+        <div class="sd">逐模块写出 .pth，卷积布局 NHWC → NCHW</div>
+        <div class="mods">
+          <div class="mod ok"><span class="mk">✓</span><span class="n">encoder</span><span class="s">encoder.pth</span><span class="c">32 项</span></div>
+          <div class="mod ok"><span class="mk">✓</span><span class="n">inter_AB</span><span class="s">inter_AB.pth</span><span class="c">8 项</span></div>
+          <div class="mod run"><span class="mk">›</span><span class="n">inter_B</span><span class="s">inter_B.pth · 正在重排</span><span class="c">3 / 8</span></div>
+          <div class="mod"><span class="mk">·</span><span class="n">decoder</span><span class="s">decoder.pth · 待转换</span><span class="c">—</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="sicon">3</div>
+      <div class="sbody">
+        <div class="st">校验 <span class="pill">待执行</span></div>
+        <div class="sd">4 个模块逐个比对源权重与输出，输出最大误差</div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span class="dot"></span>转换完成后可直接在此模型上开始训练</div>
+</div>
+
+<div class="state">② DF（df-ud · 256）· 转换中</div>
+<div class="card">
+  <div class="hd"><b>_df256</b><span class="meta">df-ud · 256 · 来自 .npy（TF）</span></div>
+  <div class="ov"><div class="ovbar"><i style="width:34%"></i></div><span class="ovpct">34%</span></div>
+
+  <div class="steps">
+    <div class="step done">
+      <div class="sicon">✓</div>
+      <div class="sbody">
+        <div class="st">加载模块 <span class="pill">已完成</span></div>
+        <div class="sd">读取 <code>saehd_weights.npy</code>，识别架构 <b>df-ud</b>，共 <b>4</b> 个模块 / <b>84</b> 项权重</div>
+      </div>
+    </div>
+    <div class="step run">
+      <div class="sicon">2</div>
+      <div class="sbody">
+        <div class="st">转换模型 <span class="pill">进行中</span></div>
+        <div class="sd">逐模块写出 .pth，卷积布局 NHWC → NCHW</div>
+        <div class="mods">
+          <div class="mod ok"><span class="mk">✓</span><span class="n">encoder</span><span class="s">encoder.pth</span><span class="c">28 项</span></div>
+          <div class="mod run"><span class="mk">›</span><span class="n">inter</span><span class="s">inter.pth · 正在重排</span><span class="c">2 / 6</span></div>
+          <div class="mod"><span class="mk">·</span><span class="n">decoder_src</span><span class="s">decoder_src.pth · 待转换</span><span class="c">—</span></div>
+          <div class="mod"><span class="mk">·</span><span class="n">decoder_dst</span><span class="s">decoder_dst.pth · 待转换</span><span class="c">—</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="step">
+      <div class="sicon">3</div>
+      <div class="sbody">
+        <div class="st">校验 <span class="pill">待执行</span></div>
+        <div class="sd">4 个模块逐个比对源权重与输出，输出最大误差</div>
+      </div>
+    </div>
+  </div>
+  <div class="foot"><span class="dot"></span>DF 的 src/dst 两个 decoder 会分别转换，同时保留</div>
+</div>
+
+<div class="state">③ 出错示例 · 某个模块形状不符</div>
+<div class="card">
+  <div class="hd"><b>_smoketrain</b><span class="meta">liae-ud · 384</span></div>
+  <div class="ov"><div class="ovbar"><i style="width:70%;background:var(--bad)"></i></div><span class="ovpct" style="color:var(--bad)">失败</span></div>
+
+  <div class="steps">
+    <div class="step done"><div class="sicon">✓</div>
+      <div class="sbody"><div class="st">加载模块 <span class="pill">已完成</span></div>
+        <div class="sd">读取 <code>saehd_weights.npy</code> · 4 个模块 / 96 项</div></div>
+    </div>
+    <div class="step err"><div class="sicon">!</div>
+      <div class="sbody">
+        <div class="st">转换模型 <span class="pill">失败</span></div>
+        <div class="mods">
+          <div class="mod ok"><span class="mk">✓</span><span class="n">encoder</span><span class="s">encoder.pth</span><span class="c">32 项</span></div>
+          <div class="mod err"><span class="mk">!</span><span class="n">inter_AB</span><span class="s">decoder.conv_out.weight 形状 (5,5,128,128)，预期 (128,128,5,5)</span><span class="c">失败</span></div>
+          <div class="mod"><span class="mk">·</span><span class="n">inter_B</span><span class="s">未开始</span><span class="c">—</span></div>
+          <div class="mod"><span class="mk">·</span><span class="n">decoder</span><span class="s">未开始</span><span class="c">—</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="step"><div class="sicon">3</div>
+      <div class="sbody"><div class="st">校验 <span class="pill">跳过</span></div>
+        <div class="sd">有模块转换失败，未进入校验</div></div>
+    </div>
+  </div>
+  <div class="foot" style="color:var(--bad)"><span class="dot" style="background:var(--bad)"></span>源 .npy 已保留，未写入任何 .pth</div>
+</div>
+
+</body></html>

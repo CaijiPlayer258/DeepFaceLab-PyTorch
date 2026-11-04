@@ -13,6 +13,8 @@ import threading
 import time
 from pathlib import Path
 
+import numpy as np
+
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import FileResponse, StreamingResponse
 
@@ -121,6 +123,178 @@ def dataset_oneshot_status():
     return j
 
 
+_FACEID_PROGRESS = {"path": ""}
+
+
+@router.get("/api/dataset/faceid/progress")
+def faceid_progress():
+    """读引擎进程写的进度文件：stage=embed/cluster/done, done/total。"""
+    # 不依赖内存里的路径（路由模块可能被导入两次）：直接找最新的进度文件
+    import glob
+    cands = sorted(glob.glob(str(WORKSPACE / "_faceid_*.json")) +
+                   glob.glob(str(WORKSPACE / "_dsprog_*.json")),
+                   key=os.path.getmtime, reverse=True)
+    if not cands:
+        return {"ok": False}
+    try:
+        with open(cands[0], "r", encoding="utf-8") as f:
+            d = json.load(f)
+        # 超过 5 分钟没更新就当过期，别让 UI 一直读旧值
+        if time.time() - os.path.getmtime(cands[0]) > 3600:
+            return {"ok": False}
+        d["ok"] = True
+        return d
+    except Exception:
+        return {"ok": False}
+
+
+def _ds_progress_writer(stage, total):
+    """写一份扫描进度文件（和 faceid 那套同一个约定），返回 put(done)。"""
+    import json as _j
+    import os as _o
+    import time as _t
+
+    path = WORKSPACE / ("_dsprog_%d.json" % _o.getpid())
+    try:
+        if path.exists():
+            path.unlink()          # 上一轮留下的 finished 状态会让 UI 一进来就显示 100%
+    except Exception:
+        pass
+    last = [_t.time()]
+
+    def put(done, total_n=None, stage_name=None):
+        now = _t.time()
+        # 每 150ms 写一次就够前端 400ms 轮询看了，别把磁盘写爆
+        if done < (total_n or total) and now - last[0] < 0.15:
+            return
+        last[0] = now
+        try:
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(_j.dumps({"stage": stage_name or stage, "done": int(done),
+                                     "total": int(total_n or total)}, ensure_ascii=False),
+                           encoding="utf-8")
+            _o.replace(str(tmp), str(path))
+        except Exception:
+            pass
+
+    put(0)
+    return put
+
+
+@router.post("/api/dataset/merge-subdirs")
+def dataset_merge_subdirs(payload: dict):
+    """把一级子目录里的图片搬回 aligned 根目录（照搬 4.0 的「合并子文件夹」）。
+
+    4.0 的做法（FacesetProcessor/Filter.py: merge_subfolders_to_aligned）：
+      * 只看**一级**子目录，不递归；
+      * 冲突直接覆盖（move /y）；
+      * 原本就空的目录保留，搬空的目录删掉。
+    这里多一条：跳过 _trash（我们自己的回收站，合回来等于撤销过滤）。
+    """
+    import shutil as _sh
+
+    target = str(payload.get("dir") or "data_src")
+    if os.path.isabs(target) or ".." in target.replace(chr(92), "/").split("/") or ":" in target:
+        raise HTTPException(400, "非法的数据集目录: " + target)
+    root = WORKSPACE / target
+    if (root / "aligned").is_dir():
+        root = root / "aligned"
+    if not root.exists():
+        raise HTTPException(404, "目录不存在: " + str(root))
+
+    exts = {".jpg", ".jpeg", ".png", ".bmp"}
+
+    def _skip(d):
+        """_trash 是回收站、点开头是缓存，两者都不动；其余（含 _by_id）都算待合并。"""
+        n = d.name.lower()
+        return n.startswith("_trash") or d.name.startswith(".")
+
+    # 递归收集所有层级的子目录。4.0 只处理一层，但用户真正会遇到的正是
+    # aligned/_by_id/g00 这种多套一层的情况 —— 只扫一层等于什么都没做。
+    subdirs = []
+    stack = [d for d in root.iterdir() if d.is_dir() and not _skip(d)]
+    while stack:
+        d = stack.pop()
+        subdirs.append(d)
+        try:
+            stack.extend(x for x in d.iterdir() if x.is_dir() and not _skip(x))
+        except OSError:
+            pass
+    if not subdirs:
+        return {"ok": True, "merged": 0, "conflicts": 0, "renamed": 0, "errors": 0,
+                "removed": [], "kept_empty": [], "dirs": 0}
+
+    def imgs(d):
+        try:
+            return [f for f in d.iterdir() if f.is_file() and f.suffix.lower() in exts]
+        except OSError:
+            return []
+
+    # 整棵子树里一张图都没有的目录视为「用户自己建的空壳」，保留不动
+    def has_images_under(d):
+        if imgs(d):
+            return True
+        try:
+            return any(has_images_under(x) for x in d.iterdir() if x.is_dir() and not _skip(x))
+        except OSError:
+            return False
+
+    # 「用户自己建的空壳」= 子树里没图、自己也一个文件都没有；这种保留。
+    # 只剩 .cache/ 的那种是我们自己的扫描缓存留下的空壳，要清掉。
+    def has_files_under(d):
+        try:
+            return any(x.is_file() for x in d.rglob("*"))
+        except OSError:
+            return True
+    keep = set()
+    for d in subdirs:
+        if not has_images_under(d) and not has_files_under(d):
+            keep.update([d] + [x for x in subdirs if d in x.parents])
+
+    files = [f for d in subdirs for f in imgs(d)]
+
+    merged = conflicts = renamed = errors = 0
+    for f in files:
+        dst = root / f.name
+        if dst.exists():
+            # 4.0 是 move /y 直接盖掉；这里改成加后缀保留，避免两个不同文件同名时静默丢数据
+            k2 = 1
+            while dst.exists():
+                dst = root / ("%s_%d%s" % (Path(f.name).stem, k2, Path(f.name).suffix))
+                k2 += 1
+            renamed += 1
+        if _move_file(f, dst):
+            merged += 1
+        else:
+            errors += 1
+
+    removed = []
+    # 从最深的开始删，父目录才有机会也跟着空掉
+    for d in sorted(subdirs, key=lambda x: len(x.parts), reverse=True):
+        if d in keep:
+            continue
+        try:
+            d.rmdir()                      # 非空会抛，正好跳过
+        except OSError:
+            # 只剩我们自己写的缓存目录（.cache / __pycache__）时也删掉：
+            # 里面的特征缓存对应的是已被搬走的文件，留着没用，还会挡住空目录清理
+            try:
+                rest = [x for x in d.iterdir() if x.name not in ("__pycache__",)]
+                if not rest:
+                    for x in d.iterdir():
+                        _sh.rmtree(str(x), ignore_errors=True)
+                    d.rmdir()
+                    removed.append(d.name)
+            except OSError:
+                pass
+        except OSError:
+            pass
+
+    return {"ok": True, "merged": merged, "conflicts": conflicts, "renamed": renamed,
+            "removed": removed, "kept_empty": sorted({d.name for d in keep}),
+            "dirs": len(subdirs)}
+
+
 @router.post("/api/dataset/scan")
 def dataset_scan(payload: dict):
     """只统计不落盘：返回会被处理掉的文件清单。
@@ -139,8 +313,10 @@ def dataset_scan(payload: dict):
         raise HTTPException(status_code=404, detail=f"目录不存在：{root}")
 
     files = FF.list_images(root)
+    # blur / repeated 也走真进度：每算完一张写一次进度文件
+    _put = _ds_progress_writer("embed", len(files)) if mode in ("blur", "repeated") else (lambda *a, **k: None)
     total = len(files)
-    recs, bad = FF.extract(files, workers=int(payload.get("workers") or 8))
+    recs, bad = FF.extract_cached(root, files, workers=int(payload.get("workers") or 8), progress=_put)
     hits = [{"name": n, "score": 0, "bad": True} for n in bad]     # 坏图在任何模式下都要清掉
 
     if mode == "blur":
@@ -167,11 +343,20 @@ def dataset_scan(payload: dict):
         import sys as _sys
         from ._paths import engine_python
 
-        eps = float(payload.get("eps", 0.314))
+        eps = float(payload.get("eps", 0.40))
         min_samples = int(payload.get("min_samples", 2))
         # 用 -m 方式启动：_faceid_cli 用了相对导入（from . import ...）
+        _prog = WORKSPACE / ("_faceid_%d.json" % os.getpid())
+        try:
+            if _prog.exists():
+                _prog.unlink()
+        except Exception:
+            pass
+        _FACEID_PROGRESS["path"] = str(_prog)
         cmd = [engine_python(), "-m", "server._faceid_cli", "--dir", str(root),
-               "--eps", str(eps), "--min-samples", str(min_samples)]
+               "--eps", str(eps), "--min-samples", str(min_samples),
+               "--merge", str(float(payload.get("merge") or 0.45)),
+               "--progress", str(_prog)]
         try:
             proc = _sp.run(cmd, capture_output=True, text=True, timeout=3600,
                            cwd=str(Path(__file__).resolve().parents[1]))
@@ -180,16 +365,64 @@ def dataset_scan(payload: dict):
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout or "").strip().splitlines()
             raise HTTPException(500, "人脸身份推理失败: " + (detail[-1] if detail else "unknown"))
-        data = _json.loads(proc.stdout.strip().splitlines()[-1])
-        for n in data.get("rare", []):
-            hits.append({"name": n, "score": 0, "rare_identity": True})
+        data = json.loads(proc.stdout.strip().splitlines()[-1])
+        # 命中项由「按身份分文件夹」决定，这里不再另算
         info = {"clusters": data.get("clusters", {}), "noise": data.get("noise", 0),
+                "main": data.get("main"), "per_cluster": data.get("per_cluster"),
                 "eps": eps, "min_samples": min_samples,
                 "ms_extract": data.get("ms_extract"), "ms_cluster": data.get("ms_cluster"),
                 "provider": data.get("provider")}
+
+        # 「按身份分文件夹」：每个身份簇一个目录，全部移动（和老逻辑一致）
+        _assign = data.get("assign", [])
+        groups_n = len({int(it.get("cluster", -1)) for it in _assign if int(it.get("cluster", -1)) >= 0})
+        if payload.get("split_by_identity"):
+            base = root          # 扁平放在 aligned 下：id001 / id002 / … / noise
+            base.mkdir(exist_ok=True)
+            moved, by_dir = 0, {}
+            for it in data.get("assign", []):
+                nm = it.get("file")
+                cid = int(it.get("cluster", -1))
+                if not nm:
+                    continue
+                # 组号从 1 开始，宽度至少 3 位（id001），组数超过 999 时自动加宽
+                width = max(3, len(str(max(1, groups_n))))
+                name = (("id%0" + str(width) + "d") % (cid + 1)) if cid >= 0 else "noise"
+                d = base / name
+                d.mkdir(exist_ok=True)
+                src = root / nm
+                if not src.exists():
+                    continue
+                dst = d / nm
+                k2 = 1
+                while dst.exists():
+                    dst = d / ("%s_%d%s" % (Path(nm).stem, k2, Path(nm).suffix))
+                    k2 += 1
+                if _move_file(src, dst):
+                    moved += 1
+                    by_dir[name] = by_dir.get(name, 0) + 1
+            info["split"] = {"dir": str(base), "moved": moved, "by_dir": by_dir, "groups": len(by_dir)}
+
+    elif mode == "errface":
+        # 68 点几何分类（xgboost）。数据集的 68 点必须是 2D106 真点；
+        # 模板点数据集方差≈0，直接拒绝，避免"全部合格"的假阴性。
+        from . import _errface
+        res = _errface.scan(str(root), threshold=float(payload.get("threshold", 0.5)),
+                            percent=float(payload.get("percent") or 0),
+                            estimate=bool(payload.get("estimate", True)))
+        if not res.get("ok"):
+            raise HTTPException(status_code=409, detail=res.get("error") or "错脸检测不可用")
+        for h in res.get("hits", []):
+            hits.append({"name": h["file"], "score": h["prob"], "prob": h["prob"]})
+        info = {"counts": res.get("counts"), "stats": res.get("stats"),
+                "variance": res.get("variance"), "threshold": res.get("threshold"),
+                "skipped": res.get("skipped"), "skipped_n": res.get("skipped_n", 0),
+                "estimated_n": res.get("estimated_n", 0)}
     else:
         raise HTTPException(status_code=400, detail="未知模式")
 
+    if mode in ("blur", "repeated"):
+        _put(total, total, "done")
     return {"total": total, "hits": hits[:5000], "count": len(hits),
             "unreadable": bad[:200], "info": info}
 
@@ -218,14 +451,21 @@ def dataset_sort(payload: dict):
             def base(n):
                 return re.sub(r"^sorted_\d+_", "", n)
             return sorted(files, key=lambda p: base(p.name))
-        recs, _bad = FF.extract(files, workers=8)
+        recs, _bad = FF.extract_cached(root, files, workers=8)
         by_name = {r["name"]: r for r in recs}
         if by == "blur":
             return sorted(files, key=lambda p: -by_name[p.name]["sharp"])
         if by == "phash":
-            return sorted(files, key=lambda p: by_name[p.name]["dhash"])
+            # 按「与位中位数参考哈希的汉明距离」排序：同类脸聚在一起，
+            # 而不是按哈希数值大小排（那等于随机顺序）
+            arr = np.array([by_name[p.name]["dhash"] for p in files], dtype=np.uint64)
+            bits = np.unpackbits(arr.view(np.uint8).reshape(-1, 8), axis=1)
+            ref = (bits.mean(axis=0) >= 0.5).astype(np.uint8)
+            dist = (bits != ref).sum(axis=1)
+            return [files[i] for i in np.argsort(dist, kind="stable")]
         if by == "hist":
-            mean = sum((by_name[p.name]["hist"] for p in files), None) / max(1, len(files))
+            # sum(..., None) 会拿 None 去加 ndarray，直接 TypeError（历史遗留）
+            mean = np.stack([by_name[p.name]["hist"] for p in files]).mean(axis=0)
             return sorted(files, key=lambda p: -float((by_name[p.name]["hist"] * mean).sum()))
         if by == "yaw":
             from ._align import read_dfljpg_meta
@@ -238,19 +478,31 @@ def dataset_sort(payload: dict):
 
     ordered = order_key()
 
-    # 两段式重命名，避免中间态撞名
-    tmp, final = [], []
+    # 两段式重命名；已经就位的文件直接跳过（重复排序几乎零成本）
+    import re
+    plan = []
     for i, p in enumerate(ordered):
-        name = p.name
-        import re
-        name = re.sub(r"^sorted_\d+_", "", name)
-        t = p.with_name(f"__tmp_{i:06d}_{name}")
+        base = re.sub(r"^sorted_\d+_", "", p.name)
+        want = "sorted_%05d_%s" % (i, base)
+        if p.name != want:
+            plan.append((p, want))
+
+    final = []
+    tmp = []
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _stage(item):
+        i, (p, want) = item
+        t = p.with_name("__tmp_%06d_%s" % (i, p.name))
         p.rename(t)
-        tmp.append((t, i, name))
-    for t, i, name in tmp:
-        dst = t.with_name(f"sorted_{i:05d}_{name}")
-        t.rename(dst)
-        final.append(dst.name)
+        return (t, want)
+
+    if plan:
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            tmp = list(ex.map(_stage, enumerate(plan)))
+    for t, want in tmp:
+        t.rename(t.with_name(want))
+        final.append(want)
 
     return {"ok": True, "count": len(final), "by": by}
 
@@ -266,6 +518,23 @@ def _within(base: Path, p: Path) -> bool:
         p_r.relative_to(base_r)
         return True
     except ValueError:
+        return False
+
+
+def _move_file(src: Path, dst: Path) -> bool:
+    """只搬不删：先同盘 rename，跨盘再退到 shutil.move，永不 unlink 源文件。"""
+    import shutil as _sh
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.replace(str(src), str(dst))
+        return True
+    except OSError:
+        pass
+    try:
+        _sh.move(str(src), str(dst))
+        return True
+    except Exception:
         return False
 
 
@@ -288,6 +557,7 @@ def dataset_apply(payload: dict):
     trash = root / "_trash"
     trash.mkdir(exist_ok=True)
     items = []
+    failed = []
     for n in names:
         n = str(n)
         if not n or "/" in n or "\\" in n or n in (".", "..") or ":" in n:
@@ -302,9 +572,11 @@ def dataset_apply(payload: dict):
         while dst.exists():
             dst = trash / (src.stem + f"_{i}" + src.suffix)
             i += 1
-        src.rename(dst)
+        if not _move_file(src, dst):
+            failed.append(n)
+            continue
         items.append({"name": n, "trash": dst.name})
-    return {"ok": True, "moved": len(items), "items": items, "trash": str(trash)}
+    return {"ok": True, "moved": len(items), "items": items, "failed": failed, "trash": str(trash)}
 
 
 @router.post("/api/dataset/restore")
@@ -319,6 +591,7 @@ def dataset_restore(payload: dict):
         root = root / "aligned"
     trash = root / "_trash"
     back = 0
+    failed = []
     for it in items:
         tn = str(it.get("trash", ""))
         nm = str(it.get("name", ""))
@@ -332,6 +605,8 @@ def dataset_restore(payload: dict):
             continue
         if dst.exists():
             continue
-        src.rename(dst)
+        if not _move_file(src, dst):
+            failed.append(nm)
+            continue
         back += 1
-    return {"ok": True, "restored": back}
+    return {"ok": True, "restored": back, "failed": failed}

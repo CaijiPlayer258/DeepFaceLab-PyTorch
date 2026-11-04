@@ -13,6 +13,12 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# 4.0 引擎代码收在 app/engine/：server 里那些 "from core… / from DFLIMG…"
+# 是惰性 import，不在这里加路径会在第一次调用时炸。
+ENGINE = ROOT / "engine"
+if ENGINE.is_dir() and str(ENGINE) not in sys.path:
+    sys.path.append(str(ENGINE))
+
 
 def _free_port(start: int = 8760) -> int:
     for p in range(start, start + 60):

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>V4 Bento 卡片</title>
+<style>
+:root{--bg:#0a0a0c;--ink:#f2f2f5;--ink2:#8f8f9b;--ink3:#63636e;--line:#1d1d24;--brand:#6d79e0;}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:var(--bg);color:var(--ink);font-family:-apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+  display:flex;align-items:center;justify-content:center;overflow:hidden}
+.logo{display:flex;align-items:center;gap:9px}
+.mark{width:26px;height:26px}
+.mono{font-family:ui-monospace,Menlo,monospace}
+button{font:inherit;cursor:pointer;border:0;background:none;color:inherit}
+
+.wrap{width:1060px;display:grid;grid-template-columns:1.35fr .65fr;grid-template-rows:auto auto;gap:14px}
+.big{grid-row:span 2;padding:38px;background:#101015;border:1px solid #1d1d25;border-radius:20px;display:flex;flex-direction:column}
+h1{font-size:40px;line-height:1.18;letter-spacing:-.6px;font-weight:800;margin-top:28px}
+.sub{margin-top:14px;font-size:13px;color:#75757f;line-height:1.85;max-width:380px}
+.big .cta{margin-top:auto;display:flex;gap:10px}
+.pri{background:var(--brand);color:#fff;border-radius:10px;padding:11px 20px;font-size:13px;font-weight:600}
+.ghost{font-size:12px;color:#8b8b96;padding:11px 12px}
+.small{padding:22px;background:#0f0f13;border:1px solid #1c1c23;border-radius:20px;display:flex;align-items:center;gap:18px}
+.small .k{font-size:11px;color:#63636e;letter-spacing:.06em}
+.small .v{font-size:26px;font-weight:700;margin-top:6px}
+.small .s{font-size:11px;color:#63636e;margin-top:4px}
+
+</style></head>
+<body>
+<div class="wrap">
+  <div class="big">
+    <div class="logo"><svg class="mark" viewBox="0 0 32 32" fill="none"><rect x="1" y="1" width="30" height="30" rx="8" fill="#15151c" stroke="#2a2a36"/><path d="M10 10h6a4 4 0 1 1 0 8h-6z" stroke="#8b93ff" stroke-width="2.2" stroke-linejoin="round"/><path d="M10 18h3v4" stroke="#8b93ff" stroke-width="2.2" stroke-linecap="round"/></svg><span style="font-size:12px;color:#8b8b96;margin-left:4px">DeepFaceLab-PyTorch</span></div>
+    <h1>本地换脸<br>完整工作流</h1>
+    <p class="sub">提取、处理、训练、合成，四步都在一个窗口里完成。数据不出本机。</p>
+    <div class="cta"><button class="pri">开始使用</button><button class="ghost">跳过，先看看</button></div>
+  </div>
+  <div class="small"><div style="width:120px;height:120px;background:#fff;border-radius:12px;padding:8px">
+  <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAXIAAAFyAQAAAADAX2ykAAACwklEQVR4nO1bUW6zMAy2DdIeQeoBdpT0ZtOOtBvAUXoDeKwE8uQ4pIhqgepXEfnx94Ag/jRZ+erEjjNkeAUtvUQHMH4atGJfwvhp0Ip9CeOnQSv2JYyfBq3YlzD+GeYHA0r5GBGgLwFaGbn2k+26oz/bQS9wT8x3LOjicDUAfnWFJF+FN/Gx/d8MOim/nyK0rQv2UcvfNQA3Gt3l3v5sBW1mnpNfPg+NJbSfDOi6y/7+kPHfOz/u9sHguhC6T7D5T4MOGr+VbLA9AAIUwD6IobojuB+Qz938IeO/Y35anyLXEr8dAF57CeLbhyg7avr8b39/M2g71cP4K+AlfBJdDfIsOCTWEY3NZxp0SH3B8SAbrhREIq2T0sj5sWqY/wRM3yz1ZVZBpcz1oetFZl/1FsxN5X8Cpm/e+nqojGJoJHT1EXkWv1nqC7IWa8CGIJa3bn6wZfrmrC/4rTc+tP6twk4c3ix+s9WXYxo1ZVo+dAdfGFv+nL2+4Ndijd9qnlWxT608LH7z5fP3p1+B76j1r7xpk1AaD48k66j+bwedd//lIO20KjferuvzVARb/pylviwKzrR8SNtopWT1b9b6QmwYhVpXDyk5HnxY/py1vjxbgWVQqyIIpZFGt+VX+fYH0f1ceGoRCao7SpNQhkq17uQPGf898RugoRsOrIbpTCueZFl+lWf8gqIYuK0LQNcwIFQdI/SXQdoNJR/TfzJ+GqxR+2gy+A1Xzyd5Oo6OnWCL34zPr5yeNU+qungr9tHkN30zvz+JUI2yFo8lt3UHLOsztlgM6Joj+k/Gf2l+mG8l+JvQ+q8LV72p8yd/DWT8Q+2/rJVwbPeDbr12Pvmf3J/Ea18CYj2iXsIKN+329mczaDv1xPsvx2+efwz6zqHxv4c/ZPwkKG1+gvHToBX7EsZPg1bsSxg/DVqxL2H8NI42P79Si0gpc1IsWgAAAABJRU5ErkJggg==" style="width:100%;height:100%;display:block;object-fit:contain"></div><div><div class="k">登录</div><div class="v" style="font-size:14px;margin-top:8px">扫码登录 B 站</div><div class="s">下载高码率素材</div></div></div>
+  <div class="small"><div style="display:flex;gap:26px">
+    <div><div class="v mono">62–72</div><div class="s">张/秒 提取</div></div>
+    <div><div class="v mono">0.02%</div><div class="s">错脸误报</div></div>
+    <div><div class="v mono">4</div><div class="s">步流程</div></div>
+  </div></div>
+</div>
+<div style="position:fixed;left:18px;top:16px;font-size:11px;color:#3f3f4a;letter-spacing:.08em">V4 Bento 卡片</div>
+</body></html>

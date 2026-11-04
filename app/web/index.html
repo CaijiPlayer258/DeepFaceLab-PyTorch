@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <title>DeepFaceLab-PyTorch</title>
 <link rel="stylesheet" href="/static/css/noto.css?v=3">
-  <link rel="stylesheet" href="/static/css/app.css?v=31">
-  <link rel="stylesheet" href="/static/css/shadcn.css?v=4">
+  <link rel="stylesheet" href="/static/css/app.css?v=109">
+  <link rel="stylesheet" href="/static/css/shadcn.css?v=98">
 </head>
 <body>
 <svg id="sprite" aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden"><symbol id="i-home" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.2 12 3l9 7.2"/><path d="M5.5 9.5V20a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1V9.5"/></symbol><symbol id="i-scan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="11" r="3"/><path d="M9 16.6c.85-.9 1.85-1.35 3-1.35s2.15.45 3 1.35"/></symbol><symbol id="i-layers" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/></symbol><symbol id="i-cpu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/></symbol><symbol id="i-box" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 20 7v10l-8 4-8-4V7l8-4Z"/><path d="m4 7 8 4 8-4M12 11v10"/></symbol><symbol id="i-sliders" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h8M16 7h4M4 17h4M12 17h8"/><circle cx="14" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></symbol><symbol id="i-gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol><symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.8h.01"/></symbol><symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></symbol><symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></symbol><symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></symbol><symbol id="i-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 5.2v13.6L20 12 8.5 5.2Z"/></symbol><symbol id="i-power" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5v8"/><path d="M7.2 6.6a7.2 7.2 0 1 0 9.6 0"/></symbol><symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol><symbol id="i-warn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.2 2.6 19.8h18.8L12 3.2z"/><path d="M12 9.4v4.6"/><path d="M12 17.4h.01"/></symbol><symbol id="i-error" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/></symbol><symbol id="i-panel" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M9 4v16"/></symbol><symbol id="i-brush" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19.5 8.5a2.12 2.12 0 0 0-3-3L5 17v3z"/><path d="M14.5 6.5l3 3"/></symbol><symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5v10"/><path d="M8 10.5l4 4 4-4"/><path d="M4.5 19.5h15"/></symbol><symbol id="i-swap" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8.5h13l-3.2-3.2"/><path d="M20 15.5H7l3.2 3.2"/></symbol><symbol id="i-scatter" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4v16h16"/><circle cx="9" cy="15" r="1.3"/><circle cx="13" cy="9.5" r="1.3"/><circle cx="17.5" cy="13" r="1.3"/></symbol><symbol id="i-min" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12h12"/></symbol><symbol id="i-max" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="1.5"/></symbol><symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4"/></symbol><symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 14.6A8.5 8.5 0 1 1 9.4 3.5a6.9 6.9 0 0 0 11.1 11.1Z"/></symbol><symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6 6 18"/></symbol><symbol id="i-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5 12 15.5 18 9.5"/></symbol><symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10M8 11l4 4 4-4M5 20h14"/></symbol><symbol id="i-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L18 10l-4-4L4 16v4Z"/><path d="m13.5 6.5 4 4"/></symbol><symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5.2A1.2 1.2 0 0 1 10.2 4h3.6A1.2 1.2 0 0 1 15 5.2V7"/><path d="M6.5 7 7.4 19a2 2 0 0 0 2 1.9h5.2a2 2 0 0 0 2-1.9L17.5 7"/></symbol></svg>
@@ -35,7 +35,6 @@
         <div class="grpbody" id="toolgrpBody">
           <div class="nav sub" data-go="tool-mask"><span class="lbl">遮罩绘制</span></div>
           <div class="nav sub" data-go="tool-bili"><span class="lbl">B 站下载</span></div>
-    <div class="nav sub" data-go="tool-perf"><span class="lbl">速度测试</span></div>
           <div class="nav sub" data-go="tool-color"><span class="lbl">色域迁移</span></div>
           <div class="nav sub" data-go="tool-angle"><span class="lbl">角度可视化</span></div>
           <div class="nav sub" data-go="tool-engine"><span class="lbl">引擎编译</span></div>
@@ -121,12 +120,12 @@
           <div class="hd"><b>参数</b></div>
 
           <div class="paths">
-            <div class="inp mono pathinp" style="height:38px">
+            <div class="inp mono pathinp">
               <span class="lb">输入</span>
               <input class="pathval" id="exSrc" value="D:&#92;media&#92;raw&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
               <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span>
             </div>
-            <div class="inp mono pathinp" style="height:38px">
+            <div class="inp mono pathinp">
               <span class="lb">输出</span>
               <input class="pathval" id="exDst" value="workspace&#92;_frames&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
               <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span>
@@ -134,8 +133,8 @@
           </div>
 
           <div class="cfgrow">
-            <span class="cl">检测器</span><span class="cd">Retina 质量优先 · TinyMog 速度优先</span>
-            <span class="cc"><div class="seg" id="exDetSeg"><b class="on">Retina</b><b>TinyMog</b></div></span>
+            <span class="cl">检测器</span><span class="cd">TinyMog 速度优先 · Retina 质量优先</span>
+            <span class="cc"><div class="seg" id="exDetSeg"><b>Retina</b><b class="on">TinyMog</b></div></span>
           </div>
 
           <div class="cfgrow">
@@ -223,12 +222,10 @@
             <div class="stat"><div class="k">已用</div><div class="v"><span id="dsRunElapsed">0</span><small>秒</small></div></div>
             <div class="stat"><div class="k">剩余</div><div class="v"><span id="dsRunEta">—</span><small></small></div></div>
           </div>
-        </div>
-
+          </div>
         <button class="btn danger hide" id="btnDsRunStop" style="width:100%;height:38px;margin-top:14px">中断</button>
-      </div>
 
-      <!-- ================= 训练器 ================= -->
+        </div>
       <div class="page" id="p-train">
         <div class="title">模型</div>
         <div class="trbar">
@@ -256,26 +253,13 @@
         <iframe id="mkFrame" src="/mask-editor/index.html" title="Mask Processor"></iframe>
       </div>
 
-      <!-- ================= 工具：速度测试 ================= -->
-      <div class="page" id="p-tool-perf">
-        <div class="title">速度测试</div>
-        <div class="card">
-          <div class="hd"><b>本机实测</b><span class="hint" id="perfHint">点下面按钮跑一遍</span></div>
-          <div id="perfBody">
-            <div class="cfgrow"><span class="cl">说明</span>
-              <span class="cd">测的是真实链路：解码 / 遮罩 / 检测 / 特征点 / 编码，不写任何文件</span>
-              <span class="cc"></span></div>
-          </div>
-          <button class="btn pri" id="btnPerf" style="width:100%;margin-top:16px;height:38px">开始测速</button>
-        </div>
-      </div>
 
       <!-- ================= 工具：B 站下载 ================= -->
       <div class="page" id="p-tool-bili">
         <div class="title">B 站下载</div>
 
         <div class="card" style="margin-top:14px">
-          <div class="cardhd"><b>用户搜索</b><span class="hint" id="biliOwner">未查询</span></div>
+          <div class="cardhd"><b>用户搜索</b></div>
           <div class="dbgrow">
             <div class="inp pathinp" style="flex:1"><span class="lb">UP 主 UID</span>
               <input id="biliUid" inputmode="numeric" placeholder="请输入哔哩哔哩 UID（纯数字）…"
@@ -290,22 +274,28 @@
         </div>
 
         <div class="card" style="margin-top:14px">
-          <div class="cardhd"><b>下载设置</b><span class="hint">Cookie 有效至 2027-03</span></div>
-          <div class="dbgrow"><div class="inp mono pathinp"><span class="lb">保存路径</span><input class="pathval" value="workspace&#92;raw&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
-              <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span></div>
+          <div class="cardhd"><b>下载设置</b></div>
+
+          <div class="inp mono pathinp" style="margin-bottom:10px">
+            <span class="lb">保存路径</span>
+            <input class="pathval" value="workspace&#92;raw&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
+            <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span>
           </div>
-          <div class="dbgrow"><div class="inp mono pathinp"><span class="lb">FFmpeg</span><input class="pathval" value="_internal&#92;ffmpeg.exe" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
-              <span class="pill iconpill" title="选择文件"><svg class="ic"><use href="#i-folder"/></svg></span></div>
+
+          <div class="inp mono pathinp" style="margin-bottom:10px">
+            <span class="lb">FFmpeg</span>
+            <input class="pathval" value="_internal&#92;ffmpeg.exe" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
+            <span class="pill iconpill" title="选择文件"><svg class="ic"><use href="#i-folder"/></svg></span>
           </div>
-          <div class="prow compact" style="margin-top:16px">
-            <div class="pc">
-              <label class="f">画质</label>
-              <div class="seg" id="biliQuality"><b class="on">最高</b><b>1080P</b><b>720P</b></div>
-            </div>
-            <div class="pc">
-              <label class="f">下载线程</label>
-              <div class="seg" id="biliThreads"><b>2</b><b class="on">4</b><b>8</b><b>16</b></div>
-            </div>
+
+          <div class="cfgrow">
+            <span class="cl">画质</span>
+            <span class="cc"><div class="seg" id="biliQuality"><b class="on">最高</b><b>1080P</b><b>720P</b></div></span>
+          </div>
+
+          <div class="cfgrow">
+            <span class="cl">下载线程</span>
+            <span class="cc"><div class="seg" id="biliThreads"><b>2</b><b class="on">4</b><b>8</b><b>16</b></div></span>
           </div>
         </div>
 
@@ -343,7 +333,6 @@
           <button class="mini" id="biliPause">暂停</button>
           <button class="mini" id="biliStop" style="color:#ef4444;border-color:rgba(239,68,68,.35)">终止</button>
         </div>
-        <div class="sub">B 站下载的实时队列，离开这页也会继续跑。</div>
 
         <div class="card" style="margin-top:14px">
           <div class="cardhd"><b>队列</b></div>
@@ -356,16 +345,18 @@
       <!-- ================= 工具：色域迁移 ================= -->
       <div class="page" id="p-tool-color">
         <div class="title">色域迁移</div>
-        <div class="sub">杜比视界 / HDR 先转成普通色域再做提取。4.1 不再内置 HDR 提取。</div>
         <div class="card" style="margin-top:14px">
           <div class="dbgrow"><div class="inp mono pathinp"><span class="lb">源视频</span><input class="pathval" value="还没有选择文件" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
               <span class="pill iconpill" title="选择视频"><svg class="ic"><use href="#i-folder"/></svg></span></div>
           </div>
-          <div class="dbgrow"><label class="f">输出</label>
-            <span class="hint">与源文件同目录，后缀 <span class="kbd">_sdr</span></span>
+          <div class="inp mono pathinp" style="margin:10px 0 14px">
+            <span class="lb">输出</span>
+            <input class="pathval" id="colorOut" placeholder="留空则与源文件同目录，加后缀 _sdr">
+            <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span>
           </div>
-          <div class="dbgrow"><label class="f">编码</label>
-            <div class="seg"><b class="on">H.265</b><b>H.264</b></div>
+          <div class="cfgrow">
+            <span class="cl">编码</span>
+            <span class="cc"><div class="seg"><b class="on">H.265</b><b>H.264</b></div></span>
           </div>
         </div>
         <div class="card" style="margin-top:14px">
@@ -398,6 +389,37 @@
         </div>
       </div>
 
+
+      <!-- ================= 训练器：模型转换（子页） ================= -->
+      <div class="page" id="p-train-convert">
+        <div class="title">模型转换</div>
+
+        <div class="card" style="margin-bottom:14px">
+          <div class="cvlist" id="cvList"></div>
+        </div>
+
+        <div class="card cvcard" id="cvCard" style="display:none">
+          <div class="cvhd">
+            <b id="cvName">model</b><span class="cvmeta" id="cvMeta"></span>
+            <span class="cvbad" id="cvBad">失败</span>
+          </div>
+          <div class="cvsteps">
+            <div class="cvst" id="cvS1">
+              <div class="cvline"><i></i></div>
+              <div class="cvsh"><span class="cvic" id="cvI1">1</span><span class="cvnm">加载模块</span></div>
+            </div>
+            <div class="cvst" id="cvS2">
+              <div class="cvline"><i></i></div>
+              <div class="cvsh"><span class="cvic" id="cvI2">2</span><span class="cvnm">转换模型</span></div>
+              <div class="cvpnl"><div><div class="cvrows" id="cvRows"></div></div></div>
+            </div>
+            <div class="cvst" id="cvS3">
+              <div class="cvsh"><span class="cvic" id="cvI3">3</span><span class="cvnm">完成</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- ================= 工具：角度可视化 ================= -->
       <div class="page" id="p-tool-angle">
         <div class="title">角度可视化</div>
@@ -405,8 +427,9 @@
           <div class="dbgrow"><div class="inp mono pathinp"><span class="lb">数据集</span><input class="pathval" value="workspace&#92;data_src&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
               <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span></div>
           </div>
-          <div class="dbgrow"><label class="f">图表</label>
-            <div class="seg"><b class="on">散点图</b><b>格子图</b></div>
+          <div class="cfgrow">
+            <span class="cl">图表</span>
+            <span class="cc"><div class="seg"><b class="on">散点图</b><b>格子图</b></div></span>
           </div>
         </div>
         <div class="card" style="margin-top:14px">
@@ -480,9 +503,10 @@
       <!-- ================= 参数设置 ================= -->
       <div class="page" id="p-train-cfg">
         <div class="title">参数设置</div>
-        <div class="sub" id="cfgSub">训练前确认参数。训练中点「保存」，带「热」标记的项会立即生效，其余要重启训练。</div>
         <div id="cfgBox" style="margin-top:14px"></div>
+
         <div class="cfgactions">
+          <div class="vram" id="cfgVram"></div>
           <span class="hint" id="cfgHint"></span>
           <div style="flex:1"></div>
           <button class="mini" id="cfgReset">恢复默认</button>
@@ -504,6 +528,13 @@
           <button class="mini" id="runPause">暂停</button>
           <button class="mini" id="runSave">保存</button>
           <button class="mini" id="runStop" style="color:var(--bad)">停止</button>
+        </div>
+
+        <!-- 训练失败横幅：常驻，直到用户关掉。OOM 这类"必须改配置"的错误不能用右下角 toast。 -->
+        <div class="alert danger hide" id="runAlert">
+          <div class="alhd"><b id="runAlertTitle">训练失败</b><button class="alx" id="runAlertX" title="关闭">×</button></div>
+          <div class="albd" id="runAlertBody"></div>
+          <div class="alft" id="runAlertAct"></div>
         </div>
 
         <div class="runbar">
@@ -589,7 +620,7 @@
                 <div class="bar"><i></i></div>
               </div>
               <button class="mini" id="mgAddVideo" style="width:100%;margin-top:8px">＋ 导入视频</button>
-              <button class="mini" id="mgAddProject" onclick="window.mvOpenProject && window.mvOpenProject()" style="width:100%;margin-top:6px">＋ 打开 DFL 项目</button>
+              <button class="mini" id="mgAddProject" style="width:100%;margin-top:6px">＋ 打开 DFL 项目</button>
             </div>
           </aside>
 
@@ -599,7 +630,7 @@
               <b data-v="det">检测</b>
               <b data-v="swap">合成</b>
             </div>
-            <div class="mgstage" id="mgStage"><span id="mgStageHint">选择视频后显示</span></div>
+            <div class="mgstage" id="mgStage"><span id="mgStageHint">选择视频后显示</span><video id="mgVideo" playsinline muted preload="metadata"></video><img id="mgPreview" alt=""></div>
           </div>
 
           <aside class="mgright">
@@ -821,6 +852,7 @@
       </div>
     </div>
   </div>
+  <div id="mgExportStatus" class="hint"></div>
         </div>
         <div class="mgview" data-view="progress">
           <div class="mgprog">
@@ -939,12 +971,12 @@
         
         
         <div class="card" style="margin-bottom:14px">
-          <b style="font-size:13px;display:block;margin-bottom:10px">B 站账号</b>
           <div style="display:flex;align-items:center;gap:10px">
-            <span class="tag ok">已登录</span>
-            <span style="font-size:12px;color:var(--ink-3)">Cookie 有效期至 2027-03</span>
+            <b style="font-size:13px">B 站账号</b>
+            <span class="tag" id="biliTag">未登录</span>
+            <span style="font-size:12px;color:var(--ink-3)" id="biliInfo">登录后可下载 1080P / 会员清晰度</span>
             <div style="flex:1"></div>
-            <button class="mini">清除 Cookie 并重新登录</button>
+            <button class="mini" id="btnBiliAction">去登录</button>
           </div>
         </div>
         <div class="card" style="margin-bottom:14px">
@@ -980,7 +1012,6 @@
         <div class="aboutHero">
           <img class="aboutLogo" id="aboutLogo" src="/static/img/logo.png" alt="DeepFaceLab" title="点我">
           <div class="aboutName">DeepFaceLab<span>PyTorch</span></div>
-          <div class="aboutTag">4.0 是技术样机，4.1 是产品。</div>
         </div>
         <div class="card">
           <table class="t">
@@ -990,7 +1021,6 @@
             <tr><td style="color:var(--ink-3)">推理</td><td id="aboutInfer">ONNX Runtime · PyTorch</td></tr>
             <tr><td style="color:var(--ink-3)">模型</td><td>TinyMog · RetinaFace_10g · InsightFace2D106</td></tr>
             <tr><td style="color:var(--ink-3)">后端</td><td id="aboutBackend">—</td></tr>
-            <tr><td style="color:var(--ink-3)">工作区</td><td id="aboutWorkspace" class="mono">—</td></tr>
             <tr><td style="color:var(--ink-3)">作者</td><td id="aboutAuthor">CaijiPlayer258</td></tr>
             <tr><td style="color:var(--ink-3)">GitHub</td><td><a class="lnk" href="https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch" data-url="https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch">github.com/CaijiPlayer258/DeepFaceLab-PyTorch</a></td></tr>
             <tr><td style="color:var(--ink-3)">Bilibili</td><td><a class="lnk" href="https://space.bilibili.com/500398541" data-url="https://space.bilibili.com/500398541">space.bilibili.com/500398541</a></td></tr>
@@ -1098,52 +1128,120 @@
 </div>
 
 <div id="toastroot"></div>
+
   <div class="welcome" id="welcome" style="display:none">
     <div class="wdrag"></div>
-    <div class="wlang" id="wLang">
+    <div class="wlang" id="wLang" data-i18n-skip="1">
       <b class="on" data-lang="zh">中文</b><b data-lang="en">EN</b>
     </div>
-    <div class="wcard">
-      <img class="wlogo" src="/static/img/logo.png" alt="">
-      <div class="wtitle">DeepFaceLab-PyTorch</div>
+      <div class="wcard">
+        <canvas class="cf" id="wGl"></canvas>
 
-      <div class="wfeats">
-        <div class="wf"><b>简洁的交互界面</b><span>所有流程都在一个窗口里完成，不用记命令。</span></div>
-        <div class="wf"><b>更快的训练</b><span>预览与 loss 实时流出，不用等一轮跑完。</span></div>
-        <div class="wf"><b>更自然的合成</b><span>遮罩、色域、角度逐帧校正，边缘不糊。</span></div>
-        <div class="wf"><b>更好的数据处理</b><span>张数、对齐质量、角度分布一目了然。</span></div>
-        <div class="wf"><b>最快的人脸提取</b><span>RetinaFace 与 TinyMog 双检测器，批量对齐。</span></div>
-        <div class="wf"><b>更多实用工具</b><span>遮罩绘制、色域迁移、角度分析、B 站下载，都在同一个侧边栏。</span></div>
+
+
+        <div class="cqr" id="wQrCard">
+          <div class="cqrbox" id="wQr">
+            <img id="wQrImg" alt="二维码" style="display:none">
+            <span id="wQrHint">正在获取…</span>
+            <button class="wqrretry" id="wQrRetry" title="刷新二维码" aria-label="刷新二维码">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>
+              </svg>
+            </button>
+          </div>
+          <div class="ccap"><span id="wCapA">使用</span><img class="bili" src="/static/img/bili-mark.png" alt="bilibili"><span id="wCapB">APP 扫码授权登录</span></div>
+          <span id="wQrState" class="sr-only" aria-live="polite"></span>
+        </div>
+      </div>
+  <div class="legal" id="legalGate" style="display:none">
+    <div class="legalCard">
+      <div class="legalHd">
+        <b class="legal-zh">使用前请阅读</b>
+        <b class="legal-en">Read before use</b>
       </div>
 
-      <div class="wlogin">
-        <div class="wqr" id="wQr">
-          <img id="wQrImg" alt="二维码" style="width:100%;height:100%;border-radius:10px;display:none">
-          <span id="wQrHint">正在获取…</span>
-          <button class="wqrretry" id="wQrRetry" title="刷新二维码" aria-label="刷新二维码">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                 stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
-              <path d="M21 3v6h-6"/>
-            </svg>
-          </button>
+      <div class="legalBody">
+        <section>
+          <h4><span class="legal-zh">开源软件 / 责任边界</span><span class="legal-en">Open source · scope of responsibility</span></h4>
+          <p class="legal-zh">本软件以开源形式发布，任何人都可以查看、修改、二次开发其代码。开发者无法控制他人对软件的修改与使用方式，也无法限制由此产生的行为。</p>
+          <p class="legal-zh">你使用本软件产出的所有内容（图片、视频、模型、工作流等）归你所有，同时由你承担全部责任。若产出内容违反你所在国家或地区的法律，与软件开发者无关。</p>
+          <p class="legal-en">This software is released as open source; anyone may read, modify and fork it. The developers cannot control how third parties modify or use it, nor restrict the behaviour that results.</p>
+          <p class="legal-en">Everything you produce with it (images, videos, models, workflows) belongs to you, and you bear full responsibility for it. If that output breaks the law where you live, the developers are not responsible.</p>
+        </section>
+
+        <section>
+          <h4><span class="legal-zh">肖像权与素材授权</span><span class="legal-en">Likeness rights and source material</span></h4>
+          <p class="legal-zh">肖像权授权必须由你本人取得，本软件不会、也无法替你申请任何授权。</p>
+          <p class="legal-zh">你使用的素材必须已获得肖像权授权。在未取得授权的情况下，将他人肖像用于训练或换脸，无论产出的内容是否正规、是否传播，都可能构成违法，请你务必知悉。</p>
+          <p class="legal-en">You must obtain likeness (portrait) permissions yourself. This software will not and cannot apply for them on your behalf.</p>
+          <p class="legal-en">All source material you use must be properly licensed. Training on, or face-swapping with, someone's likeness without permission can be unlawful regardless of whether the output is decent or ever published. Please be aware of this.</p>
+        </section>
+
+        <section>
+          <h4><span class="legal-zh">数据与联网</span><span class="legal-en">Data and network access</span></h4>
+          <p class="legal-zh">本软件不收集你的任何数据：不上传素材、不统计使用行为、不接入分析服务。所有处理都在本机完成。</p>
+          <p class="legal-zh">只有「B 站下载」等下载类功能需要联网，其余功能完全离线可用。</p>
+          <p class="legal-en">The software collects nothing: no uploads, no usage analytics, no third-party tracking. All processing happens on your machine.</p>
+          <p class="legal-en">Only download features (such as the Bilibili downloader) require a network connection; everything else works fully offline.</p>
+        </section>
+
+        <section>
+          <h4><span class="legal-zh">商业使用与代码许可</span><span class="legal-en">Commercial use and code licence</span></h4>
+          <p class="legal-zh">你可以将本软件用于商业用途，例如影视级换脸、AI 短剧换脸；产出的素材、模型、成片均可用于商业项目并对外收费。</p>
+          <p class="legal-zh">但软件本体的代码不得闭源二次分发，不得用于商业售卖、商业性修改分发，须遵循 GPL-3 协议：分发时必须提供完整源代码并保留相同许可。</p>
+          <p class="legal-en">Commercial use of the software is allowed — film-grade face swapping, AI short dramas, and so on. The material, models and finished videos you produce may be sold or used commercially.</p>
+          <p class="legal-en">The code itself, however, may not be redistributed in closed-source form, sold, or commercially modified and redistributed. It follows GPL-3: any distribution must ship the complete source under the same licence.</p>
+        </section>
+
+        <section>
+          <h4><span class="legal-zh">禁止用途</span><span class="legal-en">Prohibited uses</span></h4>
+          <p class="legal-zh">不得用于制作诈骗、诽谤、侮辱、伪造证据、冒充他人身份、传播违法信息等用途；不得用于侵害他人名誉权、隐私权、知识产权。</p>
+          <p class="legal-zh">未成年人应在监护人知情并同意的前提下使用本软件。</p>
+          <p class="legal-en">Do not use it for fraud, defamation, harassment, fabricating evidence, impersonation, or distributing unlawful material; do not use it to infringe reputation, privacy or intellectual property.</p>
+          <p class="legal-en">Minors may use the software only with the knowledge and consent of a guardian.</p>
+        </section>
+
+        <section>
+          <h4><span class="legal-zh">免责与条款变更</span><span class="legal-en">Disclaimer and changes</span></h4>
+          <p class="legal-zh">软件按「现状」提供，不对可用性、准确性或特定用途适用性作任何担保。因使用本软件产生的任何直接或间接损失，开发者不承担责任。</p>
+          <p class="legal-zh">条款可能随版本更新调整，继续使用即视为接受更新后的条款。</p>
+          <p class="legal-en">The software is provided “as is”, without warranty of any kind regarding availability, accuracy or fitness for a particular purpose. The developers are not liable for any direct or indirect loss arising from its use.</p>
+          <p class="legal-en">These terms may change with new releases; continued use means you accept the updated terms.</p>
+        </section>
+      </div>
+
+      <div class="legalFt">
+        <div class="legalChks">
+          <label class="legalChk">
+            <input type="checkbox" data-legal-check>
+            <span class="legal-zh">我已阅读并同意软件的 <b>GPL-3 开源许可协议</b></span>
+            <span class="legal-en">I accept the <b>GPL-3 open-source licence</b></span>
+          </label>
+          <label class="legalChk">
+            <input type="checkbox" data-legal-check>
+            <span class="legal-zh">我已阅读并知悉<b>法律边界</b>：肖像权授权与内容合规由我负责</span>
+            <span class="legal-en">I understand the <b>legal boundaries</b>: likeness permissions and lawful use are my responsibility</span>
+          </label>
+          <label class="legalChk">
+            <input type="checkbox" data-legal-check>
+            <span class="legal-zh">我已阅读并知悉<b>能力边界</b>：本地运行、不收集数据、生成结果由我承担</span>
+            <span class="legal-en">I understand the <b>limits of the software</b>: it runs locally, collects nothing, and I am responsible for its output</span>
+          </label>
         </div>
-        <div class="wtip">
-          <b>用 B 站 App 扫码登录</b>
-          <p id="wQrState">登录后可以下载高码率素材，主页也会记住你的名字。</p>
-          <div style="display:flex;gap:8px;margin-top:10px">
-            <button class="btn ghost" id="wSkip">跳过，先看看</button>
-          </div>
+        <div class="legalActs">
+          <button class="btn ghost" id="legalDecline"><span class="legal-zh">不同意，退出登录</span><span class="legal-en">Decline and sign out</span></button>
+          <button class="btn" id="legalAccept" disabled><span class="legal-zh">同意并继续</span><span class="legal-en">Accept and continue</span></button>
         </div>
       </div>
     </div>
+  </div>
   </div>
 
   <div class="flyout" id="toolFly">
     <div class="flyhd">工具</div>
     <div class="nav sub" data-go="tool-mask"><svg class="ic"><use href="#i-brush"/></svg><span class="lbl">遮罩绘制</span></div>
     <div class="nav sub" data-go="tool-bili"><svg class="ic"><use href="#i-download"/></svg><span class="lbl">B 站下载</span></div>
-    <div class="nav sub" data-go="tool-perf"><svg class="ic"><use href="#i-bolt"/></svg><span class="lbl">速度测试</span></div>
     <div class="nav sub" data-go="tool-color"><svg class="ic"><use href="#i-swap"/></svg><span class="lbl">色域迁移</span></div>
     <div class="nav sub" data-go="tool-angle"><svg class="ic"><use href="#i-scatter"/></svg><span class="lbl">角度可视化</span></div>
   </div>
@@ -1171,8 +1269,18 @@
     </div>
   </div>
 
-  <script src="/static/js/i18n.js?v=3"></script>
-  <script src="/static/js/app.js?v=3"></script>
-  <script src="/static/js/engines.js?v=3"></script>
-  </body>
+  <script src="/static/js/i18n.js?v=98"></script>
+  <script src="/static/js/app.js?v=110"></script>
+<script type="module">
+  import { startWelcome3D, stopWelcome3D } from "/static/js/welcomeflow.js?v=9";
+  window.__welcome3d = { start: startWelcome3D, stop: stopWelcome3D };
+  (function waitVisible(deadline) {
+    var el = document.getElementById("welcome");
+    if (el && el.style.display !== "none") { startWelcome3D(); return; }
+    if (performance.now() < deadline) requestAnimationFrame(function () { waitVisible(deadline); });
+  })(performance.now() + 6000);
+</script>
+
+  
+</body>
 </html>

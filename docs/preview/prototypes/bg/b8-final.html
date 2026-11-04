@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>B8 成品</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;background:#04050a;overflow:hidden}
+  canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+  .tag{position:fixed;left:16px;bottom:14px;color:#4a4a58;letter-spacing:.06em;
+    font:12px/1.4 -apple-system,"Segoe UI",system-ui,sans-serif}
+</style></head>
+<body>
+<canvas id="gl"></canvas>
+<div class="tag">B8 成品（副层景深 + 色调分级 + 颗粒）</div>
+<script>
+(function () {
+  var canvas = document.getElementById("gl");
+  var gl = canvas.getContext("webgl", { antialias: false, alpha: false });
+  if (!gl) { document.body.style.background = "#0a1020"; return; }
+  var VS = "attribute vec2 aPos; varying vec2 vUv;\n" +
+    "void main(){ vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }";
+  var FS = "precision highp float;\nuniform float uTime;\nuniform vec2 uRes;\nvarying vec2 vUv;\n\nfloat hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }\nfloat hash1(float n){ return fract(sin(n)*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.0-2.0*f);\n  return mix(mix(hash(i),hash(i+vec2(1.,0.)),u.x), mix(hash(i+vec2(0.,1.)),hash(i+vec2(1.,1.)),u.x), u.y);\n}\nfloat fbm(vec2 p){\n  float v=0.0,a=0.5;\n  for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=0.5; }\n  return v;\n}\nvec2 toP(){ return (vUv - 0.5) * vec2(uRes.x/uRes.y, 1.0); }\nvec3 tri(float t){\n  t = fract(t) * 3.0;\n  vec3 c0 = vec3(0.40, 0.90, 1.00);\n  vec3 c1 = vec3(0.12, 0.34, 1.00);\n  vec3 c2 = vec3(0.56, 0.30, 0.98);\n  if (t < 1.0) return mix(c0, c1, t);\n  if (t < 2.0) return mix(c1, c2, t - 1.0);\n  return mix(c2, c0, t - 2.0);\n}\n\n// 双层密度：主层 + 半速副层，制造深度\nfloat density(vec2 p, float t){\n  vec2 q;\n  q.x = fbm(p * 0.85 + vec2(0.0, t * 0.30));\n  q.y = fbm(p * 0.85 + vec2(t * 0.26, 0.0));\n  vec2 r;\n  r.x = fbm(p + 3.5 * q + vec2(1.7, 9.2) + t * 0.14);\n  r.y = fbm(p + 3.5 * q + vec2(8.3, 2.8) - t * 0.12);\n  float f = fbm(p * 2.5 + 4.55 * r);\n  return clamp(f, 0.0, 1.0);\n}\n\nvec3 shade(vec2 p, float t){\n  float d = density(p, t);\n  float s = pow(d, 0.40);\n  float k = 0.0 + d * 0.55 + 0.08 * sin(t * 0.40);\n  vec3 tint = tri(k);\n  vec3 col = tint * (0.12 + s * 2.50);\n  col += vec3(1.0) * pow(s, 6.0) * 0.22;\n  col += tri(k + 0.30) * pow(s, 3.0) * 0.30;\n  return col;\n}\n\nvoid main(){\n  vec2 p = toP();\n  float t = uTime * 0.40;\n  p *= 1.0 + 0.035 * sin(t * 0.4);\n\n  // 主层（5 采样抗锯齿）\n  vec3 c = shade(p, t);\n  c += shade(p + vec2(0.005, 0.0), t);\n  c += shade(p - vec2(0.005, 0.0), t);\n  c += shade(p + vec2(0.0, 0.005), t);\n  c += shade(p - vec2(0.0, 0.005), t);\n  c /= 5.0;\n\n  // 副层：更慢、更大、更暗，压在后景\n  vec3 back = shade(p * 0.55 + vec2(0.0, 0.10), t * 0.45) * 0.35;\n  c = c + back * (1.0 - c);\n\n  // 色调分级：暗部往紫压，亮部往青提\n  c = mix(c, c * vec3(0.92, 0.88, 1.10), smoothstep(0.35, 0.0, c.g));\n  c = mix(c, c * vec3(0.88, 1.02, 1.08), smoothstep(0.55, 1.2, c.g));\n\n  float d = density(p, t);\n  float vig = smoothstep(1.45, 0.05, length(p * vec2(0.9, 1.0)));\n  float a = clamp(0.10 + pow(d, 2.80) * 0.95, 0.0, 1.0) * (0.30 + 0.70 * vig);\n\n  // 颗粒 + 抖动，消除色带\n  float g = hash1(dot(vUv * uRes, vec2(1.0, 1.0)) + fract(uTime) * 91.7) - 0.5;\n  c += g * 0.022;\n  a += g * 0.010;\n\n  gl_FragColor = vec4(c * a, a);\n}";
+  function compile(t, s) {
+    var sh = gl.createShader(t);
+    gl.shaderSource(sh, s); gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) console.error("SHADER " + gl.getShaderInfoLog(sh));
+    return sh;
+  }
+  var prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(prog); gl.useProgram(prog);
+  var buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+  var loc = gl.getAttribLocation(prog, "aPos");
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  var uTime = gl.getUniformLocation(prog, "uTime");
+  var uRes = gl.getUniformLocation(prog, "uRes");
+  function resize() {
+    var dpr = Math.min(devicePixelRatio || 1, 1.5);
+    canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+    canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+    gl.viewport(0, 0, canvas.width, canvas.height);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+  var t0 = performance.now();
+  function frame() {
+    gl.uniform1f(uTime, (performance.now() - t0) / 1000);
+    gl.uniform2f(uRes, canvas.clientWidth, canvas.clientHeight);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    requestAnimationFrame(frame);
+  }
+  frame();
+})();
+</script>
+</body></html>

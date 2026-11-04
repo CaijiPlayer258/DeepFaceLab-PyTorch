@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>V1 左文右码</title>
+<style>
+:root{--bg:#0a0a0c;--ink:#f2f2f5;--ink2:#8f8f9b;--ink3:#63636e;--line:#1d1d24;--brand:#6d79e0;}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:var(--bg);color:var(--ink);font-family:-apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+  display:flex;align-items:center;justify-content:center;overflow:hidden}
+.logo{display:flex;align-items:center;gap:9px}
+.mark{width:26px;height:26px}
+.mono{font-family:ui-monospace,Menlo,monospace}
+button{font:inherit;cursor:pointer;border:0;background:none;color:inherit}
+
+.wrap{display:grid;grid-template-columns:1.05fr .95fr;gap:72px;align-items:center;width:1060px}
+.brand{display:flex;align-items:center;gap:10px;margin-bottom:34px}
+.brand span{font-size:12.5px;color:#8b8b96;letter-spacing:.04em}
+h1{font-size:42px;line-height:1.2;font-weight:800;letter-spacing:-.6px}
+.sub{margin-top:16px;font-size:13px;line-height:1.85;color:#77777f;max-width:380px}
+.rows{margin-top:36px}
+.row{display:flex;gap:16px;align-items:baseline;padding:14px 0;border-top:1px solid var(--line)}
+.row:last-child{border-bottom:1px solid var(--line)}
+.row b{font-size:16px;letter-spacing:2px;width:56px;flex:none}
+.row span{font-size:12px;color:#6b6b76}
+.card{width:344px;padding:22px;background:#101014;border:1px solid #1e1e25;border-radius:18px}
+.card b{display:block;margin-top:16px;font-size:13px}
+.card p{margin:6px 0 14px;font-size:11.5px;color:#6f6f7a;line-height:1.7}
+.skip{font-size:11.5px;color:#8b8b96;border:1px solid #24242c;border-radius:8px;padding:7px 12px;background:#15151a}
+
+</style></head>
+<body>
+<div class="wrap">
+  <div>
+    <div class="brand"><svg class="mark" viewBox="0 0 32 32" fill="none"><rect x="1" y="1" width="30" height="30" rx="8" fill="#15151c" stroke="#2a2a36"/><path d="M10 10h6a4 4 0 1 1 0 8h-6z" stroke="#8b93ff" stroke-width="2.2" stroke-linejoin="round"/><path d="M10 18h3v4" stroke="#8b93ff" stroke-width="2.2" stroke-linecap="round"/></svg><span>DeepFaceLab-PyTorch</span></div>
+    <h1>本地换脸<br>完整工作流</h1>
+    <p class="sub">从素材提取到成片导出，四步都在一个窗口里完成，不用记任何命令。</p>
+    <div class="rows">
+      <div class="row"><b>更快</b><span>提取与推理都按批处理，62–72 张/秒</span></div>
+      <div class="row"><b>更易</b><span>提取到合成一条流程，全程图形界面</span></div>
+      <div class="row"><b>更强</b><span>错脸检测、遮罩绘制、模型转换都在里面</span></div>
+    </div>
+  </div>
+  <div class="card"><div style="width:300px;height:300px;background:#fff;border-radius:12px;padding:8px">
+  <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAXIAAAFyAQAAAADAX2ykAAACwklEQVR4nO1bUW6zMAy2DdIeQeoBdpT0ZtOOtBvAUXoDeKwE8uQ4pIhqgepXEfnx94Ag/jRZ+erEjjNkeAUtvUQHMH4atGJfwvhp0Ip9CeOnQSv2JYyfBq3YlzD+GeYHA0r5GBGgLwFaGbn2k+26oz/bQS9wT8x3LOjicDUAfnWFJF+FN/Gx/d8MOim/nyK0rQv2UcvfNQA3Gt3l3v5sBW1mnpNfPg+NJbSfDOi6y/7+kPHfOz/u9sHguhC6T7D5T4MOGr+VbLA9AAIUwD6IobojuB+Qz938IeO/Y35anyLXEr8dAF57CeLbhyg7avr8b39/M2g71cP4K+AlfBJdDfIsOCTWEY3NZxp0SH3B8SAbrhREIq2T0sj5sWqY/wRM3yz1ZVZBpcz1oetFZl/1FsxN5X8Cpm/e+nqojGJoJHT1EXkWv1nqC7IWa8CGIJa3bn6wZfrmrC/4rTc+tP6twk4c3ix+s9WXYxo1ZVo+dAdfGFv+nL2+4Ndijd9qnlWxT608LH7z5fP3p1+B76j1r7xpk1AaD48k66j+bwedd//lIO20KjferuvzVARb/pylviwKzrR8SNtopWT1b9b6QmwYhVpXDyk5HnxY/py1vjxbgWVQqyIIpZFGt+VX+fYH0f1ceGoRCao7SpNQhkq17uQPGf898RugoRsOrIbpTCueZFl+lWf8gqIYuK0LQNcwIFQdI/SXQdoNJR/TfzJ+GqxR+2gy+A1Xzyd5Oo6OnWCL34zPr5yeNU+qungr9tHkN30zvz+JUI2yFo8lt3UHLOsztlgM6Joj+k/Gf2l+mG8l+JvQ+q8LV72p8yd/DWT8Q+2/rJVwbPeDbr12Pvmf3J/Ea18CYj2iXsIKN+329mczaDv1xPsvx2+efwz6zqHxv4c/ZPwkKG1+gvHToBX7EsZPg1bsSxg/DVqxL2H8NI42P79Si0gpc1IsWgAAAABJRU5ErkJggg==" style="width:100%;height:100%;display:block;object-fit:contain"></div><b>用 B 站 App 扫码登录</b><p>登录后可以下载高码率素材，主页也会记住你的名字。</p>
+    <button class="skip">跳过，先看看</button></div>
+</div>
+<div style="position:fixed;left:18px;top:16px;font-size:11px;color:#3f3f4a;letter-spacing:.08em">V1 左文右码</div>
+</body></html>

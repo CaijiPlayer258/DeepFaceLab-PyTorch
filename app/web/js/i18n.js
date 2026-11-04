@@ -105,6 +105,8 @@
   "推理 · 平滑": "Inference · Smooth",
   "模糊筛选": "Blur filter",
   "重复图": "Duplicates",
+  "合并子文件夹": "Merge subfolders",
+  "错脸": "Wrong face",
   "坏图": "Broken",
   "清晰度": "Sharpness",
   "角度": "Angle",
@@ -200,7 +202,7 @@
   "提取完成": "Extraction finished",
   "个文件": "files",
   "后端未连接": "Backend not connected",
-  "请通过 app/main.py 启动": "Launch through app/main.py",
+  "请通过 app/engine/main.py 启动": "Launch through app/engine/main.py",
   "合成服务已启动": "Merge service started",
   "合成服务已停止": "Merge service stopped",
   "正在提取": "Extracting…"
@@ -288,12 +290,26 @@
     if (sk && !SPACELESS[sk]) SPACELESS[sk] = DICT[k];
   });
 
-  function translateText(lang) {
-    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+  /* 数字 + 量词（"342 张" / "0 个" / "12 帧"）是拼出来的，字典永远对不上。
+     这类按"数字后面的量词"整体替换，一条规则覆盖全站的计数文案。 */
+  var UNITS = { "张": "images", "个": "items", "帧": "frames", "秒": "s",
+                "分钟": "min", "小时": "h", "万": "0k" };
+  function transUnits(t) {
+    return t.replace(/(\d[\d,.]*)\s*(张|个|帧|秒|分钟|小时)/g, function (_, n, u) {
+      return n + " " + (UNITS[u] || u);
+    });
+  }
+
+  function translateText(lang, rootEl) {
+    var walker = document.createTreeWalker(rootEl || document.body, NodeFilter.SHOW_TEXT, null, false);
     var n;
     while ((n = walker.nextNode())) {
       var raw = n.nodeValue;
       if (raw == null) continue;
+      /* 语言切换器这类控件必须原样显示（"中文" 永远是 "中文"），
+         带 data-i18n-skip 或位于 #wLang 内的节点不参与翻译 */
+      var host = n.parentElement;
+      if (host && host.closest && host.closest("#wLang,[data-i18n-skip]")) continue;
       var stored = orig.get(n);
 
       if (lang !== "en") {
@@ -354,6 +370,7 @@
     document.documentElement.setAttribute("lang", lang === "en" ? "en" : "zh-CN");
     translateText(lang);
     translateAttrs(lang);
+    if (lang === "en") watchDynamic();
     try { window.localStorage.setItem("dfl-lang", lang); } catch (e) {}
     /* 遮罩编辑器是 iframe，独立文档，只能靠消息把语言推过去 */
     var mk = document.getElementById("mkFrame");
@@ -908,6 +925,558 @@
     "下午好": "Good afternoon",
     "晚上好": "Good evening"
   });
+
+  /* 运行期文案 batch 6：保存提示、远程访问、杂项 */
+  Object.assign(DICT, {
+    "已保存 · ": "Saved · ",
+    " 项即时生效": " applied immediately",
+    "要重启训练才生效：": "Needs a training restart:",
+    "全部立即生效": "All applied immediately",
+    "已保存，但没推给训练进程": "Saved, but not pushed to the training process",
+    "参数和文件里的一致": "Parameters match the file",
+    "下次启动训练时生效": "Takes effect the next time training starts",
+    "拿不到模型列表": "Cannot get the model list",
+    "点开始训练没反应": "Clicking Start does nothing",
+    "已应用 · 立即生效": "Applied · takes effect immediately",
+    "改动 ": "Changed ",
+    " 项，": " items, ",
+    " 项要重启才生效": " need a restart",
+    "全部即时生效": "All take effect immediately",
+    "参数已保存": "Parameters saved",
+    " · 改动 ": " · changed ",
+    " 项": " items",
+    "训练已启动": "Training started",
+    " · 4.0 进程已拉起": " · the 4.0 process is up",
+    "训练未启动": "Training did not start",
+    "已启用 · 端口 ": "Enabled · port ",
+    "设置失败": "Setting failed",
+    "远程访问已开启": "Remote access enabled",
+    "远程访问已关闭": "Remote access disabled",
+    "浏览器打开 ": "Open in browser: ",
+    "只在本机可用了": "now only reachable locally",
+    "并发": "Concurrency",
+    "并发 ": "Concurrency ",
+    "硬解": "Hardware decode",
+    "软解": "Software decode",
+    "计算中…": "Calculating…",
+    "自动选择": "Automatic",
+    "未选择": "Not selected",
+    "全脸": "Full face",
+    " 进程": " processes",
+    "自动进程": "Auto processes",
+    "就绪 · ": "ready · ",
+    "已提交导出 · ": "Export submitted · ",
+    "帧 ": "frame ",
+    "人脸 帧 ": "face frame ",
+    "剪切 帧 ": "cut frame ",
+    "角度 ": "angle ",
+    "数据集参数 · 补充": "Dataset parameters · extras",
+    "多身份人脸集目录，留空 = 用 dst 人脸集兜底": "Multi-identity face set folder; empty means fall back to the dst set",
+    "有没有 train-extra 包装层": "Whether there is a train-extra wrapper layer",
+    "用什么设备训练": "Which device trains the model",
+    "按你这张卡的可用显存，建议 ": "Based on this card's available VRAM, recommended ",
+    " 分辨率 / batch ": " resolution / batch ",
+    "（训练显存约 ": "(training VRAM about "
+  });
+
+  /* 运行期文案 batch 5：训练页（参数说明、状态、显存、预览） */
+  Object.assign(DICT, {
+    "目标批次": "Target batch",
+    "想要的等效批次；= 批次大小 × 累积次数。0 = 关闭累积": "Desired effective batch = batch size × accumulation steps. 0 disables accumulation",
+    "1.0 = 关闭": "1.0 = off",
+    "0.0~0.3 · 随机调整输入的 HSV：让模型从输入就学习更丰富的色彩，解出的人脸颜色也更丰富": "0.0–0.3 · randomises the input HSV: the model learns richer colour and decodes more varied skin tones",
+    "把 src 的颜色映射到 dst 上：通过改变输入数据，让模型学习调色后的 src 图像，生成更贴合 dst 色彩的人脸": "Maps src colour onto dst: the model learns from colour-shifted src images and produces faces closer to dst tones",
+    "随机遮挡输入图像的一部分、重建目标不变：让模型在信息缺失（被挡住）的情况下也能解码出人脸": "Randomly occludes part of the input while the target stays the same: the model learns to decode faces from incomplete data",
+    "给输入图像随机加噪声、重建目标不变：让模型在噪点严重时也能解码出清晰的人脸": "Adds random noise to the input while the target stays the same: the model stays clean under noise",
+    "对输入图像随机偏色、重建目标不变：让模型无论输入什么颜色的人脸，都只解码出正常颜色的人脸": "Randomly shifts input colour while the target stays the same: the model always decodes normal skin tones",
+    "应用参数": "Apply parameters",
+    "热": "live",
+    "训练中改这一项会立即生效": "Changes to this take effect immediately during training",
+    "混乱": "messy",
+    "编辑框但打不了字": "the input box cannot be typed into",
+    "文件选择器还没接": "the file picker is not wired yet",
+    "开关拨不动": "the toggle does not move",
+    "正在配置 ": "Configuring ",
+    "，确认后开始训练。": " — confirm to start training.",
+    "训练前确认参数。": "Check the parameters before training.",
+    "当前 iter ": "Current iter ",
+    " · 已读入 ": " · loaded ",
+    " 项真实参数": " real parameters",
+    "请求失败": "Request failed",
+    "操作失败": "Action failed",
+    "已继续": "Resumed",
+    "保存中…": "Saving…",
+    "已请求保存": "Save requested",
+    "停止训练？": "Stop training?",
+    "会先让训练进程保存再退出，可能要等十几秒。": "The training process saves first, then exits — this can take a dozen seconds.",
+    "停止训练": "Stop training",
+    "停止中…": "Stopping…",
+    "训练已停止": "Training stopped",
+    "连接中": "Connecting",
+    "已停止": "Stopped",
+    "正在停止": "Stopping",
+    "加载中": "Loading",
+    "2M 参数": "2M params",
+    " / 显卡 ": " / GPU ",
+    "启动中": "Starting",
+    "显存不足": "Out of VRAM",
+    "显存不足，训练已停止": "Out of VRAM — training stopped",
+    "测速中…": "Measuring speed…",
+    "未在训练": "Not training",
+    "最近 ": "Last ",
+    " iter（实时）": " iter (live)",
+    "已跑 ": "Elapsed ",
+    "约 ": "about ",
+    " 剩余": " left",
+    "显存 ": "VRAM ",
+    "模型 ": "Model ",
+    "刚刚": "just now",
+    " iter（约）": " iter (approx.)",
+    " 份": " copies",
+    "4.0 进程正在起来，模型加载要一会儿": "The 4.0 process is starting; loading the model takes a moment",
+    "正在停止…": "Stopping…",
+    "等它保存完再退出": "waiting for it to save before exiting",
+    "正在保存…": "Saving…",
+    "下一个迭代后落盘": "written after the next iteration",
+    "加载模型…": "Loading model…",
+    "已等 ": "waited ",
+    "s 前": "s ago",
+    "m 前": "m ago",
+    "等新图…": "waiting for a new frame…",
+    "预览还没准备好": "Preview is not ready yet",
+    "4.0 通常几十秒后才有第一张": "the first frame usually arrives within tens of seconds",
+    "没拿到新图": "No new frame",
+    "训练那边还没出下一张，稍后再点一次": "training has not produced the next frame yet — try again shortly",
+    "通知": "Notifications",
+    "当前 ": "Current ",
+    " 条": " items",
+    "隐藏模式密码已更新": "Hidden-mode password updated",
+    "密码已清空": "Password cleared",
+    "还没选中模型": "No model selected",
+    "没有改动": "No changes",
+    "参数还是原来的值": "parameters are unchanged"
+  });
+
+  /* 运行期文案 batch 4：拼接片段的翻译（前后空格必须保留，否则英文会粘成一串） */
+  Object.assign(DICT, {
+    "共 ": "total ",
+    " 线程 · ": " threads · ",
+    " 张/秒": " images/s",
+    " · 剩 ": " · left ",
+    " 秒": " s",
+    " 张，命中 ": " images, matched ",
+    " 张": " images",
+    "已重排 ": "Reordered ",
+    "已按「": "Re-sorted by “",
+    "」重排 ": "” — ",
+    "身份": "Identity",
+    "重复": "Duplicates",
+    "已移走 ": "Moved ",
+    " 张失败": " images failed",
+    "并入 ": "merged ",
+    " 张 · 重名改名 ": " images · renamed ",
+    " 张 · 删除空目录 ": " images · empty dirs removed ",
+    " 个": " dirs",
+    "合并 ": "Merged ",
+    " 张，清理 ": " images, cleaned ",
+    " 个空目录": " empty dirs",
+    "已读取 ": "Read ",
+    " 张 · 命中 ": " images · matched ",
+    " 张没有元数据的脸，用 2D106 重新检测了关键点": " faces without metadata had 2D106 landmarks re-detected",
+    " 张缺有效 landmarks": " images lack valid landmarks",
+    " · 例：": " · e.g. ",
+    "（都在 _by_id/ 下）": "(all under _by_id/)",
+    " 张已分到 _by_id/ 下的 ": " images sorted into ",
+    " 个目录": " folders under _by_id/",
+    "分成 ": "Split into ",
+    " 组，移走 ": " groups, moved ",
+    " 主体 ": "Main ",
+    " 张 · 其他身份 ": " images · other identities ",
+    " 张已移出 · ": " images moved out · ",
+    " 簇": " clusters",
+    " · 噪声 ": " · noise ",
+    " 张，没有命中 · ": " images, no match · ",
+    "扫描完成 · 命中 ": "Scan finished · matched ",
+    " 张，正在移走…": " images, moving…",
+    " 小时 ": " h ",
+    " 张人脸": " faces",
+    " 个文件": " files",
+    "正在提取人脸特征并聚类…（这一步要跑引擎进程，通常 5~10 秒）": "Extracting and clustering face features… (runs the engine process, usually 5–10 s)",
+    /* 素材 / 抽帧 进度 */
+    "http://127.0.0.1:8001 · 已在浏览器打开": "http://127.0.0.1:8001 · opened in your browser",
+    " 帧 · ": " frames · ",
+    " 帧": " frames",
+    " 张 · ": " images · ",
+    " 张带 landmark": " images with landmarks",
+    " 张对齐脸": " aligned faces",
+    "每隔 ": "Every ",
+    " 帧检测一次，稍等…": " frame(s) is analysed, hold on…",
+    " 个采样点 · ": " sample points · ",
+    " 处有脸 · 用时 ": " with a face · took ",
+    /* B 站下载 */
+    "获取中…": "Fetching…",
+    "视频 ": "Video ",
+    "第 ": "Batch ",
+    " 批 · 已取 ": " · fetched ",
+    "获取完成": "Fetch finished",
+    " · 共 ": " · total ",
+    " 个视频 · ": " videos · ",
+    " 批": " batches",
+    "下载完成": "Download finished",
+    "全部 ": "All ",
+    " 个视频已下载": " videos downloaded",
+    "继续": "Continue",
+    "终止下载": "Stop downloading",
+    "会清空当前队列，已下载的文件保留。": "This clears the queue; already downloaded files are kept.",
+    "UID 不合法": "Invalid UID",
+    "请输入纯数字的 UP 主 UID": "Enter the uploader UID as digits only",
+    "开始下载": "Start download",
+    "已选 ": "Selected ",
+    /* 任务列表 / 模型卡 */
+    " 个在排队": " queued",
+    " 个进行中 / 共 ": " running / ",
+    " 个已完成": " done",
+    "个模型": "models",
+    "个已导出 DFM": "exported DFMs",
+    ".dfm 已生成": " .dfm created",
+    "会移除 ": "Removes ",
+    " 的全部权重与配置，无法恢复。": " — all weights and config, cannot be undone."
+  });
+
+  /* 运行期文案 batch 3/3：B 站登录、首页卡片、任务列表、时间单位 */
+  Object.assign(DICT, {
+    "还没有设置密码，去「设置 → 隐私密码」里设一个": "No password set yet — go to Settings → Privacy password",
+    "密码不对": "Wrong password",
+    "用户": "User",
+    "正在向 B 站申请二维码…": "Requesting a QR code from Bilibili…",
+    "生成失败": "Generation failed",
+    "点这里重试": "Click here to retry",
+    "无法获取二维码：": "Cannot get a QR code: ",
+    "登录成功，欢迎 ": "Signed in, welcome ",
+    "登录成功": "Signed in",
+    "欢迎，": "Welcome, ",
+    "已过期 · 点这里刷新": "Expired · click here to refresh",
+    "二维码已过期": "The QR code expired",
+    "等待扫码…": "Waiting for scan…",
+    "退出登录？": "Sign out?",
+    "会清除本机的 B 站授权，下次使用需要重新扫码。训练和数据都不受影响。": "This clears the local Bilibili authorisation; you will need to scan again next time. Training and data are unaffected.",
+    "已退出登录": "Signed out",
+    "B 站授权已清除": "Bilibili authorisation cleared",
+    " 分钟前": " min ago",
+    " 小时前": " h ago",
+    " 天前": " d ago",
+    "先导入一份人脸集": "Import a face set first",
+    "src 与 dst 都还是空的。提取器可以从视频或图片里裁出对齐后的人脸。": "src and dst are both empty. The extractor cuts aligned faces out of videos or images.",
+    "打开提取器": "Open the extractor",
+    "创建第一个模型": "Create your first model",
+    "数据集已就绪（src ": "Dataset ready (src ",
+    "），接下来建模型开始训练。": ") — create a model and start training.",
+    "继续训练 ": "Resume training ",
+    "停在 iter ": "stopped at iter ",
+    "，上次训练于 ": ", last trained ",
+    "未知": "Unknown",
+    "还没有模型": "No models yet",
+    "个模型": "models",
+    "个已导出 DFM": "exported DFMs",
+    "个进行中 / 共 ": " running / ",
+    "个已完成": " done",
+    "任务": "Jobs",
+    "还有 ": "Another ",
+    "个在排队": "queued",
+    "已完成 ": "Done ",
+    "下载选中（": "Download selected (",
+    "是": "Yes",
+    "否": "No",
+    "转换": "Convert",
+    "导出": "Export",
+    "删除": "Delete",
+    "参数": "Parameters",
+    "模型": "Models",
+    "切换语言": "Switch language",
+    "无预览": "No preview",
+    "暂无 loss 记录": "No loss recorded yet",
+    "正在加载显卡信息…": "Loading GPU info…",
+    "正在读取工作区…": "Reading workspace…",
+    "个文件": "files",
+    "张人脸": "faces",
+    "剩 ": "left ",
+    "分": "min",
+    "正在提取…": "Extracting…",
+    "正在中断…": "Stopping…"
+  });
+
+  /* 运行期文案 batch 2/3：抽帧 / 合成 / 导出 / 合成器 */
+  Object.assign(DICT, {
+    "抽帧": "Frame extraction",
+    "人脸对齐": "Face alignment",
+    "处理完成": "Finished",
+    "返回": "Back",
+    "已离开运行页": "Left the run page",
+    "扫描/移动会在后台继续完成": "scanning and moving continue in the background",
+    "正在中断…": "Stopping…",
+    "正在提取…": "Extracting…",
+    "缺少输入": "Missing input",
+    "先在「输入」里填一个视频文件，或把文件拖进框里": "Put a video file in “Input”, or drop it into the box",
+    "开始抽帧": "Start frame extraction",
+    "启动后在浏览器里打开工作台，模型在网页里再选": "Open the workbench in your browser after start; pick the model there",
+    "端口 8001": "Port 8001",
+    "已经在训练": "Already training",
+    "导出中…": "Exporting…",
+    " · 要加载模型，几分钟": " · loads the model, takes a few minutes",
+    "导出完成": "Export finished",
+    "导出失败": "Export failed",
+    "删除模型": "Delete model",
+    "删除失败": "Delete failed",
+    "已删除": "Deleted",
+    "好": "OK",
+    "取不到成片": "No rendered video found",
+    "成片预览": "Rendered preview",
+    "还没有成片 —— 先导出一次": "Nothing rendered yet — export once first",
+    "打开视频": "Open video",
+    "打开失败": "Open failed",
+    "未知错误": "Unknown error",
+    "已打开项目": "Project opened",
+    "已打开": "Opened",
+    "打开项目": "Open project",
+    "网页版拿不到本地路径": "The web build cannot access local paths",
+    "选择 DFL 项目目录（data_dst）": "Choose a DFL project folder (data_dst)",
+    "读不了这个目录": "Cannot read this folder",
+    "素材已就绪": "Sources ready",
+    "正在准备": "Preparing",
+    "等这一段处理完再来": "Wait until this pass finishes",
+    "抽帧…": "Extracting frames…",
+    "准备素材": "Prepare sources",
+    " · 抽帧 + 对齐": " · frames + alignment",
+    "准备失败：": "Preparation failed: ",
+    "准备失败": "Preparation failed",
+    "先打开视频": "Open a video first",
+    "分析需要先选一个视频": "Analysis needs a video selected first",
+    "开始分析": "Start analysis",
+    "分析失败": "Analysis failed",
+    "分析完成": "Analysis finished",
+    "检测失败": "Detection failed",
+    "还没有素材": "No sources yet",
+    "先导入一段视频（会自动抽帧 + 对齐）": "Import a video first (frames and alignment are automatic)",
+    "剩余 ": "Remaining ",
+    "正在取消": "Cancelling",
+    "取消失败": "Cancel failed",
+    "等它退出，几秒": "waiting for it to exit, a few seconds",
+    "没有素材": "No sources",
+    "先在工作台导入一段视频 —— 会自动抽帧 + 对齐": "Import a video in the workbench first — frames and alignment are automatic",
+    "正在合成": "Merging",
+    "上一次还没结束": "The previous run has not finished",
+    "已开始合成": "Merge started",
+    "合成未启动": "Merge did not start",
+    "导入视频": "Import video",
+    "网页版拿不到本地路径，请把视频放进工作区": "The web build cannot access local paths — put the video in the workspace",
+    "选择视频所在目录": "Choose the folder containing the video",
+    "这个目录里没有视频": "No video in this folder",
+    "没有找到视频": "No video found",
+    "导出中": "Exporting",
+    " → .dfm（要加载模型，可能几分钟）": " → .dfm (loads the model, may take a few minutes)",
+    " 已生成 .dfm": " .dfm created",
+    "看控制台日志": "Check the console log",
+    "合成中…": "Merging…",
+    "合成完成": "Merge finished",
+    "合成失败": "Merge failed",
+    "输出 ": "Output ",
+    "不存在": "does not exist",
+    "数据集已更换": "Dataset switched",
+    "路径已填入": "Path filled in",
+    "网页版拿不到本地路径，请直接填写或拖入文件夹": "The web build cannot access local paths — type it or drop a folder",
+    "选择数据集目录": "Choose a dataset folder",
+    "无法读取路径": "Cannot read the path",
+    "请把文件夹从资源管理器拖进来": "Drag the folder in from Explorer",
+    "已重置": "Reset",
+    "回到内置坐标": "Back to built-in coordinates",
+    "服务端拒绝": "Rejected by the server",
+    "已保存": "Saved",
+    "隐藏模式的脸已更新": "Hidden-mode faces updated",
+    "保存失败": "Save failed",
+    "已复制": "Copied",
+    "68 点坐标在剪贴板里": "68-point coordinates are on the clipboard"
+  });
+
+  /* 运行期文案 batch 1/3：toast、确认框、空状态（都是 JS 拼出来、只有操作时才出现的） */
+  Object.assign(DICT, {
+    "点了没反应": "Nothing happened",
+    "这一节的后端还没接": "This section is not wired to the backend yet",
+    "应用遮罩中…": "Applying mask…",
+    "正在应用遮罩": "Applying mask",
+    "启动失败": "Failed to start",
+    "应用遮罩已开始": "Mask application started",
+    "应用遮罩失败": "Mask application failed",
+    "运行中…": "Running…",
+    "等待开始": "Waiting to start",
+    "应用中…": "Applying…",
+    "应用遮罩完成": "Mask application finished",
+    "已完成": "Done",
+    "开始扫描": "Scan started",
+    " · 正在统计…": " · counting…",
+    "正在扫描清晰度": "Scanning sharpness",
+    "正在查找重复图": "Looking for duplicates",
+    "正在检测错脸": "Detecting wrong faces",
+    "正在聚类人脸身份": "Clustering identities",
+    "扫描完成": "Scan finished",
+    "扫描失败": "Scan failed",
+    "开始排序": "Sort started",
+    " · 正在处理…": " · working…",
+    "正在排序": "Sorting",
+    "排序完成": "Sort finished",
+    "排序失败": "Sort failed",
+    "正在统计清晰度": "Measuring sharpness",
+    "正在计算哈希": "Computing hashes",
+    "特征提取中": "Extracting features",
+    "正在聚类": "Clustering",
+    "按特征分组…": "Grouping by feature…",
+    "计算清晰度…": "Computing sharpness…",
+    "计算感知哈希…": "Computing perceptual hashes…",
+    "提取 ArcFace 特征…": "Extracting ArcFace features…",
+    "失败：": "Failed: ",
+    "处理失败": "Processing failed",
+    "移动到 _trash…": "Moving to _trash…",
+    "张已移入 _trash": "images moved to _trash",
+    "部分未移走": "some could not be moved",
+    "在 _trash 里": "in _trash",
+    "移动失败": "Move failed",
+    "正在合并子文件夹": "Merging subfolders",
+    "把子目录里的图搬回根目录…": "Moving images from subfolders back to root…",
+    "张已并回根目录": "images merged into root",
+    "合并完成": "Merge finished",
+    "合并失败": "Merge failed",
+    "正在统计…": "Counting…",
+    " · 扫描中": " · scanning",
+    "正在读取 68 点并分类…": "Reading 68-point landmarks and classifying…",
+    "正在统计数据集…": "Counting the dataset…",
+    "已现场补点": "landmarks re-detected",
+    "部分图片未参与错脸判定": "Some images were skipped in wrong-face detection",
+    "已按身份分文件夹": "Sorted into per-identity folders",
+    "没有可分的组": "No groups to split",
+    "身份聚类完成": "Identity clustering finished",
+    "没有需要处理的图片": "No images needed processing",
+    "扫描完成 · 没有命中": "Scan finished · nothing matched",
+    "选择数据集": "Choose a dataset",
+    "文件选择器还没接 · 也可以直接把文件夹拖到这个框里": "File picker not wired yet · you can also drop a folder into this box",
+    "模糊 · 身份 · 重复 · 错脸 · 合并": "Blur · Identity · Duplicates · Wrong face · Merge",
+    "ArcFace 特征向量聚类，同一组≈同一个人（顺带清掉打不开的文件）": "ArcFace embedding clustering — same group, same person (unreadable files removed too)",
+    "感知哈希(phash)检测高度相似，剔除重复帧（顺带清掉打不开的文件）": "pHash finds near-identical frames and drops duplicates (unreadable files removed too)",
+    "68 点几何分类判错检（需要数据集用 2D106 真点重提过）": "Flags bad detections by 68-point geometry (needs 2D106 landmarks in the dataset)",
+    "原序": "Original order",
+    "感知哈希": "Perceptual hash",
+    "越清晰排越前（blur）": "Sharpest first (blur)",
+    "按偏航角从小到大（pose/yaw）": "By yaw, smallest first",
+    "恢复原始文件顺序（reset）": "Restore original file order",
+    "按感知哈希相近度排序（phash）": "Sort by perceptual-hash similarity",
+    "按直方图相似度排序（histogram）": "Sort by histogram similarity",
+    "邻域半径": "Neighbour radius",
+    "瞬间": "Instant",
+    "卡片已经白了、字还是旧的浅灰": "the card turns white while the text is still in the old light grey",
+    "点太快把画面卡成一整块遮罩": "clicking too fast turns the preview into one solid mask",
+    "这次没动画": "no animation this time"
+  });
+
+  /* 全盘补译（扫 index.html 文本节点 + app.js 渲染字面量得出的缺口） */
+  Object.assign(DICT, {
+    "退出登录": "Sign out",
+    "你好": "Hello",
+    "正在读取工作区…": "Reading workspace…",
+    "TinyMog 速度优先 · Retina 质量优先": "TinyMog favours speed · Retina favours quality",
+    "源视频旋转角度": "Source rotation",
+    "每 N 帧取一张": "One frame every N",
+    "正在提取人脸": "Extracting faces",
+    "中断提取": "Stop extraction",
+    "已处理": "Processed",
+    "速度": "Speed",
+    "已用": "Elapsed",
+    "秒": "s",
+    "剩余": "Remaining",
+    "中断": "Stop",
+    "模型转换": "Model conversion",
+    "失败": "Failed",
+    "加载模块": "Load module",
+    "转换模型": "Convert model",
+    "尚未加载数据": "No data loaded",
+    "训练失败": "Training failed",
+    "剩余 —": "Remaining —",
+    "未登录": "Not signed in",
+    "登录后可下载 1080P / 会员清晰度": "Sign in to download 1080P / member quality",
+    "去登录": "Sign in",
+    "未启用": "Not enabled",
+    /* 数据处理页的模式行与参数行（都是 JS 渲染的，之前完全没翻） */
+    "模式": "Mode",
+    "邻居半径": "Neighbour radius",
+    "最小样本": "Min samples",
+    "相似度阈值": "Similarity threshold",
+    "判定阈值": "Decision threshold",
+    "最差 %（0=按阈值）": "Worst % (0 = by threshold)",
+    "遮罩类型": "Mask type",
+    "遮罩尺寸": "Mask size",
+    "开始处理": "Start",
+    "还没有导出过 DFM": "No DFM exported yet",
+    "停止处理": "Stop",
+    "正在处理…": "Working…"
+  });
+
+  /* 数据处理页：模式名与说明（原来只有中文） */
+  Object.assign(DICT, {
+    "人脸身份": "Identity",
+    "应用遮罩": "Apply mask",
+    "按特征向量聚类，同一组副本相同一张脸（顺带清掉打不开的文件）": "Cluster faces by ArcFace embedding — same group, same person (unreadable files removed too)",
+    "高频/低频能量比 E(b0)/E(b2) 判清晰度，按分位淘汰最差一批（顺带清掉打不开的文件）": "Blur score from the high/low frequency energy ratio E(b0)/E(b2); worst percentile is dropped (unreadable files too)",
+    "感知哈希(pHash)检测高度相似，剔除重复帧（顺带清掉打不开的文件）": "pHash detects near-identical frames and drops the duplicates (unreadable files too)",
+    "68 点几何分类判错检（需要数据集里 2D106 真点重提过）": "Flags bad detections using 68-point geometry (requires 2D106 landmarks in the dataset)",
+    "把所有子目录（含多层）里的图片搬回根目录，清掉空出来的文件夹；跳过 _trash 和隐藏目录": "Flatten every subfolder (any depth) into the root and remove the emptied folders; skips _trash and hidden dirs"
+  });
+
+  /* 登录页扫码卡的文案 */
+  Object.assign(DICT, {
+    "使用": "Scan with",
+    "APP 扫码授权登录": "the Bilibili app",
+    "用手机 B 站 App 扫码，扫完在手机上确认。": "Scan the code with the Bilibili app on your phone, then confirm there.",
+    "等待扫码": "Waiting for scan",
+    "已扫码，请在手机上确认": "Scanned — confirm on your phone"
+  });
+
+  /* ---------- 动态渲染的补翻 ----------
+     问题：i18n 只在切换语言那一刻扫一遍 DOM。之后由 JS 渲染出来的内容
+     （数据处理页的模式行、下拉选项、列表项……）都是新建节点，永远保持中文。
+     解决：语言是 en 时挂一个 MutationObserver，凡是有新节点进 DOM，
+     就在那棵子树里补跑一遍同样的翻译。只监听 childList，
+     改文本本身不会触发，不会自激。 */
+  function translateNode(node) {
+    if (!node) return;
+    if (node.nodeType === 3) {
+      var raw = node.nodeValue;
+      if (raw == null || !hasCJK(raw)) return;
+      var hostEl = node.parentElement;
+      if (hostEl && hostEl.closest && hostEl.closest("#wLang,[data-i18n-skip]")) return;
+      if (orig.get(node) === undefined) orig.set(node, raw);
+      var hit = lookup(raw);
+      if (hit) {
+        var lead = raw.match(/^\s*/)[0];
+        var trail = raw.match(/\s*$/)[0];
+        node.nodeValue = lead + hit + trail;
+      }
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    if (node.closest && node.closest("#wLang,[data-i18n-skip]")) return;
+    translateText(lang, node);
+    translateAttrs(lang);
+  }
+
+  var mo = null;
+  function watchDynamic() {
+    if (mo || typeof MutationObserver !== "function" || !document.body) return;
+    mo = new MutationObserver(function (muts) {
+      if (lang !== "en") return;
+      for (var i = 0; i < muts.length; i++) {
+        var added = muts[i].addedNodes;
+        for (var j = 0; j < added.length; j++) translateNode(added[j]);
+      }
+    });
+    mo.observe(document.body, { childList: true, subtree: true });
+  }
 
   window.I18N = {
     apply: apply,

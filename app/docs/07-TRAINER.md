@@ -268,9 +268,9 @@ model_004 这个量级（171M 参数 / 1.9GB 权重）：
 ## 六、怎么验收
 
 ```
-python tools/trainer_accept.py          # 建临时小模型，跑完自动删，约 3 分钟
-python tools/trainer_accept.py --keep   # 留着临时模型看现场
-python tools/trainer_accept.py --model 384wf   # 拿真模型跑（会真的训练它）
+python app/tools/trainer_accept.py          # 建临时小模型，跑完自动删，约 3 分钟
+python app/tools/trainer_accept.py --keep   # 留着临时模型看现场
+python app/tools/trainer_accept.py --model 384wf   # 拿真模型跑（会真的训练它）
 ```
 
 断言的是「行为」不是「字段」：迭代在涨、速度接近日志里的 ms、loss/lr 有值、

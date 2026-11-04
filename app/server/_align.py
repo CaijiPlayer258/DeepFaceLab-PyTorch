@@ -16,6 +16,7 @@ whole_face 对齐脸的 landmarks 求均值得到，坐标就是 DFL 512 对齐�
 """
 from __future__ import annotations
 
+import io
 import pickle
 import struct
 
@@ -341,10 +342,67 @@ def write_dfljpg(path, img_bgr, meta: dict, quality: int = 95):
 
 # ---------------- 批量应用遮罩（提取之后单独一步，与 DFL 的 extract → mask 流程一致） ----------------
 
-def read_dfljpg_meta(path):
-    """读出 JPEG 里 APP15 段的 dict；没有就返回 None。"""
-    data = Path(path).read_bytes()
-    if not data.startswith(b"\xff\xd8"):
+# DFL 的 APP15 段是 pickle —— 直接 loads 等于让一张 jpg 执行任意代码。
+# 数据集里混进外部图片时这就是个真实的入口，所以只放行数据类对象。
+_ALLOWED = {
+    ("numpy.core.multiarray", "_reconstruct"),
+    ("numpy._core.multiarray", "_reconstruct"),
+    ("numpy.core.multiarray", "scalar"),
+    ("numpy._core.multiarray", "scalar"),
+    ("numpy", "ndarray"),
+    ("numpy", "dtype"),
+    ("collections", "OrderedDict"),
+    ("builtins", "set"),
+    ("builtins", "frozenset"),
+    ("builtins", "bytearray"),
+    ("builtins", "complex"),
+}
+
+
+class _SafeUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if (module, name) in _ALLOWED:
+            return super().find_class(module, name)
+        raise pickle.UnpicklingError("blocked global: %s.%s" % (module, name))
+
+
+def safe_loads(blob: bytes):
+    return _SafeUnpickler(io.BytesIO(blob)).load()
+
+
+_HEAD_BYTES = 256 * 1024      # 头部段（EXIF / APP15）够用
+_TAIL_BYTES = 256 * 1024      # DFL 的 APP15 也可能挂在 EOI 之前（带 xseg 遮罩时更大）
+_EOI = bytes((0xFF, 0xD9))
+_APP15 = bytes((0xFF, 0xEF))
+_SOI = bytes((0xFF, 0xD8))
+
+
+def _read_head_tail(path):
+    """只读首尾两块，避免为了几十 KB 元数据把整张图搬进内存。"""
+    import os as _os
+    p_ = Path(path)
+    try:
+        size = _os.path.getsize(p_)
+    except OSError:
+        return b'', 0
+    if size <= _HEAD_BYTES + _TAIL_BYTES:
+        try:
+            return p_.read_bytes(), 0
+        except OSError:
+            return b'', 0
+    try:
+        with open(p_, 'rb') as f:
+            head = f.read(_HEAD_BYTES)
+            f.seek(size - _TAIL_BYTES)
+            tail = f.read(_TAIL_BYTES)
+    except OSError:
+        return b'', 0
+    return head + tail, len(head)
+
+
+def _parse_meta_bytes(data):
+    """从一段 JPEG 字节里找 APP15 并解出 dict；找不到返回 None。"""
+    if not data or not data.startswith(_SOI):
         return None
     i, n = 2, len(data)
     while i + 4 <= n:
@@ -354,29 +412,48 @@ def read_dfljpg_meta(path):
         if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
             i += 2
             continue
-        seg_len = struct.unpack(">H", data[i + 2:i + 4])[0]
+        seg_len = struct.unpack('>H', data[i + 2:i + 4])[0]
         seg = data[i + 4:i + 2 + seg_len]
         if marker == 0xEF:
             try:
-                return pickle.loads(bytes(seg))
+                return safe_loads(bytes(seg))
             except Exception:
                 return None
         i += 2 + seg_len
         if marker == 0xDA:
-            # 扫到 SOS 就停了：但 DFL 的 APP15 通常在文件末尾（EOI 之前），
-            # 所以再按「尾部段」找一次，否则读不到刚写进去的遮罩/landmarks
-            eoi = data.rfind(b"\xff\xd9")
-            if eoi > 0:
-                pos = data.rfind(b"\xff\xef", 0, eoi)
-                if pos > 0 and pos + 4 <= eoi:
-                    seg_len2 = struct.unpack(">H", data[pos + 2:pos + 4])[0]
-                    if pos + 2 + seg_len2 <= eoi:
-                        try:
-                            return pickle.loads(bytes(data[pos + 4:pos + 2 + seg_len2]))
-                        except Exception:
-                            return None
             break
+    # 扫到 SOS 就停：DFL 的 APP15 往往贴在 EOI 之前
+    eoi = data.rfind(_EOI)
+    if eoi > 0:
+        pos = data.rfind(_APP15, 0, eoi)
+        if pos > 0 and pos + 4 <= eoi:
+            seg_len = struct.unpack('>H', data[pos + 2:pos + 4])[0]
+            if pos + 2 + seg_len <= eoi:
+                try:
+                    return safe_loads(bytes(data[pos + 4:pos + 2 + seg_len]))
+                except Exception:
+                    return None
     return None
+
+
+def read_dfljpg_meta(path):
+    """读出 JPEG 里 APP15 段的 dict；没有就返回 None。
+
+    **只读首尾各 256KB**：APP15 要么在头部段里，要么贴在 EOI 之前。
+    窗口没覆盖到（段跨边界）再整读兜底 —— 以前每次都把整张图读进内存。
+    """
+    data, _off = _read_head_tail(path)
+    meta = _parse_meta_bytes(data) if data else None
+    if meta is not None:
+        return meta
+    # 头尾窗口可能把 APP15 截断：整读一次再试（只在异常文件上发生）
+    try:
+        whole = Path(path).read_bytes()
+    except OSError:
+        return None
+    if len(whole) == len(data):
+        return None
+    return _parse_meta_bytes(whole)
 
 
 def rewrite_dfljpg_meta(path, meta: dict):

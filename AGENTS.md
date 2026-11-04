@@ -18,8 +18,8 @@
 
 ## 验证
 
-- 后端改动：`python tools/trainer_accept.py` / `python tools/merge_accept.py`（会起后端 + 无头 Edge）。
-- 界面改动：至少跑一次 i18n 审计 `python tools/i18n_audit.py`，中文没进词典会以退出码 2 报警。
+- 后端改动：`python app/tools/trainer_accept.py` / `python app/tools/merge_accept.py`（会起后端 + 无头 Edge）。
+- 界面改动：至少跑一次 i18n 审计 `python app/tools/i18n_audit.py`，中文没进词典会以退出码 2 报警。
 
 ## 前端页面规则（务必遵守）
 

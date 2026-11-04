@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark"><head><meta charset="utf-8">
+<title>转换页设计演进 · A 版 → 终版</title>
+<style>
+:root{
+  --bg:#08080a; --card:#141418; --card-a:#101012; --panel:#1a1a1f;
+  --line:#26262d; --ink:#f2f2f4; --ink-2:#a3a3ad; --ink-3:#6d6d78;
+  --brand:#5d6ccf; --brand-a:#6366f1; --ok:#3ddc84; --bad:#f87171;
+  --shadow:0 1px 2px rgba(0,0,0,.5), 0 12px 36px rgba(0,0,0,.55);
+  --font:"Inter","Noto Sans SC","Source Han Sans SC","Microsoft YaHei UI","Segoe UI",system-ui,sans-serif;
+  --mono:ui-monospace,"Cascadia Mono",Consolas,monospace;
+  --ease:cubic-bezier(.16,1,.3,1);
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font);font-size:14px;line-height:1.55;
+  display:flex;align-items:center;justify-content:center;-webkit-font-smoothing:antialiased;overflow:hidden}
+
+.cap{position:fixed;top:34px;left:0;right:0;text-align:center;font-size:13px;color:var(--ink-3);
+  transition:opacity .4s var(--ease), transform .4s var(--ease)}
+.cap b{color:var(--ink-2);font-weight:600}
+.cap .n{color:var(--brand);margin-right:6px}
+.cap.hide{opacity:0;transform:translateY(-6px)}
+
+.card{
+  width:600px;
+  --pad:16px; --hd-mb:20px; --step-py:14px; --gap-x:14px; --step-gap:0px;
+  --surface:var(--card-a); --accent:var(--brand-a);
+  background:var(--surface); border:1px solid var(--line); border-radius:14px;
+  padding:var(--pad); box-shadow:var(--shadow);
+  transition:padding .8s var(--ease), background .8s ease, border-color .5s ease;
+}
+.card.bad{border-color:rgba(248,113,113,.45)}
+
+.hd{display:flex;align-items:baseline;gap:10px;margin-bottom:var(--hd-mb);
+  transition:margin-bottom .8s var(--ease)}
+.hd .ttl{font-size:15px;font-weight:650;transition:font-size .6s var(--ease)}
+.hd .sub{font-size:12px;color:var(--ink-3)}
+.hd .sp{flex:1}
+.badge{font-size:12px;color:var(--bad);opacity:0;transition:opacity .3s ease}
+.badge.on{opacity:1}
+
+/* 步骤：连线用 ::before 从图标中心接到下一个图标中心 */
+.st{position:relative;padding:var(--step-py) 0;
+  transition:padding .8s var(--ease), margin .8s var(--ease)}
+.st + .st{margin-top:var(--step-gap)}
+.line{position:absolute;left:11px;top:36px;width:1px;background:var(--line);height:0}
+.st .fill{position:absolute;left:11px;top:36px;width:1px;
+  bottom:calc(-1 * (var(--step-py) + var(--step-gap) + 4px));
+  background:var(--ok);transform:scaleY(0);transform-origin:top;
+  transition:transform .45s var(--ease)}
+.st.done .fill{transform:scaleY(1)}
+.st.last .fill{display:none}
+
+.sh{display:flex;align-items:center;gap:var(--gap-x);transition:gap .8s var(--ease)}
+.ic{position:relative;width:24px;height:24px;border-radius:50%;flex:none;display:grid;place-items:center;
+  font-size:11px;background:#1d1d24;color:var(--ink-3);z-index:1;
+  transition:background .3s,color .3s,box-shadow .3s}
+.st.on .ic{background-color:var(--surface);color:#a8b3ee;
+  background-image:linear-gradient(rgba(93,108,207,.18),rgba(93,108,207,.18));
+  box-shadow:0 0 0 3px rgba(93,108,207,.12)}
+.st.done .ic{background-color:var(--surface);color:var(--ok);
+  background-image:linear-gradient(rgba(61,220,132,.14),rgba(61,220,132,.14))}
+.st.err .ic{background-color:var(--surface);color:var(--bad);
+  background-image:linear-gradient(rgba(248,113,113,.16),rgba(248,113,113,.16));
+  box-shadow:0 0 0 3px rgba(248,113,113,.12)}
+.ic svg{width:12px;height:12px;animation:spin .9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.nm{font-size:13px;color:var(--ink-2);transition:color .3s}
+.st.on .nm{color:var(--ink)} .st.err .nm{color:var(--bad)}
+
+.sub2{font-size:12px;color:var(--ink-3);margin:-4px 0 12px;max-height:40px;
+  transition:opacity .4s ease,max-height .45s var(--ease),margin .45s var(--ease)}
+.banner{font-size:12px;color:var(--ink-3);border:1px dashed rgba(248,113,113,.35);
+  border-radius:0;padding:7px 10px;margin-bottom:10px;max-height:40px;
+  transition:opacity .4s ease,max-height .45s var(--ease),margin .45s var(--ease),padding .45s var(--ease)}
+.note{font-size:11px;color:var(--ink-3);margin-left:auto;
+  transition:opacity .4s ease,max-height .45s var(--ease)}
+.card.s3 .rm{opacity:0;max-height:0;margin:0;padding:0;overflow:hidden}
+.score{font-size:11px;color:var(--ink-3);margin-left:auto;max-height:16px;
+  transition:opacity .4s ease,max-height .45s var(--ease),margin .45s var(--ease)}
+.desc{font-size:12px;color:var(--ink-3);margin:5px 0 0 34px;max-height:52px;
+  transition:opacity .4s ease,max-height .45s var(--ease),margin .45s var(--ease)}
+.sbar{height:4px;border-radius:999px;background:#35353f;overflow:hidden;margin-top:12px;max-height:4px;
+  transition:opacity .4s ease,max-height .45s var(--ease),margin .45s var(--ease)}
+.sbar > i{display:block;height:4px;width:0;animation:fillbar 2.8s cubic-bezier(.25,.46,.45,.94) forwards;background:var(--accent);border-radius:999px;transition:background .8s ease}
+
+.panel{display:grid;grid-template-rows:1fr;opacity:1;margin-left:36px;margin-top:8px;
+  transition:grid-template-rows .5s var(--ease),opacity .35s ease,margin .5s var(--ease)}
+.st:not(.open) .panel{grid-template-rows:0fr;opacity:0;margin-top:0}
+.panel > div{overflow:hidden}
+.rows{border:1px solid var(--line);border-radius:12px;background:var(--panel);overflow:hidden}
+.row{display:flex;align-items:center;gap:10px;padding:7px 10px;font-size:12px;
+  border-bottom:1px solid var(--line);flex-wrap:wrap;transition:background .25s ease}
+.row:last-child{border-bottom:0}
+.row .m{width:12px;text-align:center;color:var(--ink-3)}
+.row .n{font-family:var(--mono);color:var(--ink-2)}
+.row .c{margin-left:auto;color:var(--ink-3);font-variant-numeric:tabular-nums;min-width:56px;text-align:right}
+.row.run{background:rgba(93,108,207,.08)}
+.row.run .n{color:var(--ink)} .row.run .c{color:#a8b3ee}
+.row.ok .m,.row.ok .c{color:var(--ok)}
+.row.bad{background:rgba(248,113,113,.08)}
+.row.bad .m,.row.bad .c,.row.bad .n{color:var(--bad)}
+.reason{flex:0 0 100%;padding:1px 0 5px 22px;color:var(--bad);opacity:.85;
+  font-family:var(--mono);font-size:11px;line-height:1.65;word-break:break-word}
+
+.foot{display:flex;align-items:center;gap:10px;margin-top:16px;padding-top:14px;max-height:56px;
+  border-top:1px solid var(--line);
+  transition:opacity .4s ease,max-height .5s var(--ease),margin .5s var(--ease),padding .5s var(--ease)}
+.btn{height:32px;padding:0 14px;border-radius:9px;border:1px solid #35353f;background:#1d1d24;
+  color:var(--ink);font-size:12.5px;font-family:inherit}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#fff;transition:background .8s ease,border-color .8s ease}
+.eta{margin-left:auto;font-size:11.5px;color:var(--ink-3)}
+
+/* ---- 设计标注层 ---- */
+#anno{position:fixed;inset:0;pointer-events:none;z-index:20}
+.abox{position:absolute;border:1px dashed rgba(248,113,113,.9);border-radius:0;
+  background:rgba(248,113,113,.05);opacity:0;transform:scale(.985);
+  animation:annoIn .28s var(--ease) forwards;
+  transition:left .8s var(--ease),top .8s var(--ease),width .8s var(--ease),height .8s var(--ease)}
+.abox.red{border-color:rgba(248,113,113,.9);background:rgba(248,113,113,.05)}
+@keyframes annoIn{to{opacity:1;transform:none}}
+@keyframes annoOut{from{opacity:1}to{opacity:0}}
+.abox.out,.agap.out{animation:annoOut .32s ease forwards}
+.atip{position:absolute;left:0;top:100%;transform:translateY(6px);
+  max-width:320px;padding:5px 9px;border-radius:0;font-size:11.5px;line-height:1.5;
+  color:var(--ink);background:#1b1b22;border:1px solid rgba(93,108,207,.45);
+  box-shadow:0 6px 18px rgba(0,0,0,.5);white-space:nowrap;
+  opacity:0;animation:annoIn .28s var(--ease) .06s forwards}
+.atip.up{top:auto;bottom:100%;transform:translateY(-6px)}
+.atip b{color:#a8b3ee;font-weight:600}
+.atip .fr{color:var(--ink-3)}
+.atip .to{color:var(--ok)}
+.agap{position:absolute;width:0;border-left:1px dashed rgba(248,113,113,.9);
+  transition:top .8s var(--ease),height .8s var(--ease),left .8s var(--ease);opacity:0;
+  animation:annoIn .28s var(--ease) forwards}
+.agap::before,.agap::after{content:"";position:absolute;left:-4px;width:8px;height:1px;
+  background:rgba(248,113,113,.9)}
+.agap::before{top:0} .agap::after{bottom:0}
+.agap .atip{left:auto;right:10px;top:50%;transform:translateY(-50%)}
+
+/* ---- 十一段 ---- */
+.card.s3 .desc{opacity:0;max-height:0;margin:0 0 0 34px}
+.card.s4 .score{opacity:0;max-height:0;margin:0}
+.card.s5 .sbar{opacity:0;max-height:0;margin:0}
+.card.s6 .foot{opacity:0;max-height:0;margin:0;padding:0;border:0}
+.card.s7{--surface:var(--card);--accent:var(--brand)}
+.card.s8{--hd-mb:10px}
+.card.s9{--pad:24px;--step-py:8px}
+.card.s10{--gap-x:10px}
+.card.s11{--step-gap:6px}
+
+/* 标题改名 / 降级由 JS 直接改文本与字号 */
+.card.t13 .hd .ttl{font-size:13px;font-weight:600}
+
+@keyframes fillbar{ from{width:0} to{width:62%} }
+@keyframes shake{
+  0%,100%{transform:translateX(0)} 15%{transform:translateX(-4px)} 30%{transform:translateX(4px)}
+  45%{transform:translateX(-3px)} 60%{transform:translateX(3px)} 75%{transform:translateX(-2px)}
+}
+.shake{animation:shake .42s cubic-bezier(.36,.07,.19,.97) both}
+.hint{position:fixed;bottom:20px;left:0;right:0;text-align:center;font-size:11.5px;color:#3f3f48}
+@media (prefers-reduced-motion: reduce){ *{transition-duration:.01ms!important;animation-duration:.01ms!important} }
+</style></head>
+<body>
+
+<div class="cap" id="cap"></div>
+
+<div class="card" id="card">
+  <div class="hd">
+    <span class="ttl" id="ttl">转换模型</span>
+    <span class="sub" id="sub">_smoketrain · liae-ud · 384</span>
+    <span class="sp"></span><span class="badge" id="badge">失败</span>
+    <span class="sp"></span><span class="badge" id="badge">失败</span>
+  </div>
+
+  <div class="sub2 rm">本页面用于把 TensorFlow 的 .npy 权重文件转换为 PyTorch 可用的 .pth 格式，转换完成后可直接开始训练，无需任何额外操作。</div>
+
+  <div class="banner rm">提示：转换过程全自动，请勿关闭窗口或中断程序。</div>
+
+  <div class="st done" id="st1">
+    <i class="line"><b></b></i>
+    <div class="sh"><div class="ic" id="ic1">✓</div><div class="nm">加载模块</div></div>
+    <div class="desc">已读取 _smoketrain：架构 liae-ud，权重 38 项，来源 .npy（TF），完整性校验通过，可以继续下一步操作。</div>
+    <div class="panel"><div><div class="rows" id="rows1"></div></div></div>
+  </div>
+
+  <div class="st on" id="st2">
+    <i class="line"><b></b></i>
+    <div class="sh"><div class="ic" id="ic2">2</div><div class="nm">转换模型</div>
+      <span class="score">62%</span></div>
+    <div class="desc">写出 torch 权重 · 正在重排卷积核布局（NHWC → NCHW），该过程可能需要数秒时间，请耐心等待。</div>
+    <div class="sbar"><i></i></div>
+    <div class="panel"><div><div class="rows" id="rows2"></div></div></div>
+  </div>
+
+  <div class="st last" id="st3">
+    <div class="sh"><div class="ic" id="ic3">3</div><div class="nm" id="nm3">校验</div></div>
+    <div class="desc">逐张量比对源与目标，输出最大误差值；若误差为 0，则表示转换结果完全一致。</div>
+  </div>
+
+  <div class="foot" id="foot">
+    <button class="btn pri">开始转换</button>
+    <button class="btn">打开目录</button>
+    <span class="eta">预计 3 秒</span>
+    <span class="note rm">转换失败时原始 .npy 文件不会被删除，请放心操作。</span>
+  </div>
+</div>
+
+<div id="anno"></div>
+<div class="hint">空格 暂停 / 继续 · R 重播</div>
+
+<script>
+var MODS = [["encoder",32],["inter_AB",8],["inter_B",8],["decoder",24]];
+var el = function (id) { return document.getElementById(id); };
+var SPIN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.6"/></svg>';
+
+var NSEG = 11;
+var caps = ["起点 · A 版原始设计",
+  "① 标题改名：转换模型 → model", "② 标题降级 15px → 13px",
+  "③ 删掉步骤说明段", "④ 删掉局部百分比", "⑤ 删掉每步的细进度条",
+  "⑥ 删掉按钮行与预计时间", "⑦ 配色换成项目 token",
+  "⑧ margin 收紧", "⑨ padding 加到 24px", "⑩ 横向 gap 收紧", "⑪ 纵向 gap 出现"];
+
+var timers = [], frozen = false;
+function later(fn, ms) { if (frozen) return; timers.push(setTimeout(fn, ms)); }
+function clearAll() { timers.forEach(clearTimeout); timers = []; }
+
+function say(i) {
+  var c = el("cap");
+  c.classList.add("hide");
+  later(function () {
+    if (i === null) c.innerHTML = "<b>实际处理</b> · 成功 → 失败";
+    else if (i === 0) c.innerHTML = "<b>" + caps[0] + "</b>";
+    else c.innerHTML = '<span class="n">' + i + '/11</span><b>' + caps[i].replace(/^[①-⑪]s*/, "") + "</b>";
+    c.classList.remove("hide");
+  }, 280);
+}
+
+function relayout() {
+  var sts = document.querySelectorAll(".st");
+  for (var i = 0; i < sts.length - 1; i++) {
+    var line = sts[i].querySelector(".line");
+    if (!line) continue;
+    var a = sts[i].querySelector(".ic").getBoundingClientRect();
+    var b = sts[i + 1].querySelector(".ic").getBoundingClientRect();
+    var boxTop = sts[i].getBoundingClientRect().top;
+    line.style.top = Math.round(a.top - boxTop + a.height / 2) + "px";
+    line.style.height = Math.max(0, Math.round(b.top - a.top)) + "px";
+  }
+}
+/* 卡片尺寸一变（展开/折叠/间距变化）就重算连线 */
+var ro = new ResizeObserver(function () { relayout(); });
+ro.observe(document.getElementById("card"));
+
+function rowsInto(host) {
+  host.innerHTML = "";
+  return MODS.map(function (m) {
+    var r = document.createElement("div");
+    r.className = "row";
+    r.innerHTML = '<span class="m">·</span><span class="n">' + m[0] + '</span><span class="c">' + m[1] + ' 项</span>';
+    host.appendChild(r); return r;
+  });
+}
+
+function resetAll() {
+  clearAll();
+  frozen = false;
+  el("card").className = "card";
+  el("ttl").textContent = "转换模型";
+  el("nm3").textContent = "校验";
+  el("badge").classList.remove("on");
+  el("st1").className = "st done"; el("ic1").textContent = "✓";
+  el("st2").className = "st on";   el("ic2").textContent = "2";
+  el("st3").className = "st";      el("ic3").textContent = "3";
+  el("rows1").innerHTML = ""; el("rows2").innerHTML = "";
+  el("st1").classList.remove("open"); el("st2").classList.remove("open");
+}
+
+/* ---------------- 演进（rAF 时钟驱动，避免后台节流） ---------------- */
+var HOLD0 = 3200, SEG = 2000, showT0 = 0, stage = 0;
+
+var anno = document.getElementById("anno");
+var annoToken = 0, annoState = null;
+function rOf(sel) { var e = document.querySelector(sel); return e ? e.getBoundingClientRect() : null; }
+function clearAnno() { annoToken++; anno.innerHTML = ""; annoState = null; }
+
+function remeasure() {
+  if (!annoState) return;
+  if (annoState.kind === "box") {
+    var r = rOf(annoState.sel);
+    if (!r) return;
+    var pad = annoState.pad;
+    annoState.el.style.left = (r.left - pad) + "px";
+    annoState.el.style.top = (r.top - pad) + "px";
+    annoState.el.style.width = (r.width + pad * 2) + "px";
+    annoState.el.style.height = (r.height + pad * 2) + "px";
+  } else {
+    var a = rOf(annoState.a), b = rOf(annoState.b);
+    if (!a || !b) return;
+    annoState.el.style.left = (a.left - 10) + "px";
+    annoState.el.style.top = a.bottom + "px";
+    annoState.el.style.height = Math.max(0, b.top - a.bottom) + "px";
+  }
+}
+
+function fadeAnno(after) {
+  var t = annoToken;
+  setTimeout(function () {
+    if (t !== annoToken || !annoState) return;
+    var el = annoState.el;
+    /* 关键：先停掉 annoIn（它带 forwards，会一直把 opacity 顶成 1），再走 transition 淡出 */
+    el.style.animation = "none";
+    el.style.transition = "none";
+    el.style.opacity = "1";
+    void el.offsetWidth;                 /* 强制重排，让下面的 0 从 1 过渡过去 */
+    el.style.transition = "opacity .4s ease";
+    el.style.opacity = "0";
+    setTimeout(function () { if (t === annoToken) clearAnno(); }, 430);
+  }, after);
+}
+
+function annoBox(sel, html, opt) {
+  var r = rOf(sel); if (!r) return null;
+  var pad = (opt && opt.pad) || 6;
+  var b = document.createElement("div");
+  b.className = "abox" + (opt && opt.red ? " red" : "");
+  b.style.left = (r.left - pad) + "px";
+  b.style.top = (r.top - pad) + "px";
+  b.style.width = (r.width + pad * 2) + "px";
+  b.style.height = (r.height + pad * 2) + "px";
+  anno.appendChild(b);
+  annoState = { kind: "box", el: b, sel: sel, pad: pad };
+  return b;
+}
+
+function annoGap(selA, selB, html) {
+  var a = rOf(selA), b = rOf(selB); if (!a || !b) return null;
+  var g = document.createElement("div");
+  g.className = "agap";
+  g.style.left = (a.left - 10) + "px";
+  g.style.top = a.bottom + "px";
+  g.style.height = Math.max(0, b.top - a.bottom) + "px";
+  anno.appendChild(g);
+  annoState = { kind: "gap", el: g, a: selA, b: selB };
+  return g;
+}
+
+/* 每个阶段标注什么 */
+function annotate(n) {
+  clearAnno();
+  annoToken++;
+  if (n === 1) annoBox(".hd .ttl", '<b>命名</b> <span class="fr">转换模型</span> → <span class="to">model</span>');
+  if (n === 2) annoBox(".hd .ttl", '<b>字号</b> <span class="fr">15px</span> → <span class="to">13px</span>');
+  if (n === 3) {
+    var d = document.querySelectorAll(".desc");
+    if (d[0]) annoBox(".desc", '<b>删除</b> 三行说明（与上面重复）', { red: true });
+  }
+  if (n === 4) annoBox(".score", '<b>删除</b> 局部百分比（步骤已在表达进度）', { red: true, pad: 4 });
+  if (n === 5) annoBox(".sbar", '<b>删除</b> 每步的细进度条', { red: true, pad: 4 });
+  if (n === 6) annoBox(".foot", '<b>删除</b> 按钮行与预计时间', { red: true });
+  if (n === 7) annoBox("#card", '<b>配色</b> 换成项目 token');
+  if (n === 8) annoGap(".hd", ".st", '<b>margin</b> <span class="fr">20px</span> → <span class="to">10px</span>');
+  if (n === 9) annoBox("#card", '<b>padding</b> <span class="fr">16px</span> → <span class="to">24px</span>');
+  if (n === 10) annoGap("#st1 .sh .ic", "#st1 .sh .nm", '<b>gap</b> <span class="fr">14px</span> → <span class="to">10px</span>');
+  if (n === 11) annoGap("#st1", "#st2", '<b>纵向 gap</b> <span class="fr">0</span> → <span class="to">6px</span>');
+}
+
+function applyStage(n) {
+  if (n === 1) { el("ttl").textContent = "model"; el("sub").textContent = "liae-ud · 384"; }
+  if (n === 2) el("card").classList.add("t13");
+  if (n === 3) el("nm3").textContent = "完成";
+  annotate(n);
+  var DEL = [3, 4, 5, 6].indexOf(n) >= 0;
+  if (DEL) {
+    /* 先让观众看清"要删哪块"，再删 */
+    setTimeout(function () { if (stage === n) el("card").classList.add("s" + n); }, 850);
+    setTimeout(function () { if (stage === n) remeasure(); }, 800);
+  } else {
+    el("card").classList.add("s" + n);
+  }
+  say(n);
+  /* 过渡结束后重新量一次，让标注跟着收缩 */
+  if (!DEL) {
+    [120, 380, 620].forEach(function (t) {
+      setTimeout(function () { if (stage === n) remeasure(); }, t);
+    });
+  }
+  /* 删除类：元素 850ms 开始塌缩、约 1350ms 结束 → 标记同时淡出；其余在段落末尾淡出 */
+  fadeAnno([3, 4, 5, 6].indexOf(n) >= 0 ? 1250 : 1750);
+}
+
+function showLoop() {
+  if (frozen) return;
+  if (!showT0) showT0 = Date.now();
+  var elapsed = Date.now() - showT0;
+  var idx = elapsed < HOLD0 ? 0 : Math.floor((elapsed - HOLD0) / SEG) + 1;
+  if (idx > stage) {
+    stage = Math.min(idx, NSEG + 1);
+    if (stage <= NSEG) applyStage(stage);
+    if (stage > NSEG) { say(null); later(startProc, 1200); clearInterval(showTimer); return; }
+  }
+}
+
+var showTimer = null;
+
+function startShow() {
+  resetAll();                 /* 清 timer、复位 class、frozen=false */
+  if (showTimer) clearInterval(showTimer);
+  showT0 = 0; stage = 0;
+  el("cap").classList.remove("hide");
+  el("cap").innerHTML = "<b>" + caps[0] + "</b>";
+  showTimer = setInterval(showLoop, 100);
+}
+
+/* ---------------- 实操 ---------------- */
+var failNext = false;
+function startProc() { clearAnno(); failNext = false; procRound(); }
+
+function procRound() {
+  clearAll();
+  var willFail = failNext; failNext = !failNext;
+  el("card").className = "card" + (willFail ? "" : "") + " s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 t13";
+  el("ttl").textContent = "model";
+  el("nm3").textContent = "完成";
+  el("badge").classList.remove("on");
+  el("card").classList.remove("bad");
+  el("st1").className = "st"; el("ic1").textContent = "1";
+  el("st2").className = "st"; el("ic2").textContent = "2";
+  el("st3").className = "st"; el("ic3").textContent = "3";
+  el("rows1").innerHTML = ""; el("rows2").innerHTML = "";
+  var r1 = rowsInto(el("rows1")), r2 = rowsInto(el("rows2"));
+
+  later(function () { el("st1").classList.add("on", "open"); el("ic1").innerHTML = SPIN; }, 120);
+  MODS.forEach(function (m, i) {
+    later(function () { r1[i].classList.add("run"); r1[i].querySelector(".m").textContent = "›"; }, 340 + i * 200);
+    later(function () { r1[i].className = "row ok"; r1[i].querySelector(".m").textContent = "✓"; }, 340 + i * 200 + 170);
+  });
+  var endLoad = 340 + MODS.length * 200 + 170;
+  later(function () { el("st1").className = "st done"; el("ic1").textContent = "✓"; }, endLoad);
+  later(function () { el("st1").classList.remove("open"); }, endLoad + 300);
+
+  later(function () { el("st2").classList.add("on", "open"); el("ic2").innerHTML = SPIN; }, endLoad + 380);
+
+  var failed = false;
+  MODS.forEach(function (m, i) {
+    var st = endLoad + 620 + i * 600;
+    var failHere = willFail && i === 1;
+    later(function () {
+      if (failed) return;
+      r2[i].classList.add("run"); r2[i].querySelector(".m").textContent = "›";
+    }, st);
+    if (!failHere) {
+      [1, 2, 3].forEach(function (q) {
+        later(function () {
+          if (failed) return;
+          r2[i].querySelector(".c").textContent = Math.round(m[1] * q / 3) + " 项";
+        }, st + q * 160);
+      });
+    }
+    later(function () {
+      if (failed) return;
+      if (failHere) {
+        failed = true;
+        r2[i].className = "row bad";
+        r2[i].querySelector(".m").textContent = "!";
+        r2[i].querySelector(".c").textContent = "形状不符";
+        var why = document.createElement("div");
+        why.className = "reason";
+        why.textContent = "conv_out：源 (5,5,128,128) ≠ 目标 (128,128,5,5) —— 该层布局未转换";
+        r2[i].appendChild(why);
+        r2[i].classList.add("shake");
+        setTimeout(function () { r2[i].classList.remove("shake"); }, 460);
+        el("st2").className = "st err open"; el("ic2").textContent = "!";
+        el("card").classList.add("bad");
+        el("badge").classList.add("on");
+        return;
+      }
+      r2[i].className = "row ok";
+      r2[i].querySelector(".m").textContent = "✓";
+      r2[i].querySelector(".c").textContent = m[1] + " 项";
+    }, st + 500);
+  });
+
+  if (willFail) {
+    later(procRound, endLoad + 7000);
+  } else {
+    var endConv = endLoad + 620 + MODS.length * 600 + 160;
+    later(function () { el("st2").className = "st done"; el("ic2").textContent = "✓"; }, endConv);
+    later(function () { el("st2").classList.remove("open"); }, endConv + 320);
+    later(function () { el("st3").classList.add("on"); el("ic3").innerHTML = SPIN; }, endConv + 340);
+    later(function () { el("st3").className = "st done"; el("ic3").textContent = "✓"; }, endConv + 940);
+    later(procRound, endConv + 3400);
+  }
+}
+
+/* ---------- 截图用钩子：直接跳到某个阶段 / 某个处理状态 ---------- */
+window.__seek = function (n) {
+  resetAll();
+  frozen = true;
+  clearAll();
+  if (showTimer) { clearInterval(showTimer); showTimer = null; }
+  var cap = el("cap");
+  cap.classList.remove("hide");
+
+  function apply(i) {
+    if (i === 1) { el("ttl").textContent = "model"; el("sub").textContent = "liae-ud · 384"; }
+    if (i === 2) el("card").classList.add("t13");
+    if (i === 3) el("nm3").textContent = "完成";
+    el("card").classList.add("s" + i);
+  }
+
+  var DEL = [3, 4, 5, 6].indexOf(n) >= 0;
+  var upto = DEL ? n - 1 : n;              /* 删除类：停在删除前的那一帧 */
+  for (var i = 1; i <= upto; i++) apply(i);
+  if (n >= 1) annotate(n);
+  if (!DEL) setTimeout(remeasure, 60);
+
+  if (n >= 1) cap.innerHTML = '<span class="n">' + n + '/11</span><b>' + caps[n].replace(/^[①-⑪]\s*/, "") + "</b>";
+  else cap.innerHTML = "<b>" + caps[0] + "</b>";
+};
+
+window.__proc = function (phase) {
+  clearAll(); frozen = true;
+  el("card").className = "card s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 t13";
+  el("ttl").textContent = "model"; el("sub").textContent = "liae-ud · 384"; el("nm3").textContent = "完成";
+  var r1 = rowsInto(el("rows1")), r2 = rowsInto(el("rows2"));
+  el("st1").className = "st done open"; el("ic1").textContent = "✓";
+  r1.forEach(function (r) { r.className = "row ok"; r.querySelector(".m").textContent = "✓"; });
+  el("st1").className = "st done"; el("ic1").textContent = "✓";
+  if (phase === "success") {
+    el("st2").className = "st done"; el("ic2").textContent = "✓";
+    r2.forEach(function (r) { r.className = "row ok"; r.querySelector(".m").textContent = "✓"; });
+    el("st3").className = "st done"; el("ic3").textContent = "✓";
+  } else {
+    el("st2").className = "st err open"; el("ic2").textContent = "!";
+    r2[0].className = "row ok"; r2[0].querySelector(".m").textContent = "✓";
+    r2[1].className = "row bad"; r2[1].querySelector(".m").textContent = "!";
+    r2[1].querySelector(".c").textContent = "形状不符";
+    var why = document.createElement("div");
+    why.className = "reason";
+    why.textContent = "conv_out：源 (5,5,128,128) ≠ 目标 (128,128,5,5) —— 该层布局未转换";
+    r2[1].appendChild(why);
+    el("card").classList.add("bad"); el("badge").classList.add("on");
+    el("st3").className = "st"; el("ic3").textContent = "3";
+  }
+  el("cap").classList.add("hide");
+};
+
+document.addEventListener("keydown", function (e) { if (e.code === "KeyR") startShow(); });
+startShow();
+</script>
+</body></html>

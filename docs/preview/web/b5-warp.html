@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>B5 双层扭曲</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;background:#04050a;overflow:hidden}
+  canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+  .tag{position:fixed;left:16px;bottom:14px;color:#4a4a58;letter-spacing:.06em;
+    font:12px/1.4 -apple-system,"Segoe UI",system-ui,sans-serif}
+</style></head>
+<body>
+<canvas id="gl"></canvas>
+<div class="tag">B5 双层扭曲</div>
+<script>
+(function () {
+  var canvas = document.getElementById("gl");
+  var gl = canvas.getContext("webgl", { antialias: false, alpha: false });
+  if (!gl) { document.body.style.background = "#0a1020"; return; }
+  var VS = "attribute vec2 aPos; varying vec2 vUv;\n" +
+    "void main(){ vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }";
+  var FS = "\nprecision highp float;\nuniform float uTime;\nuniform vec2 uRes;\nvarying vec2 vUv;\n\nfloat hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.0-2.0*f);\n  return mix(mix(hash(i),hash(i+vec2(1.,0.)),u.x), mix(hash(i+vec2(0.,1.)),hash(i+vec2(1.,1.)),u.x), u.y);\n}\nfloat fbm(vec2 p){\n  float v=0.0,a=0.5;\n  for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=0.5; }\n  return v;\n}\nvec2 toP(){ return (vUv - 0.5) * vec2(uRes.x/uRes.y, 1.0); }\n\n// 青 → 蓝 → 紫 循环\nvec3 tri(float t){\n  t = fract(t);\n  vec3 c0 = vec3(0.32, 0.92, 1.00);\n  vec3 c1 = vec3(0.08, 0.30, 1.00);\n  vec3 c2 = vec3(0.60, 0.26, 0.98);\n  float s = t * 3.0;\n  if (s < 1.0) return mix(c0, c1, s);\n  if (s < 2.0) return mix(c1, c2, s - 1.0);\n  return mix(c2, c0, s - 2.0);\n}\n\n// 双层域扭曲 —— 迷幻感的骨架\nfloat field(vec2 p, float t, out float ridge, out float warp){\n  vec2 q;\n  q.x = fbm(p + vec2(0.0, t * 0.7));\n  q.y = fbm(p + vec2(t * 0.6, 0.0));\n\n  vec2 r;\n  r.x = fbm(p + 1.9 * q + vec2(1.7, 9.2) + t * 0.35);\n  r.y = fbm(p + 1.9 * q + vec2(8.3, 2.8) - t * 0.28);\n\n  float f = fbm(p + 2.4 * r);\n  warp = r.x;\n\n  float rid = 1.0 - abs(f * 2.0 - 1.0);\n  ridge = pow(smoothstep(0.32, 0.98, rid), 3.0);\n  return f;\n}\n\nvec3 shade(vec2 p, float t){\n  float ridge, warp;\n  float f = field(p, t, ridge, warp);\n\n  float k = 0.10 + f * 0.42 + 0.12 * sin(t * 0.5) + warp * 0.18;\n  vec3 tint = tri(k);\n  vec3 base = tint * (0.05 + f * 0.22);              // 暗底\n  vec3 line = tri(k + 0.20) * ridge * 1.6;           // 亮脊线\n  vec3 col = base + line;\n  col += tri(k + 0.50) * pow(ridge, 3.0) * 0.6;      // 彩边\n  col = col / (1.0 + col * 0.85) * 1.55;             // 色调映射，避免死白\n  return col;\n}\n\nvoid main(){\n  vec2 p = toP();\n  float t = uTime * 0.12;\n  p *= 1.0 + 0.05 * sin(t * 0.45);\n\n  vec3 c = shade(p, t);\n  c += shade(p + vec2(0.004, 0.0), t);\n  c += shade(p - vec2(0.004, 0.0), t);\n  c += shade(p + vec2(0.0, 0.004), t);\n  c += shade(p - vec2(0.0, 0.004), t);\n  c /= 5.0;\n\n  float vig = smoothstep(1.35, 0.15, length(p * vec2(0.8, 1.0)));\n  float a = clamp(0.32 + 0.72 * vig, 0.0, 1.0);\n  gl_FragColor = vec4(c * a, a);\n}\n";
+  function compile(type, src) {
+    var sh = gl.createShader(type);
+    gl.shaderSource(sh, src); gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(sh));
+    return sh;
+  }
+  var prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(prog); gl.useProgram(prog);
+
+  var buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+  var loc = gl.getAttribLocation(prog, "aPos");
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+  var uTime = gl.getUniformLocation(prog, "uTime");
+  var uRes = gl.getUniformLocation(prog, "uRes");
+
+  function resize() {
+    var dpr = Math.min(devicePixelRatio || 1, 1.5);
+    canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+    canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+    gl.viewport(0, 0, canvas.width, canvas.height);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  var t0 = performance.now();
+  function frame() {
+    gl.uniform1f(uTime, (performance.now() - t0) / 1000);
+    gl.uniform2f(uRes, canvas.clientWidth, canvas.clientHeight);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    requestAnimationFrame(frame);
+  }
+  frame();
+})();
+</script>
+</body></html>

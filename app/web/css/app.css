@@ -1084,6 +1084,8 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
    整行悬停高亮：负外边距 10px 让高亮块吃到卡片内边距外面一点，
    卡片自身 16~18px 内边距兜得住，不越界；两处页面视觉一致。 */
 .cfgrow {
+  /* 控件比说明文字宽时（五段模式选择）整行允许折行，别让控件压上去 */
+  flex-wrap: wrap; row-gap: 6px;
   display: flex; align-items: center; gap: 12px;
   /* 曾经是 margin: 0 -10px —— 行比卡片内容框宽 20px，悬停底色会**拱到卡片边框外面**，
      圆角的左端突出一点点，看着就是每个高亮行下面"多出一个弯"。
@@ -1112,11 +1114,17 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
 }
 
 .cfgrow .cc {
-  /* 控件列固定宽、靠右，但**不画线**：分界靠留白，不靠实体边框。
-     左边留 28px 的空档 —— 说明文字到这儿为止，控件从这里开始。 */
+  /* 控件列靠右，但**不画线**：分界靠留白，不靠实体边框。
+     左边留 28px 的空档 —— 说明文字到这儿为止，控件从这里开始。
+
+     宽度原来写死 220px。模式那一行有 5 个分段（模糊/人脸身份/重复图/错脸/
+     合并子文件夹），整条分段比 220 宽得多；justify-content: flex-end 会让
+     超出的部分从**左边**顶出列外，正好压在说明文字上。
+     改成 min-width: 220（数值输入那批仍按 220 对齐），宽度随内容自适应。 */
   align-self: stretch;
   flex: 0 0 auto;
-  width: 220px;
+  width: auto;
+  min-width: 220px;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -1163,7 +1171,7 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
 .cfgrow:hover .cd { color: var(--ink-2); }
 .cfgrow:last-child { border-bottom: 0; }
 .cfgrow .cl { width: 130px; flex: 0 0 130px; font-size: 12.5px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.cfgrow .cd { flex: 1; min-width: 0; font-size: 11.5px; color: var(--ink-3); }
+.cfgrow .cd { flex: 1 1 180px; min-width: 0; font-size: 11.5px; color: var(--ink-3); line-height: 1.45; }
 .cfgrow .cc { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
 .cfgrow .cc .inp { width: 150px; min-height: 30px; font-size: 12px; }
 .cfgrow .cc .seg b { padding: 4px 10px; font-size: 12px; }
@@ -1332,6 +1340,9 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
   display: grid; place-items: center;
   font-size: 11px; font-weight: 700;
 }
+.uavatar { overflow: hidden; }
+.uavatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.uavatar.has-img { background: var(--panel-2); }
 .uname { flex: 1; min-width: 0; font-size: 12px; color: var(--ink-1);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .userbox .mini { flex: none; padding: 4px 8px; font-size: 11px; }
@@ -1507,8 +1518,9 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
 /* ===== 关于页 ===== */
 .aboutHero {
   display: flex; flex-direction: column; align-items: center;
-  padding: 26px 0 22px;
-  margin-bottom: 6px;
+  /* 标签句删掉后，底部 22px 成了纯空白（卡片上方"空了一块"），收到 8px */
+  padding: 26px 0 16px;
+  margin-bottom: 0;
 }
 .aboutLogo {
   width: 76px; height: 76px; border-radius: 18px;
@@ -1843,6 +1855,11 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
 .mgitem.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .mgitem .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mgitem .tag { font-size: 10px; opacity: .75; }
+/* 多选徽章（face all / face N）：沿用 .tag 现有风格，不新增配色，只是做成可点的 */
+.mgitem .mgface { flex: none; cursor: pointer; }
+.mgitem .mgface:hover { opacity: 1; }
+/* .tag 自带 display:inline-block，会盖过 UA 的 [hidden]，这里明确关掉 */
+.mgitem .mgface[hidden] { display: none !important; }
 
 /* 中间预览 */
 .mgcenter {
@@ -1885,6 +1902,38 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
   place-items: center;
 }
 .mgstage span { font-size: 11.5px; color: var(--ink-3); }
+/* 真实视频播放器：和 img 用同一个 6px 内缩盒子，压在旧帧图之上（有源视频时 JS 才 display:block） */
+#p-merge .mgstage video {
+  position: absolute;
+  inset: 6px;
+  width: calc(100% - 12px);
+  height: calc(100% - 12px);
+  object-fit: contain;
+  object-position: center;
+  border-radius: 6px;
+  background: #000;
+  display: none;
+  z-index: 1;
+}
+/* 暂停时的单帧合成预览：盖在 video 之上；原图/检测视图里由 JS 关掉 */
+#p-merge .mgstage img#mgPreview {   /* 比下面那条通用 img 规则更具体，display:none 才压得住 */
+  position: absolute;
+  inset: 6px;
+  width: calc(100% - 12px);
+  height: calc(100% - 12px);
+  object-fit: contain;
+  object-position: center;
+  border-radius: 6px;
+  background: transparent;
+  pointer-events: none;
+  display: none;
+  z-index: 3;
+}
+/* 老路径（逐帧 JPEG / DFL 项目模式）的帧图：压在 video 之上、检测框之下 */
+.mgstage img.mgfrm {
+  pointer-events: none;
+  z-index: 1;
+}
 /* 检测框叠加层：和 img 用同一个 6px 内缩盒子，画的时候才和画面严丝合缝 */
 .mgstage canvas.mgovl {
   position: absolute;
@@ -2363,9 +2412,24 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
 
 /* ---------- 一、页面容器：默认隐藏，.on 时占满剩余高度 ---------- */
 
+/* 「默认 display:none + 撑满剩余高度」已经在 L2078-2084 的 #p-merge .mgview 里，
+   这里只补「谁被放出来」。JS 有两条通路，选择器两边都认：
+     · app.js:2652 mgStep()          → 给当前页加 .in（主视图也走这条，见 L2085）
+     · app.js:6723 MergePages.show() → 给命中的页加 .on + aria-hidden="false"，
+                                       并给 #p-merge 挂 .mgp-on
+   页容器在 index.html 里是 .mgview[data-view]（main / facedb / settings / progress），
+   .mgpage 是早期草案的类名，保留作兼容别名。 */
+#p-merge.mgp-on > :is(.mgpage, .mgview) { display: none; }
+#p-merge.mgp-on > :is(.mgpage, .mgview).on,
+#p-merge.mgp-on > :is(.mgpage, .mgview)[aria-hidden="false"],
+#p-merge.mgp-on > :is(.mgpage, .mgview).in:not([data-view="main"]) { display: flex; }
+/* 第三条是兜底：万一 .mgp-on 挂上了而 .on 没跟上（只有 mgStep 的 .in），照样按 .in 切页；
+   :not([data-view="main"]) 保证主视图不会跟着自己的 .in 一起露头，和二级页叠在一起。 */
 
-/* 有二级页时，主视图（左右栏 + 舞台 / 时间轴）让位
-   若两个 .mgpage 不是 #p-merge 的直接子元素，改下面两条选择器即可 */
+/* 有二级页时，主视图（左右栏 + 舞台 / 时间轴）让位：
+   data-view="main" 就算还留着 .in，也不许和二级页叠在一起 */
+#p-merge.mgp-on > :is(.mgpage, .mgview)[data-view="main"],
+#p-merge.mgp-on > :is(.mgpage, .mgview)[data-page="main"] { display: none; }
 
 
 /* ---------- 二、页头：标题 + 计数 + 主按钮 ---------- */
@@ -2492,40 +2556,47 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
 }
 
 /* 行：68px 标签 + 1fr 控件（与 #p-merge .mgrow 同一套网格，防止加载顺序影响） */
-.mgpage .mgrow {
+:is(.mgpage, .mgview:not([data-view="main"])) .mgrow {
   display: grid;
   grid-template-columns: 68px minmax(0, 1fr);
   gap: 10px;
   align-items: center;
   padding: 6px 0;
 }
-.mgpage .mgrow .f {
+:is(.mgpage, .mgview:not([data-view="main"])) .mgrow .f {
   font-size: 11.5px;
   color: var(--ink-3);
   white-space: nowrap;
 }
-.mgpage .seg { justify-self: start; }
-.mgpage .seg b { padding: 4px 10px; font-size: 11.5px; }
-.mgpage .mgnum { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.mgpage .mgtiny { width: 58px; flex: 0 0 58px; height: 24px; text-align: center; }
-.mgpage .mgunit { font-size: 10px; color: var(--ink-3); white-space: nowrap; }
+:is(.mgpage, .mgview:not([data-view="main"])) .seg { justify-self: start; }
+:is(.mgpage, .mgview:not([data-view="main"])) .seg b { padding: 4px 10px; font-size: 11.5px; }
+:is(.mgpage, .mgview:not([data-view="main"])) .mgnum { display: flex; align-items: center; gap: 6px; min-width: 0; }
+:is(.mgpage, .mgview:not([data-view="main"])) .mgtiny { width: 58px; flex: 0 0 58px; height: 24px; text-align: center; }
+:is(.mgpage, .mgview:not([data-view="main"])) .mgunit { font-size: 10px; color: var(--ink-3); white-space: nowrap; }
 
 /* 输出路径行：压缩到与 seg/数字同高（.inp 默认 39px 太高） */
-.mgpage .inp.pathinp {
+:is(.mgpage, .mgview:not([data-view="main"])) .inp.pathinp {
   min-height: 30px;
   height: 30px;
   padding: 0 4px 0 8px;
   border-radius: 8px;
   background: var(--panel);
 }
-.mgpage .inp.pathinp .pathval { font-size: 11.5px; }
-.mgpage .inp.pathinp .pill.iconpill {
+:is(.mgpage, .mgview:not([data-view="main"])) .inp.pathinp .pathval { font-size: 11.5px; }
+:is(.mgpage, .mgview:not([data-view="main"])) .inp.pathinp .pill.iconpill {
   flex: 0 0 22px;
   width: 22px;
   height: 22px;
   margin-left: auto;
 }
-.mgpage .inp.pathinp .pill.iconpill .ic { width: 14px; height: 14px; }
+:is(.mgpage, .mgview:not([data-view="main"])) .inp.pathinp .pill.iconpill .ic { width: 14px; height: 14px; }
+
+/* 选中态（.mgitem.on）：L1855 给的是紫底紫字，L3154 又用 !important 把它压成
+   var(--sel) 中性底 + var(--ink-1) 字色 —— 而 --ink-1 这个 token 根本没定义（只有
+   --ink / --ink-2 / --ink-3），于是选中只剩一层几乎看不见的灰。
+   这里补一条不靠层叠顺序的信号：box-shadow / font-weight 没有别处声明，
+   跟那两条 !important 的 background/color 不打架；颜色用确实存在的 --ink。 */
+
 
 /* ---------- 六、底部固定动作区 ---------- */
 .mgp-foot {
@@ -3333,6 +3404,9 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
   width: 100%;
 }
 
+/* .mini 的 display 带 !important，隐藏必须同样带 !important 才压得住 */
+.mini[hidden] { display: none !important; }
+
 .mini {
   display: inline-flex !important;
   align-items: center !important;
@@ -3802,7 +3876,7 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
    比让最后一列独自空旷更自然；数字右对齐贴着自己那一列，状态列固定在右端。 */
 .engtable th:nth-child(2),.engtable td:nth-child(2){width:auto}
 .engtable th.eng-num,.engtable td.eng-num{width:110px;text-align:right}
-.engtable th.eng-st,.engtable td.eng-st{width:96px;text-align:left}
+.engtable th.eng-st,.engtable td.eng-st{width:120px;text-align:right}
 .engtable td.eng-name{font-weight:600}
 .engtable td.eng-md5{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   color:var(--ink-2);font-size:11.5px}
@@ -3887,6 +3961,7 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
 .xferhd b{font-size:13px;font-weight:600;color:var(--ink)}
 .xferpct{margin-left:auto;font-size:13px;font-variant-numeric:tabular-nums;color:var(--ink-2)}
 #exGraph{width:100%;height:230px;display:block;margin:6px 0 10px;background:transparent}
+#dsRunGraph{width:100%;height:230px;display:block;margin:6px 0 10px;background:transparent}
 .xferft{display:flex;gap:12px;margin-top:10px;font-size:11.5px;color:var(--ink-3)}
 .xferft span:last-child{margin-left:auto;font-variant-numeric:tabular-nums}
 
@@ -3947,3 +4022,386 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
 .numin::-webkit-outer-spin-button,
 .numin::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
 .numin{-moz-appearance:textfield;appearance:textfield}
+.engtable th.eng-st, .engtable td.eng-st{width:140px;text-align:right;white-space:nowrap;overflow:visible}
+
+/* 引擎表状态列：标签靠左、编译按钮靠右，用满这一列，避免按钮右边留一截空白 */
+.engtable td.eng-st .engcell{display:flex;align-items:center;justify-content:flex-end;gap:12px;width:100%}
+/* 路径输入框统一外观（以「当前数据集」那条为准）：标签 + 等宽值 + 尾部胶囊/图标 */
+.inp.mono.pathinp{display:flex;align-items:center;gap:8px;width:100%;height:38px;min-height:38px;
+  padding:0 8px 0 12px;border:1px solid var(--line-strong);border-radius:10px;background:var(--surface)}
+.inp.mono.pathinp .lb{font-size:12px;color:var(--ink-3);white-space:nowrap}
+.inp.mono.pathinp .pathval{flex:1;min-width:0;border:0;background:transparent;color:var(--ink);
+  font-size:12px;outline:none;font-family:ui-monospace,'Cascadia Mono',Consolas,monospace}
+.inp.mono.pathinp .pill{flex:none}
+.inp.mono.pathinp:focus-within{border-color:var(--brand)}
+
+
+/* 参数行的控件始终靠右：没有说明列（.cd）时，.cc 需要 margin-left:auto 顶到右侧 */
+.cfgrow .cc{margin-left:auto}
+
+
+/* 原生 <select> 的弹出列表由 Chromium 绘制，只改 background 没用；
+   必须在深色主题下声明 color-scheme，弹层才会跟着变暗。 */
+[data-theme="dark"] select{color-scheme:dark}
+[data-theme="dark"] select option{background:#1b1b21;color:#ececf2}
+[data-theme="light"] select{color-scheme:light}
+
+
+/* 下拉箭头统一成 chevron（替换原来的实心三角），和图标体系一致 */
+.ddbtn::after{
+  content:''; flex:none; width:10px; height:10px; border:0;
+  background: var(--ink-3);
+  -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>") center/10px no-repeat;
+  mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>") center/10px no-repeat;
+  transition: transform .16s ease, background-color .14s ease;
+}
+.dd.open .ddbtn::after{ transform: rotate(180deg); background: var(--accent); }
+
+/* 未被增强的原生 select（万一有）也用同款 chevron */
+.mgsel{
+  background-image:none;
+  -webkit-appearance:none; appearance:none;
+}
+
+
+/* 合成器右侧：下拉框被 enhanceSelect 包成 .dd 之后，原来 select 上的 flex:1 不生效，
+   结果它比下面的数字输入框窄一截。这里让 .dd 撑满所在行。 */
+#p-merge .mgrow .dd{flex:1 1 auto;min-width:0;width:100%}
+#p-merge .mgrow .dd .ddbtn{width:100%}
+
+
+/* 覆盖上一条：flex 行里给 .dd 设 width:100% 反而会算错宽度，
+   改成 flex:1 + width:auto，让它和同一行的输入框等宽。 */
+#p-merge .mgrow > .dd{flex:1 1 auto;width:auto;min-width:0;display:flex}
+#p-merge .mgrow > .dd > .ddbtn{flex:1 1 auto;width:auto;min-width:0}
+#p-merge .mgrow > .inp, #p-merge .mgrow > input{flex:1 1 auto;min-width:0}
+
+
+/* 合成器右侧一列控件统一尺寸：下拉框、数字框、路径框都吃满同一份宽度，
+   数字框的 54px 定宽和右对齐文字在这里一并改掉。 */
+#p-merge .mgrow > .dd,
+#p-merge .mgrow > .mgnum,
+#p-merge .mgrow > .inp,
+#p-merge .mgrow > select,
+#p-merge .mgrow > input{flex:1 1 auto;min-width:0;width:auto}
+#p-merge .mgrow .mgnum{width:100%}
+#p-merge .mgrow .mgtiny{width:100% !important;flex:1 1 auto !important;text-align:left}
+
+
+/* ================= 模型转换页（Stepper） ================= */
+#p-train-convert .cvlist{display:flex;flex-direction:column;gap:8px}
+#p-train-convert .cvrow{display:flex;align-items:center;gap:10px;padding:9px 12px;
+  border:1px solid var(--line);border-radius:10px;background:var(--panel-2)}
+#p-train-convert .cvrow .n{font-family:var(--mono);font-size:12.5px;color:var(--ink)}
+#p-train-convert .cvrow .m{font-size:11.5px;color:var(--ink-3)}
+#p-train-convert .cvrow .sp{flex:1}
+#p-train-convert .cvrow .mini{height:26px;padding:0 10px;border-radius:8px}
+#p-train-convert .cvempty{font-size:12px;color:var(--ink-3);padding:6px 2px}
+
+#p-train-convert .cvcard{padding:24px}
+#p-train-convert .cvhd{display:flex;align-items:baseline;gap:8px;margin-bottom:12px}
+#p-train-convert .cvhd b{font-size:13px;font-weight:600}
+#p-train-convert .cvmeta{font-size:12px;color:var(--ink-3);flex:1}
+#p-train-convert .cvbad{font-size:12px;color:var(--bad);opacity:0;transition:opacity .25s}
+#p-train-convert .cvbad.on{opacity:1}
+
+#p-train-convert .cvst{position:relative;padding:8px 0}
+#p-train-convert .cvst + .cvst{margin-top:6px}
+#p-train-convert .cvsh{display:flex;align-items:center;gap:10px}
+#p-train-convert .cvic{position:relative;z-index:1;width:24px;height:24px;border-radius:50%;flex:none;
+  display:grid;place-items:center;font-size:11px;background:var(--panel-2);color:var(--ink-3);
+  transition:background .2s,color .2s,box-shadow .25s}
+#p-train-convert .cvst.on .cvic{background-color:var(--panel);color:#a8b3ee;
+  background-image:linear-gradient(rgba(93,108,207,.18),rgba(93,108,207,.18));
+  box-shadow:0 0 0 3px rgba(93,108,207,.12)}
+#p-train-convert .cvst.done .cvic{background-color:var(--panel);color:var(--ok);
+  background-image:linear-gradient(rgba(61,220,132,.14),rgba(61,220,132,.14))}
+#p-train-convert .cvst.err .cvic{background-color:var(--panel);color:var(--bad);
+  background-image:linear-gradient(rgba(248,113,113,.16),rgba(248,113,113,.16));
+  box-shadow:0 0 0 3px rgba(248,113,113,.12)}
+#p-train-convert .cvnm{font-size:12.5px;color:var(--ink-2);transition:color .2s}
+#p-train-convert .cvst.on .cvnm{color:var(--ink)}
+#p-train-convert .cvst.err .cvnm{color:var(--bad)}
+
+#p-train-convert .cvline{position:absolute;left:11px;top:32px;bottom:-6px;width:1px;background:var(--line)}
+#p-train-convert .cvst:last-child .cvline{display:none}
+#p-train-convert .cvline > i{position:absolute;inset:0;background:var(--ok);transform-origin:top;
+  transform:scaleY(0);transition:transform .38s var(--ease)}
+#p-train-convert .cvst.done .cvline > i{transform:scaleY(1)}
+
+#p-train-convert .cvpnl{display:grid;grid-template-rows:0fr;opacity:0;margin-left:34px;
+  transition:grid-template-rows .45s var(--ease),opacity .3s,margin .45s}
+#p-train-convert .cvst.open .cvpnl{grid-template-rows:1fr;opacity:1;margin-top:8px}
+#p-train-convert .cvpnl > div{overflow:hidden}
+#p-train-convert .cvrows{border:1px solid var(--line);border-radius:12px;background:var(--panel-2);overflow:hidden}
+#p-train-convert .cvrowi{display:flex;align-items:center;gap:10px;padding:7px 10px;font-size:12px;
+  border-bottom:1px solid var(--line);flex-wrap:wrap}
+#p-train-convert .cvrowi:last-child{border-bottom:0}
+#p-train-convert .cvrowi .mk{width:12px;text-align:center;color:var(--ink-3)}
+#p-train-convert .cvrowi .n{font-family:var(--mono);flex:1;min-width:0;color:var(--ink-2)}
+#p-train-convert .cvrowi .c{color:var(--ink-3);min-width:62px;text-align:right;font-variant-numeric:tabular-nums}
+#p-train-convert .cvrowi.run{background:rgba(93,108,207,.08)}
+#p-train-convert .cvrowi.run .n{color:var(--ink)} #p-train-convert .cvrowi.run .c{color:#a8b3ee}
+#p-train-convert .cvrowi.ok .mk,#p-train-convert .cvrowi.ok .c{color:var(--ok)}
+#p-train-convert .cvrowi.bad{background:rgba(248,113,113,.08)}
+#p-train-convert .cvrowi.bad .mk,#p-train-convert .cvrowi.bad .c,#p-train-convert .cvrowi.bad .n{color:var(--bad)}
+
+
+
+/* 欢迎页：三张卡点开后的数据面板（就地在欢迎页展示） */
+.wfpanel {
+  width: 100%; margin-top: 14px; padding: 18px 20px;
+  background: #121216; border: 1px solid var(--line); border-radius: 14px;
+  text-align: left; animation: wfIn .18s ease;
+}
+@keyframes wfIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.wfpanel[hidden] { display: none; }
+.wfpanel h4 { margin: 0 0 12px; font-size: 13px; color: var(--ink); font-weight: 700; }
+.wfpanel .row { display: flex; align-items: baseline; gap: 10px; padding: 7px 0; border-top: 1px solid #1c1c22; }
+.wfpanel .row:first-of-type { border-top: 0; }
+.wfpanel .k { width: 132px; flex: none; font-size: 12px; color: var(--ink-3); }
+.wfpanel .v { font-size: 12.5px; color: var(--ink-2); line-height: 1.6; }
+.wfpanel .v b { color: var(--ink); font-weight: 600; }
+.wfeats .wf.big.on { border-color: var(--brand); background: #17171d; }
+
+/* ===== 欢迎页：斜置胶囊 + 毛玻璃条 + 扫码卡 ===== */
+.welcome .wcard {
+  position: relative; width: 100%; height: 100%; max-width: none;
+  display: flex; align-items: center; justify-content: center;
+  background: #04050a; overflow: hidden; border: 0; box-shadow: none; padding: 0;
+}
+.cf { position: absolute; inset: 0; width: 100% !important; height: 100% !important;
+  display: block !important; pointer-events: none;
+  transform: none;
+  filter: none; }
+.wbrand { position: absolute; left: 28px; top: 74px; z-index: 3;
+  display: flex; align-items: center; gap: 14px; pointer-events: none; }
+.wbrand .wlogo { width: 46px; height: 46px; border-radius: 12px; flex: none;
+  filter: drop-shadow(0 4px 18px rgba(0,0,0,.55)); }
+.wbrand .ctxt { font-size: 15px; letter-spacing: .5px; color: #eef0f8;
+  text-shadow: 0 2px 14px rgba(0,0,0,.6); }
+.cbar {
+  position: absolute; left: 0; right: 0; top: 0; bottom: 0;
+  display: flex; align-items: center; justify-content: center; gap: 20px;
+  padding: 0 40px;
+  /* 黑灰玻璃：先把背景去色压暗，再叠一层极淡的中性灰 */
+  background: linear-gradient(180deg, rgba(0,0,0,.12) 0%, rgba(0,0,0,.20) 100%);
+  backdrop-filter: blur(18px) brightness(.70) saturate(.9) contrast(.96);
+  -webkit-backdrop-filter: blur(18px) brightness(.70) saturate(.9) contrast(.96);
+  /* 只有上下 0.5px 描边；左右靠遮罩淡出，不留边 */
+  border-top: .5px solid rgba(255,255,255,.16);
+  border-bottom: .5px solid rgba(255,255,255,.10);
+  border-left: 0; border-right: 0;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 16%, #000 84%, transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0%, #000 16%, #000 84%, transparent 100%);
+  transition: opacity .3s ease, transform .3s ease;
+}
+.cbar .wlogo { width: 46px; height: 46px; border-radius: 12px; flex: none;
+  filter: drop-shadow(0 0 16px rgba(150,160,255,.55)); }
+.ctxt { font-size: 16px; letter-spacing: .4px; color: #f3f3f9; font-weight: 500; }
+.ctxt b { color: inherit; font-weight: 600; }
+.clogin {
+  margin: 22px 0 0 40px; font-size: 12.5px; color: #c8c8d4; letter-spacing: 1.2px;
+  background: none; border: 0; border-bottom: 1px solid rgba(255,255,255,.24);
+  padding: 3px 1px; cursor: pointer; transition: color .2s, border-color .2s;
+}
+.clogin:hover { color: #fff; border-color: #fff; }
+
+.cqr {
+  position: absolute; left: 50%; top: 50%; z-index: 3;
+  width: 322px; padding: 22px; border-radius: 26px; text-align: center;
+  background: linear-gradient(180deg, rgba(26,26,40,.42), rgba(12,12,20,.55));
+  backdrop-filter: blur(30px) saturate(160%);
+  -webkit-backdrop-filter: blur(30px) saturate(160%);
+  border: 1px solid rgba(255,255,255,.13);
+  box-shadow: 0 40px 110px rgba(0,0,0,.65), inset 0 1px 0 rgba(255,255,255,.15);
+  opacity: 1; pointer-events: auto;
+  transform: translate(-50%, -50%) scale(1);
+  transition: opacity .34s ease, transform .34s cubic-bezier(.2,.85,.25,1);
+}
+/* 二维码状态类由 JS 写成 .wqr / .wqr.ready / .wqr.expired / .wqr.error */
+.welcome .cqr .wqr {
+  aspect-ratio: 1 / 1; width: 100%; height: auto; background: #fff; border-radius: 16px;
+  padding: 10px; position: relative; overflow: hidden; display: grid; place-items: center;
+  font-size: 11px; color: #7a7a86;
+}
+.welcome .cqr .wqr img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.welcome .cqr .wqr .wqrretry {
+  position: absolute; right: 10px; bottom: 10px; width: 32px; height: 32px;
+  display: none; place-items: center; border-radius: 10px; border: 1px solid #e2e2ea;
+  background: #f6f6fa; color: #444;
+}
+.welcome .cqr .wqr .wqrretry svg { width: 16px; height: 16px; }
+.welcome .cqr .wqr.expired .wqrretry,
+.welcome .cqr .wqr.error .wqrretry { display: grid; }
+.ccap { margin-top: 14px; font-size: 12px; color: #b9b9c8; letter-spacing: .3px;
+  line-height: 1.9; text-align: center; }
+.ccap .bili { height: 21px; width: auto; display: inline-block;
+  vertical-align: -5px; margin: 0 6px; opacity: 1;
+  filter: drop-shadow(0 2px 8px rgba(210,82,124,.35)); }
+
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.cqr .btn { margin-top: 14px; font-size: 11.5px; }
+
+.welcome.signin .cbar, .welcome.signin .clogin { opacity: 0; transform: scale(.985); pointer-events: none; }
+.welcome.signin .cqr { opacity: 1 !important; transform: translate(-50%, -50%) scale(1) !important; pointer-events: auto !important; }
+
+
+/* ===== 使用许可 / 免责声明 ===== */
+.legal {
+  position: fixed; inset: 0; z-index: 9000;
+  display: flex; align-items: center; justify-content: center;
+  padding: 4vh 24px;
+  background: rgba(6,7,11,.86);
+}
+.legalCard {
+  width: min(680px, 100%); max-height: 88vh;
+  display: flex; flex-direction: column;
+  background: var(--panel-2, #1a1a1f);
+  border: 1px solid var(--line, #26262d);
+  border-radius: 14px;
+  box-shadow: var(--shadow-high, 0 24px 60px rgba(0,0,0,.6));
+  overflow: hidden;
+}
+.legalHd { padding: 24px 26px 14px; }
+.legalHd b {
+  display: block; font-size: 15px; font-weight: 600;
+  letter-spacing: -.01em; color: var(--ink, #f2f2f4);
+}
+
+.legalBody {
+  padding: 0 26px 4px; overflow-y: auto; flex: 1;
+}
+/* 细滚动条：不要设 scrollbar-width，否则 Chromium 会忽略下面的 ::-webkit- 规则 */
+.legalBody::-webkit-scrollbar { width: 5px; height: 5px; }
+.legalBody::-webkit-scrollbar-track { background: transparent; }
+.legalBody::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,.14);
+  border-radius: 999px;
+}
+.legalBody::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.26); }
+.legalBody::-webkit-scrollbar-button { display: none; height: 0; }
+
+.legalBody section { padding: 16px 0; }
+.legalBody section + section { border-top: 1px solid rgba(255,255,255,.05); }
+.legalBody h4 {
+  font-size: 12.5px; font-weight: 600; letter-spacing: .01em;
+  color: var(--ink, #f2f2f4); margin-bottom: 7px;
+}
+.legalBody p {
+  font-size: 12.5px; line-height: 1.8; color: var(--ink-2, #a3a3ad);
+  margin-bottom: 5px;
+}
+.legalBody p:last-child { margin-bottom: 0; }
+
+.legalFt { padding: 14px 26px 22px; }
+.legalChks { display: flex; flex-direction: column; gap: 9px; }
+.legalChk {
+  display: flex; align-items: flex-start; gap: 8px;
+  font-size: 12px; line-height: 1.55; color: var(--ink-2, #a3a3ad);
+  cursor: pointer; user-select: none;
+}
+.legalChk input {
+  width: 14px; height: 14px; margin-top: 2px; flex: none;
+  accent-color: var(--brand, #5d6ccf); cursor: pointer;
+}
+.legalChk b { color: var(--ink, #f2f2f4); font-weight: 600; }
+
+.legalActs { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.legal .legalActs .btn {
+  height: 30px; padding: 0 14px; font-size: 12px; border-radius: 8px;
+  background: var(--surface-hover, #232329) !important;
+  border: 0 !important;
+  color: var(--ink-2, #a3a3ad) !important; box-shadow: none; font-weight: 500;
+}
+.legal .legalActs .btn:hover {
+  background: #2a2a31 !important; color: var(--ink, #f2f2f4) !important;
+}
+.legal .legalActs .btn:not(.ghost) {
+  background: var(--brand, #5d6ccf) !important; border-color: transparent !important;
+  color: #fff !important; font-weight: 500;
+}
+.legal .legalActs .btn:not(.ghost):hover { background: var(--brand-hover, #6f7cdd) !important; }
+.legal .legalActs .btn[disabled], .legal .legalActs .btn[disabled]:hover {
+  opacity: .4; cursor: not-allowed;
+  background: var(--brand, #5d6ccf) !important; color: #fff !important;
+}
+
+/* 中英切换：靠 <html lang> 控制，!important 才能压过 .legalHd b / h4 的 display */
+html:not([lang="en"]) .legal .legal-en { display: none !important; }
+html[lang="en"] .legal .legal-zh { display: none !important; }
+
+/* 训练页失败横幅：常驻、可关闭。和右下角 toast 分工不同 ——
+   toast 是「操作完成了」的瞬时反馈，横幅是「状态坏了、需要你改配置」。 */
+.alert{
+  margin:14px 0 0;border-radius:12px;padding:12px 14px;
+  border:1px solid var(--line);background:var(--surface-2);
+}
+.alert.danger{border-color:rgba(220,80,80,.42);background:rgba(220,80,80,.08)}
+.alert .alhd{display:flex;align-items:center;gap:8px}
+.alert .alhd b{font-size:13px;color:var(--ink);font-weight:700}
+.alert.danger .alhd b{color:var(--bad,#e05555)}
+.alert .alx{margin-left:auto;background:none;border:0;color:var(--ink-3);font-size:18px;line-height:1;cursor:pointer;padding:0 4px}
+.alert .alx:hover{color:var(--ink)}
+.alert .albd{margin-top:6px;font-size:12.5px;line-height:1.65;color:var(--ink-2);white-space:pre-line}
+.alert .alft{margin-top:9px;display:flex;gap:8px;flex-wrap:wrap}
+.alert .alft:empty{display:none}
+
+/* 参数页的显存估算：放在底部动作栏里，就在「开始训练」旁边，永远可见 */
+.cfgactions .vram{margin:0;padding:5px 10px;border-radius:8px;border:1px solid var(--line);
+  background:var(--surface-2);font-size:12px;color:var(--ink-2);display:flex;
+  align-items:baseline;gap:6px;white-space:nowrap}
+.cfgactions .vram b{color:var(--ink);font-variant-numeric:tabular-nums}
+.cfgactions .vram.warn{border-color:rgba(220,170,60,.45);background:rgba(220,170,60,.09)}
+.cfgactions .vram.bad{border-color:rgba(220,80,80,.5);background:rgba(220,80,80,.1)}
+.cfgactions .vram .vh{display:none}
+
+/* 用户协议挪到登录页：不再是盖住整个应用的模态框，而是贴在欢迎页里的一层，
+   背景透明 → 底下的扫码页 shader 继续跑，视觉上和登录页是一体的。 */
+#welcome .legal{
+  position:absolute; inset:0; display:none; align-items:center; justify-content:center;
+  background:transparent; padding:24px; z-index:20;
+}
+#welcome .legal .legalCard{
+  max-height:calc(100% - 40px); max-width:760px; width:100%; overflow:hidden;
+  display:flex; flex-direction:column;
+}
+#welcome .legal .legalBody{overflow:auto; flex:1 1 auto}
+
+/* 协议卡片：和登录页的毛玻璃条同一套语言（同一组 blur/brightness 参数），
+   这样它浮在扫码背景上时，看起来是"同一块玻璃"，而不是另贴上去的深色板子。 */
+#welcome .legal .legalCard{
+  /* 收窄一些，让四周露出更多流动的背景 —— 玻璃感来自"能看见后面在动" */
+  width: min(640px, 100%);
+  max-height: 78vh;
+  background: linear-gradient(180deg, rgba(10,11,16,.52) 0%, rgba(6,7,11,.62) 100%);
+  backdrop-filter: blur(18px) brightness(.72) saturate(.95) contrast(.98);
+  -webkit-backdrop-filter: blur(18px) brightness(.72) saturate(.95) contrast(.98);
+  border: .5px solid rgba(255,255,255,.14);
+  box-shadow: 0 24px 70px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.06);
+  border-radius: 16px;
+}
+/* 卡片内部的分隔线和正文颜色也往玻璃上调一档，避免"深色板 + 白字"的割裂感 */
+#welcome .legal .legalHd{ border-bottom: .5px solid rgba(255,255,255,.08); }
+#welcome .legal .legalBody p{ color: rgba(234,236,244,.80); }
+#welcome .legal .legalBody h4{ color: rgba(246,247,252,.95); }
+#welcome .legal .legalChk span{ color: rgba(234,236,244,.86); }
+
+/* 协议展示期间：只留背景 shader + 协议卡，扫码卡/品牌字全部隐掉。
+   半透明而不是 display:none —— 用透明度做个 0.25s 的淡出，
+   直接切 display 会"啪"地一下跳变，和毛玻璃的气质不搭。 */
+/* 语言切换**不淡出**：读协议时最可能想切到英文对照，
+   还要抬到协议层上面，否则被那层盖住点不到。 */
+#welcome.legal-on .wlang { z-index: 30; }
+
+#welcome.legal-on .cqr,
+#welcome.legal-on .wbrand {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .25s ease;
+}
+
+/* 关于页：hero 下面是第一张信息卡。全局 .card 有 48px 上边距（原本给"标签句"
+   留的视觉间隔），标签句删掉后这段就成了卡片上方一块空白，这里单独收窄。 */
+#p-about > .aboutHero + .card { margin-top: 26px !important; }   /* .page > .card 带 !important，这里必须对等 */

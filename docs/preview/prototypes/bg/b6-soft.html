@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>B6 软水银</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;background:#04050a;overflow:hidden}
+  canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+  .tag{position:fixed;left:16px;bottom:14px;color:#4a4a58;letter-spacing:.06em;
+    font:12px/1.4 -apple-system,"Segoe UI",system-ui,sans-serif}
+</style></head>
+<body>
+<canvas id="gl"></canvas>
+<div class="tag">B6 软水银（边缘柔化 + 青蓝紫流转）</div>
+<script>
+(function () {
+  var canvas = document.getElementById("gl");
+  var gl = canvas.getContext("webgl", { antialias: false, alpha: false });
+  if (!gl) { document.body.style.background = "#0a1020"; return; }
+  var VS = "attribute vec2 aPos; varying vec2 vUv;\n" +
+    "void main(){ vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }";
+  var FS = "\nprecision highp float;\nuniform float uTime;\nuniform vec2 uRes;\nvarying vec2 vUv;\n\nfloat hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.0-2.0*f);\n  return mix(mix(hash(i),hash(i+vec2(1.,0.)),u.x), mix(hash(i+vec2(0.,1.)),hash(i+vec2(1.,1.)),u.x), u.y);\n}\nfloat fbm(vec2 p){\n  float v=0.0,a=0.5;\n  for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=0.5; }\n  return v;\n}\nvec2 toP(){ return (vUv - 0.5) * vec2(uRes.x/uRes.y, 1.0); }\n\n// 青 → 蓝 → 紫 循环（不来回复位，直接环）\nvec3 tri(float t){\n  t = fract(t) * 3.0;\n  vec3 c0 = vec3(0.36, 0.93, 1.00);\n  vec3 c1 = vec3(0.10, 0.34, 1.00);\n  vec3 c2 = vec3(0.62, 0.28, 1.00);\n  if (t < 1.0) return mix(c0, c1, t);\n  if (t < 2.0) return mix(c1, c2, t - 1.0);\n  return mix(c2, c0, t - 2.0);\n}\n\nvec3 shade(vec2 p, float t){\n  // 域扭曲（水银的骨架）\n  vec2 q = p;\n  for (int i = 0; i < 3; i++) {\n    q += 0.28 * vec2(fbm(q * 1.7 + t), fbm(q * 1.7 - t + 5.0));\n    q *= 1.15;\n  }\n  float v = fbm(q * 2.2 + vec2(t * 0.3, 0.0));\n\n  // 脊线：指数从 12 降到 6.5，边缘变软\n  float rid = 1.0 - abs(v - 0.5) * 2.0;\n  float streak = pow(clamp(rid, 0.0, 1.0), 6.5);\n\n  float hue = 0.06 + v * 0.42 + 0.11 * sin(t * 0.45) + 0.05 * fbm(q * 0.7);\n  vec3 line = tri(hue) * streak * 1.25;\n\n  // 底色：同一色环压暗，不做纯黑，避免边缘对撞\n  vec3 base = tri(hue + 0.30) * (0.05 + v * 0.18);\n  vec3 col = base + line;\n\n  col += tri(hue + 0.6) * pow(streak, 2.5) * 0.45;   // 彩边\n  return col / (1.0 + col * 0.9) * 1.6;              // 色调映射\n}\n\nvoid main(){\n  vec2 p = toP();\n  float t = uTime * 0.10;\n  p *= 1.0 + 0.04 * sin(t * 0.4);\n\n  vec3 c = shade(p, t);\n  c += shade(p + vec2(0.0045, 0.0), t);\n  c += shade(p - vec2(0.0045, 0.0), t);\n  c += shade(p + vec2(0.0, 0.0045), t);\n  c += shade(p - vec2(0.0, 0.0045), t);\n  c /= 5.0;\n\n  float vig = smoothstep(1.30, 0.18, length(p * vec2(0.85, 1.0)));\n  float a = clamp(0.34 + 0.70 * vig, 0.0, 1.0);\n  gl_FragColor = vec4(c * a, a);\n}\n";
+  function compile(type, src) {
+    var sh = gl.createShader(type);
+    gl.shaderSource(sh, src); gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(sh));
+    return sh;
+  }
+  var prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(prog); gl.useProgram(prog);
+
+  var buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+  var loc = gl.getAttribLocation(prog, "aPos");
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+  var uTime = gl.getUniformLocation(prog, "uTime");
+  var uRes = gl.getUniformLocation(prog, "uRes");
+
+  function resize() {
+    var dpr = Math.min(devicePixelRatio || 1, 1.5);
+    canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+    canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+    gl.viewport(0, 0, canvas.width, canvas.height);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  var t0 = performance.now();
+  function frame() {
+    gl.uniform1f(uTime, (performance.now() - t0) / 1000);
+    gl.uniform2f(uRes, canvas.clientWidth, canvas.clientHeight);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    requestAnimationFrame(frame);
+  }
+  frame();
+})();
+</script>
+</body></html>

@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>V8 立体胶囊（SVG）</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{background:#04050a;font-family:-apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;color:#f4f4f7;
+  display:flex;align-items:center;justify-content:center;position:relative}
+.field{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+.field svg{width:980px;height:auto;transform:rotate(-10deg);filter:blur(.4px)}
+.stage{position:relative;z-index:2;width:min(820px,62vw)}
+.bar{height:150px;display:flex;align-items:center;gap:24px;padding:0 36px;
+  background:linear-gradient(180deg, rgba(10,10,18,.42) 0%, rgba(6,6,12,.58) 100%);
+  backdrop-filter:blur(22px) saturate(150%) brightness(.95);
+  -webkit-backdrop-filter:blur(22px) saturate(150%) brightness(.95);
+  border-top:1px solid rgba(255,255,255,.15);
+  border-bottom:1px solid rgba(255,255,255,.06);
+  box-shadow:0 30px 90px rgba(0,0,0,.55);
+  transition:opacity .3s ease, transform .3s ease}
+.bar svg.logo{width:52px;height:52px;flex:none;filter:drop-shadow(0 0 16px rgba(150,160,255,.6))}
+.bar .txt{font-size:16px;letter-spacing:.4px;color:#f3f3f9;font-weight:500}
+.bar .txt b{color:#ff8364;font-weight:600}
+.login{margin:24px 0 0 36px;font-size:12.5px;color:#c8c8d4;letter-spacing:1.2px;background:none;border:0;
+  border-bottom:1px solid rgba(255,255,255,.24);padding:3px 1px;cursor:pointer;transition:color .2s,border-color .2s}
+.login:hover{color:#fff;border-color:#fff}
+.qcard{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%) scale(.94);width:322px;padding:22px;
+  border-radius:26px;text-align:center;
+  background:linear-gradient(180deg, rgba(26,26,40,.42), rgba(12,12,20,.55));
+  backdrop-filter:blur(30px) saturate(160%);-webkit-backdrop-filter:blur(30px) saturate(160%);
+  border:1px solid rgba(255,255,255,.13);
+  box-shadow:0 40px 110px rgba(0,0,0,.65), inset 0 1px 0 rgba(255,255,255,.15);
+  opacity:0;pointer-events:none;transition:opacity .34s ease, transform .34s cubic-bezier(.2,.85,.25,1)}
+.qr{background:#fff;border-radius:16px;padding:10px;aspect-ratio:1}
+.qr img{width:100%;height:100%;display:block;object-fit:contain}
+.cap{margin-top:16px;font-size:11.5px;color:#a6a6b6;letter-spacing:.5px}
+body.signin .bar,body.signin .login{opacity:0;transform:scale(.985);pointer-events:none}
+body.signin .qcard{opacity:1;transform:translate(-50%,-50%) scale(1);pointer-events:auto}
+</style></head>
+<body>
+<div class="field">
+<svg viewBox="0 0 900 640" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#a9ecff"/><stop offset="42%" stop-color="#5f8dff"/>
+      <stop offset="78%" stop-color="#7b5cff"/><stop offset="100%" stop-color="#9a63ff"/>
+    </linearGradient>
+    <linearGradient id="cyl" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#0f2a8c" stop-opacity=".55"/>
+      <stop offset="18%" stop-color="#2f63e6" stop-opacity=".15"/>
+      <stop offset="38%" stop-color="#ffffff" stop-opacity=".28"/>
+      <stop offset="58%" stop-color="#2f63e6" stop-opacity=".08"/>
+      <stop offset="100%" stop-color="#240a63" stop-opacity=".62"/>
+    </linearGradient>
+    <radialGradient id="hi" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity=".75"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft"><feGaussianBlur stdDeviation="0.6"/></filter>
+  </defs>
+  <g filter="url(#soft)">
+<g opacity="0.62">
+    <rect x="40" y="213" width="84" height="250" rx="42" fill="url(#body)"/>
+    <rect x="40" y="213" width="84" height="250" rx="42" fill="url(#cyl)"/>
+    <ellipse cx="75.28" cy="248" rx="25.2" ry="22.5" fill="url(#hi)"/>
+  </g>
+<g opacity="0.85">
+    <rect x="128" y="146" width="84" height="320" rx="42" fill="url(#body)"/>
+    <rect x="128" y="146" width="84" height="320" rx="42" fill="url(#cyl)"/>
+    <ellipse cx="163.28" cy="190.8" rx="25.2" ry="28.799999999999997" fill="url(#hi)"/>
+  </g>
+<g opacity="1">
+    <rect x="220" y="125" width="84" height="390" rx="42" fill="url(#body)"/>
+    <rect x="220" y="125" width="84" height="390" rx="42" fill="url(#cyl)"/>
+    <ellipse cx="255.28" cy="179.60000000000002" rx="25.2" ry="35.1" fill="url(#hi)"/>
+  </g>
+<g opacity="0.75">
+    <rect x="320" y="205.5" width="84" height="265" rx="42" fill="url(#body)"/>
+    <rect x="320" y="205.5" width="84" height="265" rx="42" fill="url(#cyl)"/>
+    <ellipse cx="355.28" cy="242.6" rx="25.2" ry="23.849999999999998" fill="url(#hi)"/>
+  </g>
+<g opacity="0.92">
+    <rect x="412" y="133.5" width="84" height="345" rx="42" fill="url(#body)"/>
+    <rect x="412" y="133.5" width="84" height="345" rx="42" fill="url(#cyl)"/>
+    <ellipse cx="447.28" cy="181.8" rx="25.2" ry="31.049999999999997" fill="url(#hi)"/>
+  </g>
+<g opacity="0.6">
+    <rect x="512" y="204" width="84" height="232" rx="42" fill="url(#body)"/>
+    <rect x="512" y="204" width="84" height="232" rx="42" fill="url(#cyl)"/>
+    <ellipse cx="547.28" cy="236.48000000000002" rx="25.2" ry="20.88" fill="url(#hi)"/>
+  </g>
+<g opacity="0.96">
+    <rect x="600" y="152" width="84" height="372" rx="42" fill="url(#body)"/>
+    <rect x="600" y="152" width="84" height="372" rx="42" fill="url(#cyl)"/>
+    <ellipse cx="635.28" cy="204.08" rx="25.2" ry="33.48" fill="url(#hi)"/>
+  </g>
+<g opacity="0.74">
+    <rect x="700" y="162" width="84" height="288" rx="42" fill="url(#body)"/>
+    <rect x="700" y="162" width="84" height="288" rx="42" fill="url(#cyl)"/>
+    <ellipse cx="735.28" cy="202.32" rx="25.2" ry="25.919999999999998" fill="url(#hi)"/>
+  </g>
+<g opacity="0.88">
+    <rect x="792" y="155" width="84" height="330" rx="42" fill="url(#body)"/>
+    <rect x="792" y="155" width="84" height="330" rx="42" fill="url(#cyl)"/>
+    <ellipse cx="827.28" cy="201.2" rx="25.2" ry="29.7" fill="url(#hi)"/>
+  </g>
+  </g>
+</svg>
+</div>
+
+<div class="stage">
+  <div class="bar">
+    <svg class="logo" viewBox="0 0 48 48" fill="none">
+      <path d="M11 11h12.5a8.5 8.5 0 0 1 0 17H11z" stroke="#eee6ff" stroke-width="3.2" stroke-linejoin="round"/>
+      <path d="M11 28h6.5v9.5" stroke="#eee6ff" stroke-width="3.2" stroke-linecap="round"/>
+      <rect x="28" y="30" width="6" height="6" rx="1" fill="#a9e6ff"/>
+      <rect x="37" y="30" width="6" height="6" rx="1" fill="#a9e6ff" opacity=".55"/>
+    </svg>
+    <div class="txt">更快、更易、更强的 DeepFake 工作流　<b>PyTorch</b></div>
+  </div>
+  <button class="login" onclick="document.body.classList.add('signin')">登入</button>
+</div>
+
+<div class="qcard">
+  <div class="qr"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAXIAAAFyAQAAAADAX2ykAAACwklEQVR4nO1bUW6zMAy2DdIeQeoBdpT0ZtOOtBvAUXoDeKwE8uQ4pIhqgepXEfnx94Ag/jRZ+erEjjNkeAUtvUQHMH4atGJfwvhp0Ip9CeOnQSv2JYyfBq3YlzD+GeYHA0r5GBGgLwFaGbn2k+26oz/bQS9wT8x3LOjicDUAfnWFJF+FN/Gx/d8MOim/nyK0rQv2UcvfNQA3Gt3l3v5sBW1mnpNfPg+NJbSfDOi6y/7+kPHfOz/u9sHguhC6T7D5T4MOGr+VbLA9AAIUwD6IobojuB+Qz938IeO/Y35anyLXEr8dAF57CeLbhyg7avr8b39/M2g71cP4K+AlfBJdDfIsOCTWEY3NZxp0SH3B8SAbrhREIq2T0sj5sWqY/wRM3yz1ZVZBpcz1oetFZl/1FsxN5X8Cpm/e+nqojGJoJHT1EXkWv1nqC7IWa8CGIJa3bn6wZfrmrC/4rTc+tP6twk4c3ix+s9WXYxo1ZVo+dAdfGFv+nL2+4Ndijd9qnlWxT608LH7z5fP3p1+B76j1r7xpk1AaD48k66j+bwedd//lIO20KjferuvzVARb/pylviwKzrR8SNtopWT1b9b6QmwYhVpXDyk5HnxY/py1vjxbgWVQqyIIpZFGt+VX+fYH0f1ceGoRCao7SpNQhkq17uQPGf898RugoRsOrIbpTCueZFl+lWf8gqIYuK0LQNcwIFQdI/SXQdoNJR/TfzJ+GqxR+2gy+A1Xzyd5Oo6OnWCL34zPr5yeNU+qungr9tHkN30zvz+JUI2yFo8lt3UHLOsztlgM6Joj+k/Gf2l+mG8l+JvQ+q8LV72p8yd/DWT8Q+2/rJVwbPeDbr12Pvmf3J/Ea18CYj2iXsIKN+329mczaDv1xPsvx2+efwz6zqHxv4c/ZPwkKG1+gvHToBX7EsZPg1bsSxg/DVqxL2H8NI42P79Si0gpc1IsWgAAAABJRU5ErkJggg==" alt=""></div>
+  <div class="cap">使用手机哔哩哔哩扫码登录</div>
+</div>
+</body></html>

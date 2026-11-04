@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>V6 光斑 + 毛玻璃</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{background:radial-gradient(120% 90% at 50% 45%,#0b1024 0%,#050608 70%);
+  font-family:-apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;color:#f4f4f7;
+  display:flex;align-items:center;justify-content:center}
+
+/* ---- 光斑 ---- */
+.blobs{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+.blob{flex:none;margin:0 -6px;border-radius:999px;transform:translateY(var(--dy));   /* 全部竖直，方向一致 */
+  background:
+    radial-gradient(70% 30% at 50% 8%, rgba(255,255,255,.55), rgba(255,255,255,0) 72%),
+    linear-gradient(176deg, var(--c1) 0%, var(--c2) 50%, var(--c3) 100%);
+  box-shadow:0 0 90px rgba(90,130,255,.42);
+  filter:blur(.4px) saturate(1.15);opacity:var(--op)}
+.b1{width:94px;height:300px;--dy:6px;--op:.6;--c1:#5fd2ff;--c2:#4d7dff;--c3:#7a55ff}
+.b2{width:102px;height:390px;--dy:-18px;--op:.88;--c1:#8fe4ff;--c2:#5a8cff;--c3:#8a5cff}
+.b3{width:108px;height:470px;--dy:-42px;--op:1;--c1:#b6f0ff;--c2:#6fa2ff;--c3:#9a6bff}
+.b4{width:90px;height:320px;--dy:10px;--op:.7;--c1:#7fe0ff;--c2:#4f80ff;--c3:#8260ff}
+.b5{width:104px;height:414px;--dy:-24px;--op:.92;--c1:#a6eaff;--c2:#5f90ff;--c3:#9268ff}
+.b6{width:86px;height:268px;--dy:18px;--op:.55;--c1:#69d6ff;--c2:#487aff;--c3:#7552ff}
+.b7{width:106px;height:452px;--dy:-34px;--op:.95;--c1:#b2eeff;--c2:#6799ff;--c3:#9668ff}
+
+/* ---- 中央玻璃条 ---- */
+.stage{position:relative;z-index:2;width:min(820px,62vw)}
+.bar{height:152px;display:flex;align-items:center;gap:24px;padding:0 38px;
+  background:linear-gradient(180deg, rgba(8,8,14,.52) 0%, rgba(5,5,10,.66) 100%);
+  backdrop-filter:blur(22px) saturate(140%) brightness(.92);
+  -webkit-backdrop-filter:blur(22px) saturate(140%) brightness(.92);
+  border-top:1px solid rgba(255,255,255,.16);
+  border-bottom:1px solid rgba(255,255,255,.06);
+  box-shadow:0 30px 90px rgba(0,0,0,.5);
+  transition:opacity .3s ease, transform .3s ease}
+.bar svg{width:54px;height:54px;flex:none;filter:drop-shadow(0 0 16px rgba(150,160,255,.6))}
+.bar .txt{font-size:16px;letter-spacing:.5px;color:#f2f2f8;font-weight:500}
+.bar .txt b{color:#ff8364;font-weight:600}
+
+.login{margin:24px 0 0 38px;font-size:12.5px;color:#c8c8d4;letter-spacing:1.2px;
+  background:none;border:0;border-bottom:1px solid rgba(255,255,255,.24);padding:3px 1px;cursor:pointer;
+  transition:color .2s,border-color .2s}
+.login:hover{color:#fff;border-color:#fff}
+
+/* ---- 二维码卡 ---- */
+.qcard{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%) scale(.94);
+  width:320px;padding:22px;border-radius:26px;text-align:center;
+  background:linear-gradient(180deg, rgba(26,26,40,.40), rgba(12,12,20,.52));
+  backdrop-filter:blur(36px) saturate(180%);
+  -webkit-backdrop-filter:blur(36px) saturate(180%);
+  border:1px solid rgba(255,255,255,.13);
+  box-shadow:0 40px 110px rgba(0,0,0,.62), inset 0 1px 0 rgba(255,255,255,.14);
+  opacity:0;pointer-events:none;transition:opacity .34s ease, transform .34s cubic-bezier(.2,.85,.25,1)}
+.qr{background:#fff;border-radius:16px;padding:10px;aspect-ratio:1}
+.qr img{width:100%;height:100%;display:block;object-fit:contain}
+.cap{margin-top:16px;font-size:11.5px;color:#a6a6b6;letter-spacing:.5px}
+
+body.signin .bar,body.signin .login{opacity:0;transform:scale(.985);pointer-events:none}
+body.signin .qcard{opacity:1;transform:translate(-50%,-50%) scale(1);pointer-events:auto}
+</style></head>
+<body>
+<div class="blobs">
+  <div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div><div class="blob b4"></div>
+  <div class="blob b5"></div><div class="blob b6"></div><div class="blob b7"></div>
+</div>
+
+<div class="stage">
+  <div class="bar">
+    <svg viewBox="0 0 48 48" fill="none">
+      <path d="M11 11h12.5a8.5 8.5 0 0 1 0 17H11z" stroke="#eee6ff" stroke-width="3.2" stroke-linejoin="round"/>
+      <path d="M11 28h6.5v9.5" stroke="#eee6ff" stroke-width="3.2" stroke-linecap="round"/>
+      <rect x="28" y="30" width="6" height="6" rx="1" fill="#a9e6ff"/>
+      <rect x="37" y="30" width="6" height="6" rx="1" fill="#a9e6ff" opacity=".55"/>
+    </svg>
+    <div class="txt">更快、更易、更强的 DeepFake 工作流　<b>PyTorch</b></div>
+  </div>
+  <button class="login" onclick="document.body.classList.add('signin')">登入</button>
+</div>
+
+<div class="qcard">
+  <div class="qr"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAXIAAAFyAQAAAADAX2ykAAACwklEQVR4nO1bUW6zMAy2DdIeQeoBdpT0ZtOOtBvAUXoDeKwE8uQ4pIhqgepXEfnx94Ag/jRZ+erEjjNkeAUtvUQHMH4atGJfwvhp0Ip9CeOnQSv2JYyfBq3YlzD+GeYHA0r5GBGgLwFaGbn2k+26oz/bQS9wT8x3LOjicDUAfnWFJF+FN/Gx/d8MOim/nyK0rQv2UcvfNQA3Gt3l3v5sBW1mnpNfPg+NJbSfDOi6y/7+kPHfOz/u9sHguhC6T7D5T4MOGr+VbLA9AAIUwD6IobojuB+Qz938IeO/Y35anyLXEr8dAF57CeLbhyg7avr8b39/M2g71cP4K+AlfBJdDfIsOCTWEY3NZxp0SH3B8SAbrhREIq2T0sj5sWqY/wRM3yz1ZVZBpcz1oetFZl/1FsxN5X8Cpm/e+nqojGJoJHT1EXkWv1nqC7IWa8CGIJa3bn6wZfrmrC/4rTc+tP6twk4c3ix+s9WXYxo1ZVo+dAdfGFv+nL2+4Ndijd9qnlWxT608LH7z5fP3p1+B76j1r7xpk1AaD48k66j+bwedd//lIO20KjferuvzVARb/pylviwKzrR8SNtopWT1b9b6QmwYhVpXDyk5HnxY/py1vjxbgWVQqyIIpZFGt+VX+fYH0f1ceGoRCao7SpNQhkq17uQPGf898RugoRsOrIbpTCueZFl+lWf8gqIYuK0LQNcwIFQdI/SXQdoNJR/TfzJ+GqxR+2gy+A1Xzyd5Oo6OnWCL34zPr5yeNU+qungr9tHkN30zvz+JUI2yFo8lt3UHLOsztlgM6Joj+k/Gf2l+mG8l+JvQ+q8LV72p8yd/DWT8Q+2/rJVwbPeDbr12Pvmf3J/Ea18CYj2iXsIKN+329mczaDv1xPsvx2+efwz6zqHxv4c/ZPwkKG1+gvHToBX7EsZPg1bsSxg/DVqxL2H8NI42P79Si0gpc1IsWgAAAABJRU5ErkJggg==" alt=""></div>
+  <div class="cap">使用手机哔哩哔哩扫码登录</div>
+</div>
+</body></html>

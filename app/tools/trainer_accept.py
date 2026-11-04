@@ -27,9 +27,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-RL = str(Path(__file__).resolve().parents[1])          # app/
-PROJ = str(Path(RL).parent)                            # 工程根（app 的上一层）
-WS = os.environ.get("DFL_WORKSPACE") or str(Path(PROJ) / "workspace")
+RL = str(Path(__file__).resolve().parents[1])
+WS = os.environ.get("DFL_WORKSPACE") or r"D:\MyProject\DeepFaceLab-PyTorch\workspace"
 
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 _FAILS = []
@@ -84,7 +83,7 @@ def main() -> int:
 
     py = sys.executable
     env = dict(os.environ, DFL_WORKSPACE=WS)
-    proc = subprocess.Popen([py, "serve.py"], cwd=RL,
+    proc = subprocess.Popen([py, "serve.py"], cwd=os.path.join(RL, "app"),
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, bufsize=1, env=env, creationflags=0x08000000)
     port = 0

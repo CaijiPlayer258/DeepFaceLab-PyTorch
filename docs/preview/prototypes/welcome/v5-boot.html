@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>V5 启动页</title>
+<style>
+:root{--bg:#0a0a0c;--ink:#f2f2f5;--ink2:#8f8f9b;--ink3:#63636e;--line:#1d1d24;--brand:#6d79e0;}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:var(--bg);color:var(--ink);font-family:-apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+  display:flex;align-items:center;justify-content:center;overflow:hidden}
+.logo{display:flex;align-items:center;gap:9px}
+.mark{width:26px;height:26px}
+.mono{font-family:ui-monospace,Menlo,monospace}
+button{font:inherit;cursor:pointer;border:0;background:none;color:inherit}
+
+body{background:radial-gradient(120% 90% at 50% 0%,#15151d 0%,#08080a 62%)}
+.wrap{display:flex;flex-direction:column;align-items:center;gap:0;text-align:center}
+h1{margin-top:30px;font-size:30px;font-weight:800;letter-spacing:.4px}
+.sub{margin-top:10px;font-size:12.5px;color:#6d6d78}
+.qrbox{margin-top:42px;padding:18px;border:1px solid #1c1c23;border-radius:22px;background:rgba(16,16,20,.7)}
+.tip{margin-top:16px;font-size:11.5px;color:#6b6b76}
+.foot{position:fixed;bottom:40px;left:0;right:0;display:flex;justify-content:center;gap:70px}
+.foot b{font-size:13px;letter-spacing:.4px}
+.foot span{display:block;margin-top:5px;font-size:10.5px;color:#4f4f5a}
+.skip{position:fixed;bottom:96px;left:0;right:0;text-align:center;font-size:11.5px;color:#5f5f6a}
+
+</style></head>
+<body>
+<div class="wrap">
+  <div class="logo"><svg class="mark" viewBox="0 0 32 32" fill="none"><rect x="1" y="1" width="30" height="30" rx="8" fill="#15151c" stroke="#2a2a36"/><path d="M10 10h6a4 4 0 1 1 0 8h-6z" stroke="#8b93ff" stroke-width="2.2" stroke-linejoin="round"/><path d="M10 18h3v4" stroke="#8b93ff" stroke-width="2.2" stroke-linecap="round"/></svg></div>
+  <h1>DeepFaceLab-PyTorch</h1>
+  <p class="sub">用 B 站 App 扫码，登录后开始</p>
+  <div class="qrbox"><div style="width:240px;height:240px;background:#fff;border-radius:12px;padding:8px">
+  <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAXIAAAFyAQAAAADAX2ykAAACwklEQVR4nO1bUW6zMAy2DdIeQeoBdpT0ZtOOtBvAUXoDeKwE8uQ4pIhqgepXEfnx94Ag/jRZ+erEjjNkeAUtvUQHMH4atGJfwvhp0Ip9CeOnQSv2JYyfBq3YlzD+GeYHA0r5GBGgLwFaGbn2k+26oz/bQS9wT8x3LOjicDUAfnWFJF+FN/Gx/d8MOim/nyK0rQv2UcvfNQA3Gt3l3v5sBW1mnpNfPg+NJbSfDOi6y/7+kPHfOz/u9sHguhC6T7D5T4MOGr+VbLA9AAIUwD6IobojuB+Qz938IeO/Y35anyLXEr8dAF57CeLbhyg7avr8b39/M2g71cP4K+AlfBJdDfIsOCTWEY3NZxp0SH3B8SAbrhREIq2T0sj5sWqY/wRM3yz1ZVZBpcz1oetFZl/1FsxN5X8Cpm/e+nqojGJoJHT1EXkWv1nqC7IWa8CGIJa3bn6wZfrmrC/4rTc+tP6twk4c3ix+s9WXYxo1ZVo+dAdfGFv+nL2+4Ndijd9qnlWxT608LH7z5fP3p1+B76j1r7xpk1AaD48k66j+bwedd//lIO20KjferuvzVARb/pylviwKzrR8SNtopWT1b9b6QmwYhVpXDyk5HnxY/py1vjxbgWVQqyIIpZFGt+VX+fYH0f1ceGoRCao7SpNQhkq17uQPGf898RugoRsOrIbpTCueZFl+lWf8gqIYuK0LQNcwIFQdI/SXQdoNJR/TfzJ+GqxR+2gy+A1Xzyd5Oo6OnWCL34zPr5yeNU+qungr9tHkN30zvz+JUI2yFo8lt3UHLOsztlgM6Joj+k/Gf2l+mG8l+JvQ+q8LV72p8yd/DWT8Q+2/rJVwbPeDbr12Pvmf3J/Ea18CYj2iXsIKN+329mczaDv1xPsvx2+efwz6zqHxv4c/ZPwkKG1+gvHToBX7EsZPg1bsSxg/DVqxL2H8NI42P79Si0gpc1IsWgAAAABJRU5ErkJggg==" style="width:100%;height:100%;display:block;object-fit:contain"></div></div>
+  <div class="tip">扫码后主页会记住你的名字</div>
+</div>
+<div class="skip">跳过，先看看</div>
+<div class="foot">
+  <div><b class="mono">62–72</b><span>张/秒 提取</span></div>
+  <div><b class="mono">0.02%</b><span>错脸误报</span></div>
+  <div><b class="mono">4</b><span>步走完流程</span></div>
+</div>
+<div style="position:fixed;left:18px;top:16px;font-size:11px;color:#3f3f4a;letter-spacing:.08em">V5 启动页</div>
+</body></html>
