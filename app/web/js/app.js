@@ -140,7 +140,17 @@
         });
       } else if (c.step && i < trail.length - 1) {
         el.classList.add("link");
-        el.addEventListener("click", function () { if (window.mgStep) window.mgStep(c.step); });
+        el.addEventListener("click", function () {
+          /* 人脸库还在时点「合成工作室」= 返回并取消导出，必须走二次确认；
+             直接 mgStep('main') 会绕过 FaceDB 的关闭确认。 */
+          var fdbView = document.getElementById("mgFaceDb");
+          if (c.step === "main" && window.FaceDB && window.FaceDB.isOpen && window.FaceDB.isOpen() &&
+              fdbView && fdbView.classList.contains("in")) {
+            window.FaceDB.requestClose();
+            return;
+          }
+          if (window.mgStep) window.mgStep(c.step);
+        });
       } else if (c.go && i < trail.length - 1) {
         el.classList.add("link");
         el.addEventListener("click", function () { go(c.go); });
@@ -3977,6 +3987,9 @@
       if (!mgVideoMode() || (window.__mgVideo || {}).streamDown) return;
       var pg = document.getElementById("p-merge");
       if (!pg || !pg.classList || !pg.classList.contains("on")) return;
+      /* 人脸库打开时空格归卡片选择，不要顺手把后台视频播起来 */
+      var fdbView = document.getElementById("mgFaceDb");
+      if (fdbView && fdbView.classList.contains("in")) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       var t = e.target || {};
       var tag = String(t.tagName || "").toUpperCase();
@@ -4151,17 +4164,39 @@
       });
     }
 
+    /* 两条导出都先经过人脸库：整理完点「继续导出」才回调真正发请求。
+       face_db.js 自己不发 /export；它只把控制权交回这里，参数组装仍然只有下面
+       mgRunExport / mgpjStart 这一份，避免两套导出契约。 */
+    function mgOpenFaceDb(mode, proceed) {
+      var project = window.__mergeInputDir || "";
+      if (!project) {
+        toast("还没有素材", "先导入一段视频（会自动抽帧 + 对齐）或打开 DFL 项目", "warn");
+        return;
+      }
+      if (!window.FaceDB || !window.FaceDB.open) {
+        toast("人脸库没有加载", "face_db.js 版本不匹配，刷新页面再试", "error");
+        return;
+      }
+      window.FaceDB.open({
+        project: project,
+        mode: mode,
+        allowExtract: true,
+        onContinue: proceed,
+        onCancel: function () { if (window.mgStep) window.mgStep("main"); }
+      });
+    }
+
     var exBtn = $("mgExport");
     if (exBtn && !exBtn.dataset.bound) {
       exBtn.dataset.bound = "1";
       exBtn.addEventListener("click", function () {
-        /* 人脸库（分组/去重）还没做，先不挡路：直接进导出设置。
-           合成本身不需要人脸库 —— MergeStudio 靠 DFLJPG 的元数据定位人脸。 */
         if (!window.__mergeInputDir) {
           toast("还没有素材", "先导入一段视频（会自动抽帧 + 对齐）", "warn");
           return;
         }
-        if (window.mgStep) window.mgStep("settings");
+        mgOpenFaceDb("export", function () {
+          mgRunExport((window.MergePages && window.MergePages.settings) ? window.MergePages.settings() : {});
+        });
       });
     }
 
@@ -4332,7 +4367,13 @@
     var pjBtn = $("mgExportProject");
     if (pjBtn && !pjBtn.dataset.bound) {
       pjBtn.dataset.bound = "1";
-      pjBtn.addEventListener("click", function () { mgpjStart(); });
+      pjBtn.addEventListener("click", function () {
+        if (!window.__mergeInputDir) {
+          toast("还没有素材", "先导入一段视频（会自动抽帧 + 对齐）或打开 DFL 项目", "warn");
+          return;
+        }
+        mgOpenFaceDb("export-project", function () { mgpjStart(); });
+      });
     }
 
     var pjCancel = $("mgpjCancel");

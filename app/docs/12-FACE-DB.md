@@ -33,8 +33,8 @@
   "next_face": 7,
   "next_group": 3,
   "groups": [
-    {"id": "g1", "dfm": "张元英", "name": "张元英"},
-    {"id": "g2", "dfm": "阿証-416", "name": "阿証-416", "orphan": true}
+    {"id": "g1", "dfm": "张元英", "name": "张元英", "size": 384},
+    {"id": "g2", "dfm": "阿証-416", "name": "阿証-416", "orphan": true, "size": 416}
   ],
   "faces": [
     {
@@ -57,6 +57,8 @@
 * `face.group` 可以是空串：刚提取、还没投放的脸 = **未分组**。
 * `group.id` 一旦分配永不回收。`dfm` 是组的身份（大小写变体复用同一个
   id，只更新显示名）。不再选中的组如果还有脸，`orphan=true` 保留；没脸才消失。
+* `group.size` 是 DFM 的 ONNX 输入边长（384 / 416 / 512…）。找不到
+  `workspace/model/<dfm>.dfm` 时按 512；前端组头直接显示 `size×size`。
 * `next_face` / `next_group` 是单调计数器（删除后 id 也不复用）。
 * 组/脸只存元数据，**不复制文件**：跨组投放只改 `face.group`。
 
@@ -74,7 +76,7 @@
 {
   "ok": true,
   "project": "D:/.../workspace/merge/xx",
-  "groups": [{"id": "g1", "dfm": "张元英", "name": "张元英", "orphan": false}],
+  "groups": [{"id": "g1", "dfm": "张元英", "name": "张元英", "orphan": false, "size": 384}],
   "faces": [{"id": "f_0001", "file": "f_0001.png", "group": "g1",
              "source": {"video": "xx.mp4", "frame": 1234},
              "added_at": 1794063308.806, "trashed": false,

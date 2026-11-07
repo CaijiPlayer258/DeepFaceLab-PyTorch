@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>DeepFaceLab-PyTorch</title>
 <link rel="stylesheet" href="/static/css/noto.css?v=3">
-  <link rel="stylesheet" href="/static/css/app.css?v=109">
+  <link rel="stylesheet" href="/static/css/app.css?v=110">
   <link rel="stylesheet" href="/static/css/shadcn.css?v=98">
 </head>
 <body>
@@ -784,25 +784,122 @@
 </div>
         </div>
 
-        <div class="mgview" data-view="facedb">
-<div class="mgp-head">
-    <div class="mgp-tt">
-      <b>人脸库</b>
-    </div>
-    <!-- 计数：建库后由 MergePages.setFaceCount(n) 更新 -->
-    <span class="mgp-count" id="mgFaceCount">已建库 <b>0</b> 张人脸</span>
-    <!-- 动作对应 4.0 的 Compute Face Embeddings（POST /api/face/compute-embeddings） -->
-    <button class="btn mgp-btn" id="mgComputeEmb" type="button">计算人脸特征</button>
-          <button class="btn pri mgp-btn" id="mgToSettings" type="button">下一步</button>
-  </div>
+        <!-- ================= 合成器 · 人脸数据库（导出前必须经过） ================= -->
+        <!--
+          页面本身只放骨架，组卡片 / 人脸卡 / 回收站条目全部由 js/face_db.js 按
+          GET /api/merge/faces 的真实数据渲染。缩略图统一 128×128，来自
+          GET /api/merge/faces/thumb；DFM 输入尺寸由后端随组一起返回。
+        -->
+        <div class="mgview" data-view="facedb" id="mgFaceDb">
+          <div class="fdb" id="fdbRoot">
+            <header class="fdb-top">
+              <div class="fdb-title">
+                <div class="fdb-tt">
+                  <b>人脸数据库</b>
+                  <span class="fdb-mode" id="fdbMode">常规导出</span>
+                </div>
+                <div class="fdb-project mono" id="fdbProject" title="">—</div>
+              </div>
+              <div class="fdb-topacts">
+                <div class="fdb-extract" id="fdbExtractWrap">
+                  <label class="fdb-lbl" for="fdbDfm">提取到</label>
+                  <select class="mgsel fdb-dfm" id="fdbDfm" aria-label="提取到哪个 DFM"></select>
+                  <button class="btn" id="fdbExtract" type="button">从当前帧提取人脸</button>
+                </div>
+                <button class="btn ghost fdb-close" id="fdbClose" type="button">关闭</button>
+              </div>
+            </header>
 
-  <!-- 页面内部滚动区：缩略图多了也不撑破容器 -->
-  <div class="mgp-scroll">
-    <div class="mgp-grid" id="mgFaceGrid">
-      <!-- 24 个棋盘格占位缩略图由 merge-pages.js 生成 -->
-    </div>
-    <div class="empty-note mgp-empty" id="mgFaceEmpty" hidden>还没有建立人脸库</div>
-  </div>
+            <div class="fdb-subline">
+              <span id="fdbHint">拖动人脸可在组间移动；点选后可批量处理</span>
+              <span class="fdb-frame" id="fdbFrame">当前帧 —</span>
+            </div>
+
+            <div class="fdb-body">
+              <section class="fdb-main" id="fdbBoardWrap" aria-label="人脸分组">
+                <div class="fdb-selectbar" id="fdbSelectBar">
+                  <span class="fdb-selected"><span>已选</span><b id="fdbSelCount">0</b><span>张脸</span></span>
+                  <button class="mini" id="fdbPickAll" type="button">全选</button>
+                  <button class="mini" id="fdbClearSel" type="button">清空选择</button>
+                  <span class="fdb-spacer"></span>
+                  <label class="fdb-lbl" for="fdbMoveTarget">移动到</label>
+                  <select class="mgsel fdb-move" id="fdbMoveTarget" aria-label="批量移动目标组"></select>
+                  <button class="mini" id="fdbMoveBtn" type="button">移动</button>
+                  <button class="mini fdb-danger" id="fdbTrashBtn" type="button">移入回收站</button>
+                </div>
+
+                <div class="fdb-board" id="fdbBoard" tabindex="-1">
+                  <div class="fdb-lane fdb-ungrouped" data-drop-group="" id="fdbUngrouped">
+                    <div class="fdb-lane-hd">
+                      <span class="fdb-lane-name">未分组</span>
+                      <span class="fdb-count"><b id="fdbUngroupedCount">0</b><span>张脸</span></span>
+                      <span class="fdb-drop-note">拖到这里移出分组</span>
+                    </div>
+                    <div class="fdb-grid fdb-grid--lane" id="fdbUngroupedGrid"
+                         role="listbox" aria-multiselectable="true" aria-label="未分组人脸"></div>
+                  </div>
+
+                  <div class="fdb-groups" id="fdbGroups"></div>
+
+                  <div class="fdb-empty" id="fdbEmpty" hidden>
+                    <div class="fdb-empty-ic" aria-hidden="true">＋</div>
+                    <b>人脸库还是空的</b>
+                    <span>点「从当前帧提取人脸」开始</span>
+                  </div>
+
+                  <div class="fdb-loading" id="fdbLoading"><span>正在读取人脸库…</span></div>
+                  <div class="fdb-error" id="fdbError" hidden>
+                    <b>人脸库读取失败</b>
+                    <span id="fdbErrorMsg"></span>
+                    <button class="mini" id="fdbRetry" type="button">重试</button>
+                  </div>
+                </div>
+              </section>
+
+              <aside class="fdb-trash" id="fdbTrash" aria-label="回收站">
+                <div class="fdb-trash-hd">
+                  <b>回收站</b>
+                  <span class="fdb-count"><b id="fdbTrashCount">0</b><span>张脸</span></span>
+                  <span class="fdb-spacer"></span>
+                  <button class="mini" id="fdbRestoreAll" type="button">全部还原</button>
+                  <button class="mini fdb-danger" id="fdbPurgeAll" type="button">清空</button>
+                </div>
+                <div class="fdb-trash-list" id="fdbTrashList"></div>
+                <div class="fdb-trash-empty" id="fdbTrashEmpty">回收站是空的</div>
+              </aside>
+            </div>
+
+            <footer class="fdb-foot">
+              <div class="fdb-stats">
+                <span><span>总脸数</span><b id="fdbStatTotal">0</b></span>
+                <span><span>已分组</span><b id="fdbStatGrouped">0</b></span>
+                <span><span>未分组</span><b id="fdbStatUngrouped">0</b></span>
+                <span><span>回收站</span><b id="fdbStatTrash">0</b></span>
+              </div>
+              <button class="btn fdb-continue" id="fdbContinue" type="button">继续导出</button>
+              <div class="fdb-keys" aria-label="键盘快捷键">
+                <span><kbd>Tab</kbd> 聚焦</span>
+                <span><kbd>M</kbd> 移动</span>
+                <span><kbd>T</kbd> 回收站</span>
+                <span><kbd>Esc</kbd> 取消选择</span>
+              </div>
+            </footer>
+
+            <div class="fdb-drop-tip" id="fdbDropTip" hidden></div>
+
+            <!-- 二次确认与「选组 / 选择提取结果」共用同一张卡；由 face_db.js 填内容。 -->
+            <div class="fdb-modal" id="fdbModal" hidden role="dialog" aria-modal="true" aria-labelledby="fdbModalTitle">
+              <div class="fdb-modal-card">
+                <div class="fdb-modal-hd"><b id="fdbModalTitle">确认</b></div>
+                <div class="fdb-modal-desc" id="fdbModalDesc"></div>
+                <div class="fdb-modal-body" id="fdbModalBody"></div>
+                <div class="fdb-modal-foot">
+                  <button class="btn ghost" id="fdbModalCancel" type="button">取消</button>
+                  <button class="btn" id="fdbModalOk" type="button">确定</button>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
         <div class="mgview" data-view="settings">
 <div class="mgp-head">
@@ -1357,10 +1454,11 @@
     </div>
   </div>
 
-  <script src="/static/js/i18n.js?v=98"></script>
+  <script src="/static/js/i18n.js?v=99"></script>
   <!-- TF 时代 dat 的迁移提示：参数页顶部那一行。单独成文件，Node 里能直接断言 -->
   <script src="/static/js/legacy_notice.js?v=1"></script>
-  <script src="/static/js/app.js?v=113"></script>
+  <script src="/static/js/app.js?v=114"></script>
+  <script src="/static/js/face_db.js?v=1"></script>
 <script type="module">
   import { startWelcome3D, stopWelcome3D } from "/static/js/welcomeflow.js?v=9";
   window.__welcome3d = { start: startWelcome3D, stop: stopWelcome3D };

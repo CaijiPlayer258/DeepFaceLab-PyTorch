@@ -96,6 +96,25 @@ def _decorate(project: Path, faces: list) -> list:
     return out
 
 
+def _decorate_groups(groups: list) -> list:
+    """给每个组补上 DFM 输入尺寸（正方形边长）。
+
+    前端组头要显示「384×384 / 416×416」。尺寸的真相在 .dfm 的 ONNX 输入张量里，
+    而 GET /api/merge/faces 本来只回 id/dfm/name/orphan —— 不在这一层补，前端只能瞎猜。
+    找不到 .dfm 时沿用后端提取时的同一规则：512。
+    """
+    out = []
+    for g in groups:
+        item = dict(g)
+        try:
+            _name, size = _resolve_dfm(g.get("dfm"))
+        except Exception:
+            size = 512
+        item["size"] = int(size)
+        out.append(item)
+    return out
+
+
 # ============================================================
 # 取当前帧 / 解析 DFM
 # ============================================================
@@ -193,6 +212,7 @@ def list_faces(project: str = ""):
     """整个库：groups + faces + stats。"""
     p = store.resolve_project(project)
     data = store.snapshot(p)
+    data["groups"] = _decorate_groups(data["groups"])
     data["faces"] = _decorate(p, data["faces"])
     return {"ok": True, "project": str(p), **data}
 
@@ -299,6 +319,7 @@ def sync_groups(body: dict):
     body = _as_dict(body)
     p = store.resolve_project(body.get("project"))
     data = store.sync_groups(p, body.get("dfms"))
+    data["groups"] = _decorate_groups(data["groups"])
     data["faces"] = _decorate(p, data["faces"])
     return {"ok": True, "project": str(p), **data}
 
