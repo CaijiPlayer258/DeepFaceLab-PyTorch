@@ -15,9 +15,10 @@ class ArcFace:
     Output: [N, 512] embedding vector
     """
 
+    # 权重平铺在 weights/ 根下：模型名 + 原文件名
     MODEL_FILES = {
-        'w600k_mbf': 'w600k_mbf.onnx',
-        'w600k_r50': 'w600k_r50.onnx',
+        'w600k_mbf': 'arcface_mbf.onnx',
+        'w600k_r50': 'arcface_r50.onnx',
     }
 
     @staticmethod
@@ -29,7 +30,7 @@ class ArcFace:
             raise Exception(f'device_info {device_info} not available')
         if model_name not in self.MODEL_FILES:
             raise Exception(f'Unknown model: {model_name}')
-        path = weights.path('onnx/ArcFace/' + self.MODEL_FILES[model_name])
+        path = weights.path(self.MODEL_FILES[model_name])
         self._sess = InferenceSession_with_device(str(path), device_info)
         self._input_name = self._sess.get_inputs()[0].name
 

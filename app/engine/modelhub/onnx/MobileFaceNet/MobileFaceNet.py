@@ -13,7 +13,7 @@ class MobileFaceNet:
         return get_available_devices_info()
 
     def __init__(self, device_info: ORTDeviceInfo):
-        path = weights.path('onnx/MobileFaceNet/landmark_detection_56_se_external.onnx')
+        path = weights.path('mobilefacenet.onnx')
         self._sess = InferenceSession_with_device(str(path), device_info)
         self._input_name = self._sess.get_inputs()[0].name
         # ── TRT BF16 加速 ──────────────────────

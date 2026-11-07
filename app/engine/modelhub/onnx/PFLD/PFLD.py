@@ -13,7 +13,7 @@ class PFLD:
         return get_available_devices_info()
 
     def __init__(self, device_info: ORTDeviceInfo):
-        path = weights.path('onnx/PFLD/pfld.onnx')
+        path = weights.path('pfld.onnx')
         self._sess = InferenceSession_with_device(str(path), device_info)
         self._input_name = self._sess.get_inputs()[0].name
         # ── TRT BF16 加速 ──────────────────────

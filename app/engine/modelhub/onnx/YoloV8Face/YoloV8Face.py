@@ -31,7 +31,7 @@ class YoloV8Face:
         if device_info not in YoloV8Face.get_available_devices():
             raise Exception(f'device_info {device_info} is not in available devices for YoloV8Face')
 
-        path = weights.path('onnx/YoloV8Face/yolov8n-face.onnx')
+        path = weights.path('yolov8n_face.onnx')
         self._sess = sess = InferenceSession_with_device(str(path), device_info)
         self._input_name = sess.get_inputs()[0].name
         

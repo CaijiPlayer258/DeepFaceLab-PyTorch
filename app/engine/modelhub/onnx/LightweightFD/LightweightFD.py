@@ -13,7 +13,7 @@ class LightweightFD:
         return get_available_devices_info()
 
     def __init__(self, device_info: ORTDeviceInfo):
-        path = weights.path('onnx/LightweightFD/face_det_lite.onnx')
+        path = weights.path('lightweightfd.onnx')
         self._sess = InferenceSession_with_device(str(path), device_info)
         # ── TRT BF16 加速 ──────────────────────
         _trt_path = None

@@ -34,7 +34,7 @@ class FastFaceAlign:
         if device_info not in FastFaceAlign.get_available_devices():
             raise Exception(f'device_info {device_info} is not in available devices for FastFaceAlign')
 
-        path = weights.path('onnx/FastFaceAlign/FastFaceAlign.onnx')
+        path = weights.path('fastfacealign.onnx')
         self._sess = sess = InferenceSession_with_device(str(path), device_info)
         self._input_name = sess.get_inputs()[0].name
 

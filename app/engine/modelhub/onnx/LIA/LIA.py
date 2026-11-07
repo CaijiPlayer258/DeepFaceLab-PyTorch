@@ -33,7 +33,7 @@ class LIA:
         if device_info not in LIA.get_available_devices():
             raise Exception(f'device_info {device_info} is not in available devices for LIA')
         
-        generator_path = weights.path('onnx/LIA/generator.onnx')
+        generator_path = weights.path('lia_generator.onnx')
         SplittedFile.merge(generator_path, delete_parts=False)
         if not generator_path.exists():
             raise FileNotFoundError(f'{generator_path} not found')

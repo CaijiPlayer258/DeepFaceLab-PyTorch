@@ -35,7 +35,7 @@ class CenterFace:
         if device_info not in CenterFace.get_available_devices():
             raise Exception(f'device_info {device_info} is not in available devices for CenterFace')
 
-        path = weights.path('onnx/CenterFace/CenterFace.onnx')
+        path = weights.path('centerface.onnx')
         self._sess = sess = InferenceSession_with_device(str(path), device_info)
         self._input_name = sess.get_inputs()[0].name
 

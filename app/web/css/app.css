@@ -3950,6 +3950,10 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
 }
 .ddopt:hover { background: var(--panel-2); color: var(--ink-1); }
 .ddopt.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+/* 「未安装」的选项：置灰但仍可点（点了只解释怎么装，不切换） */
+.ddopt.off { opacity: .45; }
+.ddopt.off:hover { background: transparent; color: var(--ink-2); }
+.ddbtn.off { color: var(--ink-3); }
 
 /* 参数页控件列里的下拉占满整列 */
 .cfgrow .cc .dd { width: 100%; }
@@ -3962,6 +3966,10 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
 .xferpct{margin-left:auto;font-size:13px;font-variant-numeric:tabular-nums;color:var(--ink-2)}
 #exGraph{width:100%;height:230px;display:block;margin:6px 0 10px;background:transparent}
 #dsRunGraph{width:100%;height:230px;display:block;margin:6px 0 10px;background:transparent}
+/* 数据处理运行卡：图表下面的那条横向进度条是多余的（图表 + 四张统计卡已经说明一切），
+   DOM 里已经删掉，这里再兜一道，防止旧缓存/旧模板把它塞回来。
+   只锁 #dsRunCard 里面的 .bar —— 提取页/合并页的 .bar 共用组件不受影响。 */
+#dsRunCard .bar{display:none !important}
 .xferft{display:flex;gap:12px;margin-top:10px;font-size:11.5px;color:var(--ink-3)}
 .xferft span:last-child{margin-left:auto;font-variant-numeric:tabular-nums}
 
@@ -4348,6 +4356,29 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
 .alert .alft{margin-top:9px;display:flex;gap:8px;flex-wrap:wrap}
 .alert .alft:empty{display:none}
 
+/* 参数页顶部：TF 时代（DFL 1.x/2.0）dat 的迁移提示。非阻塞 —— 只是把「迁了什么、
+   还差什么」摆在参数前面；不展开就一行，不挡任何操作，也不是错误。 */
+.lgHost{margin-top:14px}
+.lgHost[hidden]{display:none}
+.alert.warn{border-color:rgba(220,170,60,.45);background:rgba(220,170,60,.08)}
+.alert .lgToggle{margin-left:auto}
+.alert .lgSub{font-variant-numeric:tabular-nums}
+.alert .lgNote{margin-top:6px;font-size:12px;color:var(--ink-3)}
+.alert .lgDetail{margin-top:10px;border-top:1px solid var(--line);padding-top:10px}
+.alert .lgDetail[hidden]{display:none}
+.alert .lgHd{font-size:12px;font-weight:600;color:var(--ink-2);margin:10px 0 4px}
+.alert .lgDetail .lgHd:first-child{margin-top:0}
+.alert .lgReasons{margin:0;padding-left:18px;font-size:12px;color:var(--ink-2);line-height:1.7}
+.alert pre.lgReport{margin:0;max-height:220px;overflow:auto;font-size:11.5px;line-height:1.6;
+  padding:8px 10px;border-radius:8px;background:var(--panel-2);border:1px solid var(--line);
+  white-space:pre-wrap;word-break:break-all;font-family:var(--mono,ui-monospace,Consolas,monospace)}
+.alert .lgCmd{display:flex;gap:8px;align-items:flex-start}
+.alert .lgCmd .lgCmdText{flex:1;margin:0;max-height:160px;overflow:auto;font-size:11.5px;
+  line-height:1.6;padding:8px 10px;border-radius:8px;background:var(--panel-2);
+  border:1px solid var(--line);white-space:pre-wrap;word-break:break-all;user-select:all;
+  font-family:var(--mono,ui-monospace,Consolas,monospace)}
+.alert .lgCmd .lgCopy{flex:none}
+
 /* 参数页的显存估算：放在底部动作栏里，就在「开始训练」旁边，永远可见 */
 .cfgactions .vram{margin:0;padding:5px 10px;border-radius:8px;border:1px solid var(--line);
   background:var(--surface-2);font-size:12px;color:var(--ink-2);display:flex;
@@ -4405,3 +4436,48 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
 /* 关于页：hero 下面是第一张信息卡。全局 .card 有 48px 上边距（原本给"标签句"
    留的视觉间隔），标签句删掉后这段就成了卡片上方一块空白，这里单独收窄。 */
 #p-about > .aboutHero + .card { margin-top: 26px !important; }   /* .page > .card 带 !important，这里必须对等 */
+
+/* ============ 遮挡率排序器（数据处理 · 排序不删） ============
+   没有新造一套组件：统计用 .stat，角标用 .tag（t-green/t-yellow/t-red），
+   网格自己只负责"方格子 + 右下角角标"这一层布局。 */
+.occbar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  margin-top: 12px;
+}
+.occbar .cl { font-size: 12px; color: var(--ink-3); }
+.occbar #occThr { flex: 1 1 160px; min-width: 120px; accent-color: var(--brand); }
+.occbar #occThrNum { width: 62px; }
+.occbar .occacts { margin-left: auto; display: flex; gap: 6px; }
+.occbar .occacts .btn { height: 32px; padding: 0 14px; font-size: 12.5px; }
+
+.occgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+.occcell {
+  position: relative; border-radius: 9px; overflow: hidden;
+  background: var(--panel-2); border: 1px solid var(--line);
+  aspect-ratio: 1 / 1;
+}
+.occcell img { display: block; width: 100%; height: 100%; object-fit: cover; }
+/* 超阈值的那批：描一圈品牌色，一眼看出"移走的是哪些" */
+.occcell.hit { border-color: var(--bad); box-shadow: 0 0 0 2px rgba(211,58,58,.28) inset; }
+.occcell .occb {
+  position: absolute; right: 4px; bottom: 4px;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 1px 3px rgba(0,0,0,.28);
+}
+.occmore { margin-top: 8px; }
+/* .btn 的 display 带 !important，撤销按钮靠 hidden 属性收起，必须同权重才压得住 */
+#occUndo[hidden] { display: none !important; }
+
+.occun { margin-top: 14px; }
+.occunrow {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  padding: 6px 0; border-top: 1px solid var(--line);
+  font-size: 12px;
+}
+.occunrow .ocr { color: var(--ink-2); }
+.occunrow .hint { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

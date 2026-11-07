@@ -211,7 +211,6 @@
             <b id="dsRunTitle">正在处理</b>
           </div>
           <canvas id="dsRunGraph"></canvas>
-          <div class="bar"><i id="dsRunBar" style="width:0%"></i></div>
           <div class="xferft">
             <span id="dsRunMsg">准备中…</span>
             <span id="dsRunRate"></span>
@@ -224,6 +223,28 @@
           </div>
           </div>
         <button class="btn danger hide" id="btnDsRunStop" style="width:100%;height:38px;margin-top:14px">中断</button>
+
+        <!-- 遮挡率排序结果：只排序不删，超过阈值的才由用户点按钮移进 _trash -->
+        <div class="card hide" id="occCard">
+          <div class="cardhd">
+            <b>遮挡率排序</b>
+            <span class="hint" id="occHint">未扫描</span>
+          </div>
+          <div class="stats4" id="occStats"></div>
+          <div class="occbar">
+            <span class="cl">阈值</span>
+            <input type="range" id="occThr" min="0" max="100" step="1" value="30" title="超过这个百分比就算遮挡">
+            <input class="numin mono" id="occThrNum" type="number" min="0" max="100" step="1" value="30" title="超过这个百分比就算遮挡">
+            <span class="hint">%</span>
+            <span class="hint" id="occCnt"></span>
+            <div class="occacts">
+              <button class="btn ghost" id="occUndo" hidden>撤销</button>
+              <button class="btn danger" id="occMove" disabled></button>
+            </div>
+          </div>
+          <div class="occgrid" id="occGrid"></div>
+          <div class="occun" id="occUnranked"></div>
+        </div>
 
         </div>
       <div class="page" id="p-train">
@@ -315,6 +336,7 @@
                 <th style="width:38px"><input type="checkbox" id="biliAll" title="全选 / 取消全选"></th>
                 <th>标题</th>
                 <th style="width:110px">BV 号</th>
+                <th style="width:80px">时长</th>
                 <th style="width:70px">合作</th>
               </tr>
             </thead>
@@ -503,6 +525,8 @@
       <!-- ================= 参数设置 ================= -->
       <div class="page" id="p-train-cfg">
         <div class="title">参数设置</div>
+        <!-- TF 时代 dat 的迁移提示由 js/legacy_notice.js 画在这里：一行标题 + 可展开明细 -->
+        <div id="cfgLegacy" class="lgHost" hidden></div>
         <div id="cfgBox" style="margin-top:14px"></div>
 
         <div class="cfgactions">
@@ -1000,6 +1024,23 @@
           </div>
           <div class="hint" style="margin-top:8px">开启后整个界面监听 0.0.0.0，同网段的设备（或部署在服务器上时）用浏览器直接打开。只在自己信任的网络里开。</div>
         </div>
+        <div class="card" style="margin-bottom:14px">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:9px">
+            <b style="font-size:13px">权重包</b>
+            <span class="tag t-gray" id="pkgTag">未检测</span>
+            <div style="flex:1"></div>
+            <button class="mini" id="pkgRefresh">重新检测</button>
+          </div>
+          <div id="pkgBox" class="hint">正在读取权重清单…</div>
+          <div style="display:flex;align-items:center;gap:10px;margin-top:10px">
+            <div class="inp pathinp" style="flex:1">
+              <span class="lb">镜像</span>
+              <input id="pkgUrl" type="text" placeholder="https://你的镜像/weights（留空则只用本地已有的）" spellcheck="false"
+                     style="flex:1;min-width:0;border:0;background:transparent;color:var(--ink);font-size:12px;outline:none">
+            </div>
+          </div>
+          <div class="hint" id="pkgMsg" style="margin-top:8px"></div>
+        </div>
         <div class="card">
           <b style="font-size:13px;display:block;margin-bottom:10px">GitHub 代理</b>
           <div class="inp mono" style="margin-bottom:9px">http://127.0.0.1:26561</div>
@@ -1270,7 +1311,9 @@
   </div>
 
   <script src="/static/js/i18n.js?v=98"></script>
-  <script src="/static/js/app.js?v=110"></script>
+  <!-- TF 时代 dat 的迁移提示：参数页顶部那一行。单独成文件，Node 里能直接断言 -->
+  <script src="/static/js/legacy_notice.js?v=1"></script>
+  <script src="/static/js/app.js?v=113"></script>
 <script type="module">
   import { startWelcome3D, stopWelcome3D } from "/static/js/welcomeflow.js?v=9";
   window.__welcome3d = { start: startWelcome3D, stop: stopWelcome3D };

@@ -21,7 +21,7 @@ class FaceEnhancer:
     def __init__(self, device_info: ORTDeviceInfo):
         if device_info not in FaceEnhancer.get_available_devices():
             raise Exception(f'device_info {device_info} not available')
-        path = weights.path('onnx/FaceEnhancer/FaceEnhancer.onnx')
+        path = weights.path('faceenhancer.onnx')
         self._sess = InferenceSession_with_device(str(path), device_info)
         self._input_names = [inp.name for inp in self._sess.get_inputs()]
 

@@ -22,6 +22,19 @@ from .app import (WEBUI_PORT, _DFL_ROOT, _kill_train_tree, _last_preview_state, 
 
 router = APIRouter()
 
+
+def _check_target(body):
+    """控制类接口（暂停/继续/保存/停止）都作用于"正在训练的那个模型"。
+    界面可能切到了别的模型再点暂停 —— 以前会不声不响停掉另一个，现在明确拒绝。"""
+    name = str((body or {}).get("name") or "").strip()
+    if not name:
+        return
+    with _train_job_lock:
+        cur = _train_job.get("name")
+        running = bool(_train_job.get("running"))
+    if running and cur and name != cur:
+        raise HTTPException(409, "现在训练的是 %s，不是 %s" % (cur, name))
+
 @router.post("/api/train/start")
 def train_start(body: dict):
     body = body or {}
@@ -36,6 +49,26 @@ def train_start(body: dict):
     with _train_job_lock:
         if _train_job["running"]:
             raise HTTPException(409, "已经在训练 " + _train_job["name"])
+    # 可选 options：一次请求就把"参数 + 启动"做完（前端不必先 POST /config 再 start）
+    opts_in = body.get("options")
+    if isinstance(opts_in, dict) and opts_in:
+        from .routes_models import _clean_options
+        import pickle as _pk
+        try:
+            _data = _pk.loads(dat.read_bytes())
+            _cur = _data.get("options") or {}
+            _clean, _bad = _clean_options(opts_in, _cur)
+            if _bad:
+                raise HTTPException(400, "这些参数类型不对: " + ", ".join(_bad))
+            _cur.update(_clean)
+            _data["options"] = _cur
+            _tmp = dat.with_suffix(".dat.tmp")
+            _tmp.write_bytes(_pk.dumps(_data))
+            _tmp.replace(dat)
+        except HTTPException:
+            raise
+        except Exception as _e:
+            raise HTTPException(500, "写入训练参数失败: " + str(_e)[:120])
     fixed = _repair_option_strings(name)
     if fixed:
         print("[trainer] 修好了参数里的说明文字: " + ", ".join(fixed), flush=True)
@@ -44,7 +77,8 @@ def train_start(body: dict):
 
 
 @router.post("/api/train/save")
-def train_save():
+def train_save(body: dict = None):
+    _check_target(body)
     """立即保存：让 4.0 在下一个迭代结束后落盘（不打断训练）。"""
     with _train_job_lock:
         if not _train_job["running"]:
@@ -61,7 +95,8 @@ def train_save():
 
 
 @router.post("/api/train/pause")
-def train_pause():
+def train_pause(body: dict = None):
+    _check_target(body)
     """暂停：挂起训练进程（psutil suspend），迭代停在原地，显存不释放。"""
     with _train_job_lock:
         if not _train_job["running"]:
@@ -88,7 +123,8 @@ def train_pause():
 
 
 @router.post("/api/train/resume")
-def train_resume():
+def train_resume(body: dict = None):
+    _check_target(body)
     with _train_job_lock:
         if not _train_job["running"]:
             raise HTTPException(409, "现在没有在训练")
@@ -114,7 +150,8 @@ def train_resume():
 
 
 @router.post("/api/train/stop")
-def train_stop():
+def train_stop(body: dict = None):
+    _check_target(body)
     """停止：先请 4.0 保存并退出（/request-quit），超时再强杀整棵树。"""
     with _train_job_lock:
         running = _train_job["running"]

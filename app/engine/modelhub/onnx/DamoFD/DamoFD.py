@@ -42,7 +42,7 @@ class DamoFD:
         if device_info not in DamoFD.get_available_devices():
             raise Exception(f"device_info {device_info} not available for DamoFD")
 
-        model_path = weights.path("onnx/DamoFD/DamoFD.onnx")
+        model_path = weights.path("damofd.onnx")
         if not model_path.exists():
             raise FileNotFoundError(f"DamoFD ONNX model not found at {model_path}")
 

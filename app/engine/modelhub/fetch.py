@@ -1,6 +1,9 @@
 """权重下载 / 校验（`python -m modelhub.fetch`）。
 
 代码与模型分离：仓库只带代码，权重按 `weights/manifest.json` 下载。
+清单里的 path 是**平铺**的（`tinymog.onnx` / `retinaface_10g.onnx` / `sam2.1_hiera_small.pt`），
+落到 `<权重根>/<path>`；唯一带目录的一条是 BERT tokenizer（`bert-base-uncased/`，
+AutoTokenizer 要求词表和权重同目录，平铺不了）。
 支持三种来源，按优先级：
 
 1. `--source DIR`   从本地目录复制（离线分发包、内网镜像）

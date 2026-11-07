@@ -16,7 +16,7 @@
 训练：
     cd app
     python -m tools.train_errface --npz ../workspace/errface_ds.npz \
-        --out ../app/engine/modelhub/errface/errface_xgb.ubj
+        --out ../weights/errface_xgb.ubj
 """
 from __future__ import annotations
 
@@ -95,7 +95,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--npz", action="append", required=True,
                     help="数据集，可重复；用 路径:权重 指定该源权重，如 a.npz:1 b.npz:6")
-    ap.add_argument("--out", default="../app/engine/modelhub/errface/errface_xgb.ubj")
+    ap.add_argument("--out", default="../weights/errface_xgb.ubj")
     ap.add_argument("--neg-dir", default="", help="真实误检样本目录（DFL 对齐图）")
     ap.add_argument("--rounds", type=int, default=400)
     ap.add_argument("--ratio", type=int, default=3, help="每条正样本生成几个破坏样本")

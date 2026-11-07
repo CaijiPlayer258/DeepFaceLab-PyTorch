@@ -45,6 +45,7 @@
      · 2. 参数页搜索
      · 3. 训练页「继续训练」置顶
      · 挂钩页面切换
+     · 权重分包门控（工具 → 遮罩绘制）
    ========================================================================== */
 
 (function () {
@@ -195,8 +196,9 @@
     });
     renderCrumbs(key);
     if (key === "debug") { edInit(); edBind(); edDraw(); }
-    if (key === "dataset") { renderSteps(); syncDatasetBadge(); }
+    if (key === "dataset") { renderSteps(); syncDatasetBadge(); erLoad(); }
     if (key === "train") bindTrainerTop();
+    if (key === "settings" && window.WPK) window.WPK.enter();
     if (key === "train-cfg") {
       if (window.markHotRows) window.markHotRows();
       var cb = document.getElementById("cfgBox");
@@ -222,6 +224,8 @@
         var dir = ws ? (ws + "\\data_src\\aligned") : "workspace\\data_src\\aligned";
         mk.src = "/mask-editor/index.html?dir=" + encodeURIComponent(dir);
       }
+      /* 权重分包门控：进页按 /api/weights/status 决定 SAM 那三块能不能用 */
+      if (window.WKG && window.WKG.enter) window.WKG.enter();
       document.querySelector(".main").classList.add("no-scroll");
     }
     if (key === "merge") {
@@ -712,13 +716,14 @@
   window.toast = toast;
 
   var MODULES = [
-    { n: "过滤器", d: "模糊 · 身份 · 重复 · 错脸 · 合并",
-      modes: ["模糊", "人脸身份", "重复图", "错脸", "合并子文件夹"],
+    { n: "过滤器", d: "模糊 · 身份 · 重复 · 错脸 · 遮挡 · 合并",
+      modes: ["模糊", "人脸身份", "重复图", "错脸", "合并子文件夹", "遮挡率（排序）"],
       modeDesc: ["高频/低频能量比 E(b0)/E(b2) 判清晰度，按分位淘汰最差一批（顺带清掉打不开的文件）",
                  "ArcFace 特征向量聚类，同一组≈同一个人（顺带清掉打不开的文件）",
                  "感知哈希(phash)检测高度相似，剔除重复帧（顺带清掉打不开的文件）",
       "68 点几何分类判错检（需要数据集用 2D106 真点重提过）",
-                 "把所有子目录（含多层）里的图片搬回根目录，清掉空出来的文件夹；跳过 _trash 和隐藏目录"],
+                 "把所有子目录（含多层）里的图片搬回根目录，清掉空出来的文件夹；跳过 _trash 和隐藏目录",
+                 "68 点凸包（不含眉毛）内 XSeg 遮罩的软面积占比：100% = 整张脸被挡住，0% = 一点没挡。只排序，移走要你确认"],
       out: "" },
     { n: "排序器", d: "清晰度 · 角度 · 时间",
       modes: ["清晰度", "角度", "原序", "感知哈希", "直方图"],
@@ -731,6 +736,81 @@
       modeDesc: ["用训练好的遮罩模型推理"],
       out: "" }
   ];
+
+  /* ---------- 错脸检测（errface）能力门控 ----------
+     缺 errface_xgb.ubj 属于「权重没装」，不是「功能坏了」。后端 /api/errface/info
+     回 {available, reason, install}（中英各一份），这里据此把「错脸」选项置灰 +
+     title 说明，点上去只解释「未安装 + 怎么装」，不再打到 /api/dataset/scan 吃 409。 */
+  var ERRFACE = { known: false, ok: true, reason: "", reason_en: "", install: "", install_en: "", model: "" };
+  var ERRFACE_IDX = 3;            /* MODULES[0].modes 里「错脸」的下标（改数组记得同步） */
+
+  /* 后端来的动态文案也要进词典：切英文时这句不能留中文 */
+  function erI18n(zh, en) {
+    try {
+      var d = window.I18N && window.I18N.dict;
+      if (!d || !zh) return;
+      if (d[zh] === undefined) d[zh] = en || zh;
+    } catch (e) {}
+  }
+
+  function erOff() { return ERRFACE.known && !ERRFACE.ok; }
+
+  function erHint(st) {
+    var s = st || ERRFACE;
+    return [s.reason, s.install].filter(Boolean).join(" · ");
+  }
+  function erHintEn(st) {
+    var s = st || ERRFACE;
+    return [s.reason_en, s.install_en].filter(Boolean).join(" · ");
+  }
+
+  function erApply(d) {
+    if (!d || typeof d !== "object" || typeof d.available !== "boolean") {
+      ERRFACE.known = false;                  /* 读不到就当"未知"：不置灰、不挡路 */
+      return ERRFACE;
+    }
+    ERRFACE.known = true;
+    ERRFACE.ok = d.available === true;
+    ERRFACE.reason = String(d.reason || "");
+    ERRFACE.reason_en = String(d.reason_en || "");
+    ERRFACE.install = String(d.install || "");
+    ERRFACE.install_en = String(d.install_en || "");
+    ERRFACE.model = String(d.model || "");
+    erI18n(erHint(), erHintEn());
+    return ERRFACE;
+  }
+
+  /* 点「错脸」但没装：把「缺什么 / 多大 / 怎么装」说清楚，这不是报错 */
+  function erExplain(d, btn) {
+    if (d) erApply(d);
+    var zh = erHint(d) || "缺 errface_xgb.ubj";
+    erI18n(zh, erHintEn(d));
+    if (btn) { btn.textContent = "开始处理"; btn.disabled = false; }
+    if (typeof dsRunPaint === "function") {
+      dsRunPaint({ pct: 0, done: 0, total: 0, speed: 0, elapsed: 0,
+                   msg: "错脸检测未安装 · 见右下角提示", running: false });
+    }
+    toast("错脸检测未安装", zh, "warn", 12000);
+    erLoad();                     /* 顺手刷一次：用户可能刚把文件拷进去 */
+  }
+  window.erfaceExplain = erExplain;
+
+  function erLoad() {
+    return fetch("/api/errface/info")
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        var before = ERRFACE.known + "|" + ERRFACE.ok;
+        erApply(d);
+        if ((ERRFACE.known + "|" + ERRFACE.ok) !== before) {
+          try { if (typeof renderSteps === "function" && $("dsSteps")) renderSteps(); } catch (e) {}
+        }
+        return ERRFACE;
+      })
+      .catch(function () { ERRFACE.known = false; return ERRFACE; });
+  }
+  window.__erfaceReload = erLoad;
+  window.ERRFACE_CAP = ERRFACE;   /* 自动化/排查用：页面里直接看能力状态 */
+  window.__erfaceOff = erOff;
 
   /* 三段流水线同时展开：模块 → 模式 → 参数，各自独立成节 */
   var STEP_SEL = [0, 0, 0];      /* 每节选中的模式 */
@@ -762,13 +842,22 @@
   /* options 超过 3 个时改用下拉：分段控件排到 4 项以上会挤成一排小按钮，
      一眼看不清也容易点错。只有数据集页的「模式」走这条路 ——
      配置页的保存逻辑是按 .seg b.on 读取的，不能全局替换。 */
-  function makeSelect(options, sel, onPick) {
+  /* meta[i] = {label, title, onBlock} —— 把某一项标成「未安装」：
+     原生 option 置灰 + title，强化下拉框读 sl.__off 决定点了要不要拦。 */
+  function makeSelect(options, sel, onPick, meta) {
     var sl = document.createElement("select");
     sl.className = "mgsel";
     options.forEach(function (o, i) {
       var op = document.createElement("option");
+      var mm = meta && meta[i];
       op.value = String(i);
-      op.textContent = o;
+      op.textContent = (mm && mm.label) || o;
+      if (mm) {
+        op.disabled = true;                 /* 原生下拉里也点不动 */
+        op.title = mm.title || "";
+        sl.__off = sl.__off || {};
+        sl.__off[i] = mm;
+      }
       if (i === sel) op.selected = true;
       sl.appendChild(op);
     });
@@ -819,9 +908,21 @@
     var r1 = document.createElement("div");
     r1.className = "cfgrow";
     r1.innerHTML = '<span class="cl">模式</span><span class="cd">' + (m.modeDesc[k] || "") + '</span><span class="cc"></span>';
+    /* 错脸检测没装：这一项置灰 + title 说明，点上去只弹「怎么装」 */
+    var meta = null;
+    if (i === 0 && erOff()) {
+      meta = {};
+      meta[ERRFACE_IDX] = {
+        label: "错脸（未安装）",
+        title: erHint(),
+        onBlock: function () { erExplain(); }
+      };
+    }
     r1.querySelector(".cc").appendChild(
       (m.modes.length > 3 ? makeSelect : makeSeg)(m.modes, k, function (idx) {
       STEP_SEL[i] = idx;
+      /* 换了模式：上一轮的排序网格留着只会误导（角标是旧数据），直接收起 */
+      if (i === 0 && typeof window.occReset === "function") window.occReset();
       var fresh = renderStation(i);
       card.replaceWith(fresh);
       /* 只让「模式」下面的参数行弹一下：模式行本身不动，避免整卡片一起闪 */
@@ -834,7 +935,7 @@
             { duration: 170, delay: k * 25, easing: PAGE_EASE });
         });
       }
-    }));
+    }, meta));
     card.appendChild(r1);
     }
 
@@ -940,6 +1041,7 @@
     noSpell();
   }
   window.renderSteps = renderSteps;
+  erLoad();                        /* 进页就知道「错脸」能不能用，别等点了才说 */
 
   /* 第 3 站：应用遮罩（XSeg 推理） */
   function dsMask() {
@@ -948,11 +1050,16 @@
     /* 直接读输入框的实际内容——用户手动输入时 DSB.dir 不会跟着变，这里不能信它 */
     var inp = document.getElementById("dsPathVal");
     var dir = String((inp && inp.value) || (window.DSB && DSB.dir) || "data_src").trim();
-    var btn = document.querySelector('#dsSteps .step:nth-child(3) .btn');
+    /* 站点卡片上的按钮带 data-step（renderStation 里加的）。以前用的
+       '#dsSteps .step:nth-child(3) .btn' 这个结构根本不存在，选择器恒为 null ——
+       收尾分支（复位按钮 / 完成 toast）一次都跑不到，这就是「按钮没复位」的根因。 */
+    var btn = dsStepBtn(2);
     if (btn) { btn.disabled = true; btn.textContent = "应用遮罩中…"; }
     toast("应用遮罩", dir + " · " + (model === "xseg" ? "XSeg" : "XSegLite") + " · " + res + "px · 8 线程", "info");
     dsRunShow("正在应用遮罩");
     window.__maskT0 = Date.now();
+    window.__maskDone = false;          /* 新一轮：解开上一次的完成闩 */
+    window.__maskFinal = null;
     fetch("/api/dataset/mask", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dir: dir, workers: 8, model: model, res: res })
@@ -961,46 +1068,108 @@
       toast("应用遮罩已开始", "共 " + (d.workers || 8) + " 线程 · " + (d.res || res) + "px", "success");
       maskPoll(btn);
     }).catch(function (e) {
-      toast("应用遮罩失败", String((e && e.message) || e), "error");
-      if (btn) { btn.disabled = false; btn.textContent = "开始处理"; }
+      var msg = String((e && e.message) || e);
+      window.__maskDone = true;         /* 起不来也要把界面和按钮放开 */
+      toast("应用遮罩失败", msg, "error");
+      maskResetBtn(btn);
+      dsRunPaint({ pct: 0, msg: "启动失败：" + msg, done: 0, total: 0,
+                   speed: null, elapsed: 0, eta: null, running: false, ok: false });
     });
   }
-  /* 轮询应用遮罩进度，直接显示在按钮上 */
+  /* 应用遮罩进度：一次运行只收尾一次。
+     /api/dataset/mask/progress 的 speed 来自 JOB.snapshot() 的 done / (now - t0)：
+     跑完之后 t0 不再前进、done 也不再涨，于是每轮重算出来的速度只会越来越小。
+     以前这里 500ms 无条件重绘、也从不真的停表，界面就停在 100% 一边「掉速」，
+     按钮也停在「应用中…」。现在：收到终态 → 定格最终平均速度 + 冻结曲线 +
+     复位按钮 + 彻底停轮询；之后后端再推什么旧帧（running=true / pct<100）都丢掉。 */
+  function maskIsDone(p) {
+    if (!p) return false;
+    if (p.running) return false;                /* 还在跑：pct=100 只可能是上一轮的残留 */
+    if (p.ok === false) return true;            /* 失败也是终态，按钮同样要放开 */
+    var pct = Number(p.pct) || 0;
+    var done = Number(p.done) || 0;
+    var total = Number(p.total) || 0;
+    /* 只认「真的跑满」的终态：done>0 但没跑满的帧，是上一次失败/中断留下的残值，
+       直接当完成会把「没跑起来」说成「处理完成」。 */
+    return pct >= 100 || (total > 0 && done >= total) || Number(p.stage) === 3;
+  }
+
+  function maskResetBtn(btn) {
+    var b = btn || dsStepBtn(2);
+    if (b) { b.disabled = false; b.textContent = "开始处理"; }
+    return b;
+  }
+
+  var MASK_POLL_FAST_MS = 2000;   /* 任务开头这 2 秒用 200ms 采样，之后回落 500ms */
+
   function maskPoll(btn) {
+    if (!window.__maskT0) window.__maskT0 = Date.now();   /* 没给起点也不能让 age 永远算 0 */
+    var started = false;      /* 见过 running=true 才算这一轮真的跑起来了 */
+    var idle = 0;             /* 连续「没跑、没进度」的轮数 */
+
     var tick = function () {
+      if (window.__maskDone) return;                        /* 已定稿：不再轮询 */
       fetch("/api/dataset/mask/progress").then(function (r) { return r.json(); }).then(function (p) {
-        var pct = p.pct || 0;
-        var num = document.getElementById("maskPct");
-        var lbl = document.getElementById("maskLbl");
-        var bar = document.getElementById("maskBar");
-        setNavRunning("dataset", !!p.running, pct);
-        var elapsed = (Date.now() - (window.__maskT0 || Date.now())) / 1000;
-        dsRunPaint({ pct: pct, msg: p.msg, done: p.done, total: p.total,
-                     speed: p.speed != null ? p.speed : (elapsed > 0.3 && p.done ? p.done / elapsed : null),
-                     elapsed: elapsed, eta: p.eta, running: p.running });
-        if (num) num.textContent = pct + "%";
-        if (lbl) {
-          /* 速度一直留着（结束后是平均值），剩余时间只在运行时显示 */
-          var sp = (p.speed > 0) ? " · " + p.speed + " 张/秒" : "";
-          var eta = (p.running && p.eta > 0) ? " · 剩 " + Math.round(p.eta) + " 秒" : "";
-          lbl.textContent = (p.msg || (p.running ? "运行中…" : "等待开始")) + sp + eta;
-        }
-        if (bar) bar.style.width = pct + "%";
-        if (btn) {
-          if (p.running) {
-            btn.disabled = true;
-            btn.textContent = "应用中…";
-          } else {
-            btn.disabled = false;
-            btn.textContent = "开始处理";
-            toast("应用遮罩完成", p.msg || "已完成", "success");
-            return;
+        if (window.__maskDone) return;                      /* 飞行途中的旧包：以第一次 completed 为准 */
+        p = p || {};
+        var pct = Math.max(0, Math.min(100, Number(p.pct) || 0));
+        var done = Number(p.done) || 0;
+        var total = Number(p.total) || 0;
+        var running = !!p.running;
+        var age = Date.now() - (window.__maskT0 || Date.now());    /* 本轮已跑多久（ms） */
+        var elapsed = age / 1000;
+        if (running) started = true;
+        setNavRunning("dataset", running, pct);
+        /* 轮询节奏：前 2 秒 200ms（秒杀任务 1.4 秒，500ms 只够采 2~3 个点），
+           之后 500ms，长任务不持续高频打请求。 */
+        var next = age < MASK_POLL_FAST_MS ? 200 : 500;
+
+        /* ---------------- 终态：一口气收尾，然后彻底停 ---------------- */
+        /* started 之外还要 age>=1500ms：POST 刚发出时后端还挂着上一轮的
+           pct=100/running=false，那是残帧，不是这一轮的完成。 */
+        if (maskIsDone(p) && (started || age >= 1500)) {
+          window.__maskDone = true;
+          /* 最终平均速度 = 总张数 / 总耗时。后端 rate 就是 done/(now-t0)，
+             拿得到就照抄；读不到才退回前端自己量的 done/elapsed。 */
+          var avg = null;
+          if (done > 0) {
+            avg = (Number(p.speed) > 0) ? Number(p.speed)
+                  : (elapsed > 0.3 ? done / elapsed : null);
           }
+          window.__maskFinal = { speed: avg, done: done, total: total,
+                                 elapsed: elapsed, msg: p.msg || "" };
+          dsRunPaint({ pct: 100, msg: p.msg, done: total || done, total: total || done,
+                       speed: avg, elapsed: elapsed, eta: null, running: false, ok: p.ok });
+          dsFreezeGraph(avg);                                /* 末端压成平线并冻结采样 */
+          maskResetBtn(btn);
+          setNavRunning("dataset", false, 0);
+          toast("应用遮罩完成", p.msg || "已完成", "success");
+          return;                                            /* 不再 setTimeout：就此定格 */
         }
-        setTimeout(tick, 500);
-      }).catch(function () { setTimeout(tick, 1000); });
+
+        /* ---------------- 运行中 ---------------- */
+        idle = (running || pct > 0 || done > 0) ? 0 : idle + 1;
+        if (idle >= 6 && age > 3000) {                       /* ≈3 秒什么都没有：别空转 */
+          window.__maskDone = true;
+          setNavRunning("dataset", false, 0);
+          maskResetBtn(btn);
+          dsRunPaint({ pct: 0, msg: "任务没有启动（后端没有进度）", done: 0, total: 0,
+                       speed: null, elapsed: elapsed, eta: null, running: false, ok: false });
+          toast("应用遮罩", "后端没有进度，任务可能没起来", "error");
+          return;
+        }
+        dsRunPaint({ pct: pct, msg: p.msg, done: done, total: total,
+                     speed: (Number(p.speed) > 0) ? Number(p.speed)
+                            : (elapsed > 0.3 && done ? done / elapsed : null),
+                     elapsed: elapsed, eta: p.eta, running: true });
+        if (btn) { btn.disabled = true; btn.textContent = "应用中…"; }
+        setTimeout(tick, next);
+      }).catch(function () {
+        if (window.__maskDone) return;                       /* 网络抖一下不算完成 */
+        setTimeout(tick, 1000);
+      });
     };
-    setTimeout(tick, 400);
+    setTimeout(tick, 200);
   }
   window.maskPoll = maskPoll;
 
@@ -1025,6 +1194,7 @@
     /* ---------- 过滤器 ---------- */
     if (i === 0) {
       var mode = k === 1 ? "faceid" : (k === 2 ? "repeated" : (k === 3 ? "errface" : "blur"));
+      if (mode === "errface" && erOff()) { erExplain(); return; }
       var body = { mode: mode, dir: "data_src" };
       if (mode === "blur") body.percent = PARAM_VAL["0-0-0"] !== undefined ? PARAM_VAL["0-0-0"] : 10;
       else if (mode === "repeated") body.similarity = PARAM_VAL["0-2-0"] !== undefined ? PARAM_VAL["0-2-0"] : 0.98;
@@ -1080,6 +1250,8 @@
     if (n.indexOf("重复") >= 0) return "repeated";
     if (n.indexOf("错脸") >= 0 || n.indexOf("坏图") >= 0) return "errface";
     if (n.indexOf("合并") >= 0) return "merge";
+    /* 遮挡率是**排序器**：不筛不删，算完给你看排序 + 一个阈值手动移走 */
+    if (n.indexOf("遮挡") >= 0) return "occlusion";
     return "blur";
   }
 
@@ -1090,6 +1262,14 @@
   function dsNum() { return document.querySelector('#dsSteps [data-res="num"]'); }
   function dsLbl() { return document.querySelector('#dsSteps [data-res="lbl"]'); }
   function dsBar() { return document.querySelector('#dsSteps [data-res="a"]'); }
+
+  /* 站点卡片上的「开始处理」按钮：真实按钮带 data-step（见 renderStation）。
+     '#dsSteps .step:nth-child(n) .btn' 那套选择器从来没有匹配到过，别再用 ——
+     应用遮罩就是因为 btn 恒为 null，完成之后按钮一直停在「应用中…」。 */
+  function dsStepBtn(i) {
+    return document.querySelector('#dsSteps button[data-step="' + i + '"]') ||
+           document.querySelector('#dsSteps .dsacts .btn') || null;
+  }
 
   function dsPaint(num, lbl, pct) {
     var n = dsNum(), l = dsLbl(), b = dsBar();
@@ -1113,6 +1293,44 @@
     if (k >= 0) parts = parts.slice(k);
     return parts.join("/") || "data_src";
   }
+
+  /* ---------- 「这一层有几张」只有一个来源：后端 /api/dataset/count ----------
+     路径框右边那个「N 张」以前读 /api/state 的 datasets.src.count，而它永远
+     数 data_src/aligned —— 选中 data_src/1（670 张）也照样显示 1203 张，
+     运行面板还拿这个数预填成「已读取 1203 张」，跟聚类实际吃的 670 张对不上。
+     现在面板一打开、路径一变就问后端要「选中目录这一层」的数。 */
+  var DS_COUNT = { arg: "", dir: "", count: 0, skipped: [], recursive: 0 };
+  var DS_WARMED = false;
+
+  function dsWarmFaceid() {
+    /* 人脸身份第一次点击要 1.5~2 秒加载引擎；面板打开时就提前热起来，
+       用户真点下去只剩 0.2~0.3 秒的活。失败无所谓，点击时还会自己起。 */
+    if (DS_WARMED) return;
+    DS_WARMED = true;
+    try {
+      fetch("/api/dataset/faceid/prewarm", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}"
+      }).catch(function () { DS_WARMED = false; });
+    } catch (e) { DS_WARMED = false; }
+  }
+  window.dsWarmFaceid = dsWarmFaceid;
+
+  function dsRefreshCount(dirArg) {
+    var arg = (dirArg == null ? dsDirArg() : dirArg) || "data_src";
+    return fetch("/api/dataset/count", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dir: arg })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (!d || d.count == null) return null;
+      DS_COUNT = { arg: arg, dir: d.dir || "", count: d.count || 0,
+                   skipped: d.skipped_dirs || [], recursive: d.recursive_would_be || 0 };
+      var el = document.getElementById("dsPathCount");
+      if (el) el.textContent = DS_COUNT.count + " 张";
+      dsWarmFaceid();
+      return DS_COUNT;
+    }).catch(function () { return null; });
+  }
+  window.dsRefreshCount = dsRefreshCount;
 
   var DS_TICK = 0;
 
@@ -1189,7 +1407,7 @@
     dsTickStop();
     var txt = (e && (e.message || e)) + "";
     dsRunPaint({ pct: 100, done: 0, total: 0, speed: 0, elapsed: 0,
-                 msg: "失败：" + txt, running: false });
+                 msg: "失败：" + txt, running: false, ok: false });
     toast("处理失败", txt, "error");
 
   }
@@ -1251,6 +1469,14 @@
     var dirArg = dsDirArg();
     var t0 = Date.now();
 
+    /* 遮挡率（排序器）：不筛不删，走自己那条路（算完只排版 + 给个阈值） */
+    if (mode === "occlusion") { occScan(btn, dirArg, false); return; }
+    occReset();                       /* 换到别的模式：上一轮的排序网格收起来 */
+
+    /* 错脸检测是「能力」：没装就直说怎么装，一个请求都不发（以前这里一路打到
+       /api/dataset/scan 吃 409，界面只显示「扫描失败」，看着像坏了）。 */
+    if (mode === "errface" && erOff()) { erExplain(); return; }
+
 
     /* 合并子文件夹：一次性搬完，没有扫描阶段 */
     if (mode === "merge") {
@@ -1282,9 +1508,12 @@
     dsPaint(null, "正在统计…", 0);
     DSB.stage = 0;
     dsRunShow(MODULES[DS_TAB].n + " · 扫描中");
-    /* 先把总数填上：人脸身份要在引擎进程里跑 6~10 秒，光显示「0 / 0」像是卡死 */
-    var knownTotal = 0;
-    try { knownTotal = parseInt(String(($("dsPathCount") || {}).textContent || "").replace(/[^0-9]/g, ""), 10) || 0; } catch (e) {}
+    /* 先把总数填上：人脸身份要等引擎，光显示「0 / 0」像是卡死。
+       **只认后端给的「这个目录这一层」的张数** —— 以前从路径框的
+       「N 张」标签里抠数字，而那个数永远数的是 data_src/aligned，
+       选中 data_src/1（670 张）也照样显示 1203 张。 */
+    var knownTotal = (DS_COUNT.arg === dirArg) ? DS_COUNT.count : 0;
+    if (!knownTotal) dsRefreshCount(dirArg);      /* 数还没到手：先要，别拿别的目录凑 */
     if (knownTotal > 0) dsRunPaint({ pct: 2, done: 0, total: knownTotal, speed: null, elapsed: 0,
                                     msg: "已读取 " + knownTotal + " 张" });
     if (mode === "faceid" || mode === "blur" || mode === "repeated") { DS_MODE = mode; dsPollStart(); }
@@ -1295,11 +1524,28 @@
       body: JSON.stringify(dsScanBody(mode, dirArg))
     }).then(function (r) { return r.json(); }).then(function (d) {
       dsPollStop();
+      /* 能力没装：后端回 200 + unavailable（不是 409）。这里只解释，不进入移动阶段 */
+      if (d && d.unavailable) {
+        erExplain(d);
+        dsTickStop();
+        if (btn) { btn.textContent = "开始处理"; btn.disabled = false; }
+        return;
+      }
       if (d && d.detail) throw new Error(String(d.detail));
       DSB.hits = d.hits || [];
       var sec = ((Date.now() - t0) / 1000).toFixed(1);
       var hd0 = document.querySelector("#dsSteps .card .cardhd .hint");
-      if (hd0) hd0.textContent = "共 " + d.total + " 张 · 命中 " + (d.count || 0) + " 张";
+      if (hd0) {
+        /* 三件事分开写清楚：这一层共几张、引擎实际吃了几张、哪些子目录被跳过。
+           以前只有一个数，而且可能是别的目录的。 */
+        var _nf = (d.info && d.info.n_files != null) ? d.info.n_files : null;
+        var _skd = (d.skipped_dirs || []).filter(function (x) { return x.images > 0; });
+        var _txt = "共 " + d.total + " 张";
+        if (mode === "faceid" && _nf != null) _txt += "，实际参与聚类 " + _nf + " 张";
+        _txt += " · 命中 " + (d.count || 0) + " 张";
+        if (_skd.length) _txt += " · 跳过 " + _skd.map(function (x) { return x.name + " " + x.images; }).join("、") + " 张";
+        hd0.textContent = _txt;
+      }
       var sk = (d.info && d.info.skipped_n) || 0;
       var est = (d.info && d.info.estimated_n) || 0;
       if (mode === "errface" && est > 0) {
@@ -1355,11 +1601,296 @@
   }
 
 
+  /* ---------- 遮挡率排序器（排序，不是过滤器） ----------
+     口径全在后端（app/server/_occlusion.py）：
+       occ = 1 - sum(mask[凸包]) / count(凸包)，凸包 = 68 点里去掉眉毛 17..26
+     100% = 眼睛及以下整块被挡住，0% = 一点没挡。
+     这里只做三件事：排版（角标 + 统计）、阈值实时计数、把超阈值的移进 _trash。 */
+  var OCC = { data: null, dir: "", thr: 0.30, last: null, busy: false, bound: false };
+  var OCC_MAXCELLS = 1200;          /* 网格上限：再多 DOM 就卡，超出用一行字说明 */
+
+  var OCC_REASON = {
+    no_landmarks: "没有 68 点 landmarks（不是 DFLJPG）",
+    no_mask: "没有 xseg 遮罩（APP15 里没有 xseg_mask）",
+    hull_too_small: "凸包面积小于图面积 0.5%（点集失效）",
+    unreadable: "文件读不出来或图片解不开"
+  };
+
+  function occPct(v) {
+    return (v == null || isNaN(Number(v))) ? "—" : (Math.round(Number(v) * 100) + "%");
+  }
+  function occBadgeCls(v) {
+    return v >= 0.5 ? "t-red" : (v >= 0.25 ? "t-yellow" : "t-green");
+  }
+  function occEl(id) { return document.getElementById(id); }
+
+  /* 收起面板（换模式 / 开始新一轮时调用）：数据也清掉，免得角标和统计对不上 */
+  function occReset() {
+    OCC.data = null;
+    OCC.last = null;
+    var card = occEl("occCard");
+    if (card) card.classList.add("hide");
+    var g = occEl("occGrid");
+    if (g) g.innerHTML = "";
+    var un = occEl("occUnranked");
+    if (un) un.innerHTML = "";
+    var undo = occEl("occUndo");
+    /* 用 hidden 属性而不是 .hide：.btn 的 display 带 !important，
+       和 .hide 同权重、后出现，靠 classList 根本收不起来（.mini 踩过同一个坑） */
+    if (undo) undo.hidden = true;
+  }
+  window.occReset = occReset;
+
+  function occBind() {
+    if (OCC.bound) return;
+    OCC.bound = true;
+    var sl = occEl("occThr"), num = occEl("occThrNum");
+    function apply(v, from) {
+      var n = Math.round(Number(v));
+      if (!isFinite(n)) n = 30;
+      n = Math.max(0, Math.min(100, n));
+      OCC.thr = n / 100;
+      if (sl && from !== "sl") sl.value = n;
+      if (num && from !== "num") num.value = n;
+      occCount();
+    }
+    if (sl) sl.addEventListener("input", function () { apply(sl.value, "sl"); });
+    if (num) num.addEventListener("input", function () { apply(num.value, "num"); });
+    if (occEl("occMove")) occEl("occMove").addEventListener("click", occAskMove);
+    if (occEl("occUndo")) occEl("occUndo").addEventListener("click", occUndo);
+    apply(OCC.thr * 100, "");
+  }
+
+  /* 超阈值 = 严格大于（和后端 move 的判据一致，数目才可能一模一样） */
+  function occHits() {
+    if (!OCC.data) return [];
+    return (OCC.data.items || []).filter(function (it) {
+      return it.valid && it.occ > OCC.thr;
+    });
+  }
+
+  function occCount() {
+    var n = occHits().length;
+    var thr = Math.round(OCC.thr * 100);
+    var c = occEl("occCnt");
+    if (c) c.textContent = "超过 " + thr + "% 的有 " + n + " 张";
+    var mv = occEl("occMove");
+    if (mv) {
+      mv.textContent = "移走这 " + n + " 张";
+      mv.disabled = (n === 0) || OCC.busy;
+    }
+    /* 会在网格上标出来的那一批：描一圈，用户一眼看到"移走的是哪几张" */
+    var cells = document.querySelectorAll("#occGrid .occcell");
+    Array.prototype.forEach.call(cells, function (cd) {
+      cd.classList.toggle("hit", Number(cd.dataset.occ) > OCC.thr);
+    });
+  }
+
+  function occStat(k, v, unit) {
+    return '<div class="stat"><div class="k">' + k + '</div><div class="v">' + v +
+           (unit ? '<small>' + unit + '</small>' : '') + '</div></div>';
+  }
+
+  function occRender(d) {
+    occBind();
+    var card = occEl("occCard");
+    if (!card) return;
+    card.classList.remove("hide");
+    var st = d.stats || {};
+    var unranked = st.unranked || 0;
+
+    var hint = occEl("occHint");
+    if (hint) {
+      hint.textContent = "共 " + (d.total || 0) + " 张 · 有效 " + (d.valid || 0) +
+                         " · 未参与 " + unranked + " · 用时 " + (d.ms || 0) + " 毫秒";
+    }
+
+    var stats = occEl("occStats");
+    if (stats) {
+      stats.innerHTML =                       /* occPct 自带 %，单位别再拼一遍 */
+        occStat("中位", occPct(st.median), "") +
+        occStat("p90", occPct(st.p90), "") +
+        occStat("最大", occPct(st.max), "") +
+        occStat("未参与", String(unranked), "张");
+    }
+
+    var grid = occEl("occGrid");
+    if (grid) {
+      grid.innerHTML = "";
+      var list = (d.items || []).filter(function (it) { return it.valid; });
+      var shown = list.slice(0, OCC_MAXCELLS);
+      var frag = document.createDocumentFragment();
+      var q = "/api/dataset/thumb?dir=" + encodeURIComponent(OCC.dir) + "&s=96&name=";
+      shown.forEach(function (it) {
+        var cell = document.createElement("div");
+        cell.className = "occcell";
+        cell.dataset.occ = it.occ;
+        cell.title = it.name + " · 遮挡 " + occPct(it.occ) +
+                     "（凸包占图 " + occPct(it.hull_ratio) + "）";
+        var img = document.createElement("img");
+        img.loading = "lazy";
+        img.decoding = "async";
+        img.alt = "";
+        img.src = q + encodeURIComponent(it.name);
+        var tag = document.createElement("span");
+        tag.className = "tag occb " + occBadgeCls(it.occ);
+        tag.textContent = occPct(it.occ);
+        cell.appendChild(img);
+        cell.appendChild(tag);
+        frag.appendChild(cell);
+      });
+      grid.appendChild(frag);
+      /* 上一轮那行说明先摘掉：rescan 之后它要么重复、要么说的是旧张数 */
+      var old = document.querySelector("#occCard .occmore");
+      if (old && old.parentNode) old.parentNode.removeChild(old);
+      if (list.length > shown.length) {
+        var more = document.createElement("div");
+        more.className = "hint occmore";
+        more.textContent = "网格只画前 " + shown.length + " 张（共 " + list.length + " 张），排序与统计是全量的";
+        grid.parentNode.insertBefore(more, grid.nextSibling);
+      }
+    }
+
+    var un = occEl("occUnranked");
+    if (un) {
+      un.innerHTML = "";
+      var bad = (d.items || []).filter(function (it) { return !it.valid; });
+      if (bad.length) {
+        var by = {};
+        bad.forEach(function (it) { (by[it.reason] = by[it.reason] || []).push(it.name); });
+        var hd = document.createElement("div");
+        hd.className = "cardhd";
+        hd.innerHTML = '<b>未参与排序 ' + bad.length + ' 张</b>' +
+                       '<span class="hint">没有凸包/遮罩的图算不出遮挡率，不参与统计</span>';
+        un.appendChild(hd);
+        Object.keys(by).sort().forEach(function (k) {
+          var row = document.createElement("div");
+          row.className = "occunrow";
+          var names = by[k];
+          var eg = names.slice(0, 3).join("、") + (names.length > 3 ? " …" : "");
+          row.innerHTML = '<span class="tag t-gray">' + names.length + '</span>' +
+                          '<span class="ocr">' + (OCC_REASON[k] || k) + '</span>' +
+                          '<span class="hint">例：' + eg + '</span>';
+          un.appendChild(row);
+        });
+      }
+    }
+    occCount();
+  }
+
+  function occScan(btn, dirArg, quiet) {
+    if (OCC.busy) return;
+    OCC.busy = true;
+    OCC.dir = dirArg || OCC.dir || "data_src";
+    var t0 = Date.now();
+    if (btn) btn.disabled = true;
+    if (!quiet) {
+      occReset();
+      dsRunShow("遮挡率排序");
+      dsTickStart("读 landmarks 与 XSeg 遮罩…", 0);
+    }
+    fetch("/api/dataset/occlusion", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dir: OCC.dir, action: "scan" })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      OCC.busy = false;
+      dsTickStop();
+      if (btn) { btn.textContent = "开始处理"; btn.disabled = false; }
+      if (!d || d.ok !== true) throw new Error((d && d.detail) || "扫描失败");
+      OCC.data = d;
+      occRender(d);
+      var un = (d.stats && d.stats.unranked) || 0;
+      if (!quiet) {
+        dsRunFinish("有效 " + (d.valid || 0) + " 张 · 未参与 " + un + " 张", d.total, d.total, t0);
+        toast("遮挡率已排好",
+              (d.valid || 0) + " 张可排序" + (un ? " · " + un + " 张缺数据" : "") +
+              " · " + (d.ms || 0) + " 毫秒",
+              (d.valid ? "success" : "warn"), 6000);
+      }
+    }).catch(function (e) {
+      OCC.busy = false;
+      dsTickStop();
+      if (btn) { btn.textContent = "开始处理"; btn.disabled = false; }
+      /* 失败也必须落到终态（running=false），否则进度条永远停在"处理中"。
+         quiet 是"移走/还原之后的重扫"，那一次的运行卡片已经是完成态，
+         不能再被改写成失败 —— 只弹一句提示。 */
+      if (quiet) toast("重扫失败", String((e && e.message) || e), "error");
+      else dsRunFail("遮挡率扫描失败", e);
+    });
+  }
+  window.occScan = occScan;
+
+  function occAskMove() {
+    var hits = occHits();
+    if (!hits.length || OCC.busy) return;
+    var thr = Math.round(OCC.thr * 100);
+    confirmBox("移走这 " + hits.length + " 张？",
+               "遮挡率都超过 " + thr + "%。文件只会移动到 _trash 里（不删除），" +
+               "移完可以点「撤销」原地还原。",
+               "移走", function () { occDoMove(); }, true);
+  }
+
+  function occDoMove() {
+    if (OCC.busy) return;
+    OCC.busy = true;
+    var mv = occEl("occMove");
+    if (mv) { mv.disabled = true; mv.textContent = "正在移走…"; }
+    fetch("/api/dataset/occlusion", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dir: OCC.dir, action: "move", threshold: OCC.thr, target: "_trash" })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      OCC.busy = false;
+      if (!d || d.ok !== true) throw new Error((d && d.detail) || "移动失败");
+      OCC.last = d;
+      var mn = String(d.manifest || "").split(/[\\/]/).pop();
+      var bad = (d.failed || []).length;
+      toast("已移走 " + d.moved + " 张",
+            "在 _trash 里 · 清单 " + (mn || "—") + (bad ? " · " + bad + " 张失败" : ""),
+            bad ? "warn" : "success", 9000);
+      var undo = occEl("occUndo");
+      if (undo) undo.hidden = false;
+      dsRefreshCount(OCC.dir);
+      occScan(null, OCC.dir, true);          /* 重新扫：网格/统计/计数跟着目录状态走 */
+    }).catch(function (e) {
+      OCC.busy = false;
+      toast("移动失败", String((e && e.message) || e), "error");
+      occCount();
+    });
+  }
+
+  function occUndo() {
+    if (OCC.busy || !OCC.last) return;
+    var items = (OCC.last.items || []).map(function (x) {
+      return { name: x.name, trash: x.trash };
+    });
+    if (!items.length) return;
+    OCC.busy = true;
+    fetch("/api/dataset/restore", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dir: OCC.dir, items: items })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      OCC.busy = false;
+      if (!d || d.ok !== true) throw new Error((d && d.detail) || "还原失败");
+      var bad = (d.failed || []).length;
+      toast("已还原 " + d.restored + " 张", bad ? bad + " 张没还原（可能重名了）" : "文件都回原位了",
+            bad ? "warn" : "success", 7000);
+      OCC.last = null;
+      var undo = occEl("occUndo");
+      if (undo) undo.hidden = true;
+      dsRefreshCount(OCC.dir);
+      occScan(null, OCC.dir, true);
+    }).catch(function (e) {
+      OCC.busy = false;
+      toast("还原失败", String((e && e.message) || e), "error");
+    });
+  }
+
   var DS_OPEN_AT = 0;
   function dsOpen() {
     var now = Date.now();
     if (now - DS_OPEN_AT < 800) return;      /* 防误触 / 重复触发 */
     DS_OPEN_AT = now;
+    dsRefreshCount();                        /* 顺手把「这一层几张」和引擎都热起来 */
     /* 没有空态了：路径框和工作区常在，这里只负责重新选目录 */
     var path = $("dspath"), work = $("dswork");
     if (path) path.classList.add("in");
@@ -1555,28 +2086,60 @@
     if (dsRunEl("dsRunMsg")) dsRunEl("dsRunMsg").textContent = "准备中…";
     if (dsRunEl("dsRunDone")) dsRunEl("dsRunDone").textContent = "0";
     if (dsRunEl("dsRunTotal")) dsRunEl("dsRunTotal").textContent = "/ 0";
-    if (dsRunEl("dsRunBar")) dsRunEl("dsRunBar").style.width = "0%";
     if (dsRunEl("dsRunSpeed")) dsRunEl("dsRunSpeed").textContent = "0";
     if (dsRunEl("dsRunElapsed")) dsRunEl("dsRunElapsed").textContent = "0";
     if (dsRunEl("dsRunEta")) dsRunEl("dsRunEta").textContent = "—";
     if (dsRunEl("dsRunRate")) dsRunEl("dsRunRate").textContent = "";
     DS_HIST = [];                 /* 新一次运行从零开始，别把上一轮的曲线留着 */
+    DS_HIST_FROZEN = false;       /* 采样闩一起清，新一轮才采得到样 */
+    DS_HIST_FINAL = false;        /* 定稿闩一起清，新曲线才有资格被补端点 */
     dsDrawGraph();
     go("dataset-run");
+  }
+
+  /* ---------- 速度曲线采样 ---------- */
+  var DS_HIST_MAX = 240;        /* 最多 240 点，页面开着久了也不会无限涨 */
+
+  /* 采一个点。返回 true 表示 DS_HIST 变了、需要重画。
+     规则：
+     - 第一个真实采样点之前固定插入 (0%,0) —— 曲线从原点出发，不是从半空开始；
+     - x 只增不减：乱序旧帧直接丢；同一百分比用最新真实值替换，不堆竖线；
+     - 0% 的瞬时速度没有信息量（那是计时器刚起跳），丢掉，起点已经是 (0,0)。 */
+  function dsHistPush(pct, spd) {
+    if (DS_HIST_FROZEN) return false;
+    var y = Number(spd) || 0;
+    if (!(y > 0)) return false;
+    var x = Math.max(0, Math.min(100, Number(pct) || 0));
+    var changed = false;
+    if (!DS_HIST.length) { DS_HIST.push({ pct: 0, spd: 0 }); changed = true; }
+    if (x <= 0) return changed;                 /* 0% 起跳点：起点已经钉好 */
+    var last = DS_HIST[DS_HIST.length - 1];
+    if (x < last.pct) return changed;           /* 迟到的旧帧：别把 x 拉回去 */
+    if (x === last.pct) {
+      if (last.spd === y) return changed;
+      last.spd = y;                             /* 同一进度：保留最新真实值 */
+      return true;
+    }
+    DS_HIST.push({ pct: x, spd: y });
+    /* 超上限先丢第二个点：起点 (0,0) 必须留在图上 */
+    if (DS_HIST.length > DS_HIST_MAX) DS_HIST.splice(1, 1);
+    return true;
   }
 
   function dsRunPaint(p) {
     if (!p) return;
     /* 采样：给速度曲线用（最多 240 点，页面开着久了也不会无限涨） */
-    /* 只采「有真实速度」的点：起手那几帧 speed 是 null，采进去曲线会从 0 起飞，
-       画出来就是一条贴底直线接一根竖直尖峰 */
-    if (p.pct != null && !p.noSample && Number(p.speed) > 0) {
-      DS_HIST.push({ pct: p.pct, spd: Number(p.speed) || 0 });
-      if (DS_HIST.length > 240) DS_HIST.shift();
+    /* 只采「有真实速度」的点：起手那几帧 speed 是 null，采进去曲线会从 0 起飞。
+       第一个真实采样点之前先钉一个 (0%,0) 起点（dsHistPush 负责），曲线必定从原点
+       出发 —— 以前秒杀任务只采到完成帧，曲线就只剩 x=100 上的一根竖线。
+       收尾帧只采一次（采完立刻定稿），定稿之后一个点都不再采 —— 完成后每轮算出来
+       的速度只会更小，再采下去就是在 x=100 上继续往下画，用户看到的就是
+       「跑完了曲线还在掉」。 */
+    if (p.pct != null && !p.noSample && !DS_HIST_FROZEN && Number(p.speed) > 0 &&
+        dsHistPush(p.pct, p.speed)) {
       dsDrawGraph();
     }
     if (dsRunEl("dsRunMsg")) dsRunEl("dsRunMsg").textContent = p.msg || "";
-    if (dsRunEl("dsRunBar")) dsRunEl("dsRunBar").style.width = Math.max(0, Math.min(100, p.pct || 0)).toFixed(1) + "%";
     if (dsRunEl("dsRunDone")) dsRunEl("dsRunDone").textContent = p.done || 0;
     if (dsRunEl("dsRunTotal")) dsRunEl("dsRunTotal").textContent = "/ " + (p.total || 0);
     if (dsRunEl("dsRunSpeed")) dsRunEl("dsRunSpeed").textContent = (p.speed == null) ? "—" : dsFmtSpd(p.speed);
@@ -1589,16 +2152,30 @@
       dsRunEl("dsRunRate").textContent = bits.join(" · ");
     }
     if (!p.running) {
+      /* 终态一次性钉死：标题、返回按钮、剩余时间。之后的帧不会再改动这些。 */
       var t = dsRunEl("dsRunTitle");
-      if (t) t.textContent = "处理完成";
+      if (t) t.textContent = (p.ok === false) ? "处理失败" : "处理完成";
       var st = dsRunEl("btnDsRunStop");
-      if (st) { st.dataset.mode = "back"; st.classList.remove("danger"); st.textContent = "返回"; }
+      if (st) {
+        st.dataset.mode = "back";
+        st.classList.remove("danger");
+        st.classList.remove("hide");
+        st.disabled = false;
+        st.textContent = "返回";
+      }
+      if (dsRunEl("dsRunEta")) dsRunEl("dsRunEta").textContent = "—";
+      DS_HIST_FROZEN = true;          /* 终态：此后不再采样（历史本身不动） */
     }
 
   }
   window.dsRunPaint = dsRunPaint;
 
   var DS_HIST = [];
+  /* 采样闩：dsRunPaint 见到终态帧就置 true，不再追加采样；dsRunShow 清回 false。
+     它只挡「之后的追加」，不动已有历史。 */
+  var DS_HIST_FROZEN = false;
+  /* 定稿闩：dsFreezeGraph 只允许把一条曲线补完一次，重复调用不改任何数 */
+  var DS_HIST_FINAL = false;
 
   /* 速度显示：大数取整，小数一位 —— 之前把 2524.1090146750525 原样贴出来了 */
   function dsFmtSpd(v) {
@@ -1683,6 +2260,49 @@
     g.lineJoin = "round";
     g.stroke();
   }
+  /* 曲线定稿：补齐端点 → 稀疏时按 done 比例补中间点 → 冻结采样。
+     三条规矩：
+     1) 只补点，不改写已有历史 —— 冻结只影响之后的追加（以前把最后一个点直接
+        改成平均值，历史就这么被改掉了）；
+     2) 采样太稀（<3 点，例如 669 张 / 473 张每秒 ≈ 1.4 秒的秒杀任务，500ms 一次
+        只来得及采到完成帧）时，从 (0,0) 线性补到 (100, 最终平均速度)；中间点的
+        速度按 done 比例插值，只有真实端点数据，不编造任何抖动；
+     3) 完成后不再追加，重复调用不改历史的任何一个数。 */
+  var DS_SYNTH_STEPS = 4;       /* 稀疏曲线 4 段：0 / 25 / 50 / 75 / 100 */
+
+  function dsFreezeGraph(spd) {
+    if (DS_HIST_FINAL) { dsDrawGraph(); return; }    /* 已定稿：再来一次也不动历史 */
+    var v = Number(spd);
+    if (!isFinite(v) || v < 0) v = 0;
+
+    /* 起点：固定 (0,0)。缺就补，已有的点一个不动。 */
+    if (!DS_HIST.length) DS_HIST.push({ pct: 0, spd: 0 });
+    else if (DS_HIST[0].pct > 0) DS_HIST.unshift({ pct: 0, spd: 0 });
+
+    /* 太稀：真实数据只有 (0,0) 加最多一个采样点，用终值铺一条直线过去 */
+    if (DS_HIST.length < 3) {
+      var endSpd = v > 0 ? v : (DS_HIST.length > 1 ? DS_HIST[DS_HIST.length - 1].spd : 0);
+      if (endSpd > 0) {
+        var line = [];
+        for (var k = 0; k <= DS_SYNTH_STEPS; k++) {
+          line.push({ pct: 100 * k / DS_SYNTH_STEPS, spd: endSpd * k / DS_SYNTH_STEPS });
+        }
+        DS_HIST = line;
+      }
+    }
+
+    /* 终点：追加 (100, 最终平均)。最后一个真实采样点保持原值；同 x 再补一个同值点，
+       最后一段斜率是 0（平收尾），不会在完成后再往下掉。 */
+    var last = DS_HIST[DS_HIST.length - 1];
+    var tailSpd = v > 0 ? v : last.spd;
+    DS_HIST.push({ pct: 100, spd: tailSpd });
+    if (DS_HIST.length > DS_HIST_MAX) DS_HIST.splice(1, DS_HIST.length - DS_HIST_MAX);
+
+    DS_HIST_FROZEN = true;
+    DS_HIST_FINAL = true;
+    dsDrawGraph();
+  }
+
   window.dsRunShow = dsRunShow;
 
   /* 「中断 / 返回」：这个按钮以前没绑任何事件，点了没反应 */
@@ -1719,13 +2339,16 @@
   window.setNavRunning = setNavRunning;
 
   function setExtractUI(s) {
+    /* 失败态：后端 Job.fail 给的是 ok=false + error（app.py）。以前这里只看
+       running —— 线程一死就写「提取完成」，用户以为跑完了，这就是事故现场。 */
+    var failed = (s.ok === false || !!s.error);
     if (!s.running) {
       /* 结束：运行视图仍可查看，但侧栏点「提取器」应回到参数页 */
       delete SUB_MEMORY["extract"];
       if (LAST_PAGE["extract"] === "extract-run") LAST_PAGE["extract"] = "extract";
       /* 结束：标题改「提取完成」，按钮从「中断提取」变成「返回」 */
       var hd0 = document.querySelector("#exProgress .xferhd b");
-      if (hd0) hd0.textContent = "提取完成";
+      if (hd0) hd0.textContent = failed ? "提取失败" : "提取完成";
       var sb0 = document.getElementById("btnExStop");
       if (sb0) {
         sb0.dataset.mode = "back";
@@ -1735,7 +2358,12 @@
       }
     }
     /* 显示值不再直接写 DOM：把它交给缓动循环，避免每 0.5s 一跳 */
-    var faceRate = (s.elapsed > 0.5 && s.faces) ? (s.faces / s.elapsed) : 0;
+    /* 人脸速度与帧速度同口径：分子是**本次运行**新落盘的脸（后端 faces_new），
+       分母是 SSE 里的 elapsed（和 fps 用的是同一个 JOB.t0）。有后端的 face_rate
+       就用它，没有（老后端）才退回 faces/elapsed。 */
+    var faceRate = (typeof s.face_rate === "number" && s.elapsed > 0.3)
+      ? s.face_rate
+      : ((s.elapsed > 0.5 && s.faces) ? (s.faces / s.elapsed) : 0);
     EX_T = {
       pct: s.pct || 0, fps: s.fps || 0, faces: s.faces || 0,
       done: s.done || 0, total: s.total || 0,
@@ -1762,6 +2390,24 @@
     es.onmessage = function (ev) {
       var s = JSON.parse(ev.data);
       setExtractUI(s);
+      /* 失败优先于「完成」：ok===false 或 error 非空就是失败 —— 红条，别报完成 */
+      if (s.ok === false || s.error) {
+        es.close(); es = null;
+        toast("提取失败", String(s.error || s.msg || "").replace(/^提取失败：/, ""), "error", 8000);
+        if (btnEx) { btnEx.disabled = false; btnEx.textContent = "开始提取"; }
+        var sbF = document.getElementById("btnExStop");
+        if (sbF) {
+          sbF.dataset.mode = "back";
+          sbF.classList.remove("danger", "hide");
+          sbF.disabled = false;
+          sbF.textContent = "返回";
+        }
+        setTimeout(function () {
+          var pF = $("exProgress");
+          if (pF) pF.classList.remove("hide");
+        }, 0);
+        return;
+      }
       if (!s.running && s.pct >= 100) {
         es.close(); es = null;
         toast("提取完成",
@@ -2145,6 +2791,8 @@
   try { if (window.I18N && window.I18N.get() === "en") window.I18N.refresh(); } catch (e) {}
     if (window.I18N) window.I18N.refresh();
   }
+  /* 暴露给外部：新建 / 删除模型之后要立刻重画「模型选择」列表 */
+  window.renderTrainer = renderTrainer;
 
   /* ---------- 合成工作室：真实视频预览（后端 /api/merge/*） ---------- */
   /* 所有状态都挂在 window 上：之前用模块内 var，出现过「传 300 却按 0 取帧」的诡异串台 */
@@ -3887,10 +4535,10 @@
   window.facePts = facePts;
 
   function syncDatasetBadge() {
-    var el = document.getElementById("dsPathCount");
-    if (!el) return;
-    var d = (STATE && STATE.datasets && STATE.datasets.src) || null;
-    if (d && d.count != null) el.textContent = d.count + " 张";
+    /* 只刷新「当前选中目录这一层」的张数。
+       以前直接拿 STATE.datasets.src.count —— 那数的是 data_src/aligned，
+       选 data_src/1 也照样显示 1203 张，用户拿它跟自己的 670 张一对就炸了。 */
+    if (window.dsRefreshCount) { try { window.dsRefreshCount(); } catch (e) {} }
   }
   window.syncDatasetBadge = syncDatasetBadge;
 
@@ -3908,10 +4556,9 @@
     /* 数据集顶部的框：更新路径并刷新张数 */
     if (box.id === "dsPathBox") {
       DSB.dir = path;
-      fetch("/api/state").then(function (r) { return r.json(); }).then(function (s) {
-        var c = (s.datasets && s.datasets.src && s.datasets.src.count) || 0;
-        if ($("dsPathCount")) $("dsPathCount").textContent = c + " 张";
-      }).catch(function () {});
+      /* 换了目录就立刻问后端「这一层几张」—— 别再用 /api/state 里那个
+         永远指向 data_src/aligned 的 datasets.src.count。 */
+      dsRefreshCount();
       toast("数据集已更换", path, "success");
     } else {
       toast("路径已填入", path, "success");
@@ -4912,18 +5559,27 @@
     }
     function row(j) {
       var d = document.createElement("div");
-      d.className = "job" + (j.state === "done" ? " done" : "");
+      d.className = "job" + (j.state === "done" ? " done" : (j.state === "failed" ? " failed" : ""));
+      var tail;
+      if (j.state === "done") {
+        tail = '<span class="jobstate done">已完成</span>';
+      } else if (j.state === "failed") {
+        tail = '<span class="jobstate" style="color:#ef4444" title="' +
+          String(j.error || "").replace(/"/g, "&quot;") + '">失败' +
+          (j.error ? "：" + String(j.error).slice(0, 60) : "") + "</span>";
+      } else if (j.state === "queued") {
+        tail = '<span class="jobstate">排队中</span>';
+      } else if (j.state === "cancelled") {
+        tail = '<span class="jobstate">已取消</span>';
+      } else {
+        tail = '<span class="jobbar"><i style="width:' + Math.round(j.pct || 0) + '%"></i></span>' +
+          '<span class="jobpct">' + Math.round(j.pct || 0) + "%</span>" +
+          '<span class="jobstate">' + (j.speed || "0.0 MB/s") + "</span>";
+      }
       d.innerHTML =
         '<i class="jobdot"></i>' +
         '<span class="jobname">' + (j.title || j.bvid || "任务") + "</span>" +
-        '<span class="jobkind">' + (j.kind || "B 站下载") + "</span>" +
-        (j.state === "done"
-          ? '<span class="jobstate done">已完成</span>'
-          : (j.state === "queued"
-            ? '<span class="jobstate">排队中</span>'
-            : '<span class="jobbar"><i style="width:' + Math.round(j.pct || 0) + '%"></i></span>' +
-              '<span class="jobpct">' + Math.round(j.pct || 0) + "%</span>" +
-              '<span class="jobstate">' + (j.speed || "0.0 MB/s") + "</span>"));
+        '<span class="jobkind">' + (j.kind || "B 站下载") + "</span>" + tail;
       return d;
     }
     var runningList = BILI_JOBS.filter(function (j) { return j.state === "downloading"; });
@@ -4984,8 +5640,9 @@
     BILI_VIDEOS.forEach(function (v, i) {
       var tr = document.createElement("tr");
       tr.innerHTML = '<td><input type="checkbox"' + (v.checked ? " checked" : "") + "></td>" +
-        "<td>" + (v.title || "—") + "</td>" +
-        '<td class="mono">' + (v.bvid || "—") + "</td>" +
+        "<td>" + (biliEsc(v.title) || "—") + "</td>" +
+        '<td class="mono">' + (biliEsc(v.bvid) || "—") + "</td>" +
+        '<td class="mono">' + (biliEsc(v.length) || "—") + "</td>" +
         "<td>" + (v.coop ? "是" : "否") + "</td>";
       var cb = tr.querySelector("input");
       cb.addEventListener("change", function () {
@@ -4998,138 +5655,190 @@
   }
   window.renderBili = renderBili;
 
-  /* ---------- 模拟：分段拉取（B 站接口一次只给 20 条，且要限流） ---------- */
-  var BILI_PAGE = 20;
+  /* ---------- 视频列表：走后端真实接口 /api/bili/up/videos ----------
+     以前这里是个纯前端假列表：本地随机生成 60~160 条假 bvid / 假标题，
+     还配了个定时器假装在分页，一条网络请求都不发。现在按页拉真数据。 */
+  var BILI_PAGE = 30;
   var BILI_TIMER = null;
-  var BILI_FAKE = [
-    "【4K】深夜书房的一次实验", "第一次尝试这种转场，效果意外地好",
-    "帮我看看这段打光有没有问题", "练习：三分钟讲完一个故事",
-    "棚拍花絮 · 那些没剪进正片的镜头", "用一盏灯拍完整支片子",
-    "夏日限定 · 海边随手拍", "重制版 · 三年前的作品",
-    "这期的调色我改了七遍", "街头采访第 12 期",
-    "器材开箱 · 这次真的买贵了", "幕后 · 一场雨戏怎么拍",
-    "五分钟看完整个项目", "关于构图，我想说的三件事",
-    "第一次用这种机位，有点手抖", "夜景实拍 · 高感表现",
-    "剪辑复盘 · 为什么删掉了这段", "合作投稿 · 来自观众的素材",
-    "幕后花絮 · 拍到凌晨三点", "年度总结 · 这一年的 20 个片子"
-  ];
+  var DL_TIMER = null;
+  var DL_THREADS = 4;
+  var BILI_QUALITY = "best";
+  var BILI_PAUSED = false;
 
-  function biliMockFetch(uid, total) {
-    if (BILI_TIMER) { clearInterval(BILI_TIMER); BILI_TIMER = null; }
+  function biliEsc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  /* FastAPI 的 HTTPException detail 可能是字符串，也可能是 {code,message} */
+  function biliErrText(body, status) {
+    var d = body;
+    if (d && typeof d === "object" && d.detail !== undefined) d = d.detail;
+    var msg = "";
+    if (d && typeof d === "object") msg = d.message || d.msg || "";
+    else if (typeof d === "string") msg = d;
+    if (!msg) msg = "HTTP " + status;
+    return msg;
+  }
+
+  function biliFetchList(uid) {
+    if (BILI_TIMER) { clearTimeout(BILI_TIMER); BILI_TIMER = null; }
     var bar = $("biliFetchBar"), fill = $("biliFetchFill"), txt = $("biliFetchText");
     var btn = $("biliFetch"), owner = $("biliOwner");
-    total = total || (60 + Math.floor(Math.random() * 100));
-    var got = 0, batch = 0, pages = Math.ceil(total / BILI_PAGE);
+    var page = 1, total = 0, mock = false;
     BILI_VIDEOS.length = 0;
     renderBili([]);
     if (bar) bar.hidden = false;
     if (btn) { btn.disabled = true; btn.textContent = "获取中…"; }
     if (owner) owner.textContent = "UID " + uid;
 
+    function fail(msg) {
+      if (fill) fill.style.width = "0%";
+      if (txt) txt.textContent = "失败：" + msg;
+      if (btn) { btn.disabled = false; btn.textContent = "获取视频列表"; }
+      toast("获取视频列表失败", msg, "error");
+    }
+
     function step() {
-      batch++;
-      var take = Math.min(BILI_PAGE, total - got);
-      for (var i = 0; i < take; i++) {
-        var n = got + i + 1;
-        BILI_VIDEOS.push({
-          bvid: "BV1" + String(Math.abs((uid * 7919 + n * 104729) % 1e9)).padStart(9, "0").slice(0, 9),
-          title: (BILI_FAKE[(n - 1) % BILI_FAKE.length] || ("视频 " + n)) + " · P" + n,
-          coop: n % 7 === 0,
-          checked: false
+      fetch("/api/bili/up/videos", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mid: uid, page: page, ps: BILI_PAGE })
+      }).then(function (r) {
+        return r.text().then(function (t) {
+          var d = null;
+          try { d = JSON.parse(t || "null"); } catch (e) { d = t; }
+          return { ok: r.ok, status: r.status, body: d };
         });
-      }
-      got += take;
-      renderBili();
-      var pct = Math.round((got / total) * 100);
-      if (fill) fill.style.width = pct + "%";
-      if (txt) txt.textContent = "第 " + batch + " / " + pages + " 批 · 已取 " + got + " / " + total;
-      if (got >= total) {
-        clearInterval(BILI_TIMER); BILI_TIMER = null;
-        if (bar) setTimeout(function () { bar.hidden = true; }, 900);
-        if (btn) { btn.disabled = false; btn.textContent = "获取视频列表"; }
-        if (fill) fill.style.width = "0%";
-        toast("获取完成", "UID " + uid + " · 共 " + total + " 个视频 · " + pages + " 批", "success");
-      }
+      }).then(function (res) {
+        var d = res.body || {};
+        if (!res.ok) { fail(biliErrText(d, res.status)); return; }
+        var items = (d && d.items) || [];
+        mock = !!(d && d.mock);
+        total = (d && d.total) || 0;
+        items.forEach(function (v) {
+          BILI_VIDEOS.push({
+            bvid: v.bvid || "",
+            title: v.title || "",
+            length: v.length || "",
+            coop: !!v.is_coop,
+            checked: false
+          });
+        });
+        renderBili();
+        var pct = total ? Math.round(BILI_VIDEOS.length / total * 100) : 0;
+        if (fill) fill.style.width = Math.min(100, pct) + "%";
+        if (txt) {
+          txt.textContent = "第 " + page + " 页 · 已取 " + BILI_VIDEOS.length +
+            (total ? " / " + total : "") + (mock ? "（占位数据）" : "");
+        }
+        if (d && d.has_more && items.length) {
+          page += 1;
+          BILI_TIMER = setTimeout(step, 400);
+        } else {
+          BILI_TIMER = null;
+          if (bar) setTimeout(function () { bar.hidden = true; }, 900);
+          if (btn) { btn.disabled = false; btn.textContent = "获取视频列表"; }
+          if (fill) fill.style.width = "0%";
+          toast(mock ? "获取完成（占位数据）" : "获取完成",
+                "UID " + uid + " · 共 " + BILI_VIDEOS.length + " 个视频", "success");
+        }
+      }).catch(function (e) {
+        fail("请求失败：" + e);
+      });
     }
     step();
-    BILI_TIMER = setInterval(step, 850);
   }
-  window.biliMockFetch = biliMockFetch;
+  window.biliFetchList = biliFetchList;
 
-  /* ---------- 模拟：下载推进 ---------- */
-  var DL_TIMER = null;
-  var DL_PAUSED = false;
-  var DL_THREADS = 4;
+  /* ---------- 下载：真队列，进度来自 /api/bili/batch/status ---------- */
   function biliConcurrency() { return DL_THREADS; }
   function biliSetThreads(n) { DL_THREADS = n; }
   window.biliSetThreads = biliSetThreads;
-  function biliStopAll() {
-    if (DL_TIMER) { clearInterval(DL_TIMER); DL_TIMER = null; }
-    DL_PAUSED = false;
-    BILI_JOBS.length = 0;
-    renderProcs();
-  }
-  window.biliStopAll = biliStopAll;
-  function biliTogglePause() {
-    DL_PAUSED = !DL_PAUSED;
-    return DL_PAUSED;
-  }
-  window.biliTogglePause = biliTogglePause;
-
-  var BILI_QUALITY = "best";
   function biliSetQuality(q) { BILI_QUALITY = q || "best"; }
   window.biliSetQuality = biliSetQuality;
 
-  function biliMockDownload(picked) {
-    /* 画质决定体积和速度：最高 40-300MB，1080P 25-120MB，720P 12-60MB */
-    var qr = BILI_QUALITY === "best" ? [40, 300]
-           : BILI_QUALITY === "1080" ? [25, 120] : [12, 60];
-    var spd = BILI_QUALITY === "best" ? 1.0 : BILI_QUALITY === "1080" ? 1.3 : 1.7;
-    picked.forEach(function (v, i) {
-      /* 先落盘（后端用 ffmpeg 生成等价文件），再按返回的真实大小推进度 */
-      fetch("/api/bili/download", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ bvid: v.bvid, title: v.title, quality: BILI_QUALITY })
-      }).then(function (r) { return r.json(); }).then(function (d) {
-        if (!d.ok) return;
-        var job = BILI_JOBS.filter(function (j) { return j.bvid === v.bvid; })[0];
-        if (job) {
-          job.path = d.path;
-          job.size = Math.round((d.size || 0) / 1048576 * 10) / 10;
-        }
-      }).catch(function () {});
+  function biliStopPoll() {
+    if (DL_TIMER) { clearInterval(DL_TIMER); DL_TIMER = null; }
+  }
+
+  function biliApplyStatus(s) {
+    var items = (s && s.items) || [];
+    BILI_JOBS.length = 0;
+    items.forEach(function (it) {
+      var v = BILI_VIDEOS.filter(function (x) { return x.bvid === it.bvid; })[0] || {};
       BILI_JOBS.push({
-        bvid: v.bvid, title: v.title, kind: "B 站下载",
-        state: i < DL_THREADS ? "downloading" : "queued",
-        speed: "0.0 MB/s", pct: 0,
-        size: qr[0] + Math.floor(Math.random() * (qr[1] - qr[0])),
-        q: BILI_QUALITY, spd: spd
+        bvid: it.bvid,
+        title: v.title || it.bvid,
+        state: it.state,
+        pct: it.pct || 0,
+        speed: it.speed ? (Number(it.speed).toFixed(1) + " MB/s") : "",
+        error: it.error || "",
+        path: it.path || ""
       });
     });
     renderProcs();
-    if (DL_TIMER) return;
-    DL_TIMER = setInterval(function () {
-      if (DL_PAUSED) return;
-      var active = BILI_JOBS.filter(function (j) { return j.state === "downloading"; });
-      if (!active.length) {
-        var queued = BILI_JOBS.filter(function (j) { return j.state === "queued"; });
-        if (!queued.length) { clearInterval(DL_TIMER); DL_TIMER = null; return; }
-        queued.slice(0, DL_THREADS).forEach(function (j) { j.state = "downloading"; });
-        active = BILI_JOBS.filter(function (j) { return j.state === "downloading"; });
+    var pauseBtn = $("biliPause");
+    if (pauseBtn) pauseBtn.textContent = (s && s.paused) ? "继续" : "暂停";
+    if (s && !s.running) {
+      biliStopPoll();
+      var failed = items.filter(function (i) { return i.state === "failed"; }).length;
+      if (failed) {
+        toast("下载结束，但有失败", failed + " 个失败：见任务列表里的错误信息", "error");
+      } else if (items.length) {
+        toast("下载完成", "全部 " + items.length + " 个视频已下载", "success");
       }
-      active.forEach(function (j) {
-        j.pct = Math.min(100, (j.pct || 0) + (1.2 + Math.random() * 5) * (j.spd || 1));
-        j.speed = ((2 + Math.random() * 7) * (j.spd || 1)).toFixed(1) + " MB/s";
-        if (j.pct >= 100) { j.pct = 100; j.state = "done"; j.speed = ""; }
-      });
-      renderProcs();
-      if (BILI_JOBS.every(function (j) { return j.state === "done"; })) {
-        clearInterval(DL_TIMER); DL_TIMER = null;
-        toast("下载完成", "全部 " + BILI_JOBS.length + " 个视频已下载", "success");
-      }
-    }, 400);
+    }
   }
-  window.biliMockDownload = biliMockDownload;
+
+  function biliPollStatus() {
+    fetch("/api/bili/batch/status").then(function (r) { return r.json(); })
+      .then(biliApplyStatus).catch(function () { });
+  }
+
+  function biliStartDownload(picked) {
+    if (!picked || !picked.length) return;
+    var bvids = picked.map(function (v) { return v.bvid; });
+    toast("开始下载", "已选 " + bvids.length + " 个视频", "info");
+    fetch("/api/bili/batch", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bvids: bvids, workers: biliConcurrency(), quality: BILI_QUALITY })
+    }).then(function (r) {
+      return r.text().then(function (t) {
+        var d = null;
+        try { d = JSON.parse(t || "null"); } catch (e) { d = t; }
+        return { ok: r.ok, status: r.status, body: d };
+      });
+    }).then(function (res) {
+      if (!res.ok) { toast("下载启动失败", biliErrText(res.body, res.status), "error"); return; }
+      BILI_JOBS.length = 0;
+      biliPollStatus();
+      biliStopPoll();
+      DL_TIMER = setInterval(biliPollStatus, 800);
+    }).catch(function (e) {
+      toast("下载启动失败", String(e), "error");
+    });
+  }
+  window.biliStartDownload = biliStartDownload;
+
+  function biliTogglePause() {
+    BILI_PAUSED = !BILI_PAUSED;
+    fetch("/api/bili/batch/pause", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paused: BILI_PAUSED })
+    }).then(function (r) { return r.json(); }).then(biliApplyStatus).catch(function () { });
+    return BILI_PAUSED;
+  }
+  window.biliTogglePause = biliTogglePause;
+
+  function biliStopAll() {
+    BILI_PAUSED = false;
+    fetch("/api/bili/batch/cancel", { method: "POST" })
+      .then(function (r) { return r.json(); })
+      .then(biliApplyStatus)
+      .catch(function () { biliStopPoll(); });
+  }
+  window.biliStopAll = biliStopAll;
 
   (function bindBili() {
     var pauseBtn = $("biliPause");
@@ -5185,7 +5894,7 @@
           toast("UID 不合法", "请输入纯数字的 UP 主 UID", "error");
           return;
         }
-        biliMockFetch(uid);
+        biliFetchList(uid);
       });
     }
     var all = $("biliAll");
@@ -5202,8 +5911,7 @@
       start.addEventListener("click", function () {
         var picked = BILI_VIDEOS.filter(function (v) { return v.checked; });
         if (!picked.length) return;
-        toast("开始下载", "已选 " + picked.length + " 个视频", "info");
-        if (window.biliMockDownload) window.biliMockDownload(picked);
+        biliStartDownload(picked);
         go("bili-jobs");
       });
     }
@@ -5297,7 +6005,8 @@
     { t: "数据集参数", rows: [
       { k: "src", l: "src 人脸集", t: "path", v: "workspace\\data_src\\" },
       { k: "dst", l: "dst 人脸集", t: "path", v: "workspace\\data_dst\\" },
-      { k: "face_type", l: "人脸类型", t: "sel", o: ["whole_face", "full_face", "half_face", "midfull_face", "head"], v: "whole_face" }
+      { k: "face_type", l: "人脸类型", t: "sel", o: ["whole_face", "full_face", "half_face", "midfull_face", "head"], v: "whole_face",
+        d: "新建模型时按这一项确定，建完就固定在模型里" }
     ]},
     { t: "训练参数", rows: [
       { k: "batch_size", l: "批次大小", t: "num", v: "8", d: "每次训练的样本数量" },
@@ -5472,6 +6181,12 @@
 
     box.innerHTML = "";
 
+    /* 上一个模型的迁移提示不能留在页面上：先清掉，等 /config 回来再按这次的结果画。
+       （新格式 dat 的 legacy.detected=false，一路清空，页面上什么都不多出来。） */
+    try {
+      if (window.LegacyNotice) window.LegacyNotice.clear(document.getElementById("cfgLegacy"));
+    } catch (e) { /* 提示层失败不能挡住参数页 */ }
+
     CFG_GROUPS.forEach(function (g) {
       /* 标了 ro 的分组（模型架构参数）内容和顶部"模型结构"只读卡完全重复：
          名字/分辨率/archi/e_dims/ae_dims/d_dims/d_mask_dims 一模一样。
@@ -5616,7 +6331,14 @@
               var _b0 = Number(opts.batch_size) || 1, _a0 = Number(opts.accum_steps) || 1;
               v = _a0 > 1 ? _b0 * _a0 : 0;
             }
-            if (v === undefined) return;
+            if (v === undefined) {
+              /* dat 里没有这个键（老模型没存过 / 新建时没写）：
+                 标记一下，别给它记基线 —— 否则用户改成界面默认值会被判成"没改"，
+                 这个值永远存不进模型（"最大备份数填 3 不生效"就是这么来的）。 */
+              el.dataset.missing = "1";
+              return;
+            }
+            delete el.dataset.missing;
             filled++;
             if (el.tagName === "INPUT") el.value = v;
             else if (el.tagName === "SELECT") {
@@ -5651,6 +6373,16 @@
           });
           /* 回填完真实参数，把「初始值」重记一遍：之后只有用户真改过的才算改过 */
           if (window.syncCfgBaseline) window.syncCfgBaseline();
+
+          /* TF 时代（DFL 1.x/2.0）的 dat：后端（server/_legacy.py）已经把 options 翻成
+             4.1 的键，这里只负责把「迁了几项、还要不要转权重」放在页面顶部，
+             一行 + 可展开明细。新格式 dat 传进来的 legacy.detected=false，这行不会出现。 */
+          try {
+            if (window.LegacyNotice) {
+              window.LegacyNotice.render(document.getElementById("cfgLegacy"), d.legacy);
+            }
+          } catch (e) { console.warn("legacy notice failed", e); }
+
           var hint = document.getElementById("cfgHint");
           if (hint) {
             /* 先记下原始文案：openCfg 每重画一次都会拉一遍配置，直接往后追加会叠成
@@ -5677,7 +6409,14 @@
 
   /* ---------- 训练页控制按钮：暂停 / 继续 · 立即保存 · 停止 ---------- */
   function trainCtl(path, okMsg) {
-    return fetch(path, { method: "POST" })
+    /* 带上当前模型名：后端会核对"这是不是正在训练的那个"，
+       避免界面切到别的模型后点暂停，把另一个训练不声不响停掉。 */
+    var _m = (window.__lastTrain && window.__lastTrain.name)
+          || (window.__cfgModel && window.__cfgModel.name) || "";
+    return fetch(path, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: _m })
+    })
       .then(function (r) { return r.json().then(function (d) {
         if (!r.ok) throw new Error(d.detail || "请求失败");
         return d;
@@ -5754,14 +6493,53 @@
        激活  1.94 GB（随 batch 线性、随分辨率平方）
      参数个数不去公式推算 —— SAEHD 的 conv 栈宽度和 e_dims 不是线性关系，
      硬推会得出 "2M 参数" 这种离谱数字（真实 78.6M）。 */
+  /* 显存估算。
+     旧公式把「权重/梯度/优化器状态」乘了 (resolution/128)^2 —— 完全错了：
+     分辨率不决定参数量（参数量只由 ae/e/d/d_mask 和架构决定），只影响激活。
+     结果 512/ae512 的模型被估成 46.7 GB（实际 8.9 GB），吓得不敢建。
+     新公式用「参数量推固定开销 + 经验激活项」，用实测值标定：
+       512/ae512/e64/d128/bs1/检查点  -> 实际 8.9 GB
+       640/ae512/e64/d128/bs1          -> 实际 11.8 GB
+       1024/ae256/e128/d128/bs1/单解码 -> 实际 18.0 GB
+     误差约 ±30%，比原来的 5 倍偏差强得多。 */
   function vramEstimate(o) {
     var R = Number(o.resolution) || 128;
     var B = Number(o.batch_size) || 1;
     var ae = Number(o.ae_dims) || 256;
-    var staticGb = 1.26 * Math.pow(R / 128, 2) * Math.max(0.5, ae / 256);
-    var actGb = 1.94 * (B / 8) * Math.pow(R / 128, 2);
-    if (o.use_gradient_checkpointing) actGb *= 0.45;
-    return { total: staticGb + 2.5 + actGb, act: actGb, stat: staticGb };
+    var eD = Number(o.e_dims) || 64;
+    var dD = Number(o.d_dims) || 128;
+    var ckpt = !!(o.gradient_checkpointing || o.use_gradient_checkpointing);
+    var archi = String(o.archi || "");
+    var dmD = Number(o.d_mask_dims) || 32;
+    var flags = String(o.archi || "df-udt").toLowerCase();
+    var hasT = flags.indexOf("t") >= 0, hasD = flags.indexOf("d") >= 0;
+    // ★ 分辨率确实影响参数量，而且是通过 inter 的两个 Dense 层**平方级**影响：
+    //   out_res   = R / (32 if -t else 16)     ← encoder 展平后的空间尺寸
+    //   lowest    = R / (32 if -d else 16)     ← inter 输出的最低分辨率
+    //   dense1 = (e_ch*8 * out_res^2) * ae
+    //   dense2 = ae * (lowest^2 * ae)
+    // 例：1024 且不带 -t 时 out_res=64，dense1 直接到 10.7 亿参数（就是那个 1073.7M 的张量）。
+    var e8 = eD * 8;
+    var outRes = Math.floor(R / (hasT ? 32 : 16));
+    var lowest = Math.floor(R / (hasD ? 32 : 16));
+    var interM = (e8 * outRes * outRes * ae + ae
+                  + ae * lowest * lowest * ae + lowest * lowest * ae) / 1e6;
+    // encoder + 两个 decoder：与分辨率无关（卷积核/通道数固定），只随 e / d / mask 变
+    var encM = 15.65 * Math.pow(Math.max(eD, 16) / 64, 2);
+    var decM = 2 * (123.9 * Math.pow(Math.max(dD, 16) / 128, 2)
+                    + 8.63 * Math.pow(Math.max(dmD, 8) / 32, 1.5));
+    var paramsM = interM + encM + decM;
+    // 每个参数占的字节：权重 4 + 梯度 4 + 优化器状态（AdaBelief/Adam 8，Lion 4）
+    var opt = String(o.optimizer || "adabelief").toLowerCase();
+    var optB = (opt === "lion") ? 4 : 8;
+    var perParam = 4 + 4 + optB;
+    // 单解码器支路：dst 解码器不参与前向/反向，梯度与状态只算 src 那半边
+    var singleDec = !!(o.pretrain && o.pretrain_single_decoder);
+    var fixedGb = paramsM * perParam / 1024 * (singleDec ? 0.72 : 1.0);
+    var actGb = 1.0 * Math.pow(R / 512, 2) * Math.max(B, 1)
+                    * Math.sqrt(Math.max(ae, 32) / 512) * (ckpt ? 1.0 : 2.2);
+    var sysGb = 0.9;
+    return { total: fixedGb + actGb + sysGb, act: actGb, stat: fixedGb + sysGb };
   }
   window.vramEstimate = vramEstimate;
 
@@ -5806,6 +6584,16 @@
     if (!o.resolution) o.resolution = m.resolution || m.res || 0;
     var assumed = false;
     if (!o.resolution) { o.resolution = 128; assumed = true; }
+    /* ★ 新建模型时，分辨率和 ae 维度在「新建模型 · 结构」卡里，不在 cfgBox 的
+       参数行上（那些行没有 data-cfg）。以前这里读不到就退回上一个/第一个模型的
+       resolution —— 于是明明要建 256 的模型，底栏却按 384 估出 "22.6 GB 放不下"，
+       跟同一行提示"建议 256 / batch 8，约 3.5 GB"自相矛盾，吓得人不敢建。 */
+    if (document.getElementById("nmStruct")) {
+      var _nr = document.getElementById("nmRes");
+      var _na = document.getElementById("nmAe");
+      if (_nr && _nr.value) { o.resolution = Number(_nr.value); assumed = false; }
+      if (_na && _na.value) { o.ae_dims = Number(_na.value); }
+    }
     box.style.display = "";
     var r = vramEstimate(o);
     var gpu = window.GPU_INFO || {};
@@ -5817,7 +6605,7 @@
       (total ? " / 显卡 " + total.toFixed(1) + " GB" : "") +
       (total && r.total > total ? " <b style=\"color:var(--bad)\">放不下，请降低分辨率或批次</b>" : "") +
       (assumed ? " <span style=\"color:var(--ink-3)\">按 128px 估</span>" : "") +
-      "<span class=\"vh\">参考值，实际 ±15%</span>";
+      "<span class=\"vh\">估算值（±30%），训练页显示的才是实测占用</span>";
   }
   window.paintVram = paintVram;
 
@@ -6259,11 +7047,17 @@
   window.HOT_KEYS = HOT_KEYS;
 
   /* 把参数页上改过的值收集成一个 patch（「保存」和「开始训练」共用） */
+  window.collectCfgPatch = collectCfgPatch;
   /* 回填真实参数之后，把「初始值」重记一遍：只有和它不同的项才算改过 */
   function syncCfgBaseline() {
     var box = $("cfgBox");
     if (!box) return;
     box.querySelectorAll("[data-cfg]").forEach(function (el) {
+      if (el.dataset.missing === "1") {
+        /* 模型里没有这个键 → 不记基线；用户真改过（dirty）时 collectCfgPatch 会把它写进去 */
+        delete el.dataset.v0;
+        return;
+      }
       if (el.tagName === "INPUT") el.dataset.v0 = String(el.value);
       else if (el.tagName === "SELECT") el.dataset.v0 = String(el.value);
       else if (el.classList.contains("sw")) el.dataset.v0 = el.classList.contains("on") ? "1" : "0";
@@ -6320,7 +7114,23 @@
   window.validateTargetBatch = validateTargetBatch;
 
 
-  function collectCfgPatch() {
+  /* 用户真的动过某一行 → 打 dirty 标记。
+     原因：collectCfgPatch 只报"和基线不同"的行，而基线是回填 dat 时设的；
+     dat 里没有的键（max_backups / backup_interval / crash_threshold 等）永远没有基线，
+     于是用户填了值也会被静默丢掉 —— 这就是"最大备份数填 3 却不生效"的根因。 */
+  (function () {
+    function mark(e) {
+      var t = e.target;
+      var el = t && t.closest ? t.closest("[data-cfg]") : null;
+      if (el) el.dataset.dirty = "1";
+    }
+    ["input", "change", "click"].forEach(function (ev) {
+      document.addEventListener(ev, mark, true);
+    });
+  })();
+
+  /* all=true：新建模型时用 —— 此时模型还不存在，没有"基线"可谈，页面上的值就是用户要的。 */
+  function collectCfgPatch(all) {
     var box = $("cfgBox");
     var patch = {};
     if (!box) return patch;
@@ -6349,19 +7159,30 @@
       /* 只报真的改过的：没动过的行不写回、也不热推。
          以前保存会把整页默认值一起推过去，模型里没有的键
          （crash_threshold / max_backups / log_code_stats…）就被写成 UI 默认值。 */
-      if (Object.prototype.hasOwnProperty.call(patch, k)) {
+      if (Object.prototype.hasOwnProperty.call(patch, k) && !all) {
         /* 没有基线 = 这一行不是我们画的（或还没回填完）。以当前值为基线并跳过，
            宁可这一次不报，也不要把界面默认值当成用户的修改写进模型。 */
         if (el.dataset.v0 === undefined) {
-          el.dataset.v0 = el.classList.contains("sw")
-            ? (el.classList.contains("on") ? "1" : "0")
-            : String(patch[k]);
-          delete patch[k];
+          if (el.dataset.dirty === "1") {
+            /* 用户主动改过：保留这次的值为"用户修改"，并把当前值记成新基线，
+               这样同一个键不会每次都重复推送。 */
+            el.dataset.v0 = el.classList.contains("sw")
+              ? (el.classList.contains("on") ? "1" : "0")
+              : String(patch[k]);
+          } else {
+            el.dataset.v0 = el.classList.contains("sw")
+              ? (el.classList.contains("on") ? "1" : "0")
+              : String(patch[k]);
+            delete patch[k];
+          }
         } else {
           var nowV = el.classList.contains("sw")
             ? (el.classList.contains("on") ? "1" : "0")
             : String(patch[k]);
-          if (nowV === String(el.dataset.v0)) delete patch[k];
+          /* dat 里没有这个键 + 用户动过 → 就算值刚好等于界面默认值也要写进去。
+             否则"把最大备份数设成默认的 3"永远存不进模型（这就是用户报的那个 bug）。 */
+          var _force = (el.dataset.missing === "1" && el.dataset.dirty === "1");
+          if (!_force && nowV === String(el.dataset.v0)) delete patch[k];
         }
       }
     });
@@ -6825,6 +7646,10 @@
     }).then(function (d) {
       cfgSave.disabled = false;
       cfgSave.textContent = "保存";
+      /* 老 dat 一保存就落成新格式了：迁移那行撤掉，转换提示（如果还没有 .pth）留着 */
+      try {
+        if (window.LegacyNotice) window.LegacyNotice.render(document.getElementById("cfgLegacy"), d.legacy);
+      } catch (e2) { /* 提示层失败不影响保存结果 */ }
       var hot = d.hot || [], cold = d.need_restart || [];
       if (d.hot_applied) {
         toast("已保存 · " + hot.length + " 项即时生效",
@@ -6902,6 +7727,9 @@
         if (window.markHotRows) window.markHotRows();
         return;
       }
+      try {
+        if (window.LegacyNotice) window.LegacyNotice.render(document.getElementById("cfgLegacy"), d.legacy);
+      } catch (e2) { /* 同上 */ }
       if (d.count) toast("参数已保存", m.name + " · 改动 " + d.count + " 项", "success");
       openRun(m);
       if (window.trainStartingUi) window.trainStartingUi();
@@ -8260,7 +9088,9 @@
 
   /* ---------------- 1. 新建模型：直接进"空模型的参数页" ----------------
    * 不做弹窗。点「新建模型」就跳到参数设置页，顶上多一块「模型结构」：
-   * 名字 / 架构 / 子分支 / 算子 / 分辨率 / 四个维度 / 脸型。
+   * 名字 / 架构 / 子分支 / 算子 / 分辨率 / 四个维度。
+   * 脸型不在这块卡里：「数据集参数」卡已经有一项（whole_face / full_face …），
+   * 两处同时出现就是重复项。创建时 nmSubmit() 从那一项取，再转成 dat 认的短码。
    * 结构参数只在这里出现（训练参数页原本没有这些），底部按钮临时变成「创建模型」。
    * 下拉项和合法值全部来自后端 /api/model_spec（源头是 4.0 的 core/archi_names.py）。
    */
@@ -8302,9 +9132,13 @@
       host = document.createElement("div");
       host.id = "nmStruct";
       host.className = "card";
-      var sbox = $("cfgSearch");
-      var anchor = sbox ? sbox.parentNode : box;   /* 放在搜索框上面 */
-      anchor.parentNode.insertBefore(host, anchor);
+      /* ★ 必须插进 #cfgBox 里面。
+         以前是 "sbox.parentNode" 再 insertBefore —— 而搜索框外面那层 wrapper 是
+         position:sticky(top:-2px)，结果整张「新建模型 · 结构」卡跟着一起吸顶，
+         像 Excel 冻结首行那样压在参数列表上，页面看起来像"滚不动"。
+         放进 cfgBox 后它跟普通卡片一样随页面滚动。 */
+      if (box.firstChild) box.insertBefore(host, box.firstChild);
+      else box.appendChild(host);
     }
     var S = NEW.spec;
     function opt(list, valueKey, textKey, selected) {
@@ -8346,8 +9180,6 @@
           num("nmD", d.d_dims, S.limits.d_dims[0], S.limits.d_dims[1], 8)) +
       row("遮罩维度", "mask：解码器里遮罩分支的通道数",
           num("nmMask", d.d_mask_dims, S.limits.d_mask_dims[0], S.limits.d_mask_dims[1], 8)) +
-      row("脸型", "训练时按哪种脸对齐裁切，改等于重做数据集",
-          '<select class="mgsel" id="nmFace">' + opt(S.face_types, "v", "label", "wf") + "</select>") +
       '<div class="cfgrow"><span class="cl"></span><span class="cd"></span><span class="cc">' +
       '<span class="hint" id="nmNote"></span></span></div>' +
       '<div class="cfgrow"><span class="cl"></span><span class="cd"></span><span class="cc">' +
@@ -8405,9 +9237,9 @@
       host = document.createElement("div");
       host.id = "nmInfo";
       host.className = "card";
-      var sbox = $("cfgSearch");
-      var anchor = sbox ? sbox.parentNode : box;
-      anchor.parentNode.insertBefore(host, anchor);
+      /* 同上：不能插进吸顶的搜索框 wrapper，否则整卡跟着吸顶 */
+      if (box.firstChild) box.insertBefore(host, box.firstChild);
+      else box.appendChild(host);
     }
     function ro(label, value) {
       var v = (value === undefined || value === null || value === "") ? "—" : value;
@@ -8426,7 +9258,6 @@
       ro("编码器维度", m.e_dims) +
       ro("解码器维度", m.d_dims) +
       ro("遮罩维度", m.mask_dims) +
-      ro("脸型", m.face_type_label || m.face_type) +
       ro("已训练", nfmt(m.iter || 0) + " iter · " + (m.optimizer || "—") +
          (m.weights ? " · 权重 " + m.weights : ""));
     i18nRefresh();
@@ -8457,7 +9288,7 @@
       if (!NEW.on) return;
       /* 重画会重建 DOM，把用户已经填/选的东西先存下来，画完再放回去 */
       var FIELDS = ["nmName", "nmArchi", "nmSub", "nmKernel", "nmRes",
-                    "nmAe", "nmE", "nmD", "nmMask", "nmFace"];
+                    "nmAe", "nmE", "nmD", "nmMask"];
       var keep = {};
       FIELDS.forEach(function (k) { if ($(k)) keep[k] = $(k).value; });
       /* 用兜底值时那几个数字就是默认值，后端到了要换成推荐值；
@@ -8470,7 +9301,7 @@
         nmMask: !keep.nmMask || keep.nmMask === String(SPEC_FALLBACK.dims.d_mask_dims)
       };
       nmRenderPanel();
-      ["nmName", "nmArchi", "nmSub", "nmKernel", "nmFace"].forEach(function (k) {
+      ["nmName", "nmArchi", "nmSub", "nmKernel"].forEach(function (k) {
         if ($(k) && keep[k] !== undefined) $(k).value = keep[k];
       });
       var custom = !(untouched.nmRes && untouched.nmAe && untouched.nmE &&
@@ -8490,25 +9321,62 @@
 
   function openNewModel() {
     nmBindCreate();
-    if (window.go) window.go("train-cfg");
+    /* ★ 先确保参数行已经渲染出来。
+       以前是直接 go("train-cfg")，而 go() 只在「#cfgBox 里一张卡都没有」时才调 openCfg；
+       新建面板自己往 #cfgBox 插了一张「模型结构」卡，于是 go() 认为"已经渲染过"，
+       参数行（批次大小 / 预训练 / 预训练集路径 / 优化器 …）**永远不出现** ——
+       用户在新建流程里根本没法设这些，建出来的模型只能吃推荐值。 */
+    var box = document.getElementById("cfgBox");
+    var hasRows = box && box.querySelector(".card:not(#nmStruct):not(#nmInfo)");
+    if (!hasRows) {
+      var m0 = window.__cfgModel || (window.MODELS || [])[0] || null;
+      if (m0 && window.openCfg) { try { window.openCfg(m0); } catch (e) { if (window.go) window.go("train-cfg"); } }
+      else if (window.go) window.go("train-cfg");
+    } else if (window.go) {
+      window.go("train-cfg");
+    }
     setTimeout(function () { nmEnter(true); nmBindCreate(); }, 80);
+  }
+
+  /* 脸型只有一个入口：「数据集参数」卡里的 face_type 下拉（whole_face / full_face …）。
+     创建模型时要把它翻成 dat 认的短码 —— Model_SAEHD 是拿 'wf'/'f'/'h'/'mf'/'head'
+     直接查 FaceType 表的，发全名过去，训练一启动就 KeyError。 */
+  var FACE_SHORT = { whole_face: "wf", full_face: "f", half_face: "h",
+                     midfull_face: "mf", head: "head" };
+
+  function nmFaceType() {
+    var sel = document.querySelector("#cfgBox [data-cfg=face_type]");
+    var v = sel ? String(sel.value || "").trim() : "";
+    return FACE_SHORT[v] || v || "wf";      /* 空着或认不出就给 4.1 的老默认 wf */
   }
 
   function nmSubmit() {
     var name = ($("nmName").value || "").trim();
     if (!name) { $("nmErr").textContent = "起个名字"; $("nmName").focus(); return; }
+    /* 一次请求带全：spec（结构，创建后不可改）+ options（训练参数，页面上填的）。
+       后端用同一套 _clean_options 解析，返回"实际生效的全部 options"。
+       前端不再需要"创建成功后再发一次 config"这种补丁式做法。 */
     var body = {
       name: name,
-      archi_display: $("nmArchi").value,
-      subarchi: $("nmSub").value,
-      kernel_label: $("nmKernel") ? $("nmKernel").value : "",
-      face_type: $("nmFace").value,
-      resolution: parseInt($("nmRes").value, 10) || undefined,
-      ae_dims: parseInt($("nmAe").value, 10) || undefined,
-      e_dims: parseInt($("nmE").value, 10) || undefined,
-      d_dims: parseInt($("nmD").value, 10) || undefined,
-      d_mask_dims: parseInt($("nmMask").value, 10) || undefined,
-      batch_size: (NEW.spec && NEW.spec.recommend && NEW.spec.recommend.batch_size) || 4
+      spec: {
+        archi_display: $("nmArchi").value,
+        subarchi: $("nmSub").value,
+        kernel_label: $("nmKernel") ? $("nmKernel").value : "",
+        face_type: nmFaceType(),
+        resolution: parseInt($("nmRes").value, 10) || undefined,
+        ae_dims: parseInt($("nmAe").value, 10) || undefined,
+        e_dims: parseInt($("nmE").value, 10) || undefined,
+        d_dims: parseInt($("nmD").value, 10) || undefined,
+        d_mask_dims: parseInt($("nmMask").value, 10) || undefined
+      },
+      options: (window.collectCfgPatch ? window.collectCfgPatch(true) : {}),
+      /* 批次大小：页面上的值已经在 options 里了；这里只在它缺失时用显卡推荐值兜底 */
+      batch_size: (function () {
+        var el = document.querySelector("#cfgBox [data-cfg=batch_size]");
+        var v = el ? parseInt(el.value, 10) : 0;
+        if (v > 0) return v;
+        return (NEW.spec && NEW.spec.recommend && NEW.spec.recommend.batch_size) || 4;
+      })()
     };
     var btn = $("cfgStart");
     btn.disabled = true;
@@ -8526,12 +9394,44 @@
         return r.json().then(function (x) { if (!r.ok) throw new Error(x.detail || "训练没起来"); return d; });
       });
     }).then(function (d) {
-      nmEnter(false);
       btn.disabled = false;
       btn.textContent = "开始训练";
       if (window.toast) window.toast("已创建并开始训练", d.name + " · " + d.options.archi + " · " + d.options.resolution + " 分辨率", "success");
-      if (window.go) window.go("run");
-      if (window.pollTrain) window.pollTrain();
+      /* 后端会顺手把超范围的参数夹进合法区间（分辨率上限 640 等）。
+         以前是静默的 —— 填 1024 建出来是 640，人还以为在训 1024。现在先说清楚。 */
+      if (d.clamped && Object.keys(d.clamped).length) {
+        var _nm = { resolution: "分辨率", ae_dims: "编码器宽度", e_dims: "编码器维度",
+                    d_dims: "解码器维度", d_mask_dims: "遮罩维度" };
+        var _txt = Object.keys(d.clamped).map(function (k) {
+          var c = d.clamped[k];
+          return (_nm[k] || k) + " " + c.requested + "→" + c.used;
+        }).join("，");
+        if (window.toast) window.toast("部分参数超出范围，已自动调整", _txt, "info");
+      }
+      /* ★ 关键：把「当前模型」切到刚建的这个再进运行页。
+         以前这里是 go("run") —— 运行页不认模型，顶部标题还停在旧值（甚至
+         是 HTML 里的占位 "384wf"），曲线/统计也按 "列表里第一个" 取，
+         于是用户看到的是"点新建，却在训练第一个模型"。
+         现在重拉一次模型列表，按名字找回这一条，openRun(它)。 */
+      fetch("/api/models").then(function (r) { return r.json(); }).then(function (mm) {
+        var list = (mm && mm.models) || [];
+        var fresh = null;
+        for (var i = 0; i < list.length; i++) {
+          if (list[i] && list[i].name === d.name) { fresh = list[i]; break; }
+        }
+        if (list.length) window.MODELS = list;
+        /* 立刻重画「模型选择」列表：以前新建完要切页/刷新才看得到新模型 */
+        try { if (window.renderTrainer && window.MODELS) window.renderTrainer(window.MODELS); } catch (e) {}
+        if (fresh) { window.__cfgModel = fresh; window.__runModel = fresh; }
+        nmEnter(false);
+        if (fresh && window.openRun) window.openRun(fresh);
+        else if (window.go) window.go("run");
+        if (window.pollTrain) window.pollTrain(fresh || undefined);
+      }).catch(function () {
+        nmEnter(false);
+        if (window.go) window.go("run");
+        if (window.pollTrain) window.pollTrain();
+      });
     }).catch(function (e) {
       btn.disabled = false;
       btn.textContent = "创建模型";
@@ -8591,15 +9491,26 @@
       var o = sel.options[sel.selectedIndex];
       return o ? o.textContent : "";
     }
-    function sync() { txt.textContent = cur(); btn.title = cur(); }
+    function off(i) { return (sel.__off && sel.__off[i]) || null; }
+    function sync() {
+      txt.textContent = cur();
+      /* 选中项本身是「未安装」时，按钮的 tooltip 要能说明原因，不能只回一遍标签文字 */
+      var o = sel.options[sel.selectedIndex], mm = o ? off(sel.selectedIndex) : null;
+      btn.title = mm ? (mm.title || o.textContent) : cur();
+      btn.classList.toggle("off", !!mm);
+    }
     function build() {
       menu.innerHTML = "";
       Array.prototype.forEach.call(sel.options, function (o, i) {
-        var it = doll("div", "ddopt" + (i === sel.selectedIndex ? " on" : ""));
+        var mm = off(i);
+        var it = doll("div", "ddopt" + (i === sel.selectedIndex ? " on" : "") + (mm ? " off" : ""));
         it.textContent = o.textContent;
-        it.title = o.textContent;
+        it.title = mm ? (mm.title || o.textContent) : o.textContent;
+        if (mm) it.setAttribute("aria-disabled", "true");
         it.addEventListener("click", function (ev) {
           ev.stopPropagation();
+          /* 未安装：不切换，只解释（清掉原生 select 被选中的可能） */
+          if (mm) { if (mm.onBlock) mm.onBlock(); sync(); close(); return; }
           sel.selectedIndex = i;
           sel.dispatchEvent(new Event("change", { bubbles: true }));
           sync();
@@ -8723,6 +9634,9 @@
     var q = String(inp.value || "").trim().toLowerCase();
     var cards = box.querySelectorAll(".card");
     for (var i = 0; i < cards.length; i++) {
+      /* 结构卡（新建 / 只读）不参与搜索过滤：它们是页面的上下文，
+         过滤掉会让人以为"新建模型的面板不见了"。 */
+      if (cards[i].id === "nmStruct" || cards[i].id === "nmInfo") continue;
       var rows = cards[i].querySelectorAll(".cfgrow");
       var shown = 0;
       for (var j = 0; j < rows.length; j++) {
@@ -9562,3 +10476,553 @@
     setInterval(sync, 600);
     sync();
   })();
+
+/* ============================================================================
+ * 权重分包门控 —— 工具 → 遮罩绘制
+ *   weights/ 按功能分包：core 必需（缺了这页没法用），sam 可选（约 3.4 GB）。
+ *   后端接口（并行开发中，没上线时会 404 —— 一律按"未知"处理，不报错、不遮挡）：
+ *     GET  /api/weights/status        → { ok, packages:{ core:{installed}, sam:{installed,size_mb} } }
+ *     POST /api/weights/fetch         { group:"sam" } → { ok, job }
+ *     GET  /api/weights/fetch/status  → { ok, running, pct, line, error }
+ *   遮罩绘制那三块控件（SAM / GROUNDED SAM2 / BISENET）长在 iframe
+ *   /mask-editor/index.html 里，是独立文档 —— app.css 打不进去，
+ *   所以这里同源直连 contentDocument：置灰走 disabled + 半透明，
+ *   提示条也插在它自己的 .right-panel 里，配色全部借编辑器已有的 token
+ *   （--m-line / --m-panel-2 / --m-ink-2，按钮复用 .mkbtn，红沿用 #ef4444）。
+ * ============================================================================ */
+/* ==== WKG-START ==== 这段可以单独切出来喂假 DOM 跑状态机，别在里面引用外部变量 */
+(function () {
+  "use strict";
+
+  var SIZE_MB = 3455;   /* 后端没给 size_mb 时的兜底值（= 3.4 GB） */
+
+  /* ------------------------------------------------------------ 纯状态机 */
+
+  /** /api/weights/status 的响应 → {core,sam,samMB}；形状不对返回 null（= 未知）。 */
+  function wgParse(d) {
+    if (!d || typeof d !== "object") return null;
+    var pk = d.packages;
+    if (!pk || typeof pk !== "object") return null;
+    var core = pk.core, sam = pk.sam;
+    if (!core || typeof core.installed !== "boolean") return null;
+    var mb = (sam && typeof sam.size_mb === "number" && sam.size_mb > 0) ? sam.size_mb : SIZE_MB;
+    return { core: core.installed === true, sam: !!(sam && sam.installed === true), samMB: mb };
+  }
+
+  /** 3455 → "3.4 GB" */
+  function wgSize(mb) {
+    var g = (Number(mb) || SIZE_MB) / 1024;
+    return g.toFixed(1) + " GB";
+  }
+
+  /** 按钮文案：只有下载中带百分比，失败/中断回到「重试」。 */
+  function wgLabel(phase, pct) {
+    if (phase === "downloading") return "下载中 " + pct + "%";
+    if (phase === "failed") return "重试";
+    return "下载";
+  }
+
+  /**
+   * 状态机：status（wgParse 的结果）+ 运行时（{phase,pct,err}）→ 视图
+   *   unknown     接口没就绪 / 读失败 → 什么都不做，维持现状
+   *   nocore      core 没装（理论上不该）→ 顶部红条 + 「打开数据集」之外主要操作置灰
+   *   missing     sam 没装 → 三块置灰 + 上方提示条 + 「下载」
+   *   downloading 正在下 → 三块继续置灰 + 按钮「下载中 42%」
+   *   failed      失败/中断 → 三块继续置灰 + 按钮「重试」+ 一行错误
+   *   ready       sam 装好 → 解锁，提示条撤掉
+   */
+  function wgView(st, rt) {
+    rt = rt || {};
+    var phase = "unknown";
+    if (st) {
+      if (!st.core) phase = "nocore";
+      else if (st.sam) phase = "ready";
+      else if (rt.phase === "downloading") phase = "downloading";
+      else if (rt.phase === "failed") phase = "failed";
+      else phase = "missing";
+    }
+    var pct = Math.round(Number(rt.pct) || 0);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    var gate = (phase === "missing" || phase === "downloading" || phase === "failed");
+    return {
+      phase: phase,
+      gate: gate,
+      label: wgLabel(phase, pct),
+      pct: pct,
+      size: wgSize(st ? st.samMB : SIZE_MB),
+      err: phase === "failed" ? String(rt.err || "下载中断，点「重试」再来一次") : "",
+      core: phase === "nocore"
+    };
+  }
+
+  /* -------------------------------------------------------- 画到 iframe 里 */
+
+  function wgFrame() { return document.getElementById("mkFrame"); }
+
+  /** 同源 iframe 的文档；拿不到（还没 load / 跨域）返回 null。 */
+  function wgDoc() {
+    var f = wgFrame();
+    if (!f) return null;
+    try {
+      var d = f.contentDocument || (f.contentWindow && f.contentWindow.document);
+      return (d && typeof d.createElement === "function") ? d : null;
+    } catch (e) { return null; }
+  }
+
+  /** 按标题文字找右栏那三块（"SAM" / "GROUNDED SAM2" / "BISENET"）。 */
+  function wgSection(doc, title) {
+    var secs = doc.querySelectorAll(".right-panel .panel-section") || [];
+    for (var i = 0; i < secs.length; i++) {
+      var t = secs[i].querySelector(".panel-section__title");
+      if (t && String(t.textContent || "").trim().toUpperCase() === title) return secs[i];
+    }
+    return null;
+  }
+
+  /**
+   * 置灰 / 还原：disabled 挡住点击，opacity + pointer-events 让它看着也用不了。
+   * key 是"谁上的锁"：core 一层、sam 一层，各记各的基线，
+   * 否则整页锁还原时会把三块刚上的锁一起解掉（右栏锁包含那三块）。
+   */
+  function wgLockBox(el, on, key) {
+    if (!el) return;
+    var k = key || "data-wkgwas";
+    var ctl = el.querySelectorAll("button, input, select, textarea") || [];
+    for (var i = 0; i < ctl.length; i++) {
+      var c = ctl[i];
+      if (on) {
+        if (c.getAttribute(k) === null) c.setAttribute(k, c.disabled ? "1" : "0");
+        c.disabled = true;
+      } else if (c.getAttribute(k) !== null) {
+        c.disabled = c.getAttribute(k) === "1";
+        c.removeAttribute(k);
+      }
+    }
+    if (el.style) {
+      el.style.opacity = on ? "0.45" : "";
+      el.style.pointerEvents = on ? "none" : "";
+    }
+  }
+
+  /** 三块上方那条提示条（懒建；建好之后每帧只改文字）。 */
+  function wgBox(doc) {
+    var bar = doc.getElementById("wkgSamBar");
+    if (bar) return bar;
+    bar = doc.createElement("div");
+    bar.id = "wkgSamBar";
+    bar.style.cssText =
+      "display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 8px;" +
+      "padding:8px 10px;border:1px solid var(--m-line);border-radius:9px;" +
+      "background:var(--m-panel-2);color:var(--m-ink-2);font-size:10.5px;line-height:1.45";
+
+    var txt = doc.createElement("div");
+    txt.id = "wkgSamTxt";
+    txt.style.cssText = "flex:1 1 auto;min-width:0";
+    txt.textContent = "遮罩绘制需要额外模型（约 3.4 GB）";
+    bar.appendChild(txt);
+
+    var btn = doc.createElement("button");
+    btn.id = "wkgSamBtn";
+    btn.type = "button";
+    btn.className = "mkbtn";                       /* 复用编辑器里「打开」那颗按钮 */
+    btn.style.cssText = "height:24px;padding:0 10px;font-size:10.5px";
+    btn.textContent = "下载";
+    btn.onclick = function () { wgStart(); };
+    bar.appendChild(btn);
+
+    var err = doc.createElement("div");
+    err.id = "wkgSamErr";
+    err.style.cssText = "display:none;flex:1 1 100%;font-size:10px;color:#ef4444";
+    bar.appendChild(err);
+    return bar;
+  }
+
+  /** 插到第一块（SAM）前面；找不到就追加到右栏末尾。 */
+  function wgPut(doc, bar, before) {
+    var host = before && before.parentNode;
+    if (!host) {
+      host = doc.querySelector(".right-panel") || doc.body;
+      before = null;
+    }
+    if (!host || bar.parentNode === host) return;
+    host.insertBefore(bar, before || null);
+  }
+
+  /** core 缺包时页面顶部的红条。 */
+  function wgCoreBar(doc) {
+    var cb = doc.getElementById("wkgCoreBar");
+    if (cb) return cb;
+    cb = doc.createElement("div");
+    cb.id = "wkgCoreBar";
+    cb.style.cssText =
+      "display:flex;align-items:center;gap:8px;padding:9px 14px;" +
+      "font-size:11.5px;line-height:1.4;color:#ef4444;" +
+      "background:rgba(239,68,68,0.10);border-bottom:1px solid rgba(239,68,68,0.28)";
+    cb.textContent = "缺少基础模型，请先运行 modelhub.fetch --group core";
+    var shell = doc.querySelector(".app-shell") || doc.body;
+    if (shell) shell.insertBefore(cb, shell.firstChild || null);
+    return cb;
+  }
+
+  /**
+   * 把视图贴到编辑器文档上。doc 可以是真 Document，也可以是假 DOM。
+   * 找不到那三块（编辑器改版）就整体不动，别把别人的布局搅了。
+   */
+  function wgPaintDoc(doc, view) {
+    if (!doc || !view) return false;
+
+    /* core 缺包管的是整页，必须先落锁/解锁 —— 放到三块后面会被它们的还原盖掉 */
+    var cb = doc.getElementById("wkgCoreBar");
+    if (view.core) {
+      wgCoreBar(doc);
+      wgLockBox(doc.querySelector(".toolbar"), true, "data-wkgcore");
+      wgLockBox(doc.querySelector(".mode-bar"), true, "data-wkgcore");
+      wgLockBox(doc.querySelector(".right-panel"), true, "data-wkgcore");
+    } else if (cb && cb.parentNode) {
+      cb.parentNode.removeChild(cb);
+      wgLockBox(doc.querySelector(".toolbar"), false, "data-wkgcore");
+      wgLockBox(doc.querySelector(".mode-bar"), false, "data-wkgcore");
+      wgLockBox(doc.querySelector(".right-panel"), false, "data-wkgcore");
+    }
+
+    var titles = ["SAM", "GROUNDED SAM2", "BISENET"];
+    var lockSecs = view.core || view.gate;   /* core 缺时也锁着，别让两层互相解 */
+    var first = null, i, sec;
+    for (i = 0; i < titles.length; i++) {
+      sec = wgSection(doc, titles[i]);
+      if (sec && !first) first = sec;
+      wgLockBox(sec, lockSecs, "data-wkgsec");
+    }
+
+    var bar = doc.getElementById("wkgSamBar");
+    if (view.gate && first) {
+      bar = wgBox(doc);
+      var txt = doc.getElementById("wkgSamTxt");
+      if (txt) txt.textContent = "遮罩绘制需要额外模型（约 " + view.size + "）";
+      var btn = doc.getElementById("wkgSamBtn");
+      if (btn) {
+        btn.textContent = view.label;                        /* 下载 / 下载中 42% / 重试 */
+        btn.disabled = (view.phase === "downloading");       /* 下载中不许连点 */
+      }
+      var err = doc.getElementById("wkgSamErr");
+      if (err) {
+        err.textContent = view.err || "";
+        err.style.display = view.err ? "block" : "none";
+      }
+      wgPut(doc, bar, first);
+    } else if (bar && bar.parentNode) {
+      bar.parentNode.removeChild(bar);
+    }
+    return true;
+  }
+
+  /* ---------------------------------------------------------------- 运行时 */
+
+  var RT = { status: null, phase: "idle", pct: 0, err: "", timer: 0 };
+
+  function wgPaint() {
+    var doc = wgDoc();
+    if (!doc) return false;
+    try { return wgPaintDoc(doc, wgView(RT.status, RT)); } catch (e) { return false; }
+  }
+
+  function wgStop() {
+    if (RT.timer) { clearInterval(RT.timer); RT.timer = 0; }
+  }
+
+  /** 失败/中断收口：轮询停掉、按钮回到「重试」、提示条给一行错误。 */
+  function wgFail(msg) {
+    wgStop();
+    RT.phase = "failed";
+    RT.err = String(msg || "下载中断");
+    wgPaint();
+  }
+
+  /** GET status —— 读不到（404 / 网络失败）就当"未知"，维持现状。 */
+  function wgLoad() {
+    return fetch("/api/weights/status")
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        RT.status = wgParse(d);
+        wgPaint();
+        return RT.status;
+      })
+      .catch(function () { RT.status = null; wgPaint(); return null; });
+  }
+
+  /** 跑完/停了之后重新读 status，控件按真实安装状态恢复（不用刷新页面）。 */
+  function wgDone(d) {
+    return fetch("/api/weights/status")
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) {
+        RT.status = wgParse(j);
+        if (RT.status && RT.status.sam) {
+          RT.phase = "idle"; RT.err = ""; RT.pct = 100;
+          wgPaint();
+          return;
+        }
+        wgFail((d && (d.error || d.detail || d.line)) || "下载没有完成，已中断");
+      })
+      .catch(function () { wgFail("下载停了但读不到安装状态，点「重试」再确认一次"); });
+  }
+
+  /** 1000ms 一跳：running 就一直报进度，停了就收口。 */
+  function wgTick() {
+    return fetch("/api/weights/fetch/status")
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (!d || typeof d !== "object") throw new Error("下载状态接口没有响应");
+        RT.pct = Math.round(Number(d.pct) || 0);
+        if (d.running) { wgPaint(); return; }
+        wgStop();
+        if (d.error) { wgFail(d.error); return; }
+        return wgDone(d);
+      })
+      .catch(function (e) { wgFail((e && e.message) || "下载中断"); });
+  }
+
+  /** 点「下载」：POST 起任务 → 1s 轮询，pct 直接写到按钮文字上。 */
+  function wgStart() {
+    if (RT.phase === "downloading") return;          /* 已经在下，别再起一个 */
+    RT.phase = "downloading";
+    RT.pct = 0;
+    RT.err = "";
+    wgPaint();                                        /* 立刻变「下载中 0%」并置灰 */
+    fetch("/api/weights/fetch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ group: "sam" })
+    }).then(function (r) {
+      if (!r.ok) throw new Error(r.status === 404 ? "下载接口还没就绪，稍后再试" : ("下载接口返回 " + r.status));
+      return r.json();
+    }).then(function (d) {
+      if (d && d.ok === false) throw new Error(String(d.error || d.detail || "下载任务没能启动"));
+      wgStop();
+      RT.timer = setInterval(wgTick, 1000);
+    }).catch(function (e) { wgFail((e && e.message) || "下载启动失败"); });
+  }
+
+  /** 进入「工具 → 遮罩绘制」时调用。 */
+  function wgEnter() {
+    var f = wgFrame();
+    if (f && !f.dataset.wkgBound) {
+      f.dataset.wkgBound = "1";
+      /* 换目录 / 首次加载都会重设 src，画好的状态要重新贴一次 */
+      f.addEventListener("load", function () { wgPaint(); });
+    }
+    wgPaint();          /* 先把上次读到的状态贴上去，切页回来不闪 */
+    return wgLoad();    /* 再按后端最新状态刷一遍 */
+  }
+
+  /* 刷新 / 深链接直接落在这一页时：主 IIFE 的 go() 比这段先跑，那时 window.WKG 还不存在，
+     所以这里补一次（有 hash 就当作"进页"）。 */
+  try {
+    document.addEventListener("DOMContentLoaded", function () {
+      var h = "";
+      try { h = String((window.location && window.location.hash) || "").replace(/^#/, ""); } catch (e2) {}
+      if (h === "tool-mask") wgEnter();
+    });
+  } catch (e3) {}
+
+  window.WKG = { enter: wgEnter, refresh: wgLoad, start: wgStart, paint: wgPaint };
+  /* 单测入口：纯函数 + 画布函数都能直接喂假文档 */
+  window.WKG._test = { parse: wgParse, view: wgView, label: wgLabel, size: wgSize, paint: wgPaintDoc };
+})();
+/* ==== WKG-END ==== */
+
+/* ============================================================================
+ * 设置 → 权重包 —— 「缺哪个包、缺几个、点一下能下」
+ *   GET  /api/weights/status        → { packages:{ core:{installed,missing,missing_mb,…} } }
+ *   POST /api/weights/fetch         { group, url_base } → { ok, job }
+ *   GET  /api/weights/fetch/status  → { running, pct, line, error }
+ *   在这块 UI 之前，缺 errface_xgb.ubj 只能靠命令行 modelhub.fetch 解决，
+ *   界面上说「缺模型」却没地方点 —— 至少要有地方能看、能下、能知道下到哪一步。
+ * ============================================================================ */
+(function () {
+  "use strict";
+
+  var TIMER = 0, BUSY = "";
+
+  function $(id) { return document.getElementById(id); }
+
+  /* 后端来的动态句子也要进词典（切英文不能留中文） */
+  function addDict(zh, en) {
+    try {
+      var d = window.I18N && window.I18N.dict;
+      if (d && zh && d[zh] === undefined) d[zh] = en || zh;
+    } catch (e) {}
+  }
+  function say(zh, en) { addDict(zh, en); return zh; }
+
+  function size(mb) {
+    var n = Number(mb) || 0;
+    if (!n) return "";
+    return n >= 1024 ? (n / 1024).toFixed(1) + " GB" : n.toFixed(1) + " MB";
+  }
+
+  function stateText(p) {
+    if (!p) return say("未检测", "unknown");
+    if (p.installed) return say("已装", "installed");
+    var miss = Number(p.missing) || 0;
+    var sz = size(p.missing_mb);
+    return say("缺 " + miss + " 个文件" + (sz ? "（" + sz + "）" : ""),
+               miss + " files missing" + (sz ? " (" + sz + ")" : ""));
+  }
+
+  function row(key, pkg) {
+    var el = document.createElement("div");
+    el.style.cssText = "display:flex;align-items:center;gap:10px;padding:5px 0;font-size:12px";
+
+    var name = document.createElement("span");
+    name.style.cssText = "width:64px;flex:0 0 64px;color:var(--ink-2);font-weight:600";
+    name.textContent = key;                     /* core / sam 是包名，不翻 */
+    el.appendChild(name);
+
+    var st = document.createElement("span");
+    st.style.cssText = "flex:1 1 auto;min-width:0;color:var(--ink-3);font-size:11.5px";
+    st.textContent = stateText(pkg);
+    st.title = st.textContent;
+    el.appendChild(st);
+
+    if (!pkg || !pkg.installed) {
+      var b = document.createElement("button");
+      b.className = "mini";
+      b.type = "button";
+      b.textContent = "下载";
+      b.disabled = !!BUSY;
+      b.addEventListener("click", function () { fetchGroup(key, b); });
+      el.appendChild(b);
+    }
+    return el;
+  }
+
+  function paint(d) {
+    var box = $("pkgBox"), tag = $("pkgTag");
+    if (!box) return;
+    box.innerHTML = "";
+    box.className = "";
+    if (!d || !d.ok) {
+      box.className = "hint";
+      box.textContent = say("读不到权重清单：", "Cannot read the weight list: ") +
+                        String((d && (d.error || d.detail)) || "weights/manifest.json");
+      if (tag) { tag.textContent = say("未知", "unknown"); tag.className = "tag t-gray"; }
+      return;
+    }
+    var pk = d.packages || {};
+    var keys = Object.keys(pk);
+    if (!keys.length) {
+      box.className = "hint";
+      box.textContent = say("清单里没有功能包", "The list declares no packs");
+      return;
+    }
+    keys.sort(function (a, b) { return (pk[a].required ? 0 : 1) - (pk[b].required ? 0 : 1); });
+    keys.forEach(function (k) { box.appendChild(row(k, pk[k])); });
+    var miss = keys.filter(function (k) { return !pk[k].installed; });
+    if (tag) {
+      tag.textContent = miss.length ? say("缺 " + miss.length + " 个包", miss.length + " packs missing")
+                                    : say("齐全", "all installed");
+      tag.className = "tag " + (miss.length ? "t-yellow" : "t-green");
+    }
+    var msg = $("pkgMsg");
+    if (msg && !BUSY) {
+      msg.textContent = d.fetch && d.fetch.ready === false
+        ? say("下载器不可用：" + (d.fetch.hint || "modelhub.fetch 不在"), "")
+        : "";
+    }
+  }
+
+  function load() {
+    var box = $("pkgBox");
+    if (box) { box.className = "hint"; box.textContent = "正在读取权重清单…"; }
+    return fetch("/api/weights/status")
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) { paint(d); return d; })
+      .catch(function () { paint(null); return null; });
+  }
+
+  function setMsg(txt) {
+    var m = $("pkgMsg");
+    if (m) m.textContent = txt || "";
+  }
+
+  function stopTick() { if (TIMER) { clearInterval(TIMER); TIMER = 0; } }
+
+  function tick(group) {
+    fetch("/api/weights/fetch/status").then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (s) {
+        if (!s || typeof s !== "object") throw new Error("no status");
+        var line = s.line || "";
+        setMsg(s.pct + "% · " + line);
+        if (s.running) return;
+        stopTick();
+        BUSY = "";
+        if (s.error) { setMsg(say("下载失败：" + s.error, "Download failed: " + s.error)); load(); return; }
+        setMsg(say("下载完成，重新检测…", "Download finished — re-checking…"));
+        load();
+      })
+      .catch(function () { stopTick(); BUSY = ""; setMsg(say("读不到下载进度", "Cannot read download progress")); });
+  }
+
+  function fetchGroup(group, btn) {
+    if (BUSY) return;
+    var base = String(($("pkgUrl") && $("pkgUrl").value) || "").trim();
+    if (!base) {
+      /* 清单里没有 url，必须给镜像 —— 别让用户点了才在日志里看到这句 */
+      setMsg(say("先填镜像地址：下载器需要 https:// 前缀的权重站（清单里没有内置 url）。",
+                 "Enter a mirror first: the downloader needs an https:// weight site (the list has no built-in url)."));
+      return;
+    }
+    BUSY = group;
+    if (btn) { btn.disabled = true; btn.textContent = "准备中…"; }
+    setMsg("…");
+    fetch("/api/weights/fetch", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ group: group, url_base: base })
+    }).then(function (r) {
+      return r.json().then(function (d) {
+        if (!r.ok) throw new Error((d && (d.detail || d.error)) || ("HTTP " + r.status));
+        return d;
+      });
+    }).then(function () {
+      stopTick();
+      TIMER = setInterval(function () { tick(group); }, 1000);
+      tick(group);
+    }).catch(function (e) {
+      BUSY = "";
+      if (btn) { btn.disabled = false; btn.textContent = "下载"; }
+      setMsg(say("下载没能启动：" + ((e && e.message) || e), ""));
+    });
+  }
+
+  function enter() {
+    var box = $("pkgBox");
+    if (!box) return null;
+    if (!box.dataset.pkBound) {
+      box.dataset.pkBound = "1";
+      var r = $("pkgRefresh");
+      if (r) r.addEventListener("click", function () { load(); });
+      var u = $("pkgUrl");
+      if (u) {
+        try { u.value = window.localStorage.getItem("dfl-weights-mirror") || ""; } catch (e) {}
+        u.addEventListener("change", function () {
+          try { window.localStorage.setItem("dfl-weights-mirror", String(u.value || "").trim()); } catch (e) {}
+        });
+      }
+    }
+    return load();
+  }
+
+  window.WPK = { enter: enter, refresh: load, _test: { stateText: stateText, size: size } };
+
+  /* 刷新 / 深链接直接落在设置页：主 IIFE 的 go() 在这段之前就跑过了，
+     那时 window.WPK 还不存在，这里补一次（和 WKG 对 tool-mask 的处理一致）。 */
+  try {
+    document.addEventListener("DOMContentLoaded", function () {
+      var h = "";
+      try { h = String((window.location && window.location.hash) || "").replace(/^#/, ""); } catch (e) {}
+      if (h === "settings") enter();
+    });
+  } catch (e2) {}
+})();
+

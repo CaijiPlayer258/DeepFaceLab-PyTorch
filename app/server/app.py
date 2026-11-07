@@ -9,8 +9,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 
 # 4.1 是 GUI 应用：任何子进程只要弹一下黑色控制台窗口，用户都会以为出事了。
@@ -188,6 +190,8 @@ class _SafeUnpickler(__import__("pickle").Unpickler):
     _OK = {
         ("numpy.core.multiarray", "_reconstruct"),
         ("numpy._core.multiarray", "_reconstruct"),
+        ("numpy.core.multiarray", "scalar"),
+        ("numpy._core.multiarray", "scalar"),
         ("numpy", "ndarray"),
         ("numpy", "dtype"),
         ("collections", "OrderedDict"),
@@ -195,6 +199,11 @@ class _SafeUnpickler(__import__("pickle").Unpickler):
         ("builtins", "set"), ("builtins", "frozenset"),
         ("builtins", "int"), ("builtins", "float"), ("builtins", "str"),
         ("builtins", "bytes"), ("builtins", "bool"),
+        # protocol≤2 没有 BINBYTES：bytes（xseg_mask 就是 bytes）一律存成
+        # _codecs.encode(str,'latin1')。少了这条，带遮罩的 DFLJPG 在这里
+        # 一律解不开 → 读出来是个空 dict，看着像"这张图没有元数据"。
+        # routes_mask._APP15_ALLOWED / _align._ALLOWED 都补过同一条。
+        ("_codecs", "encode"),
     }
 
     def find_class(self, module, name):
@@ -341,6 +350,57 @@ def _ffmpeg_exe():
         return _iff.get_ffmpeg_exe()
     except Exception:
         return "ffmpeg"
+
+
+def _open_video(src, out_params, first=False, in_params=None):
+    """打开 rawvideo 解码管道：先按 _hwaccel 的结论上硬解，失败静默换软解。
+
+    硬解在探测阶段过了、但这条片子解不开（编码 profile 不支持 / 显存不够）时也不
+    抛给调用方 —— 关掉重开一条软解管道就是了，绝不让一次抽取因为硬解而挂掉。
+    first=True 时顺带把第一帧读出来：硬解「给了头但吐不出帧」这种假成功只有真读
+    一帧才发现得了。
+    """
+    import imageio_ffmpeg
+    from . import _hwaccel
+
+    ip = list(in_params) if in_params is not None else _hwaccel.input_params(src)
+    mode = _hwaccel.current()
+    attempts = [(mode, ip), ("none", [])] if ip else [("none", [])]
+    last = None
+    for name, params in attempts:
+        gen = None
+        try:
+            gen = imageio_ffmpeg.read_frames(
+                str(src),
+                pix_fmt="bgr24",               # 直接用 BGR：省掉一次通道反转拷贝（~3ms/帧）
+                input_params=list(params),
+                output_params=list(out_params),
+            )
+            meta = next(gen)
+            W, H = meta.get("size") or (0, 0)
+            if not W or not H:
+                raise RuntimeError("ffmpeg 没给出尺寸")
+            if not first:
+                return gen, meta
+            try:
+                f0 = next(gen)
+            except StopIteration:
+                f0 = None
+            if f0 is None or len(f0) != W * H * 3:
+                raise RuntimeError("解不出帧")
+            return gen, meta, f0
+        except Exception as e:                      # noqa: BLE001
+            last = e
+            if gen is not None:
+                try:
+                    gen.close()
+                except Exception:
+                    pass
+            if name != "none":
+                _hwaccel.note_failure(name, e)
+                print("[decode] hwaccel=%s 实跑失败，本次改用 none：%s"
+                      % (name, str(e)[:160]), flush=True)
+    raise last
 
 
 def _extract_frames(video: Path, out_dir: Path, total_hint: int = 0,
@@ -497,7 +557,7 @@ _DET_ALIAS = {
 
 
 def _get_detector(name="det_500m"):
-    """按需加载检测器（模型在 4.0 的 modelhub 里，只读引用）。
+    """按需加载检测器（权重平铺在 weights/ 根下，只读引用）。
 
     支持文件名（det_10g / det_500m）和界面名（RetinaFace_10g / TinyMog）。
     """
@@ -507,28 +567,23 @@ def _get_detector(name="det_500m"):
         if "tinymog" in _det_cache:
             return _det_cache["tinymog"]
         from ._detect import TinyMogDet
-        from ._paths import modelhub_dir, weights_dir
-        for p in (weights_dir() / "onnx" / "TinyMog" / "TinyMog.onnx",
-                  ROOT / "modelhub" / "onnx" / "TinyMog" / "TinyMog.onnx"):
-            if p.is_file():
-                det = TinyMogDet(str(p), workspace=WORKSPACE, engine_name="tinymog")
-                _det_cache["tinymog"] = det
-                return det
+        p = _detector_path("tinymog.onnx")
+        if p is not None:
+            det = TinyMogDet(str(p), workspace=WORKSPACE, engine_name="tinymog")
+            _det_cache["tinymog"] = det
+            return det
         raise HTTPException(404, "找不到 TinyMog 模型")
 
     file_name = _DET_ALIAS.get(low, key)
     if file_name in _det_cache:
         return _det_cache[file_name]
     from ._detect import RetinaFaceDet
-    from ._paths import modelhub_dir, weights_dir
-    hub = weights_dir() / "onnx" / "RetinaFace"
-    cand = [hub / (file_name + ".onnx"),
-            ROOT / "modelhub" / "onnx" / "RetinaFace" / (file_name + ".onnx")]
-    for p in cand:
-        if p.is_file():
-            det = RetinaFaceDet(p, 640)
-            _det_cache[file_name] = det
-            return det
+    # det_10g → retinaface_10g.onnx（平铺在 weights/ 根下）
+    p = _detector_path("retinaface_%s.onnx" % file_name.replace("det_", ""))
+    if p is not None:
+        det = RetinaFaceDet(p, 640)
+        _det_cache[file_name] = det
+        return det
     raise HTTPException(404, "找不到检测模型 " + key)
 
 
@@ -1362,10 +1417,27 @@ CACHE_DIR = MODEL_DIR / ".cache"
 
 
 def _read_dat(dat_path: Path) -> dict:
-    """读 *_data.dat：iter / options / loss_history / sample_for_preview。"""
-    import pickle
-    with open(dat_path, "rb") as fh:
-        return pickle.load(fh)
+    """读 *_data.dat：iter / options / loss_history / sample_for_preview。
+
+    TF 时代（DFL 1.x / 2.0）的 dat 在这里就被翻成 4.1 的 options 形状：裸 pickle 读出来
+    的 learn_mask / ed_ch_dims / face_type 全名，引擎不认、参数页也不认。键名与取值
+    规则只有 app/engine/core/legacy_dat.py 一份出处，见 server/_legacy.py。
+    """
+    return _read_dat_info(dat_path)[0]
+
+
+def _read_dat_info(dat_path: Path):
+    """(完整 dat, 迁移信息)。
+
+    迁移信息是给界面用的那一条：detected / counts / report / 权重现状 / 可复制的
+    转权重命令。新格式 dat 返回 detected=False，一个字都不改。
+    """
+    from ._legacy import notice, read_dat
+    data, _info = read_dat(dat_path)
+    try:
+        return data, notice(dat_path)      # 命中缓存，只多一次 glob
+    except Exception:
+        return data, _info
 
 
 def _spark(loss_history, n=2500):
@@ -1439,6 +1511,14 @@ def _preview_jpg(dat_path: Path) -> Path:
     return Path(str(dat_path)[: -len("_data.dat")] + "_preview.jpg")
 
 
+# 新格式 dat / 快路上的模型：legacy 字段的占位，保证 /api/models 里每条都同构
+_NO_LEGACY = {
+    "detected": False, "source": "params-cache", "counts": {}, "report": [],
+    "reasons": [], "weights": {"torch": 0, "tf": 0, "pth": [], "npy": []},
+    "needs_convert": False, "hint": "", "note": "", "command": "",
+}
+
+
 def _fast_model_entry(dat_path: Path) -> dict:
     """两个小文件就够：参数缓存 + 预览快照。都不在就返回 None 走老路。
 
@@ -1485,6 +1565,9 @@ def _fast_model_entry(dat_path: Path) -> dict:
         "trained_at": int(dat_path.stat().st_mtime),
         "has_preview": has_prev,
         "preview_url": ("/api/models/" + model_name + "/preview.png") if has_prev else None,
+        # 走 .params 快路的模型一定是 4.1 自己训练出来的：没有 legacy 可言。
+        # 字段保留是为了让界面只判断 legacy.detected，不用管接口来自哪条路。
+        "legacy": dict(_NO_LEGACY),
     }
 
 
@@ -1515,9 +1598,9 @@ def _model_entry(dat_path: Path) -> dict:
         return entry
 
     try:
-        dat = _read_dat(dat_path)
+        dat, legacy = _read_dat_info(dat_path)
     except Exception:
-        dat = {}
+        dat, legacy = {}, dict(_NO_LEGACY)
 
     opt = dat.get("options") or {}
     loss = dat.get("loss_history") or []
@@ -1543,12 +1626,17 @@ def _model_entry(dat_path: Path) -> dict:
         "batch_size": int(opt.get("batch_size", 0) or 0),
         "bf16": str(opt.get("use_bf16", "False")) == "True",
         "optimizer": str(opt.get("optimizer", "")),
-        "iter": int(len(loss)),
+        # dat 里的 iter 才是真迭代数；loss_history 只是采样，早年被当成 iter 用，
+        # 结果是 41k 次训练的模型在卡片上写着「3 次迭代」。
+        "iter": int(dat.get("iter") or 0) or int(len(loss)),
         "spark": spark,
         "has_dfm": dfm.exists(),
         "weights": weights,
         "trained_at": int(dat_path.stat().st_mtime),
         "has_preview": bool(ok_prev),
+        # TF 时代的 dat：有没有迁移、迁了几项、要不要转权重，界面据此在参数页顶部
+        # 出一条非阻塞提示（新格式这里就是 detected=False，什么都不显示）
+        "legacy": legacy,
     }
 
     try:
@@ -1712,7 +1800,7 @@ def _spec_tables():
             "face_types": _FACE_TYPES,
             "dims": {"ae_dims": 256, "e_dims": 64, "d_dims": 128, "d_mask_dims": 42},
             "dims_liae": {"ae_dims": 352, "e_dims": 102, "d_dims": 102, "d_mask_dims": 32},
-            "limits": {"resolution": [64, 640], "ae_dims": [64, 1024],
+            "limits": {"resolution": [64, 1536], "ae_dims": [64, 1024],
                        "e_dims": [16, 256], "d_dims": [16, 256], "d_mask_dims": [8, 128],
                        "batch_size": [1, 64]},
         }
@@ -1788,6 +1876,19 @@ def _train_worker(name: str, cpu_only: bool):
     if not dst_dir:
         dst_dir = str(WORKSPACE / "data_dst" / "aligned") if (WORKSPACE / "data_dst" / "aligned").is_dir() else str(WORKSPACE / "data_dst")
 
+    # 预训练集：以前这里**从来不给引擎传** --pretraining-data-dir，
+    # 所以参数页里填的「预训练集」形同虚设（引擎只会退回到 dst）。
+    # 现在：dat 里 pretrain=True 且路径非空 → 传下去；空着 → 不传，
+    # 由引擎走它自己的默认（dst 训练集）。
+    pt_dir = ""
+    try:
+        if dat:
+            _po = (_pk.loads(dat.read_bytes()).get("options") or {})
+            if _po.get("pretrain"):
+                pt_dir = str(_po.get("pretrain_dataset_path") or "").strip()
+    except Exception:
+        pt_dir = ""
+
     # 走包装脚本：把 4.0 的 WebUI 和自动开浏览器摘掉，其余照旧
     boot = Path(__file__).resolve().parent / "_dfl_train.py"
     entry = str(boot) if boot.is_file() else str(main_py)
@@ -1801,8 +1902,23 @@ def _train_worker(name: str, cpu_only: bool):
            "--silent-start",
            "--webui-port", str(WEBUI_PORT),
            "--webui-password", WEBUI_PASSWORD]
+    if pt_dir:
+        cmd += ["--pretraining-data-dir", pt_dir]
     if cpu_only:
         cmd.append("--cpu-only")
+
+    # 梯度累计：4.1 界面会把 target_batch 拆成 batch_size / accum_steps，
+    # 但引擎目前**没有实现梯度累计**（Model_SAEHD 里只有一句注释说明它没有）。
+    # 与其让人以为等效 batch 生效，不如开局就说明白。
+    try:
+        _o = (__import__("pickle").loads(_model_dat(name).read_bytes()).get("options") or {}) if _model_dat(name) else {}
+        _acc = int(_o.get("accum_steps") or 0)
+        if _acc > 1:
+            print("[trainer] 注意：accum_steps=%d（目标 batch %s）目前不会生效 —— "
+                  "引擎尚未实现梯度累计，实际按 batch_size=%s 训练。"
+                  % (_acc, _o.get("target_batch") or "?", _o.get("batch_size") or 1), flush=True)
+    except Exception:
+        pass
 
     # 目标迭代次数（模型 options 里记着，用来算 ETA）
     target = 0
@@ -2072,16 +2188,17 @@ def _version() -> str:
 
 
 def _count_images(folder: Path) -> int:
-    """只数**这一层**的图片，不递归。
+    """只数**这一层**的图片，不递归，也不数 _/. 开头的缓存文件。
 
     训/合成用的都是 aligned 根目录下的那批（DFL 只扫一层），
     以前这里用 rglob，分组之后根目录空了还照样报 1204 张，
     和训练器实际看到的 0 张对不上。
+    现在口径统一到 _dataset_fast.list_images（唯一实现），这里只做转发。
     """
     if not folder.is_dir():
         return 0
-    return sum(1 for p in folder.iterdir()
-               if p.is_file() and p.suffix.lower() in IMAGE_EXT)
+    from ._dataset_fast import count_images
+    return count_images(folder)
 
 
 def _dataset(name: str) -> dict:
@@ -2093,6 +2210,9 @@ def _dataset(name: str) -> dict:
         "aligned": str(d),
         "exists": root.is_dir(),
         "count": _count_images(d) if d.is_dir() else 0,
+        # 这个 count 数的是**哪个目录**：以前 UI 把它当"当前选中的目录"用，
+        # 于是选了 data_src/1（670 张）也照样显示 data_src/aligned 的 1203 张。
+        "count_dir": str(d) if d.is_dir() else "",
     }
 
 
@@ -2145,6 +2265,9 @@ async def save_settings(payload: dict):
 
 
 # ---------------- 演示用任务状态（M0 占位，M1 换成真实提取器） ----------------
+STAGE_FAILED = -1        # 失败收尾（0 抽帧 / 1 对齐 / 2 遮罩 / 3 完成 之外的第四种）
+
+
 class Job:
     def __init__(self):
         self.lock = threading.Lock()
@@ -2156,11 +2279,45 @@ class Job:
             self.pct = 0
             self.fps = 0.0
             self.faces = 0.0
+            self.faces_new = 0.0   # 本次运行新落盘的脸（不含 base_faces），人脸速度的分子
             self.done = 0
             self.total = 0
             self.msg = "就绪"
-            self.stage = 0          # 0 抽帧 / 1 对齐 / 2 应用遮罩 / 3 完成
+            self.stage = 0          # 0 抽帧 / 1 对齐 / 2 应用遮罩 / 3 完成 / -1 失败
             self.t0 = 0.0
+            self.ok = None          # None=没跑/在跑 · True=成功结束 · False=失败
+            self.error = ""         # 失败原因（ok=False 时必定非空），前端据此出红条
+
+    def fail(self, exc, where: str = "") -> str:
+        """把异常落成「失败」态 —— 不许表现成「完成」。
+
+        事故复盘：给 TinyMogDet 多传了一个参数 → TypeError。异常抛在抽取线程里
+        没人接，JOB 停在 pct<100 的空转态；前端把「没在跑」当成「跑完了」，
+        界面上是「提取完成 0 帧」。所以失败必须一次写完四件事：
+            running=False / ok=False / error 非空（msg 同步成同一句）
+            stage=STAGE_FAILED —— 前端看到它就不再显示「提取完成」
+        """
+        name = type(exc).__name__
+        # PipelineError 只是外壳，报里面那个真异常才有用（类型名 + 200 字说明）
+        inner = getattr(exc, "original", None)
+        if inner is not None:
+            name, exc = type(inner).__name__, inner
+        detail = " ".join(str(exc).split())[:200] or "（没有异常说明）"
+        text = "提取失败：%s: %s" % (name, detail)
+        with self.lock:
+            self.running = False
+            self.ok = False
+            self.error = text
+            self.msg = text
+            self.stage = STAGE_FAILED
+            self.pct = min(int(self.pct or 0), 99)
+        # 自检脚本读 _LAST_EXTRACT，别只把失败留在界面上
+        try:
+            _LAST_EXTRACT.update({"ok": False, "error": text, "where": where})
+        except Exception:
+            pass
+        print("[extract] %s%s" % (text, ("  @ " + where) if where else ""), flush=True)
+        return text
 
     def begin(self, stage: int, total: int, msg: str = ""):
         """进入一个新阶段：重置计时与计数，前端据此算速度和剩余时间。"""
@@ -2179,20 +2336,75 @@ class Job:
             rate = (self.done / el) if (el > 0.3 and self.done) else 0.0
             left = max(0, self.total - self.done)
             eta = (left / rate) if (rate > 0 and left > 0) else 0.0
+            # 「人脸速度」和「帧速度」同一个口径：分子都是**本次运行**的计数
+            # （帧 = done / faces 用 faces_new，续跑时不含目录里原有的 base_faces），
+            # 分母都是 el（== 前端拿到的 elapsed）。以前前端自己拿累计 faces / elapsed
+            # 算，续跑会虚高；而真正的毛病是 faces 在跑的时候压根没更新过。
+            face_rate = (self.faces_new / el) if (el > 0.3 and self.faces_new) else 0.0
             return {
                 "running": self.running, "pct": self.pct, "fps": self.fps,
-                "faces": self.faces, "done": self.done, "total": self.total,
+                "faces": self.faces, "faces_new": self.faces_new,
+                "face_rate": round(face_rate, 2),
+                "done": self.done, "total": self.total,
                 "msg": self.msg, "stage": self.stage,
+                "ok": self.ok, "error": self.error,
                 "rate": round(rate, 2), "eta": round(eta, 1), "elapsed": round(el, 1),
             }
 
 
 JOB = Job()
 
+# 最近一次 _align_stream 的实测数字（模式/耗时/队列深度/取消）。自检脚本读它，
+# 不解析 stdout —— 打印格式可以随便改，数字口径不变。
+_LAST_EXTRACT = {}
+
+
+def _job_fail(where: str, exc=None) -> str:
+    """统一失败收口：JOB 落失败态 + 完整 traceback 进日志。
+
+    以前异常只出现在 stderr（GUI 启动时根本没人看得见），界面拿到的却是「完成」。
+    """
+    if exc is None:
+        exc = sys.exc_info()[1]
+    text = JOB.fail(exc, where=where)
+    tb = traceback.format_exc()
+    if tb and "NoneType: None" not in tb:
+        print(tb.rstrip(), flush=True)
+    return text
+
+
+def _job_status() -> dict:
+    """抽取任务的一次性状态（前端轮询 / 自检脚本都读这一份）。"""
+    snap = JOB.snapshot()
+    snap["ok"] = JOB.ok
+    snap["error"] = JOB.error
+    return snap
+
+
+@app.get("/api/extract/status")
+def extract_status():
+    """GET 一次拿到 running/pct/msg/fps + ok/error（ok=False 时 error 必非空）。"""
+    return _job_status()
+
 
 def _frames_worker(src: str, dst: str, fps: float = 2.0, rotate: int = 0,
                    align: bool = True, quality: str = "high", size: int = 512,
                    skip: int = 0):
+    """线程入口（routes_trt.extract_start 的 target）：异常一律落成失败态。
+
+    这里必须是**唯一**的收口：worker 线程里抛出去的异常没人接，Python 只把它
+    打到 stderr，JOB 还停在半吊子的 pct 上 —— 界面就成了「完成 0 帧」。
+    """
+    try:
+        return _frames_run(src, dst, fps, rotate, align, quality, size, skip)
+    except BaseException as e:                 # noqa: BLE001 —— 线程顶层，SystemExit 也收
+        _job_fail("_frames_worker", e)
+        raise
+
+
+def _frames_run(src: str, dst: str, fps: float = 2.0, rotate: int = 0,
+                align: bool = True, quality: str = "high", size: int = 512,
+                skip: int = 0):
     """用 ffmpeg 抽帧到 dst，然后（可选）对齐成人脸。
 
     这一版修了三处：
@@ -2221,6 +2433,7 @@ def _frames_worker(src: str, dst: str, fps: float = 2.0, rotate: int = 0,
             fps = min(float(fps), src_fps)
         except Exception:
             pass
+        # 异常不在这里收：_frames_worker 是唯一收口（ok=False + error + traceback）。
         return _align_stream(str(src), out_dir, fps, rotate, quality, skip, src_fps)
 
     # 不对齐：保留原来的"抽成 jpg"路径（给只想拆帧的场景用）
@@ -2274,7 +2487,7 @@ def _frames_worker(src: str, dst: str, fps: float = 2.0, rotate: int = 0,
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                             creationflags=_NO_WINDOW, text=True, bufsize=1)
-    t0 = time.time()
+    t0 = JOB.t0 or time.time()      # 与 SSE 的 elapsed 同一个时钟
     made = 0
     try:
         for line in proc.stdout:
@@ -2304,6 +2517,8 @@ def _frames_worker(src: str, dst: str, fps: float = 2.0, rotate: int = 0,
         JOB.total = max(total, made)
         JOB.pct = 100
         JOB.faces = 0
+        JOB.ok = True           # 走到这里才是真的"跑完了"
+        JOB.error = ""
         JOB.msg = "完成：%d 帧 → %s" % (made, str(frames_dir))
     return made
 
@@ -2325,7 +2540,6 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     """
     import queue
     import threading
-    import imageio_ffmpeg
     import numpy as np
     import cv2
     from ._align import align_face, write_dfljpg, pose_from_kps
@@ -2337,9 +2551,11 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     heavy = _get_heavy_detector() if quality == "high" else None
     primary = heavy if quality == "high" else fast
     if primary is None:
-        with JOB.lock:
-            JOB.running = False
-            JOB.msg = "检测器不可用：%s 的模型没找到" % ("RetinaFace(det_10g)" if quality == "high" else "TinyMog")
+        # 「模型没找到」也是失败：以前只改 msg 然后 return 0，前端收到的仍是「完成」。
+        _job_fail("_align_stream/检测器",
+                  RuntimeError("检测器不可用：%s 的模型没找到（weights/ 根下的 %s）"
+                               % (("RetinaFace(det_10g)" if quality == "high" else "TinyMog"),
+                                  "retinaface_10g.onnx" if quality == "high" else "tinymog.onnx")))
         return 0
     # TinyMog 走批量接口，需要提前把帧 letterbox 到 640；RetinaFace 自己会做
     need_canvas = bool(getattr(primary, "needs_canvas", False))
@@ -2361,21 +2577,25 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     # 坏命令并杀掉 ffmpeg（实测稳定复现 0 帧）。即便 fps == 源帧率，也显式写出来。
     vf.append("fps=%g" % max(0.01, float(fps)))
 
+    from . import _hwaccel
+    in_params = _hwaccel.input_params(str(src))     # 触发（或命中）一次探测，下面复用
+    norm = _hwaccel.normalize_filter()              # 硬解：先回 yuv420p 再转 BGR
+    if norm:
+        vf.append(norm)
+
     # vf 为空时不能传 -vf ""（ffmpeg 会报错），所以整段参数一起省掉
     # 不能传空列表：imageio_ffmpeg 在 output_params=[] 时会拼出坏命令并杀掉 ffmpeg（实测 0 帧）。
     # 没有滤镜就显式给个 null，等价于不处理。
     out_params = ["-vf", ",".join(vf)]
-    gen = imageio_ffmpeg.read_frames(
-        str(src),
-        pix_fmt="bgr24",                       # 直接用 BGR：省掉一次通道反转拷贝（~3ms/帧）
-        input_params=[],
-        output_params=out_params,
-    )
-    meta = next(gen)
+    # 解码走 _hwaccel 的候选链（cuda → d3d11va → qsv → none）：硬解起不来/吐不出帧
+    # 就地换软解，绝不把异常抛给抽取流程。first=True 顺带验一帧，防「有头无帧」。
+    gen, meta, first_frame = _open_video(str(src), out_params, first=True,
+                                        in_params=in_params)
     W, H = meta.get("size") or (0, 0)
     if not W or not H:
         try: gen.close()
         except Exception: pass
+        _job_fail("_align_stream/解码", RuntimeError("解不出分辨率，视频打不开或没有视频流：%s" % src))
         return 0
     dur = float(meta.get("duration") or 0)
     total_est = max(1, int(dur * max(0.01, float(fps)))) if dur else 1
@@ -2396,11 +2616,23 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     def _t():
         return time.perf_counter()
 
-    q_frames: "queue.Queue" = queue.Queue(maxsize=6)
-    q_detect: "queue.Queue" = queue.Queue(maxsize=6)
+    # TinyMog 的 batch 维是动态的：攒一批一起推理，能把每帧的固定开销摊薄。
+    # RetinaFace 的引擎是单图 profile，老老实实一张一张来。
+    # TinyMog 引擎的优化 profile 是 batch 1..4，超过 4 会被 TRT 拒绝（实测 batch=8 直接报错）
+    BATCH = min(8, int(os.environ.get("DFL_EXTRACT_BATCH") or (8 if need_canvas else 1)))
+
+    # 队列容量：DFL_EXTRACT_Q（默认 6，且**不低于一整批**，否则批永远凑不满）。
+    # 两种模式共用同一个值，否则对照不公平。
+    # 有界就是背压：解码线程 put 满了就阻塞，常驻内存与视频长度无关。
+    from . import _pipeline
+    q_cap = max(_pipeline.capacity(), BATCH)
+    q_frames: "queue.Queue" = queue.Queue(maxsize=q_cap)
+    q_detect: "queue.Queue" = queue.Queue(maxsize=q_cap)
     stop = threading.Event()
     stats = {"seen": 0, "made": 0, "fallback": 0}
-    t0 = time.time()
+    # 帧速度（JOB.fps = 解到第几帧 / el）与 SSE 的 elapsed 共用 JOB.t0：
+    # 前端算「张/秒」用的是 elapsed，两边各用各的 t0 会让两个速度一快一慢。
+    t0 = JOB.t0 or time.time()
     lock = threading.Lock()
 
     def _canvas(img):
@@ -2415,7 +2647,14 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     _pending = []          # [(path, crop, meta), ...] 攒够一批再跑 2D106
 
     def _flush():
-        """把攒下的脸一次性做 2D106，再统一落盘。"""
+        """把攒下的脸一次性做 2D106，再统一落盘。
+
+        **计数就在这一层**：谁写成功一张，stats["made"] 立刻 +1，JOB.faces 跟着更新。
+        以前只有调用方把 _flush/_emit 的返回值累加起来，而流水线模式里 emit 的返回值
+        要等 _pipeline.run() 整段跑完才回到 _align_stream —— 于是整段运行期间
+        stats["made"] 恒为 0，界面「已对齐人脸 0 张 / 人脸速度 0.0 张/秒」，
+        磁盘上却明明在长文件（截图事故的根因）。
+        """
         if not _pending:
             return 0
         crops = [c for _, c, _ in _pending]
@@ -2438,9 +2677,17 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
             try:
                 write_dfljpg(pth, crop, meta_f)
                 wrote += 1
-            except Exception:
+                with lock:                  # 落盘即计数：跑的过程中就能看到数字在长
+                    stats["made"] += 1
+            except Exception as e:          # noqa: BLE001 —— 落盘失败也要留痕
+                print("[extract] 写 %s 失败：%s" % (Path(pth).name, e), flush=True)
                 continue
         _pending.clear()
+        if wrote:
+            # 锁序：先放掉 lock 再拿 JOB.lock（_decode 那边是 JOB.lock → 读 stats，反向嵌套会死锁）
+            with JOB.lock:
+                JOB.faces_new = stats["made"]
+                JOB.faces = base_faces + stats["made"]
         return wrote
 
     def _emit(idx, img, faces):
@@ -2470,49 +2717,65 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
                 n += _flush()
         return n
 
-    def _reader():
-        idx = 0
-        it = iter(gen)
-        try:
-            while True:
-                t_a = _t()
-                try:
-                    raw = next(it)          # ← 真正的管道读取（ffmpeg 解码 + 传输）
-                except StopIteration:
-                    break
-                cost["read"] += _t() - t_a
-                if stop.is_set() or not JOB.running:
-                    break
-                if len(raw) != W * H * 3:
-                    continue
-                t_b = _t()
-                frame = np.frombuffer(raw, np.uint8).reshape(H, W, 3)
-                q_frames.put((idx, frame))
-                cost["put1"] += _t() - t_b
-                if PROF:
-                    qmax["q1"] = max(qmax["q1"], q_frames.qsize())
-                idx += 1
-                with lock:
-                    stats["seen"] = idx
-                if idx % 10 == 0:
-                    with JOB.lock:
-                        JOB.done = idx
-                        JOB.pct = min(99, int(idx * 100 / max(1, total_est)))
-                        el = max(0.01, time.time() - t0)
-                        JOB.fps = idx / el
-                        JOB.faces = base_faces + stats["made"]
-                        JOB.msg = "解码 %d 帧 · 已出 %d 张 · %.1f 帧/秒" % (
-                            idx, stats["made"], JOB.fps)
-        finally:
-            q_frames.put(None)
+    def _pipe_frames():
+        """_open_video 预读的那一帧 + 管道剩下的帧，同一序号起点。"""
+        if first_frame is not None:
+            yield first_frame
+        for raw in gen:
+            yield raw
 
-    # TinyMog 的 batch 维是动态的：攒一批一起推理，能把每帧的固定开销摊薄。
-    # RetinaFace 的引擎是单图 profile，老老实实一张一张来。
-    # TinyMog 引擎的优化 profile 是 batch 1..4，超过 4 会被 TRT 拒绝（实测 batch=8 直接报错）
-    BATCH = min(8, int(os.environ.get("DFL_EXTRACT_BATCH") or (8 if need_canvas else 1)))
+    def _decode(put):
+        """解码一级：管道读一帧 → put((idx, frame))。流水线与回退路径共用这段。
+
+        续跑（done_idx 里已有的帧）在这里就丢掉：它不需要检测、也没人写文件，
+        早点丢省一个队列位；idx 仍按真正读到的帧号走，编号不会错位。
+        """
+        idx = 0
+        it = iter(_pipe_frames())
+        while True:
+            t_a = _t()
+            try:
+                raw = next(it)          # ← 真正的管道读取（ffmpeg 解码 + 传输）
+            except StopIteration:
+                break
+            cost["read"] += _t() - t_a
+            if stop.is_set() or not JOB.running:
+                break
+            if len(raw) != W * H * 3:
+                continue
+            if idx not in done_idx:
+                frame = np.frombuffer(raw, np.uint8).reshape(H, W, 3)
+                put((idx, frame))
+            idx += 1
+            with lock:
+                stats["seen"] = idx
+            if idx % 10 == 0:
+                with JOB.lock:
+                    JOB.done = idx
+                    JOB.pct = min(99, int(idx * 100 / max(1, total_est)))
+                    el = max(0.01, time.time() - t0)
+                    JOB.fps = idx / el
+                    JOB.faces_new = stats["made"]
+                    JOB.faces = base_faces + stats["made"]
+                    JOB.msg = "解码 %d 帧 · 已出 %d 张 · %.1f 帧/秒" % (
+                        idx, stats["made"], JOB.fps)
+
+    fail_log = {"n": 0}
+
+    def _warn_detect(idx, err):
+        # 原来这里 except 一下就 append([]) —— TRT 偶发驱动错误会被静默吃成
+        # 「这一帧没人脸」，输出比上一次少一张，且没有任何痕迹。留一行日志。
+        fail_log["n"] += 1
+        if fail_log["n"] <= 20:
+            print("[extract] 检测失败（第 %d 帧，重试后仍失败）：%s" % (idx, err), flush=True)
 
     def _detect_batch(batch):
-        """batch: list[(idx, img)] → list[list[face]]"""
+        """batch: list[(idx, img)] → list[list[face]]
+
+        检测抛异常时先原样重试一次：TensorRT 在两个 CUDA 上下文并发执行时
+        （检测模型 + 2D106）偶发 "enqueueV3 ... Cuda Driver" 驱动错误，
+        重试一次就过了；只重试、不换算法，结果与一次跑通完全相同。
+        """
         if not batch:
             return []
         if need_canvas:
@@ -2520,7 +2783,11 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
             try:
                 res = primary.detect_batch(items)
             except Exception:
-                res = []
+                try:
+                    res = primary.detect_batch(items)
+                except Exception as e2:                 # noqa: BLE001
+                    _warn_detect(batch[0][0], e2)
+                    res = []
             if len(res) != len(batch):
                 res = [[] for _ in batch]
         else:
@@ -2529,93 +2796,179 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
                 try:
                     res.append(primary.detect(img))
                 except Exception:
-                    res.append([])
+                    try:
+                        res.append(primary.detect(img))
+                    except Exception as e2:             # noqa: BLE001
+                        _warn_detect(idx, e2)
+                        res.append([])
         return res
 
-    def _detector():
-        pending = []
-
-        def flush():
-            if not pending:
-                return
-            batch = list(pending)
-            pending.clear()
-            t_d = _t()
-            faces_list = _detect_batch(batch)
-            cost["det"] += _t() - t_d
-            t_p = _t()
-            for item, faces in zip(batch, faces_list):
-                # item 可能是 (idx, img) 或 (idx, img, canvas, scale)
-                q_detect.put((item[0], item[1], faces))
-            cost["put2"] += _t() - t_p
-            if PROF:
-                qmax["q2"] = max(qmax["q2"], q_detect.qsize())
-
-        while True:
-            t_a = _t()
-            item = q_frames.get()
-            cost["get1"] += _t() - t_a
-            if item is None:
-                flush()
-                q_detect.put(None)
-                return
-            if item[0] in done_idx:
-                continue
-            pending.append(item)
-            if len(pending) < BATCH:
-                continue
-            # 批次没满时看看队列里还有没有，有就一起吃掉（减少一次同步）
-            while len(pending) < BATCH:
-                try:
-                    nxt = q_frames.get_nowait()
-                except Exception:
-                    break
-                if nxt is None:
-                    q_frames.put(None)
-                    break
-                if nxt[0] not in done_idx:
-                    pending.append(nxt)
-            flush()
-
-    def _writer():
-        while True:
-            t_a = _t()
-            item = q_detect.get()
-            cost["get2"] += _t() - t_a
-            if item is None:
-                n = _flush()          # 收尾：把最后不满 8 张的一批也写掉
-                if n:
-                    with lock:
-                        stats["made"] += n
-                return
-            idx, img, faces = item
-            t_e = _t()
-            n = _emit(idx, img, faces)
-            cost["emit"] += _t() - t_e
-            if n:
-                with lock:
-                    stats["made"] += n
-
-    threads = [threading.Thread(target=_reader, name="ext-read", daemon=True),
-               threading.Thread(target=_detector, name="ext-detect", daemon=True),
-               threading.Thread(target=_writer, name="ext-write", daemon=True)]
-    for th in threads:
-        th.start()
+    # ---------------------------------------------------------------- 预热
+    # 两个模型各跑一次空输入，**在起任何 worker 之前**。原因：
+    # _trt_session.TrtSession 第一次执行时会把这次执行捕获成 CUDA Graph，捕获是
+    # 设备级操作 —— 如果此刻另一个线程正在推理（检测线程 vs 2D106），两边会互相踩，
+    # 表现为偶发 "[TRT][E] enqueueV3 ... Cuda Driver"，被检测侧的 except 吞掉后
+    # 就是「这次比上次少一张脸」。实测 21 次抽取里出现过 3 次，两种模式都有。
+    # 预热把捕获挪到安静期：跑通一次以后再也没有捕获，只有 replay。
     try:
+        if lm106 is not None:
+            lm106.landmarks68_batch([np.zeros((512, 512, 3), np.uint8)] * BATCH_106)
+    except Exception as e:                     # noqa: BLE001 —— 预热失败不影响主流程
+        print("[extract] 2D106 预热失败（不影响抽取）：%s" % e, flush=True)
+    try:
+        _detect_batch([(-1, np.zeros((64, 64, 3), np.uint8))])
+    except Exception as e:                     # noqa: BLE001
+        print("[extract] 检测器预热失败（不影响抽取）：%s" % e, flush=True)
+
+    # ---------------------------------------------------------------- 回退实现
+    def _legacy_run():
+        """DFL_EXTRACT_PIPELINE=0：改动前的三级三线程，原样留着做对照。
+
+        检测线程不再过滤 done_idx —— 那些帧在 _decode 里就没进队列（见上）。
+        """
+
+        def _reader():
+            def put(item):
+                t_b = _t()
+                q_frames.put(item)
+                cost["put1"] += _t() - t_b
+                if PROF:
+                    qmax["q1"] = max(qmax["q1"], q_frames.qsize())
+            try:
+                _decode(put)
+            finally:
+                q_frames.put(None)
+
+        def _detector():
+            pending = []
+
+            def flush():
+                if not pending:
+                    return
+                batch = list(pending)
+                pending.clear()
+                t_d = _t()
+                faces_list = _detect_batch(batch)
+                cost["det"] += _t() - t_d
+                t_p = _t()
+                for item, faces in zip(batch, faces_list):
+                    q_detect.put((item[0], item[1], faces))
+                cost["put2"] += _t() - t_p
+                if PROF:
+                    qmax["q2"] = max(qmax["q2"], q_detect.qsize())
+
+            while True:
+                t_a = _t()
+                item = q_frames.get()
+                cost["get1"] += _t() - t_a
+                if item is None:
+                    flush()
+                    q_detect.put(None)
+                    return
+                pending.append(item)
+                if len(pending) < BATCH:
+                    continue
+                # 批次没满时看看队列里还有没有，有就一起吃掉（减少一次同步）
+                while len(pending) < BATCH:
+                    try:
+                        nxt = q_frames.get_nowait()
+                    except Exception:
+                        break
+                    if nxt is None:
+                        q_frames.put(None)
+                        break
+                    pending.append(nxt)
+                flush()
+
+        def _writer():
+            while True:
+                t_a = _t()
+                item = q_detect.get()
+                cost["get2"] += _t() - t_a
+                if item is None:
+                    _flush()              # 收尾：把最后不满 8 张的一批也写掉（内部已计数）
+                    return
+                idx, img, faces = item
+                t_e = _t()
+                _emit(idx, img, faces)    # 计数在 _flush 里做，这里不要再累加
+                cost["emit"] += _t() - t_e
+
+        # 这三条线程以前是"裸的"：任一条抛异常就静默死掉，主线程还在 join 上等着。
+        # 统一包一层：异常记进 job_errors + 落失败态 + 置 stop + 塞哨兵（别让下游线程
+        # 卡在阻塞 get 上永远 join 不回来），收尾时抛回调用线程。
+        job_errors = []
+
+        def _guard(fn):
+            def _run():
+                try:
+                    fn()
+                except BaseException as e:      # noqa: BLE001 —— 线程顶层
+                    job_errors.append(e)
+                    _job_fail("_align_stream/" + fn.__name__, e)
+                    stop.set()
+                    for _q in (q_frames, q_detect):
+                        try:
+                            _q.put(None, timeout=1.0)
+                        except Exception:
+                            pass
+            return _run
+
+        threads = [threading.Thread(target=_guard(_reader), name="ext-read", daemon=True),
+                   threading.Thread(target=_guard(_detector), name="ext-detect", daemon=True),
+                   threading.Thread(target=_guard(_writer), name="ext-write", daemon=True)]
+        for th in threads:
+            th.start()
         for th in threads:
             th.join()
+        if job_errors:
+            raise job_errors[0]
+
+    # ---------------------------------------------------------------- 主路径
+    mode, cancelled, alive = "legacy", False, []
+    try:
+        if _pipeline.pipeline_enabled():
+            res = _pipeline.run(
+                decode=_decode,
+                detect_batch=_detect_batch,
+                emit=lambda item, faces: _emit(item[0], item[1], faces),
+                batch=BATCH, q_in=q_cap, q_out=q_cap,
+                should_stop=lambda: not JOB.running,
+                prof=cost, name="ext",
+            )
+            # 不再 res["made"] 回填：_flush 落盘时就逐个计过数了（这里再累加会翻倍）。
+            qmax["q1"] = max(qmax["q1"], int(res.get("q1max") or 0))
+            qmax["q2"] = max(qmax["q2"], int(res.get("q2max") or 0))
+            mode, cancelled, alive = "pipeline", bool(res["cancelled"]), list(res["alive"])
+            _flush()                     # 收尾：最后不满 8 张的一批（内部已计数）
+        else:
+            _legacy_run()
     finally:
         stop.set()
         try: gen.close()
         except Exception: pass
 
+    wall = max(1e-6, time.time() - t0)
+    # 最近一次抽取的实测数字：给 benchmark / 自检脚本读，不依赖解析 stdout
+    global _LAST_EXTRACT
+    _LAST_EXTRACT = {
+        "ok": True, "error": "",
+        "mode": mode, "frames": stats["seen"], "faces": stats["made"],
+        "wall": wall, "fps": stats["seen"] / wall,
+        "cost": {k: cost[k] for k in ("read", "put1", "get1", "det", "put2", "get2", "emit")},
+        "queue": q_cap, "batch": BATCH, "batch106": BATCH_106,
+        "q1max": qmax["q1"], "q2max": qmax["q2"],
+        "cancelled": cancelled, "alive": alive,
+        "hwaccel": _hwaccel.current(),
+    }
     if PROF:
-        wall = max(1e-6, time.time() - t0)
         try:
-            print("[extract-profile] wall=%.2fs  frames=%d  faces=%d" % (wall, stats["seen"], stats["made"]))
+            print("[extract-profile] mode=%s q=%d batch=%d  wall=%.2fs  frames=%d  faces=%d  %.1f 帧/秒"
+                  % (mode, q_cap, BATCH, wall, stats["seen"], stats["made"], stats["seen"] / wall))
             for k in ("read", "put1", "get1", "det", "put2", "get2", "emit"):
                 print("  %-5s %7.3fs  %5.1f%% of wall" % (k, cost[k], cost[k] * 100.0 / wall))
             print("  queue max depth: q1=%d q2=%d" % (qmax["q1"], qmax["q2"]))
+            if cancelled:
+                print("  cancelled at frame %d（worker 残留：%s）" % (stats["seen"], alive or "无"))
         except Exception:
             pass
 
@@ -2625,6 +2978,8 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
         JOB.total = max(stats["seen"], 1)
         JOB.pct = 100
         JOB.faces = base_faces + stats["made"]
+        JOB.ok = True           # 只有真的跑到底才置 True
+        JOB.error = ""
         JOB.msg = "完成：解码 %d 帧 · %d 张人脸 → %s" % (stats["seen"], stats["made"], str(face_dir))
     return stats["made"]
 
@@ -2662,15 +3017,11 @@ def _get_landmarks106():
     _lm106_cache["tried"] = True
     try:
         from ._landmarks106 import InsightFace106
-        from ._ortcuda import _candidate_roots
-        for root in _candidate_roots():
-            for rel in ("modelhub/onnx/InsightFace2d106/InsightFace2D106.onnx",
-                        "DeepFaceLab-PyTorch/modelhub/onnx/InsightFace2d106/InsightFace2D106.onnx"):
-                cand = Path(root) / rel
-                if cand.is_file():
-                    _lm106_cache["m"] = InsightFace106(str(cand), workspace=WORKSPACE,
-                                                       engine_name="insightface_2d106")
-                    return _lm106_cache["m"]
+        cand = _detector_path("insightface_2d106.onnx")
+        if cand is not None:
+            _lm106_cache["m"] = InsightFace106(str(cand), workspace=WORKSPACE,
+                                               engine_name="insightface_2d106")
+            return _lm106_cache["m"]
     except Exception:
         pass
     _lm106_cache["m"] = None
@@ -2730,48 +3081,73 @@ _fast_detector_cache = {"m": None, "tried": False}
 _heavy_detector_cache = {"m": None, "tried": False}
 
 
-def _detector_path(name):
-    hub = WORKSPACE / "modelhub" / "onnx"
-    cands = [hub, Path(__file__).resolve().parents[2] / "modelhub" / "onnx",
-             Path(__file__).resolve().parents[3] / "DeepFaceLab-PyTorch" / "modelhub" / "onnx"]
-    for base in cands:
-        p = base / name
-        if p.is_file():
-            return p
+# 平铺名 → 老布局（weights/onnx/<模型>/<原文件名>）。只是兜底，不是默认路径。
+_LEGACY_ONNX = {
+    "tinymog.onnx": "onnx/TinyMog/TinyMog.onnx",
+    "retinaface_10g.onnx": "onnx/RetinaFace/det_10g.onnx",
+    "retinaface_500m.onnx": "onnx/RetinaFace/det_500m.onnx",
+    "insightface_2d106.onnx": "onnx/InsightFace2d106/InsightFace2D106.onnx",
+}
+
+
+def _detector_path(flat):
+    """按**平铺名**找 onnx：weights/ 根优先（$DFL_WEIGHTS_DIR 可改），老布局兜底。"""
+    from ._paths import weights_dir
+    bases = [weights_dir(), ROOT / "weights", WORKSPACE / "modelhub"]
+    for base in bases:
+        for rel in (flat, _LEGACY_ONNX.get(flat, "")):
+            if not rel:
+                continue
+            p = base / rel
+            if p.is_file():
+                return p
     return None
 
 
 def _get_fast_detector():
     """快检测器：TinyMog（2.7 MB，SCRFD+MobileNetV1，batch 维是动态的）。"""
+    if _fast_detector_cache.get("error") is not None:
+        # 上次构造就失败了：每次抽取都如实报同一个异常，别退化成"模型没找到"
+        raise _fast_detector_cache["error"]
     if _fast_detector_cache["tried"]:
         return _fast_detector_cache["m"]
     _fast_detector_cache["tried"] = True
     try:
         from ._detect import TinyMogDet
-        p = _detector_path("TinyMog/TinyMog.onnx")
+        p = _detector_path("tinymog.onnx")
         if p is not None:
-            _fast_detector_cache["m"] = TinyMogDet(str(p), workspace=WORKSPACE, engine_name="tinymog")
-    except Exception:
-        pass
+            _fast_detector_cache["m"] = TinyMogDet(str(p), workspace=WORKSPACE, engine_name="tinymog",
+                                                graph_max_batch=8)   # 抽取走 batch，给它建图（启动预热期捕获，运行期只 replay）
+    except Exception as e:                      # noqa: BLE001
+        # 以前这里是 pass：签名不匹配（TypeError）被吞成 None，界面拿到「完成 0 帧」。
+        _fast_detector_cache["m"] = None
+        _fast_detector_cache["error"] = e
+        print("[extract] TinyMogDet 构造失败：%s: %s" % (type(e).__name__, e), flush=True)
+        raise
     return _fast_detector_cache["m"]
 
 
 def _get_heavy_detector():
     """重检测器：det_10g（召回更好），没有就退到 det_500m。"""
+    if _heavy_detector_cache.get("error") is not None:
+        raise _heavy_detector_cache["error"]
     if _heavy_detector_cache["tried"]:
         return _heavy_detector_cache["m"]
     _heavy_detector_cache["tried"] = True
     try:
         from ._detect import RetinaFaceDet
-        for nm in ("RetinaFace/det_10g.onnx", "RetinaFace/det_500m.onnx"):
+        for nm in ("retinaface_10g.onnx", "retinaface_500m.onnx"):
             p = _detector_path(nm)
             if p is not None:
                 _heavy_detector_cache["m"] = RetinaFaceDet(
                     str(p), workspace=WORKSPACE,
-                    engine_name=("retinaface_10g" if "10g" in nm else "retinaface_500m"))
+                    engine_name=nm[:-len(".onnx")])
                 break
-    except Exception:
-        pass
+    except Exception as e:                      # noqa: BLE001
+        _heavy_detector_cache["m"] = None
+        _heavy_detector_cache["error"] = e
+        print("[extract] RetinaFaceDet 构造失败：%s: %s" % (type(e).__name__, e), flush=True)
+        raise
     return _heavy_detector_cache["m"]
 
 
@@ -2788,6 +3164,7 @@ def _demo_worker():
             JOB.pct = int(i * 100 / total)
             JOB.fps = 34 + (i % 7) * 0.9
             JOB.faces = 9 + (i % 5) * 0.2
+            JOB.faces_new = JOB.faces
             JOB.msg = "处理中 %d / %d" % (i, total)
         time.sleep(0.02)
     with JOB.lock:
@@ -2923,6 +3300,23 @@ def remote_set(body: dict):
     return remote_state()
 
 
+def _capabilities() -> dict:
+    """可选能力的状态清单 —— 界面先问清楚再决定按钮灰不灰。
+
+    缺模型不是故障：点了才报错，用户看到的是「坏了」；进页就知道「没装」，
+    看到的是「装一下就好」。加新能力时在这里登记一条即可。
+    """
+    out = {}
+    try:
+        from . import _errface
+        out["errface"] = _errface.status()
+    except Exception as e:                      # 探测自己炸了也要给出状态，不能拖垮 /api/state
+        out["errface"] = {"capability": "errface", "available": False,
+                          "reason": "能力探测失败：%s" % str(e)[:200], "reason_en": "",
+                          "install": "", "install_en": "", "deps": {}}
+    return out
+
+
 @app.get("/api/state")
 def state():
     return {
@@ -2932,6 +3326,7 @@ def state():
         "datasets": {"src": _dataset("data_src"), "dst": _dataset("data_dst")},
         "models": _models(),
         "ports": _ports(),
+        "capabilities": _capabilities(),
     }
 
 
@@ -2943,7 +3338,7 @@ def _mask_worker(folder: str, workers: int = 8, model: str | None = None, out_si
     """
     import cv2
     from concurrent.futures import ThreadPoolExecutor
-    from ._align import read_dfljpg_meta, rewrite_dfljpg_meta, encode_xseg_mask
+    from ._align import read_dfljpg_metas, rewrite_dfljpg_meta, encode_xseg_mask
 
     xseg = _get_xseg(model)
     root = Path(folder)
@@ -2965,17 +3360,24 @@ def _mask_worker(folder: str, workers: int = 8, model: str | None = None, out_si
             JOB.msg = "找不到 XSeg 模型（workspace/model/XSegLite）"
         return 0
 
-    done = {"n": 0, "ok": 0}
+    done = {"n": 0, "ok": 0, "moved": 0}
 
     def _one(fp):
         try:
             if not JOB.running:
                 return
-            meta = read_dfljpg_meta(fp)
-            if meta is None:
-                return
+            head, legacy = read_dfljpg_metas(fp)
+            if head is None and legacy is None:
+                return                                  # 不是 DFLJPG（裸 jpg/png）
+            if (head or {}).get("xseg_mask") is not None:
+                return                                  # 头部已带遮罩：引擎读得到
+            meta = dict(legacy or {})
+            meta.update(head or {})                     # 头部优先，legacy 只补缺键
             if meta.get("xseg_mask") is not None:
-                pass
+                # 遮罩在 EOI 前那份 legacy 里（引擎看不到）：搬到头部，不重算
+                rewrite_dfljpg_meta(fp, meta)
+                with JOB.lock:
+                    done["moved"] += 1
             else:
                 img = _imread_any(fp)
                 if img is None:
@@ -2994,7 +3396,8 @@ def _mask_worker(folder: str, workers: int = 8, model: str | None = None, out_si
                 JOB.done = done["n"]
                 JOB.pct = int(done["n"] * 100 / max(1, total))
                 if done["n"] % 20 == 0 or done["n"] == total:
-                    JOB.msg = "应用遮罩 %d / %d · 新写入 %d" % (done["n"], total, done["ok"])
+                    JOB.msg = ("应用遮罩 %d / %d · 新写入 %d · 迁移 %d"
+                               % (done["n"], total, done["ok"], done["moved"]))
 
     with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
         list(pool.map(_one, files))
@@ -3002,7 +3405,7 @@ def _mask_worker(folder: str, workers: int = 8, model: str | None = None, out_si
     with JOB.lock:
         JOB.running = False
         JOB.pct = 100
-        JOB.msg = "应用遮罩完成：%d 张，新增 %d" % (total, done["ok"])
+        JOB.msg = "应用遮罩完成：%d 张，新增 %d，迁移 %d" % (total, done["ok"], done["moved"])
     return done["ok"]
 
 
@@ -3110,3 +3513,5 @@ app.include_router(_convert_router)
 
 from .routes_errface import router as _errface_router
 app.include_router(_errface_router)
+from .routes_weights import router as _weights_router
+app.include_router(_weights_router)

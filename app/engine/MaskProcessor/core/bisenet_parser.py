@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -78,8 +79,14 @@ class BiSeNetParser:
         """Lazy-load the BiSeNet model from ``xlib/models/bisenet/``."""
         import importlib.util
 
+        # 权重平铺：<仓库根>/weights/bisenet_model_final.pth（可用 DFL_WEIGHTS_DIR 覆盖）
+        weights_dir = Path(os.environ.get("DFL_WEIGHTS_DIR")
+                           or (PROJECT_ROOT.parent.parent / "weights"))
+        model_path = weights_dir / "bisenet_model_final.pth"
         bisenet_path = PROJECT_ROOT / "xlib" / "models" / "bisenet" / "BiSeNet.py"
-        model_path = PROJECT_ROOT / "xlib" / "models" / "bisenet" / "model_final.pth"
+        if not bisenet_path.is_file():
+            # 4.1 里没有 xlib/models/bisenet/，建模代码收在 app/engine/vendor/bisenet_net.py
+            bisenet_path = PROJECT_ROOT / "vendor" / "bisenet_net.py"
 
         spec = importlib.util.spec_from_file_location("BiSeNet", str(bisenet_path))
         bisenet_mod = importlib.util.module_from_spec(spec)

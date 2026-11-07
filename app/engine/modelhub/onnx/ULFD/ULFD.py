@@ -31,7 +31,7 @@ class ULFD:
         if device_info not in ULFD.get_available_devices():
             raise Exception(f"device_info {device_info} not available for ULFD")
 
-        model_path = weights.path("onnx/ULFD/ULFD.onnx")
+        model_path = weights.path("ulfd.onnx")
         if not model_path.exists():
             raise FileNotFoundError(f"ULFD ONNX model not found at {model_path}")
 

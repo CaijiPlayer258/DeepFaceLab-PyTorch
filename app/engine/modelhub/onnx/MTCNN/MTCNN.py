@@ -30,15 +30,18 @@ class MTCNN:
         if device_info not in MTCNN.get_available_devices():
             raise Exception(f"device_info {device_info} not available for MTCNN")
 
-        model_dir = weights.dir('onnx/MTCNN')
+        # 权重平铺在 weights/ 根下：mtcnn_pnet.onnx / mtcnn_rnet.onnx / mtcnn_onet.onnx
+        self._pnet_path = weights.path('mtcnn_pnet.onnx')
+        self._rnet_path = weights.path('mtcnn_rnet.onnx')
+        self._onet_path = weights.path('mtcnn_onet.onnx')
         self._pnet_sess = InferenceSession_with_device(
-            str(model_dir / "pnet.onnx"), device_info
+            str(self._pnet_path), device_info
         )
         self._rnet_sess = InferenceSession_with_device(
-            str(model_dir / "rnet.onnx"), device_info
+            str(self._rnet_path), device_info
         )
         self._onet_sess = InferenceSession_with_device(
-            str(model_dir / "onet.onnx"), device_info
+            str(self._onet_path), device_info
         )
 
         self._pnet_input = self._pnet_sess.get_inputs()[0].name
@@ -46,8 +49,10 @@ class MTCNN:
         self._onet_input = self._onet_sess.get_inputs()[0].name
 
         # ── TRT BF16 加速 ──────────────────────
-        for _attr, _fname in [('_pnet_sess', 'pnet.onnx'), ('_rnet_sess', 'rnet.onnx'), ('_onet_sess', 'onet.onnx')]:
-            _p = model_dir / _fname
+        for _attr, _fname in [('_pnet_sess', 'mtcnn_pnet.onnx'),
+                              ('_rnet_sess', 'mtcnn_rnet.onnx'),
+                              ('_onet_sess', 'mtcnn_onet.onnx')]:
+            _p = weights.path(_fname)
             _trt_path = None
             try:
                 from xlib.trt import find_trt_engine

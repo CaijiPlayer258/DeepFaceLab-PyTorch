@@ -753,7 +753,7 @@ class FaceIDFilter(FacesetBaseProcessor):
                 print(f"  → 将加载模型并提取缺失的 embedding\n")
         
         # 初始化 ArcFace ONNX 提取器
-        # 模型在 modelhub/onnx/ArcFace/ 下
+        # 模型平铺在权重根下：weights/arcface_mbf.onnx
         project_root = Path(__file__).parent.parent
         model_dir = project_root / "modelhub" / "onnx" / "ArcFace"
         

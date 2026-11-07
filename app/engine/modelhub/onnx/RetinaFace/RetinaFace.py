@@ -10,9 +10,10 @@ from ..det_preprocess import preprocess, map_back, sliding_window_detect
 
 
 class RetinaFace:
+    # 权重平铺在 weights/ 根下：retinaface_10g.onnx / retinaface_500m.onnx
     MODEL_SIZES = {
-        'det_10g':  {'path': 'det_10g.onnx', 'scale': 1.0},
-        'det_500m': {'path': 'det_500m.onnx', 'scale': 0.5},
+        'det_10g':  {'path': 'retinaface_10g.onnx', 'scale': 1.0},
+        'det_500m': {'path': 'retinaface_500m.onnx', 'scale': 0.5},
     }
 
     @staticmethod
@@ -24,7 +25,7 @@ class RetinaFace:
             raise Exception(f'device_info {device_info} not available for RetinaFace')
         if model_name not in self.MODEL_SIZES:
             raise Exception(f'Unknown model: {model_name}')
-        path = weights.path('onnx/RetinaFace/' + self.MODEL_SIZES[model_name]['path'])
+        path = weights.path(self.MODEL_SIZES[model_name]['path'])
         self._sess = InferenceSession_with_device(str(path), device_info)
         self._input_name = self._sess.get_inputs()[0].name
         self.model_name = model_name

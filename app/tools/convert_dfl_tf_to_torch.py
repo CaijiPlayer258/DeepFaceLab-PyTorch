@@ -38,9 +38,23 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+# 4.1 的布局把引擎代码放在 app/engine（core / samplelib / main.py 都在那儿），
+# 所以 REPO_ROOT=app 本身不含 core：还得把 app/engine 也放进来，否则 `from core...`
+# 会直接 ModuleNotFoundError（4.0 老布局里 tools/ 就在引擎根下，这段自动跳过）。
+_ENGINE_ROOT = REPO_ROOT / "engine"
+if (_ENGINE_ROOT / "main.py").is_file() and str(_ENGINE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ENGINE_ROOT))
+
 
 def _read_pickle(path: Path):
-    return pickle.loads(path.read_bytes())
+    blob = Path(path).read_bytes()
+    # 和 dat 用同一个兼容读取器：py2 写的 pickle（str 里带非 ASCII）在 py3 下
+    # 直接 loads 会 UnicodeDecodeError，legacy_dat 那边已经有 fallback，别写两套。
+    try:
+        from core.legacy_dat import pickle_compat_loads
+        return pickle_compat_loads(blob)
+    except Exception:
+        return pickle.loads(blob)
 
 
 def _read_saveable_dict(path: Path) -> Dict[str, np.ndarray]:

@@ -3,6 +3,7 @@ from typing import Iterable, List, Optional
 
 import numpy as np
 import torch
+from . import _chunked as _ch
 
 from core.leras import nn
 
@@ -43,6 +44,7 @@ class Lion(nn.OptimizerBase):
         lr_plateau_min_ratio: float = 0.1,
         lr_plateau_partitions: int = 1,
         clipnorm: float = 0.0,
+        state_bf16: bool = False,
         name: Optional[str] = None,
         **kwargs,
     ):
@@ -80,6 +82,9 @@ class Lion(nn.OptimizerBase):
         self._lr_best_base = None    # 判定基准：只前移不回退
         self._best_loss = {}
         self.clipnorm = float(clipnorm)
+        # 优化器状态（动量）的存储精度：bf16 时每参数 2B 而不是 4B。
+        # 权重与梯度仍是 fp32（存档权重不受影响），只有 ms/vs 这类内部状态降精度。
+        self._state_dtype = torch.bfloat16 if state_bf16 else torch.float32
 
         self.iterations = torch.tensor(0, dtype=torch.int64)
 
@@ -121,7 +126,7 @@ class Lion(nn.OptimizerBase):
                 params.extend([p for p in item.parameters() if isinstance(p, torch.nn.Parameter)])
 
         self.params = params
-        self.ms = [torch.zeros_like(p, device=p.device, dtype=p.dtype) for p in self.params]
+        self.ms = [torch.zeros_like(p, device=p.device, dtype=self._state_dtype) for p in self.params]
 
         # lr_dropout 的掩码**不在这里生成**。
         # 原来只在初始化时抽一次、之后每步复用，等于「训练全程固定冻结同一批参数」，
@@ -286,13 +291,8 @@ class Lion(nn.OptimizerBase):
 
         scale = 1.0
         if self.clipnorm > 0.0:
-            sq_sum = None
-            for p in self.params:
-                if p.grad is None:
-                    continue
-                g = p.grad
-                v = (g.detach().float() ** 2).sum()
-                sq_sum = v if sq_sum is None else (sq_sum + v)
+            # 分块累加：单个 10 亿参数的张量若整块 **2 会再吃 4 GiB
+            sq_sum = _ch.grad_norm_sq(self.params)
             if sq_sum is not None:
                 norm = torch.sqrt(sq_sum)
                 n = float(norm.item())
@@ -311,6 +311,25 @@ class Lion(nn.OptimizerBase):
                     g = g * scale
 
                 m = self.ms[i]
+                if m.dtype != torch.float32:
+                    # ★ bf16 状态走分块原地更新：绝不整块 .float()。
+                    # 1024 分辨率下单张量 1.07B 参数，整块 fp32 副本就是 4 GiB。
+                    mp = _ch.flat(m); gp = _ch.flat(g); pp = _ch.flat(p)
+                    n = gp.numel()
+                    for s, e in _ch.chunks(n):
+                        gs = gp[s:e]
+                        if scale != 1.0:
+                            gs = gs * scale
+                        mc = mp[s:e].float()
+                        mc.mul_(b1).add_(gs, alpha=1.0 - b1)
+                        mp[s:e].copy_(mc)              # 状态降回 bf16
+                        delta = torch.sign(mc)
+                        if self.lr_dropout != 1.0:
+                            delta = delta * torch.bernoulli(
+                                torch.full_like(delta, self.lr_dropout))
+                        pp[s:e].add_(delta, alpha=-lr)
+                    self.ms[i] = m
+                    continue
                 m_t = b1 * m + (1.0 - b1) * g
 
                 # Lion: sign(momentum) update — no second moment, no epsilon
@@ -325,7 +344,7 @@ class Lion(nn.OptimizerBase):
                     step_delta = step_delta * mask
 
                 p.add_(step_delta)
-                self.ms[i] = m_t
+                self.ms[i] = m_t.to(self._state_dtype)
 
 
 nn.Lion = Lion

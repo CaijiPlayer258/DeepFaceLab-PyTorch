@@ -20,7 +20,7 @@ class S3FD:
         if device_info not in S3FD.get_available_devices():
             raise Exception(f'device_info {device_info} is not in available devices for S3FD')
 
-        path = weights.path('onnx/S3FD/S3FD.onnx')
+        path = weights.path('s3fd.onnx')
         SplittedFile.merge(path, delete_parts=False)
         
         self._sess = sess = InferenceSession_with_device(str(path), device_info)

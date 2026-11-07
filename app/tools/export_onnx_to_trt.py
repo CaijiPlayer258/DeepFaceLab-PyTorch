@@ -9,7 +9,7 @@
     {name}_bs{batch}_sm{SM}_trt{VER}_{MD5[:16]}.engine
 
 示例:
-    python tools/export_onnx_to_trt.py modelhub/onnx/ArcFace/w600k_mbf.onnx --name w600k_mbf
+    python tools/export_onnx_to_trt.py ../weights/arcface_mbf.onnx --name arcface_mbf
 """
 import os, sys, time, hashlib, argparse, warnings
 from pathlib import Path

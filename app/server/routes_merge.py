@@ -2595,11 +2595,12 @@ def _landmarks_model():
     _LM106["tried"] = True
     try:
         from ._landmarks106 import InsightFace106
-        from ._ortcuda import _candidate_roots
-        for root in _candidate_roots():
-            for rel in ("modelhub/onnx/InsightFace2d106/InsightFace2D106.onnx",
-                        "DeepFaceLab-PyTorch/modelhub/onnx/InsightFace2d106/InsightFace2D106.onnx"):
-                cand = Path(root) / rel
+        from ._paths import weights_dir
+        # 平铺布局：<weights>/insightface_2d106.onnx；老的分目录布局作兜底
+        for base in (weights_dir(), Path(__file__).resolve().parents[2] / "weights"):
+            for rel in ("insightface_2d106.onnx",
+                        "onnx/InsightFace2d106/InsightFace2D106.onnx"):
+                cand = Path(base) / rel
                 if cand.is_file():
                     _LM106["m"] = InsightFace106(str(cand),
                                                  providers=["CPUExecutionProvider"])

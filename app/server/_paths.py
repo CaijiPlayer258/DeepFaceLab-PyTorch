@@ -90,6 +90,12 @@ def weights_dir() -> Path:
     """权重根目录：$DFL_WEIGHTS_DIR > <仓库根>/weights。
 
     代码与模型分离后，.onnx/.pth 一律放这里，不进版本库。
+    **布局是平铺的**：weights/tinymog.onnx、weights/retinaface_10g.onnx……
+    没有 onnx/<模型>/ 这种子目录；唯一保留的子目录是 bert-base-uncased/
+    （AutoTokenizer.from_pretrained(dir) 要求词表和权重同目录）。
+
+    $DFL_WEIGHTS_DIR 仍可指向别处；指向老的分目录布局也能用
+    （modelhub/weights.py 的 LEGACY_LAYOUT 负责兜底），但默认路径是平铺。
     """
     env = os.environ.get("DFL_WEIGHTS_DIR")
     if env:
@@ -98,10 +104,12 @@ def weights_dir() -> Path:
 
 
 def modelhub_dir() -> Path:
-    """ONNX 权重目录：引擎的 modelhub 优先（包内 __file__ 相对寻址），其次根 weights/。"""
-    # 引擎那份优先：modelhub 的 python 包用 Path(__file__).parent 找 .onnx，
-    # 只有代码与权重在同一个目录时才成立。weights/ 留作外部补充。
-    for cand in (engine_root() / "modelhub", ROOT / "app" / "engine" / "modelhub", ROOT / "weights"):
+    """modelhub **代码**目录（不是权重目录）。
+
+    权重已经平铺到 <仓库根>/weights/ 根下，不再有 weights/onnx/ 这一层，
+    所以这里只回答「modelhub 这个 python 包在哪」—— 4.1 自己那份优先。
+    """
+    for cand in (ROOT / "app" / "engine" / "modelhub", engine_root() / "modelhub"):
         if (cand / "onnx").is_dir():
             return cand
-    return engine_root() / "modelhub"
+    return ROOT / "app" / "engine" / "modelhub"

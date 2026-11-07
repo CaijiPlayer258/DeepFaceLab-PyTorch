@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -10,6 +11,8 @@ import numpy as np
 from segment_anything import sam_model_registry, SamPredictor
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
+# 权重平铺在 <仓库根>/weights 根下（可用 DFL_WEIGHTS_DIR 覆盖）
+WEIGHTS_DIR = Path(os.environ.get("DFL_WEIGHTS_DIR") or (PROJECT_ROOT.parent.parent / "weights"))
 
 
 class SAMPredictor:
@@ -26,10 +29,11 @@ class SAMPredictor:
         mask = predictor.predict_with_box((x1, y1, x2, y2))
     """
 
+    # 平铺：weights/sam_vit_b_01ec64.pth …（不再放进 xlib/models/sam/）
     MODEL_FILES = {
-        "vit_b": PROJECT_ROOT / "xlib" / "models" / "sam" / "sam_vit_b_01ec64.pth",
-        "vit_l": PROJECT_ROOT / "xlib" / "models" / "sam" / "sam_vit_l_0b3195.pth",
-        "vit_h": PROJECT_ROOT / "xlib" / "models" / "sam" / "sam_vit_h_4b8939.pth",
+        "vit_b": WEIGHTS_DIR / "sam_vit_b_01ec64.pth",
+        "vit_l": WEIGHTS_DIR / "sam_vit_l_0b3195.pth",
+        "vit_h": WEIGHTS_DIR / "sam_vit_h_4b8939.pth",
     }
 
     def __init__(self, model_type: str = "vit_b", device: Optional[str] = None):

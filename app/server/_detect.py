@@ -12,6 +12,17 @@ from pathlib import Path
 
 import numpy as np
 
+# 检测器的"回退/换引擎"只讲一次，别每帧刷屏；但一定要讲 —— 静默回退是上一次
+# "以为在用 int8 / 以为开了 CUDA Graph" 的根因。
+_DET_LOGGED = set()
+
+
+def _det_log(key, msg):
+    if key in _DET_LOGGED:
+        return
+    _DET_LOGGED.add(key)
+    print(msg, flush=True)
+
 
 class RetinaFaceDet:
     needs_canvas = False      # detect(img) 内部自己做 letterbox
@@ -19,7 +30,7 @@ class RetinaFaceDet:
 
     STEPS = (8, 16, 32)
 
-    def __init__(self, model_path, input_size=640, thresh=0.5, nms_thresh=0.4,
+    def __init__(self, model_path, input_size=640, thresh=0.5, nms_thresh=0.4, graph_max_batch=None,
                  workspace=None, engine_name=None):
         import onnxruntime as ort
         try:
@@ -33,9 +44,13 @@ class RetinaFaceDet:
             try:
                 from ._engines import try_engine
                 self.sess = try_engine(workspace, engine_name or Path(model_path).stem, model_path)
-            except Exception:
+            except Exception as e:                             # noqa: BLE001
+                _det_log(("retina", "try", str(model_path)),
+                         "[RetinaFaceDet] TRT 引擎查找出错（%r）→ 回退 onnxruntime" % (e,))
                 self.sess = None
         if self.sess is None:
+            _det_log(("retina", "ort", str(model_path)),
+                     "[RetinaFaceDet] 使用 onnxruntime（providers=%s）" % (list(_providers),))
             self.sess = ort.InferenceSession(str(model_path), providers=_providers)
         self.input_name = self.sess.get_inputs()[0].name
         self.input_size = int(input_size)
@@ -182,7 +197,12 @@ class TinyMogDet:
     STEPS = (8, 16, 32)
     INPUT_SIZE = 640
 
-    def __init__(self, model_path, input_size=640, thresh=0.5, nms_thresh=0.4,
+    # 精度优先级：int8 有就先用，没有再退 bf16，两个都没有才回 onnxruntime。
+    # int8 引擎必须是"用当前 onnx 的 md5 + 当前 TRT 版本"编出来的规范命名，
+    # 目录里那些 <name>_int8.engine 是旧命名，永远命中不到（见 _engines.try_engine 日志）。
+    PRECISION = ("int8", "bf16")
+
+    def __init__(self, model_path, input_size=640, thresh=0.5, nms_thresh=0.4, graph_max_batch=None,
                  providers=None, workspace=None, engine_name=None):
         import onnxruntime as ort
 
@@ -192,17 +212,46 @@ class TinyMogDet:
                 providers = _prov()
             except Exception:
                 providers = ["CPUExecutionProvider"]
-        # 优先用编译好的 TRT 引擎（引擎名按 onnx 的 md5 + SM 命名）
+        # 优先用编译好的 TRT 引擎（引擎名按 onnx 的 md5 + SM + TRT 版本命名）
         self.sess = None
+        self.sess_batch = None          # 仅当首选引擎做不了 batch（例如单张 int8）时才单独一个
+        name = engine_name or Path(model_path).stem
         if workspace is not None:
             try:
                 from ._engines import try_engine
-                self.sess = try_engine(workspace, engine_name or Path(model_path).stem, model_path)
-            except Exception:
+                self.sess = try_engine(workspace, name, model_path, precision=self.PRECISION, graph_max_batch=graph_max_batch)
+            except Exception as e:                             # noqa: BLE001
+                _det_log(("tinymog", "try", str(model_path)),
+                         "[TinyMogDet] TRT 引擎查找出错（%r）→ 回退 onnxruntime" % (e,))
                 self.sess = None
         if self.sess is None:
+            _det_log(("tinymog", "ort", str(model_path)),
+                     "[TinyMogDet] 没有可用的 TRT 引擎，使用 onnxruntime（providers=%s）"
+                     % (list(providers),))
             self.sess = ort.InferenceSession(str(model_path), providers=list(providers))
+        else:
+            prec = getattr(self.sess, "precision", "?")
+            mb = self.sess.max_batch() if hasattr(self.sess, "max_batch") else None
+            print("[TinyMogDet] 单张走 %s 引擎（precision=%s, max_batch=%s）"
+                  % (type(self.sess).__name__, prec, mb), flush=True)
+            if prec == "int8" and mb is not None and mb < 2:
+                # 老的 int8 引擎是静态 batch=1：批量检测没法用同一份引擎
+                try:
+                    self.sess_batch = try_engine(workspace, name, model_path, precision=("bf16",), graph_max_batch=graph_max_batch)
+                except Exception as e:                         # noqa: BLE001
+                    _det_log(("tinymog", "batch_try", str(model_path)),
+                             "[TinyMogDet] int8 只支持单张，找 bf16 批量引擎时出错（%r）" % (e,))
+                if self.sess_batch is not None:
+                    print("[TinyMogDet] int8 引擎 max_batch=1，批量检测改走 bf16 引擎", flush=True)
+                else:
+                    _det_log(("tinymog", "batch_ort", str(model_path)),
+                             "[TinyMogDet] int8 引擎只支持单张、又没有 bf16 引擎 → "
+                             "批量检测回退 onnxruntime")
+                    self.sess_batch = ort.InferenceSession(str(model_path),
+                                                           providers=list(providers))
         self.input_name = self.sess.get_inputs()[0].name
+        self.batch_input_name = (self.sess_batch.get_inputs()[0].name
+                                 if self.sess_batch is not None else self.input_name)
         self.input_size = int(input_size)
         self.thresh = float(thresh)
         self.nms_thresh = float(nms_thresh)
@@ -229,7 +278,11 @@ class TinyMogDet:
                 t = t.permute(2, 0, 1).flip(0).float()
                 t = (t - 127.5) * (1.0 / 128.0)
                 outs = self.sess.run_tensor({self.input_name: t})
-            except Exception:
+            except Exception as e:                             # noqa: BLE001
+                # GPU 预处理这条路炸了就退回 numpy blob（结果一样），但必须留痕
+                _det_log("run_tensor_fail",
+                         "[TinyMogDet] GPU 预处理/推理失败（%r）→ 本次改用 numpy blob 预处理"
+                         % (e,))
                 outs = None
         if outs is None:
             blob = np.empty((1, 3, S, S), np.float32)
@@ -289,7 +342,8 @@ class TinyMogDet:
             blob[i] = c[:, :, ::-1].transpose(2, 0, 1)
         blob -= 127.5
         blob *= (1.0 / 128.0)
-        outs = self.sess.run(None, {self.input_name: blob})
+        sess = self.sess_batch or self.sess                 # int8 单张引擎不能做 batch
+        outs = sess.run(None, {self.batch_input_name: blob})
 
         results = []
         for b in range(n):

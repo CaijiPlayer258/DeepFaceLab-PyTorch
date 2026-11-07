@@ -344,6 +344,13 @@ def write_dfljpg(path, img_bgr, meta: dict, quality: int = 95):
 
 # DFL 的 APP15 段是 pickle —— 直接 loads 等于让一张 jpg 执行任意代码。
 # 数据集里混进外部图片时这就是个真实的入口，所以只放行数据类对象。
+#
+# ("_codecs","encode") 是老漏的那条：pickle protocol≤2 没有 BINBYTES，bytes 一律存成
+#   _codecs.encode(str(obj,'latin1'), 'latin1')
+# 而 xseg_mask 恰好就是 bytes → 整个 data_src/aligned（1203 张，实测 1203/1203 都在
+# 旧段里带 xseg_mask）用这份白名单一张都解不开，read_dfljpg_meta 对所有带遮罩的图
+# 都返回 None。空 bytes 走的是另一条路（pickle 流里写的是 py2 名字 __builtin__.bytes），
+# 所以两条都放行；解码侧 _codecs.decode 同理，留着对称。
 _ALLOWED = {
     ("numpy.core.multiarray", "_reconstruct"),
     ("numpy._core.multiarray", "_reconstruct"),
@@ -356,6 +363,10 @@ _ALLOWED = {
     ("builtins", "frozenset"),
     ("builtins", "bytearray"),
     ("builtins", "complex"),
+    ("builtins", "bytes"),
+    ("__builtin__", "bytes"),
+    ("_codecs", "encode"),
+    ("_codecs", "decode"),
 }
 
 
@@ -400,98 +411,221 @@ def _read_head_tail(path):
     return head + tail, len(head)
 
 
-def _parse_meta_bytes(data):
-    """从一段 JPEG 字节里找 APP15 并解出 dict；找不到返回 None。"""
-    if not data or not data.startswith(_SOI):
+def _unpickle_dict(payload):
+    """APP15 的 payload → dict；不是 pickle / 解不开 / 解出来不是 dict 都返回 None。"""
+    if not payload or payload[:1] != b"\x80":      # protocol 2 的 PROTO 开头
         return None
+    try:
+        obj = safe_loads(bytes(payload))
+    except Exception:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def split_jpeg(data):
+    """→ (header, tail)：header 到 SOS 之前为止，tail 从 SOS 起到文件尾。
+
+    DFLJPG.load_raw 从头一段一段走到 SOS，然后直接跳到 EOI 划出压缩数据段 ——
+    所以 **APP15 只有落在 SOS 之前的头部才读得到**，挂在 EOI 前面等于没写。
+    """
+    data = bytes(data)
     i, n = 2, len(data)
     while i + 4 <= n:
         if data[i] != 0xFF:
             break
-        marker = data[i + 1]
-        if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+        m = data[i + 1]
+        if m in (0xD8, 0x01) or 0xD0 <= m <= 0xD7:      # 无长度字段的标记
             i += 2
             continue
-        seg_len = struct.unpack('>H', data[i + 2:i + 4])[0]
-        seg = data[i + 4:i + 2 + seg_len]
-        if marker == 0xEF:
-            try:
-                return safe_loads(bytes(seg))
-            except Exception:
-                return None
-        i += 2 + seg_len
-        if marker == 0xDA:
+        if m == 0xDA:                                   # SOS
+            return data[:i], data[i:]
+        i += 2 + struct.unpack(">H", data[i + 2:i + 4])[0]
+    return data, b""
+
+
+def _head_segments(header):
+    """头部段 → [(marker, 原始字节)]，顺序保持原样。
+
+    marker 为 None 表示「认不出长度字段、剩下原样带走」。SOI / TEM / RSTn 这些
+    零长度标记单独保留：老写法只认带长度字段的段，碰到它们会把后面的段长读错，
+    把扫描数据复制一遍，文件变大还解不开。
+    """
+    out, i, n = [], 2, len(header)
+    while i < n:
+        if header[i] != 0xFF or i + 1 >= n:
+            out.append((None, bytes(header[i:])))
             break
-    # 扫到 SOS 就停：DFL 的 APP15 往往贴在 EOI 之前
-    eoi = data.rfind(_EOI)
-    if eoi > 0:
-        pos = data.rfind(_APP15, 0, eoi)
-        if pos > 0 and pos + 4 <= eoi:
-            seg_len = struct.unpack('>H', data[pos + 2:pos + 4])[0]
-            if pos + 2 + seg_len <= eoi:
-                try:
-                    return safe_loads(bytes(data[pos + 4:pos + 2 + seg_len]))
-                except Exception:
-                    return None
+        m = header[i + 1]
+        if m in (0xD8, 0x01) or 0xD0 <= m <= 0xD7:
+            out.append((m, bytes(header[i:i + 2])))
+            i += 2
+            continue
+        if i + 4 > n:
+            out.append((None, bytes(header[i:])))
+            break
+        end = i + 2 + struct.unpack(">H", header[i + 2:i + 4])[0]
+        if end > n or end <= i:
+            out.append((None, bytes(header[i:])))
+            break
+        out.append((m, bytes(header[i:end])))
+        i = end
+    return out
+
+
+def find_app15_header(data):
+    """头部（SOS 之前）那份 APP15 的 dict —— 引擎 DFLJPG.load 只认这一份。"""
+    data = bytes(data)
+    if not data.startswith(_SOI):
+        return None
+    header, _tail = split_jpeg(data)
+    for m, seg in _head_segments(header):
+        if m == 0xEF:
+            return _unpickle_dict(seg[4:])
     return None
 
 
+def find_app15_legacy(data):
+    """挂在 EOI 之前的那份 APP15 的 dict —— 旧写法（本文件的 rewrite_dfljpg_meta
+    在 4.1 之前）留下的死重。
+
+    DFLJPG.load_raw 遇到 SOS 直接跳到 EOI，所以这份引擎永远看不到：训练一直用的是
+    「没有遮罩」的头部那份。这里读出来只为两件事：迁移（搬到头部）+ 前端回显。
+
+    判据必须三条同时成立：正好顶到 EOI、payload 是 pickle 的 PROTO 开头(0x80)、
+    而且真能解出 dict —— 只按「长度正好凑到 EOI」判断会撞上压缩数据里随机的
+    FF EF（实测能把一张 40 KB 的脸图砍掉 8 KB 扫描数据，图直接废掉）。
+    """
+    data = bytes(data)
+    if not data.startswith(_SOI):
+        return None
+    eoi = data.rfind(_EOI)
+    if eoi <= 0:
+        return None
+    pos = data.rfind(_APP15, 0, eoi)
+    while pos > 0:
+        if pos + 4 <= eoi:
+            seg_len = struct.unpack(">H", data[pos + 2:pos + 4])[0]
+            end = pos + 2 + seg_len
+            if end == eoi:
+                obj = _unpickle_dict(data[pos + 4:end])
+                if isinstance(obj, dict):
+                    return obj
+        pos = data.rfind(_APP15, 0, pos)
+    return None
+
+
+def _strip_legacy_app15(tail):
+    """摘掉 tail 里顶到 EOI 的那段 legacy APP15；没有就原样返回。"""
+    if not tail:
+        return tail
+    eoi = tail.rfind(_EOI)
+    if eoi <= 0:
+        return tail
+    pos = tail.rfind(_APP15, 0, eoi)
+    while pos > 0:
+        if pos + 4 <= eoi:
+            seg_len = struct.unpack(">H", tail[pos + 2:pos + 4])[0]
+            end = pos + 2 + seg_len
+            if end == eoi and isinstance(_unpickle_dict(tail[pos + 4:end]), dict):
+                return tail[:pos] + tail[eoi:]
+        pos = tail.rfind(_APP15, 0, pos)
+    return tail
+
+
+def read_dfljpg_metas(path):
+    """→ (头部 APP15 dict | None, EOI 前 legacy APP15 dict | None)。
+
+    只读首尾各 256KB；头部段跨过 256KB 窗口才整读兜底（异常文件才走到）。
+    """
+    data, off = _read_head_tail(path)
+    if not data or not data.startswith(_SOI):
+        return None, None
+    head = find_app15_header(data)
+    legacy = find_app15_legacy(data)
+    if off and head is None:
+        try:
+            whole = Path(path).read_bytes()
+        except OSError:
+            return head, legacy
+        if len(whole) > len(data):
+            head = find_app15_header(whole)
+            if legacy is None:
+                legacy = find_app15_legacy(whole)
+    return head, legacy
+
+
 def read_dfljpg_meta(path):
-    """读出 JPEG 里 APP15 段的 dict；没有就返回 None。
+    """读出 DFLJPG 的元数据 dict；没有就返回 None。
 
-    **只读首尾各 256KB**：APP15 要么在头部段里，要么贴在 EOI 之前。
-    窗口没覆盖到（段跨边界）再整读兜底 —— 以前每次都把整张图读进内存。
+    头部（引擎读的那份）优先，其次 EOI 前那份 legacy —— 整个 data_src/aligned 都是
+    「头部没遮罩 + EOI 前带 xseg_mask」的双份布局，只看头部等于把遮罩全丢掉。
     """
-    data, _off = _read_head_tail(path)
-    meta = _parse_meta_bytes(data) if data else None
-    if meta is not None:
-        return meta
-    # 头尾窗口可能把 APP15 截断：整读一次再试（只在异常文件上发生）
-    try:
-        whole = Path(path).read_bytes()
-    except OSError:
-        return None
-    if len(whole) == len(data):
-        return None
-    return _parse_meta_bytes(whole)
+    head, legacy = read_dfljpg_metas(path)
+    if head is not None:
+        return head
+    return legacy
 
 
-def rewrite_dfljpg_meta(path, meta: dict):
-    """把 APP15 段换成新的 dict。APP15 追加在 EOI 之前（DFL 的约定）。
-
-    历史坑：
-    1) 以前插在 SOI 之后并重排段序 —— 遇到 JPEG 填充字节(0xFF 0xFF)会把段长读错，
-       扫描数据被复制一遍，文件变大且无法解码；
-    2) 先算 pickle 长度再替换 numpy._core→numpy.core，长度差 1 字节，解码器读坏。
-    现在只做两件事：切掉旧的尾部 APP15，写新的，再补 EOI。
-    """
-    data = Path(path).read_bytes()
-    if not data.startswith(b"\xff\xd8"):
-        raise ValueError("not a jpeg")
-
-    pkl = pickle.dumps({k: v for k, v in meta.items() if v is not None}, protocol=2)
+def encode_app15_segment(meta):
+    """meta → 完整的 APP15 段（FF EF + 段长 + pickle payload）。"""
+    clean = {k: v for k, v in dict(meta or {}).items() if v is not None}
+    pkl = pickle.dumps(clean, protocol=2)
     pkl = pkl.replace(b"numpy._core", b"numpy.core")     # 先替换，再算长度
     if len(pkl) + 2 > 0xFFFF:
-        raise ValueError("metadata too large")
-    app15 = b"\xff\xef" + struct.pack(">H", len(pkl) + 2) + pkl
+        raise ValueError("DFLJPG metadata too large")
+    return _APP15 + struct.pack(">H", len(pkl) + 2) + pkl
 
-    eoi = data.rfind(b"\xff\xd9")
-    if eoi < 0:
-        raise ValueError("no EOI")
-    body = data[:eoi]
 
-    # 末尾若已有一段 APP15（段长正好顶到 body 末尾），先切掉
-    pos = len(body)
-    while True:
-        pos = body.rfind(b"\xff\xef", 0, pos)
-        if pos < 0:
-            break
-        if pos + 4 <= len(body):
-            seg_len = struct.unpack(">H", body[pos + 2:pos + 4])[0]
-            if pos + 2 + seg_len == len(body):
-                body = body[:pos]
-                break
+def write_app15_head(data, meta):
+    """把 meta 写成**头部** APP15，返回新文件的字节。纯函数，不落盘。
 
-    out = body + app15 + b"\xff\xd9"
+    1) 在 SOS 处切开 header / tail；
+    2) 头部旧的 APP15 丢掉，新段插在最后一个 APP* 段之后（DFLJPG.dump 同款位置）；
+    3) tail 里顶到 EOI 的那段 legacy APP15 摘掉 —— 写的时候不再产生，
+       但读的时候仍然认（整个 aligned 目录的历史文件都还带着它）。
+    """
+    data = bytes(data)
+    if not data.startswith(_SOI):
+        raise ValueError("not a jpeg")
+    header, tail = split_jpeg(data)
+    body, insert_at = [], 0
+    for m, seg in _head_segments(header):
+        if m == 0xEF:                                   # 旧头部 APP15：丢掉
+            continue
+        body.append(seg)
+        if m is not None and (m & 0xF0) == 0xE0:        # APP0..APP15
+            insert_at = len(body)                       # 插在最后一个 APP* 之后
+    tail = _strip_legacy_app15(tail)
+    seg = encode_app15_segment(meta)
+    return _SOI + b"".join(body[:insert_at]) + seg + b"".join(body[insert_at:]) + tail
+
+
+def rewrite_dfljpg_meta(path, meta, merge=True):
+    """把 APP15 换成新的 dict，**写在头部**（引擎唯一读得到的位置），返回字节数。
+
+    merge=True（默认）：先拿已有的 legacy + 头部 dict 当底，再用 meta 覆盖 ——
+    调用方没提到的键（face_type / landmarks / seg_ie_polys / pitch …）全部保留；
+    merge=False：只用 meta 重写。
+
+    历史坑，全在这儿记着：
+    1) APP15 曾经追加在 EOI 之前 —— DFLJPG.load_raw 遇到 SOS 就跳到 EOI，引擎压根
+       读不到：整个 aligned 目录的遮罩一直是死的，_mask_worker「补遮罩」写进去的同样
+       读不到；
+    2) 白名单漏了 _codecs.encode，protocol≤2 的 bytes 一律解不开；
+    3) 更早的写法插在 SOI 之后并重排段序 —— 遇到 JPEG 填充字节(0xFF 0xFF)会把段长
+       读错，扫描数据被复制一遍，文件变大且无法解码；
+    4) 先算 pickle 长度再替换 numpy._core→numpy.core，长度差 1 字节，解码器读坏。
+    """
+    data = Path(path).read_bytes()
+    if not data.startswith(_SOI):
+        raise ValueError("not a jpeg")
+    out_meta = {}
+    if merge:
+        legacy, head = find_app15_legacy(data), find_app15_header(data)
+        for d in (legacy, head):                        # 头部优先
+            if isinstance(d, dict):
+                out_meta.update(d)
+    out_meta.update(dict(meta or {}))
+    out = write_app15_head(data, out_meta)
     Path(path).write_bytes(out)
     return len(out)

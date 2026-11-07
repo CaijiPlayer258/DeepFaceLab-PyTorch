@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import base64
 import io
 import json
 import os
+import queue
 import re
 import subprocess as _sp
 import threading
@@ -20,6 +22,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from .app import (WORKSPACE, _DFL_ROOT, _NO_WINDOW, _dhash, _lap_var, _list_images, app)
 from ._paths import engine_python as _engine_python
+from . import _dataset_fast as FF
+from . import _occlusion as OCC
 
 router = APIRouter()
 
@@ -33,17 +37,63 @@ _oneshot_job = {"running": False, "done": 0, "total": 0, "stage": "", "result": 
 _oneshot_lock = threading.Lock()
 
 
+# ---------------- 数据集目录解析 / 计数（唯一口径） ----------------
+def _norm_target(target) -> str:
+    """workspace 下的相对目录名。绝对路径会把基路径整个替换掉，一律拒绝。"""
+    s = str(target or "data_src").replace("\\", "/").strip("/")
+    if os.path.isabs(s) or ".." in s.split("/") or ":" in s:
+        raise HTTPException(400, "非法的数据集目录: " + s)
+    return s or "data_src"
+
+
+def _resolve_root(target):
+    """数据集目录名 → 真正要处理的目录，返回 (root, redirected)。
+
+    **aligned 兜底只在用户选的就是项目根时生效。** 以前是无条件优先 aligned：
+    用户在 data_src/1 里点「人脸身份」，程序转头去聚 data_src/aligned 的 1203 张，
+    跟他自己数的 670 张对不上（和 app.py: _count_images 注释里那次 rglob
+    报 1204 张是同一类「数的是别的目录」的坑）。
+    判据只有一条：**这一层自己有图，就按它；自己没图，才下探 aligned。**
+    """
+    root = WORKSPACE / _norm_target(target)
+    if not root.is_dir():
+        raise HTTPException(404, "目录不存在：%s" % root)
+    redirected = False
+    aligned = root / "aligned"
+    if aligned.is_dir() and not FF.list_images(root):
+        root, redirected = aligned, True
+    return root, redirected
+
+
+def _count_payload(root, target, redirected):
+    """一处算完，UI 和引擎共用：这一层有几张、哪些子目录被跳过。"""
+    files = FF.list_images(root)
+    skipped = FF.skipped_subdirs(root)
+    return {"ok": True, "target": target, "dir": str(root),
+            "redirected_to_aligned": bool(redirected),
+            "count": len(files), "n_files": len(files),
+            "recursive_would_be": len(files) + sum(s["images"] for s in skipped),
+            "skipped_dirs": [s for s in skipped if s["images"]]}
+
+
+@router.post("/api/dataset/count")
+def dataset_count(payload: dict = None):
+    """**只数这一层**：前端/进度条一律用这个数，别再自己数。
+
+    以前 UI 用 /api/state 里的 datasets.src.count 预填 —— 那个数永远数的是
+    data_src/aligned，选中 data_src/1 也照样显示 1203 张（实际聚类 670 张）。
+    """
+    payload = payload or {}
+    target = _norm_target(payload.get("dir") or "data_src")
+    root, redirected = _resolve_root(target)
+    return _count_payload(root, target, redirected)
+
+
 @router.post("/api/dataset/oneshot")
 def dataset_oneshot(payload: dict):
     payload = payload or {}
-    target = str(payload.get("dir") or "data_src")
-    if os.path.isabs(target) or ".." in target.replace("\\", "/").split("/") or ":" in target:
-        raise HTTPException(400, "非法的数据集目录: " + target)
-    root = WORKSPACE / target
-    if (root / "aligned").is_dir():
-        root = root / "aligned"
-    if not root.is_dir():
-        raise HTTPException(404, "目录不存在：%s" % root)
+    target = _norm_target(payload.get("dir") or "data_src")
+    root, _redirected = _resolve_root(target)
 
     with _oneshot_lock:
         if _oneshot_job["running"]:
@@ -181,6 +231,205 @@ def _ds_progress_writer(stage, total):
     return put
 
 
+# ---------------- 人脸身份：常驻引擎进程（一次加载、多次复用） ----------------
+# 以前每点一次「人脸身份」就 subprocess.run 一个全新的引擎 python：
+#   冷启动 + import torch/tensorrt + 反序列化 ~9.6 MB 的 TRT 引擎 ≈ 3.5~4.5 s，
+#   而真正干活（670 张 ArcFace 特征 + 聚类）只要 0.3~0.5 s。
+# 现在起一个常驻进程，用 stdin/stdout 的 JSON 行协议喂请求，引擎只加载一次；
+# 第一次也可以提前付（prewarm，和 /api/merge/preview/warm 一个套路）。
+_faceid_proc = {"proc": None, "q": None, "lock": threading.Lock(), "boot_ms": None,
+                "warm_ms": None, "provider": "", "requests": 0, "error": "",
+                "ready": False, "warming": False, "engine_ms": None}
+_faceid_spawn_lock = threading.Lock()
+
+
+def _faceid_alive() -> bool:
+    p = _faceid_proc.get("proc")
+    try:
+        return bool(p is not None and p.poll() is None)
+    except Exception:
+        return False
+
+
+def _faceid_reader(proc, q):
+    """把引擎进程的 stdout 一行行塞进队列 —— readline() 没有超时，会卡死工作线程。"""
+    try:
+        for line in proc.stdout:
+            q.put(line)
+    except Exception:
+        pass
+    finally:
+        q.put(None)
+
+
+def _faceid_reset(reason: str = ""):
+    """丢掉当前进程（下次请求会重新起一个）。"""
+    proc = _faceid_proc.get("proc")
+    _faceid_proc.update({"proc": None, "q": None, "ready": False, "warming": False})
+    if reason:
+        _faceid_proc["error"] = reason
+    if proc is not None:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _faceid_spawn():
+    """起常驻引擎进程（已有活的就复用）。**必须**在 _faceid_proc["lock"] 里调。"""
+    if _faceid_alive():
+        return _faceid_proc["proc"]
+    with _faceid_spawn_lock:
+        if _faceid_alive():
+            return _faceid_proc["proc"]
+        py = _engine_python()
+        if not py.is_file():
+            raise RuntimeError("找不到引擎 python: %s" % py)
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUNBUFFERED"] = "1"
+        t0 = time.time()
+        proc = _sp.Popen([str(py), "-m", "server._faceid_cli", "--serve"],
+                         cwd=str(Path(__file__).resolve().parents[1]), env=env,
+                         creationflags=_NO_WINDOW,
+                         stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=_sp.DEVNULL,
+                         text=True, encoding="utf-8", errors="replace", bufsize=1)
+        q = queue.Queue()
+        threading.Thread(target=_faceid_reader, args=(proc, q), daemon=True,
+                         name="faceid-out").start()
+        _faceid_proc.update({"proc": proc, "q": q, "error": "", "ready": False,
+                             "boot_ms": int((time.time() - t0) * 1000)})
+        return proc
+
+
+def _faceid_exchange(req: dict, timeout: float = 1800.0) -> dict:
+    """发一条请求、收一条结果。协议：@@R <json> 结果 / @@W <json> 预热完成 / @@ERR <msg>。
+
+    进程是单线程的，请求必须排队。但**预热里可能在建引擎（75 秒）**，
+    这时候宁可让调用方退回一次性 subprocess（约 2 秒），也不要让点击等 75 秒。
+    """
+    wait = 1.0 if _faceid_proc.get("warming") else 300.0
+    if not _faceid_proc["lock"].acquire(timeout=wait):
+        raise RuntimeError("引擎进程正忙（预热/上一次聚类还没结束）")
+    try:
+        proc = _faceid_spawn()
+        q = _faceid_proc["q"]
+        try:
+            proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
+            proc.stdin.flush()
+        except Exception as e:
+            _faceid_reset("%s: %s" % (type(e).__name__, e))
+            raise RuntimeError("引擎进程写入失败: %s" % e)
+        while True:
+            try:
+                line = q.get(timeout=timeout)
+            except queue.Empty:
+                _faceid_reset("引擎进程 %d 秒没有响应" % int(timeout))
+                raise RuntimeError("人脸身份引擎超时（%d 秒）" % int(timeout))
+            if line is None:
+                code = proc.poll()
+                err = _faceid_proc.get("error") or ""
+                _faceid_reset(err or "引擎进程退出（%s）" % code)
+                raise RuntimeError(err or "人脸身份引擎进程意外退出（%s）" % code)
+            line = line.strip()
+            if line.startswith("@@R "):
+                _faceid_proc["requests"] += 1
+                data = json.loads(line[4:])
+                # 跑成功就说明引擎已经在常驻进程里加载好了 —— 后面点击不再付初始化
+                _faceid_proc.update({"ready": True,
+                                     "provider": data.get("provider") or _faceid_proc.get("provider") or "",
+                                     "engine_ms": data.get("ms_engine_load")})
+                return data
+            if line.startswith("@@W "):
+                try:
+                    info = json.loads(line[4:])
+                except Exception:
+                    info = {}
+                _faceid_proc.update({"ready": True, "warming": False,
+                                     "warm_ms": info.get("ms"),
+                                     "engine_ms": info.get("ms"),
+                                     "provider": info.get("provider") or ""})
+                return info
+            if line.startswith("@@ERR "):
+                raise RuntimeError(line[6:])
+            # 其它行是引擎自己的 print，忽略
+    finally:
+        try:
+            _faceid_proc["lock"].release()
+        except RuntimeError:
+            pass
+
+
+def _faceid_warm(timeout: float = 900.0) -> dict:
+    """把引擎加载（反序列化 / 建会话）提前做掉，之后的点击几乎零等待。"""
+    _faceid_proc["warming"] = True
+    try:
+        return _faceid_exchange({"cmd": "warm"}, timeout=timeout)
+    finally:
+        _faceid_proc["warming"] = False
+
+
+def _faceid_prewarm_async() -> bool:
+    """后台预热；已经在预热/已经热了就返回 False。"""
+    if _faceid_proc.get("ready") and _faceid_alive():
+        return False
+    if _faceid_proc.get("warming"):
+        return False
+
+    def _work():
+        try:
+            _faceid_warm()
+        except Exception as e:
+            _faceid_proc["error"] = "%s: %s" % (type(e).__name__, e)
+
+    threading.Thread(target=_work, daemon=True, name="faceid-warm").start()
+    return True
+
+
+def _faceid_one_shot(root, eps, min_samples, merge_sim, prog) -> dict:
+    """兜底：进程起不来时还是走一次性的 subprocess（慢，但一定能跑）。"""
+    py = _engine_python()
+    cmd = [str(py), "-m", "server._faceid_cli", "--dir", str(root),
+           "--eps", str(eps), "--min-samples", str(min_samples),
+           "--merge", str(merge_sim)]
+    if prog:
+        cmd += ["--progress", str(prog)]
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    proc = _sp.run(cmd, capture_output=True, text=True, timeout=3600,
+                   cwd=str(Path(__file__).resolve().parents[1]), env=env,
+                   creationflags=_NO_WINDOW)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        raise HTTPException(500, "人脸身份推理失败: " + (detail[-1] if detail else "unknown"))
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@router.post("/api/dataset/faceid/prewarm")
+def faceid_prewarm(payload: dict = None):
+    """预热：起常驻进程并把 ArcFace 引擎加载好（不阻塞，进度看 /api/dataset/faceid/warm）。"""
+    payload = payload or {}
+    t = time.time()
+    started = _faceid_prewarm_async()
+    return {"ok": True, "started": bool(started), "ready": bool(_faceid_proc.get("ready")),
+            "warming": bool(_faceid_proc.get("warming")),
+            "ms": int((time.time() - t) * 1000),
+            "alive": _faceid_alive()}
+
+
+@router.get("/api/dataset/faceid/warm")
+def faceid_warm_status():
+    return {"ok": True, "ready": bool(_faceid_proc.get("ready")),
+            "warming": bool(_faceid_proc.get("warming")),
+            "alive": _faceid_alive(), "boot_ms": _faceid_proc.get("boot_ms"),
+            "engine_ms": _faceid_proc.get("engine_ms"), "warm_ms": _faceid_proc.get("warm_ms"),
+            "provider": _faceid_proc.get("provider") or "",
+            "requests": _faceid_proc.get("requests"), "error": _faceid_proc.get("error") or ""}
+
+
+atexit.register(_faceid_reset)
+
+
 @router.post("/api/dataset/merge-subdirs")
 def dataset_merge_subdirs(payload: dict):
     """把一级子目录里的图片搬回 aligned 根目录（照搬 4.0 的「合并子文件夹」）。
@@ -193,14 +442,8 @@ def dataset_merge_subdirs(payload: dict):
     """
     import shutil as _sh
 
-    target = str(payload.get("dir") or "data_src")
-    if os.path.isabs(target) or ".." in target.replace(chr(92), "/").split("/") or ":" in target:
-        raise HTTPException(400, "非法的数据集目录: " + target)
-    root = WORKSPACE / target
-    if (root / "aligned").is_dir():
-        root = root / "aligned"
-    if not root.exists():
-        raise HTTPException(404, "目录不存在: " + str(root))
+    target = _norm_target(payload.get("dir") or "data_src")
+    root, _redirected = _resolve_root(target)
 
     exts = {".jpg", ".jpeg", ".png", ".bmp"}
 
@@ -295,6 +538,24 @@ def dataset_merge_subdirs(payload: dict):
             "dirs": len(subdirs)}
 
 
+def _unavailable(cap: str, st: dict, root) -> dict:
+    """能力没装：回一份「状态」，别用 409 让界面以为出错。
+
+    形状和正常扫描结果对齐（total/hits/count 都在），前端不用为它写一套分支：
+    看到 unavailable=true 就提示「未安装 + 怎么装」，并且绝不进入移动文件那一步。
+    """
+    st = st or {}
+    return {
+        "ok": False, "unavailable": True, "capability": cap,
+        "reason": st.get("reason") or "", "install": st.get("install") or "",
+        "status": st,
+        "total": 0, "count": 0, "hits": [],
+        "unreadable": [], "info": {},
+        "dir": str(root), "n_files": 0,
+        "redirected_to_aligned": False, "skipped_dirs": [],
+    }
+
+
 @router.post("/api/dataset/scan")
 def dataset_scan(payload: dict):
     """只统计不落盘：返回会被处理掉的文件清单。
@@ -302,21 +563,23 @@ def dataset_scan(payload: dict):
     走 _dataset_fast：一次解码同时算 dhash / 清晰度 / 直方图，线程池并发，
     去重是向量化汉明距离（旧实现是 Python 双层循环，慢两个数量级）。
     """
-    from . import _dataset_fast as FF
-
     mode = payload.get("mode", "blur")
-    target = str(payload.get("dir") or "data_src")
-    root = WORKSPACE / target
-    if (root / "aligned").is_dir():
-        root = root / "aligned"
-    if not root.exists():
-        raise HTTPException(status_code=404, detail=f"目录不存在：{root}")
+    target = _norm_target(payload.get("dir") or "data_src")
+    root, redirected = _resolve_root(target)
 
+    # 唯一口径：这一层的图（不递归、不进 _trash/_masks/分组目录）
     files = FF.list_images(root)
-    # blur / repeated 也走真进度：每算完一张写一次进度文件
-    _put = _ds_progress_writer("embed", len(files)) if mode in ("blur", "repeated") else (lambda *a, **k: None)
     total = len(files)
-    recs, bad = FF.extract_cached(root, files, workers=int(payload.get("workers") or 8), progress=_put)
+    if mode in ("blur", "repeated"):
+        # blur / repeated 也走真进度：每算完一张写一次进度文件
+        _put = _ds_progress_writer("embed", total)
+        recs, bad = FF.extract_cached(root, files, workers=int(payload.get("workers") or 8),
+                                      progress=_put)
+    else:
+        # 人脸身份 / 错脸在各自那条路上算，不用为了 dhash 再全量解码一遍
+        # （670 张多花约 1 秒，而且和人脸聚类毫无关系）
+        _put = (lambda *a, **k: None)
+        recs, bad = [], []
     hits = [{"name": n, "score": 0, "bad": True} for n in bad]     # 坏图在任何模式下都要清掉
 
     if mode == "blur":
@@ -337,15 +600,10 @@ def dataset_scan(payload: dict):
                              "dup_of": recs[d]["name"]})
         info = {"similarity": sim}
     elif mode == "faceid":
-        # 需要 onnxruntime + TRT，只能在 engine 环境跑 —— 走子进程
-        import json as _json
-        import subprocess as _sp
-        import sys as _sys
-        from ._paths import engine_python
-
+        # 需要 onnxruntime + TRT，只能在 engine 环境跑 —— 常驻进程（见 _faceid_exchange）
         eps = float(payload.get("eps", 0.40))
         min_samples = int(payload.get("min_samples", 2))
-        # 用 -m 方式启动：_faceid_cli 用了相对导入（from . import ...）
+        merge_sim = float(payload.get("merge") or 0.45)
         _prog = WORKSPACE / ("_faceid_%d.json" % os.getpid())
         try:
             if _prog.exists():
@@ -353,25 +611,37 @@ def dataset_scan(payload: dict):
         except Exception:
             pass
         _FACEID_PROGRESS["path"] = str(_prog)
-        cmd = [engine_python(), "-m", "server._faceid_cli", "--dir", str(root),
-               "--eps", str(eps), "--min-samples", str(min_samples),
-               "--merge", str(float(payload.get("merge") or 0.45)),
-               "--progress", str(_prog)]
+        t_fid = time.time()
+        warm_before = bool(_faceid_proc.get("ready"))
         try:
-            proc = _sp.run(cmd, capture_output=True, text=True, timeout=3600,
-                           cwd=str(Path(__file__).resolve().parents[1]))
+            data = _faceid_exchange({"dir": str(root), "eps": eps, "min_samples": min_samples,
+                                     "merge": merge_sim, "progress": str(_prog)})
+            worker = "resident"
         except Exception as e:
-            raise HTTPException(500, f"人脸身份推理启动失败: {e}")
-        if proc.returncode != 0:
-            detail = (proc.stderr or proc.stdout or "").strip().splitlines()
-            raise HTTPException(500, "人脸身份推理失败: " + (detail[-1] if detail else "unknown"))
-        data = json.loads(proc.stdout.strip().splitlines()[-1])
+            # 常驻进程崩了就退回一次性 subprocess（慢，但结果一样）
+            try:
+                data = _faceid_one_shot(root, eps, min_samples, merge_sim, _prog)
+                worker = "one-shot(%s)" % type(e).__name__
+            except HTTPException:
+                raise
+            except Exception as e2:
+                raise HTTPException(500, f"人脸身份推理启动失败: {e2}")
+        # 引擎真正处理了几张：以引擎自己的 total 为准（和上面的 count 同源）
+        n_engine = int(data.get("total") or data.get("n_files") or len(files))
+        total = n_engine
         # 命中项由「按身份分文件夹」决定，这里不再另算
         info = {"clusters": data.get("clusters", {}), "noise": data.get("noise", 0),
                 "main": data.get("main"), "per_cluster": data.get("per_cluster"),
                 "eps": eps, "min_samples": min_samples,
                 "ms_extract": data.get("ms_extract"), "ms_cluster": data.get("ms_cluster"),
-                "provider": data.get("provider")}
+                "provider": data.get("provider"),
+                # 核对用的三件事：数的是哪个目录、引擎吃到几张、引擎是谁
+                "dir": str(root), "n_files": n_engine,
+                "n_clustered": len(data.get("assign") or []),
+                "ms_engine_load": data.get("ms_engine_load"),
+                "engine_rebuilt": data.get("engine_rebuilt"),
+                "warm_before": warm_before, "worker": worker,
+                "ms_total": int((time.time() - t_fid) * 1000)}
 
         # 「按身份分文件夹」：每个身份簇一个目录，全部移动（和老逻辑一致）
         _assign = data.get("assign", [])
@@ -407,9 +677,16 @@ def dataset_scan(payload: dict):
         # 68 点几何分类（xgboost）。数据集的 68 点必须是 2D106 真点；
         # 模板点数据集方差≈0，直接拒绝，避免"全部合格"的假阴性。
         from . import _errface
+        # 先看能力状态：模型/运行库没装是「没装」，不是「坏了」——
+        # 以前一路走到 scan() 才抛 409「缺 errface_xgb.ubj」，点一下就像出故障。
+        st = _errface.status()
+        if not st.get("available"):
+            return _unavailable("errface", st, root)
         res = _errface.scan(str(root), threshold=float(payload.get("threshold", 0.5)),
                             percent=float(payload.get("percent") or 0),
                             estimate=bool(payload.get("estimate", True)))
+        if not res.get("ok") and res.get("unavailable"):
+            return _unavailable("errface", res.get("status") or st, root)
         if not res.get("ok"):
             raise HTTPException(status_code=409, detail=res.get("error") or "错脸检测不可用")
         for h in res.get("hits", []):
@@ -424,21 +701,19 @@ def dataset_scan(payload: dict):
     if mode in ("blur", "repeated"):
         _put(total, total, "done")
     return {"total": total, "hits": hits[:5000], "count": len(hits),
-            "unreadable": bad[:200], "info": info}
+            "unreadable": bad[:200], "info": info,
+            # 数字来源一次性说清楚：数的是哪个目录、一层几张、跳过了哪些子目录
+            "dir": str(root), "n_files": total,
+            "redirected_to_aligned": bool(redirected),
+            "skipped_dirs": [s for s in FF.skipped_subdirs(root) if s["images"]]}
 
 
 @router.post("/api/dataset/sort")
 def dataset_sort(payload: dict):
     """按指定特征排序并重命名（sorted_00001_原名.jpg），可逆。"""
-    from . import _dataset_fast as FF
-
     by = payload.get("by") or "blur"
-    target = str(payload.get("dir") or "data_src")
-    root = WORKSPACE / target
-    if (root / "aligned").is_dir():
-        root = root / "aligned"
-    if not root.exists():
-        raise HTTPException(status_code=404, detail=f"目录不存在：{root}")
+    target = _norm_target(payload.get("dir") or "data_src")
+    root, _redirected = _resolve_root(target)
 
     files = FF.list_images(root)
     if not files:
@@ -507,6 +782,99 @@ def dataset_sort(payload: dict):
     return {"ok": True, "count": len(final), "by": by}
 
 
+# ---------------- 遮挡率（排序器，不是过滤器） ----------------
+# 用户口径：68 点凸包**不含眉毛**（只用眼睛及以下），算 XSeg 遮罩在凸包内的
+# 软面积占比；全被遮住 = 100%，一点没挡 = 0%。纯 numpy+cv2，不加载模型、
+# 不起引擎进程 —— 实测 673 张 0.47~0.53 s（冷盘 0.91 s）、3345 张 1.9 s。
+@router.post("/api/dataset/occlusion")
+def dataset_occlusion(payload: dict = None):
+    """action=scan：返回按遮挡率降序的排序清单 + 统计；action=move：按阈值移进 _trash。"""
+    payload = payload or {}
+    action = str(payload.get("action") or "scan").strip().lower()
+    if action not in ("scan", "move"):
+        raise HTTPException(status_code=400, detail="未知 action：%s" % action)
+    target = _norm_target(payload.get("dir") or "data_src")
+    root, redirected = _resolve_root(target)
+
+    if action == "move":
+        # 阈值用 0..1 小数（前端显示百分比）。移动前**重新扫一遍**：
+        # 目录可能在这一瞬间被别的操作动过，拿前端缓存的清单去搬会搬错文件。
+        try:
+            thr = float(payload.get("threshold", 0.5))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="阈值必须是 0..1 的小数")
+        thr = max(0.0, min(1.0, thr))
+        res = OCC.scan(root)
+        hits = [it for it in res["items"] if it["valid"] and float(it["occ"]) > thr]
+        mv = OCC.move_to_trash(root, [it["name"] for it in hits],
+                               payload.get("target") or "_trash")
+        occ_of = {it["name"]: it["occ"] for it in hits}
+        items = [{"name": m["name"], "occ": occ_of.get(m["name"]), "trash": m["trash"]}
+                 for m in mv["items"]]
+        manifest = OCC.write_manifest(mv["trash"], {
+            "kind": "occlusion", "dir": str(root), "threshold": thr,
+            "at": time.strftime("%Y-%m-%d %H:%M:%S"), "count": mv["moved"],
+            "items": items,
+        })
+        return {"ok": True, "action": "move", "dir": str(root), "target": target,
+                "threshold": thr, "scanned": res["total"], "count": len(hits),
+                "moved": mv["moved"], "items": items, "failed": mv["failed"],
+                "trash": mv["trash"], "manifest": manifest, "ms": res["ms"]}
+
+    res = OCC.scan(root)
+    return {"ok": True, "action": "scan", "dir": str(root), "target": target,
+            "total": res["total"], "valid": res["stats"]["n"],
+            "items": res["items"], "stats": res["stats"], "ms": res["ms"],
+            "redirected_to_aligned": bool(redirected),
+            "skipped_dirs": [s for s in FF.skipped_subdirs(root) if s["images"]]}
+
+
+@router.get("/api/dataset/thumb")
+def dataset_thumb(dir: str = "data_src", name: str = "", s: int = 96):
+    """排序网格的缩略图（方形裁切 + JPEG）。只读一个文件，别把整层扫一遍。
+
+    解码按原图尺寸挑降采样档：JPEG 的 1/2、1/4 解码由 libjpeg 直接跳过 DCT 系数，
+    比整张解完再缩快 2~3 倍（96px 缩略图看不出差别），单张 0.3~1.1 ms。
+    """
+    import cv2
+    target = _norm_target(dir or "data_src")
+    root, _redirected = _resolve_root(target)
+    n = str(name or "")
+    if not n or "/" in n or "\\" in n or ":" in n or n in (".", ".."):
+        raise HTTPException(status_code=400, detail="非法的文件名")
+    p = root / n
+    if not p.is_file() or not _within(root, p):
+        raise HTTPException(status_code=404, detail="找不到图片")
+    side = max(32, min(256, int(s or 96)))
+    try:
+        raw = p.read_bytes()
+    except OSError:
+        raise HTTPException(status_code=404, detail="找不到图片")
+    wh = OCC.jpeg_size(raw) or (0, 0)
+    mind = min(wh) if wh[0] > 0 else 0
+    flag = cv2.IMREAD_COLOR
+    if mind >= 640:
+        flag = cv2.IMREAD_REDUCED_COLOR_4
+    elif mind >= 320:
+        flag = cv2.IMREAD_REDUCED_COLOR_2
+    try:
+        img = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), flag)
+    except Exception:
+        img = None
+    if img is None:
+        raise HTTPException(status_code=415, detail="图片解不开")
+    h, w = img.shape[:2]
+    k = min(h, w)
+    y0, x0 = (h - k) // 2, (w - k) // 2
+    small = cv2.resize(img[y0:y0 + k, x0:x0 + k], (side, side),
+                       interpolation=cv2.INTER_AREA)
+    ok, out = cv2.imencode(".jpg", small, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+    if not ok:
+        raise HTTPException(status_code=500, detail="缩略图编码失败")
+    return Response(content=out.tobytes(), media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
 def _within(base: Path, p: Path) -> bool:
     """p 是否真的在 base 里面（挡住 ../ 和绝对路径替换基路径）。"""
     try:
@@ -544,51 +912,26 @@ def dataset_apply(payload: dict):
 
     注意：这个装饰器以前被错挂在 _within(base, p) 上面，FastAPI 于是把两个 Path
     参数当成路径参数 —— 任何调用都返回 422，清理功能从来没通过。
+
+    搬运逻辑只有一份：_occlusion.move_to_trash（遮挡率排序器的「移走」走同一个
+    函数，所以重名改名 / 越界判断 / 只搬不删的规矩两处天然一致）。
     """
     mode = payload.get("mode", "blur")
-    target = str(payload.get("dir") or "data_src")
     # 只允许 workspace 下的相对目录名：绝对路径会把基路径整个替换掉
-    if os.path.isabs(target) or ".." in target.replace("\\", "/").split("/") or ":" in target:
-        raise HTTPException(400, "非法的数据集目录: " + target)
+    target = _norm_target(payload.get("dir") or "data_src")
     names = payload.get("names") or []
-    root = WORKSPACE / target
-    if (root / "aligned").is_dir():
-        root = root / "aligned"
-    trash = root / "_trash"
-    trash.mkdir(exist_ok=True)
-    items = []
-    failed = []
-    for n in names:
-        n = str(n)
-        if not n or "/" in n or "\\" in n or n in (".", "..") or ":" in n:
-            continue
-        src = root / n
-        if not src.exists() or not _within(root, src):
-            continue
-        dst = trash / n
-        if not _within(trash, dst):
-            continue
-        i = 1
-        while dst.exists():
-            dst = trash / (src.stem + f"_{i}" + src.suffix)
-            i += 1
-        if not _move_file(src, dst):
-            failed.append(n)
-            continue
-        items.append({"name": n, "trash": dst.name})
-    return {"ok": True, "moved": len(items), "items": items, "failed": failed, "trash": str(trash)}
+    root, _redirected = _resolve_root(target)
+    res = OCC.move_to_trash(root, names, "_trash")
+    return {"ok": True, "moved": res["moved"], "items": res["items"],
+            "failed": res["failed"], "trash": res["trash"], "mode": mode}
 
 
 @router.post("/api/dataset/restore")
 def dataset_restore(payload: dict):
     """把刚移走的文件放回去（撤销）。"""
-    target = str(payload.get("dir") or "data_src")
-    if os.path.isabs(target) or ".." in target.replace("\\", "/").split("/") or ":" in target:
-        raise HTTPException(400, "非法的数据集目录: " + target)
+    target = _norm_target(payload.get("dir") or "data_src")
     items = payload.get("items") or []
-    root = WORKSPACE / target
-    if (root / "aligned").is_dir():
-        root = root / "aligned"
+    root, _redirected = _resolve_root(target)
     trash = root / "_trash"
     back = 0
     failed = []

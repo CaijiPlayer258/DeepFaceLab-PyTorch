@@ -20,6 +20,9 @@ from pathlib import Path
 import requests
 import qrcode
 
+from . import bili_http
+from .bili_http import BiliError
+
 # bilibili 的证书链在部分 Windows 机器上验不过（certifi 里缺对应根，
 # requests 直接报 "unable to get local issuer certificate"，二维码就一直"获取失败"）。
 # truststore 走系统证书存储：浏览器能打开的站，这里也能打开。
@@ -34,10 +37,11 @@ _LOOPBACK = ("127.0.0.1", "localhost", "::1", "0.0.0.0")
 
 
 def _get(url, **kw):
-    host = url.split("//", 1)[-1].split("/", 1)[0].split(":")[0]
-    if host in _LOOPBACK:
-        kw["proxies"] = {"http": None, "https": None}
-    return requests.get(url, **kw)
+    """所有 B 站请求都走 bili_http：统一证书策略（Windows 根证书）＋错误归一化。
+
+    回环地址不代理这条规则已经下沉到 bili_http.request，这里不再重复。
+    """
+    return bili_http.request("GET", url, **kw)
 
 # ---- 接口地址（可被环境变量覆盖）----
 BASE = os.environ.get("BILI_API_BASE", "https://passport.bilibili.com").rstrip("/")
@@ -183,21 +187,47 @@ def poll(qrcode_key: str):
             "message": STATUS_TEXT.get(code, f"未知状态 {code}")}
 
 
-def fetch_user_info(cookie: str) -> dict:
+def nav(cookie: str) -> dict:
+    """用 nav 判定登录态：返回 {logged_in, uid, name, avatar, level, code, message}。
+
+    和 fetch_user_info 的区别是「失败要说清楚」：
+      · cookie 无效/过期 → logged_in=False + code=-101
+      · 网络/证书错误     → 抛 BiliError，绝不冒充「未登录」
+    """
     headers = dict(HEADERS)
-    headers["Cookie"] = cookie
+    if cookie:
+        headers["Cookie"] = cookie
     try:
-        r = _get(NAV_URL, headers=headers, timeout=10)
-        r.raise_for_status()
-        d = r.json()
-        if d.get("code") == 0 and d.get("data"):
-            info = d["data"]
-            return {
-                "uid": info.get("mid", 0),
-                "name": info.get("uname", ""),
-                "avatar": info.get("face", ""),
-                "level": (info.get("level_info") or {}).get("current_level", 0),
-            }
-    except Exception:
-        pass
-    return {}
+        j = _get(NAV_URL, headers=headers, timeout=10).json()
+    except BiliError:
+        raise
+    except Exception as e:
+        raise BiliError("nav 请求失败：%s" % e, kind="network") from e
+
+    code = j.get("code")
+    d = j.get("data") or {}
+    if code != 0 or not d.get("isLogin", True) or not d.get("mid"):
+        return {"logged_in": False, "uid": 0, "name": "", "avatar": "", "level": 0,
+                "code": code if code is not None else -101,
+                "message": j.get("message") or "账号未登录"}
+    return {
+        "logged_in": True,
+        "uid": d.get("mid", 0),
+        "name": d.get("uname", ""),
+        "avatar": d.get("face", ""),
+        "level": (d.get("level_info") or {}).get("current_level", 0),
+        "code": 0,
+        "message": "",
+    }
+
+
+def fetch_user_info(cookie: str) -> dict:
+    """兼容老调用点：只要 uid/name/avatar/level，失败返回 {}。"""
+    try:
+        info = nav(cookie)
+    except BiliError:
+        return {}
+    if not info.get("logged_in"):
+        return {}
+    return {"uid": info["uid"], "name": info["name"],
+            "avatar": info["avatar"], "level": info["level"]}

@@ -76,6 +76,9 @@ def _write_params_cache(dat_path, model):
             'options': model.options,
             'choosed_gpu_indexes': model.choosed_gpu_indexes,
             'loss_count': len(model.loss_history),
+            # 这份 dat 是不是 TF 时代的：缓存一命中就不再做老 dat 检测，但那条
+            # 「只有参数、没有 torch 权重」的提示每轮都得说，标记存下来。
+            'legacy': bool(getattr(model, '_legacy_dat', None)),
             'src_size': st.st_size,
             'src_mtime_ns': st.st_mtime_ns,
         }
@@ -256,9 +259,15 @@ class ModelBase(object):
         self.loss_history = []
         self.sample_for_preview = None
         self.choosed_gpu_indexes = None
+        self._legacy_dat = None      # 非 None = 这份 dat 来自 TF 时代，值是迁移报告
         self.model_data_path = Path(self.get_strpath_storage_for_file('data.dat'))
 
         self._load_model_data()
+
+        # TF 时代（DFL 1.x/2.0）的 dat 只有参数，没有 torch 权重：先把话说清楚，
+        # 免得用户以为接着以前那次训练在跑。
+        if self._legacy_dat is not None:
+            self._announce_legacy_dat()
 
         if self.is_first_run():
             io.log_info("\n模型首次运行。")
@@ -373,6 +382,77 @@ class ModelBase(object):
             self.sample_for_preview = self.generate_next_samples()
 
         self.last_sample = self.sample_for_preview
+
+    # ------------------------------------------------------------------
+    #  TF 时代（DFL 1.x / 2.0）dat 的兼容层
+    # ------------------------------------------------------------------
+    # 老 dat 的 options 和 4.1 不是一套：face_type 短码/全名混用、learn_mask 改名成
+    # masked_training、ed_ch_dims 一个值管编码器+解码器、archi 出现过 dfhd/liaech…
+    # 规则、键映射和报告都在 core/legacy_dat.py；这里只负责「读完 dat、还没人用过
+    # options」这一小段。新格式的 dat 必须原样通过（返回同一个 dict 对象）。
+    def _adopt_loaded_options(self, options):
+        if not isinstance(options, dict):
+            return options
+        try:
+            from core import legacy_dat as _legacy
+        except Exception as e:
+            io.log_err(f"[LEGACY] 兼容层加载失败（{e}），这份 dat 按 4.1 原样读")
+            return options
+
+        reasons = _legacy.detect_legacy(options)
+        if not reasons:
+            return options
+
+        try:
+            model_py = Path(inspect.getmodule(type(self)).__file__)
+        except Exception:
+            model_py = None
+        try:
+            migrated, report = _legacy.migrate_options(options, model_py=model_py)
+        except Exception as e:
+            io.log_err(f"[LEGACY] 老 dat 迁移失败（{e}），按原样继续")
+            return options
+
+        counts = _legacy.report_counts(report)
+        moved = counts['迁移'] + counts['改键']
+        io.log_info(f"[LEGACY] 检测到 TF 时代 dat（{'；'.join(reasons)}），"
+                    f"已迁移 {moved} 项，补默认 {counts['补默认']} 项，忽略 {counts['忽略']} 项")
+        for line in report[:12]:
+            io.log_info('  ' + line)
+        if len(report) > 12:
+            io.log_info(f"  …（其余 {len(report) - 12} 行报告："
+                        f"python tools/import_legacy_dat.py --dat {self.model_data_path}）")
+        self._legacy_dat = {'report': report, 'counts': counts, 'reasons': reasons}
+        return migrated
+
+    def _announce_legacy_dat(self):
+        """老 dat 只有参数、没有可用权重 —— 训练/合成前把现状和下一步说清楚。"""
+        name = self.get_model_name()
+        try:
+            pths = sorted(Path(self.saved_models_path).glob(name + '_*.pth'))
+            npys = sorted(Path(self.saved_models_path).glob(name + '_*.npy'))
+        except Exception:
+            pths, npys = [], []
+        if pths:
+            io.log_info(f"[LEGACY] 已找到 {len(pths)} 个 torch 权重（*.pth），按常规加载。")
+            return
+        if self._legacy_dat.get('cached'):
+            io.log_info("[LEGACY] 这份 dat 仍是 TF 时代的（options 上次已迁移过，本次走参数缓存）；"
+                        "只有参数，没有可用的 torch 权重；新建模型会从零开始训练。")
+        else:
+            io.log_info("[LEGACY] 该 dat 来自 TF 版本，只有参数，没有可用的 torch 权重；"
+                        "新建模型会从零开始训练。")
+        dat_name = self.model_data_path.name
+        stem = dat_name[:-len('_data.dat')] if dat_name.endswith('_data.dat') else name
+        if npys:
+            io.log_info(f"[LEGACY] 当前目录里有 {len(npys)} 个 TF 权重（.npy），可以转：")
+        else:
+            io.log_info("[LEGACY] 当前目录里连 TF 权重（.npy）都没有，这份 dat 只能当参数模板：")
+        # 注意顺序：转换脚本是拿 dat 里的 options 建网络骨架的，老 dat（archi=dfhd 等）
+        # 直接喂给它只会 ValueError: Unsupported SAEHD archi_type —— 先迁 dat 再转。
+        io.log_info('        python tools/import_legacy_dat.py '
+                    f'--dat "{self.model_data_path}" '
+                    f'--apply --out "<目标模型目录>/{stem}_data.dat" --convert')
 
     def load_or_def_option(self, name, def_value):
         options_val = self.options.get(name, None)
@@ -648,7 +728,9 @@ class ModelBase(object):
             t_cache = time.time()
             self.iter = int(cache.get('iter', 0))
             if self.iter != 0:
-                self.options = cache.get('options', {})
+                self.options = self._adopt_loaded_options(cache.get('options', {}))
+                if cache.get('legacy'):
+                    self._legacy_dat = {'cached': True, 'report': [], 'counts': {}, 'reasons': []}
                 self.choosed_gpu_indexes = cache.get('choosed_gpu_indexes', None)
                 self.loss_history = []
                 self._loss_partial = True
@@ -663,7 +745,7 @@ class ModelBase(object):
         model_data = pickle.loads(self.model_data_path.read_bytes())
         self.iter = model_data.get('iter', 0)
         if self.iter != 0:
-            self.options = model_data['options']
+            self.options = self._adopt_loaded_options(model_data['options'])
             self.loss_history = model_data.get('loss_history', [])
             self.sample_for_preview = model_data.get('sample_for_preview', None)
             self.choosed_gpu_indexes = model_data.get('choosed_gpu_indexes', None)
@@ -1480,7 +1562,10 @@ class ModelBase(object):
             i_mb = 2 * batch_size * 3 * resolution * resolution * 4 / (1048576.0)
             # activation memory: intermediate feature maps retained for backward
             # Scales with model size × src+dst paths × batch × resolution
-            gc_enabled = bool(self.options.get('use_gradient_checkpointing', False))
+            # 键名是 gradient_checkpointing：以前这里读 use_gradient_checkpointing（从来没被写过），
+            # 于是摘要里的"预估显存"永远按"没开检查点"算，比实际虚高近一倍。
+            gc_enabled = bool(self.options.get('gradient_checkpointing', False)
+                              or self.options.get('use_gradient_checkpointing', False))
             # activation memory: scales with model size × src+dst paths × batch × resolution
             act_mult = 1.75 if gc_enabled else 3.5  # checkpoint ~50% less activation
             a_mb = w_mb * act_mult * (batch_size / 4) * (resolution / 256) ** 2

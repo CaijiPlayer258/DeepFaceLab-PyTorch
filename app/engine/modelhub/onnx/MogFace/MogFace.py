@@ -30,7 +30,7 @@ class MogFace:
         if device_info not in MogFace.get_available_devices():
             raise Exception(f"device_info {device_info} not available for MogFace")
 
-        model_path = weights.path("onnx/MogFace/MogFace.onnx")
+        model_path = weights.path("mogface.onnx")
         if not model_path.exists():
             raise FileNotFoundError(f"MogFace ONNX model not found at {model_path}")
 

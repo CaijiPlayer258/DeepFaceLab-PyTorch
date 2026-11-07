@@ -58,9 +58,11 @@ from modelhub.DFLive import (
 
 ### 2. ONNX - ONNX Runtime 模型
 
-**位置**: `modelhub/onnx/`
+**位置**: 代码在 `modelhub/onnx/`，权重在 `<仓库根>/weights/`（**平铺**）
 
 包含各种用于人脸检测、对齐和处理的 ONNX 格式模型。
+注意两者已经分离：`modelhub/onnx/<模型>/*.py` 是**代码**（入库），
+`weights/*.onnx` 是**权重**（用户下载，平铺在 weights 根下，文件名 = 模型名 + 原文件名）。
 
 #### 可用模型
 

@@ -44,7 +44,7 @@ python app\serve.py             :: 只起后端，浏览器开 http://127.0.0.1:
 - **静态前缀固定 `/static`**：`index.html` 里有 200+ 处绝对路径（字体尤其多），改前缀会大面积 404。
 - **`?v=` 由服务端按文件 mtime 重写**（`app.py` 的 `index()`），所以改完 js/css 刷新即可，不用手动清缓存。
 - **登录凭证不进仓库**：`legacy/qt-ui/user/bilibili_cookie.txt` 已被 `.gitignore` 拦住。
-- **`engine/xlib/models/` 里是本地权重**（SAM / GroundingDINO，约 3.6 GB），`.gitignore` 已忽略，删了能重下但要重下。
+- **权重全部平铺在 `weights/` 根下**（`.onnx / .pth / .pt / .ubj`，只有 `bert-base-uncased/` 是个目录），`.gitignore` 已忽略，删了能重下但要重下。
 
 ## 五、还没做完的整理
 
@@ -55,9 +55,11 @@ python app\serve.py             :: 只起后端，浏览器开 http://127.0.0.1:
 
 ```
 app/engine/modelhub/onnx/<模型>/*.py   ← 代码，随仓库分发
-weights/<组>/<模型>/*.onnx | *.pth     ← 权重，用户自己下载，不进 git
-weights/manifest.json                   ← 清单（路径/大小/sha256），入库
+weights/<平铺名>.onnx | .pth | .pt     ← 权重，用户自己下载，不进 git
+weights/bert-base-uncased/             ← 唯一保留的目录（tokenizer 必须和权重同目录）
+weights/manifest.json                  ← 清单（路径/大小/sha256），入库
 ```
 
-代码里用 `from modelhub import weights; weights.path("onnx/RetinaFace/det_10g.onnx")` 定位；
+代码里用 `from modelhub import weights; weights.path("retinaface_10g.onnx")` 定位
+（写老路径 `weights.path("onnx/RetinaFace/det_10g.onnx")` 也认，会自动折算成平铺名）；
 缺失时抛出的异常里带着该执行的下载命令。详见 `weights/README.md`。

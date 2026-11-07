@@ -27,7 +27,7 @@ class InsightFace2D106:
         if device_info not in InsightFace2D106.get_available_devices():
             raise Exception(f'device_info {device_info} is not in available devices for InsightFace2D106')
 
-        path = weights.path('onnx/InsightFace2d106/InsightFace2D106.onnx')
+        path = weights.path('insightface_2d106.onnx')
         if not path.exists():
             raise FileNotFoundError(f'{path} not found')
             

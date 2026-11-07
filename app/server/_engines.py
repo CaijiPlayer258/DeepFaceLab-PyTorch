@@ -20,16 +20,18 @@ import hashlib
 import json
 from pathlib import Path
 
-# 需要编译的模型（路径相对引擎仓的 modelhub / workspace）
+# 需要编译的模型（路径相对 _engine_roots() 里的某个根）。
+#   · "workspace/model/..." → 根 1 = <仓库>/workspace（可训练的遮罩模型住那儿）
+#   · 其余平铺名            → 根 2 = <仓库>/weights（权重全部平铺在根下，没有模型子目录）
 MODEL_SPECS = [
     # name, 相对路径候选, 是否每次校验 MD5
     ("xseglite", ["workspace/model/XSegLite/xseglite.onnx", "workspace/model/XSegLite/XSegLite.onnx"], True),
     ("xseg",     ["workspace/model/XSeg/XSeg.onnx"], True),
-    ("tinymog",  ["modelhub/onnx/TinyMog/TinyMog.onnx"], False),
-    ("retinaface_10g", ["modelhub/onnx/RetinaFace/det_10g.onnx"], False),
-    ("insightface_2d106", ["modelhub/onnx/InsightFace2d106/InsightFace2D106.onnx"], False),
+    ("tinymog",  ["tinymog.onnx"], False),
+    ("retinaface_10g", ["retinaface_10g.onnx"], False),
+    ("insightface_2d106", ["insightface_2d106.onnx"], False),
     # 人脸特征（身份聚类用）：13 MB，比 r50 快 5 倍
-    ("arcface_mbf", ["modelhub/onnx/ArcFace/w600k_mbf.onnx"], False),
+    ("arcface_mbf", ["arcface_mbf.onnx"], False),
 ]
 
 # 动态维（batch）的模型必须给优化档位，否则 TRT 拒绝构建：
@@ -106,7 +108,11 @@ def engine_path(workspace, name, onnx_path, sm=None, precision="bf16"):
 
 
 def find_models(workspace, roots):
-    """在若干根目录里找 MODEL_SPECS 里列的 onnx，返回 [{name, onnx, md5, ...}]。"""
+    """在若干根目录里找 MODEL_SPECS 里列的 onnx，返回 [{name, onnx, md5, ...}]。
+
+    roots 见 routes_trt._engine_roots()：[WORKSPACE, weights 根, 仓库根]。
+    weights/ 是平铺的，所以这里只有文件名，没有 onnx/<模型>/ 前缀。
+    """
     out = []
     for name, rels, verify in MODEL_SPECS:
         found = None
@@ -187,24 +193,80 @@ def _md5_direct(path):
     return h.hexdigest()[:12]
 
 
-def try_engine(workspace, name, onnx_path, sm=None, precision="bf16", use_graph=True):
-    """有匹配的引擎（MD5 + SM 都对）就返回 TrtSession，否则 None。
+_WARNED = set()
+
+# 每种"没命中/加载失败"只讲一次，避免每帧刷屏
+_TRT_LOGGED = set()
+
+
+def _trt_log(key, msg):
+    if key in _TRT_LOGGED:
+        return
+    _TRT_LOGGED.add(key)
+    print("[TRT] " + msg, flush=True)
+
+
+def try_engine(workspace, name, onnx_path, sm=None, precision="bf16", use_graph=True, graph_max_batch=None):
+    """有匹配的引擎（MD5 + SM + TRT 版本都对）就返回 TrtSession，否则 None。
 
     precision 可以是单个值或列表：按顺序找，先用 int8、没有再退 bf16。
-    这是运行时的唯一入口：拿到 None 就继续走 onnxruntime，行为完全不变。
+    这是运行时的唯一入口：拿到 None 就继续走 onnxruntime。
+
+    所有"没命中"的原因都会打一行 [TRT] 日志（以前是纯静默返回 None，
+    所以"int8 引擎明明躺在目录里却没生效"这种事没人发现得了）。
     """
+    precs = [precision] if isinstance(precision, str) else list(precision)
     try:
         sm = sm or sm_tag()
-        if sm is None:
-            return None
+    except Exception as e:                                     # noqa: BLE001
+        _trt_log((name, "sm"), "%s: 取 SM 版本失败（%r）→ 回退 onnxruntime" % (name, e))
+        return None
+    if sm is None:
+        _trt_log((name, "nogpu"), "%s: torch.cuda 不可用，拿不到 SM → 回退 onnxruntime" % name)
+        return None
+    try:
         md5 = md5_fresh(name, onnx_path)
-        precs = [precision] if isinstance(precision, str) else list(precision)
-        for prec in precs:
-            p = engine_dir(workspace) / ("%s_%s_sm%d_trt%s.%s.engine"
-                                         % (name, md5, sm, trt_version(), prec))
-            if p.is_file():
-                from ._trt_session import TrtSession
-                return TrtSession(str(p), use_graph=use_graph)
+    except Exception as e:                                     # noqa: BLE001
+        _trt_log((name, "md5", str(onnx_path)),
+                 "%s: 算 onnx MD5 失败（%r）→ 回退 onnxruntime" % (onnx_path, e))
         return None
-    except Exception:
-        return None
+    trt_v = trt_version()
+    d = engine_dir(workspace)
+    tried = []
+    missed = []
+    for prec in precs:
+        p = d / ("%s_%s_sm%d_trt%s.%s.engine" % (name, md5, sm, trt_v, prec))
+        tried.append(p.name)
+        if not p.is_file():
+            missed.append(prec)
+            continue
+        try:
+            from ._trt_session import TrtSession
+            sess = TrtSession(str(p), use_graph=use_graph)
+        except Exception as e:                                 # noqa: BLE001
+            _trt_log((name, prec, p.name),
+                     "%s: 引擎 %s 加载失败（%r）→ 试下一种精度" % (name, p.name, e))
+            continue
+        _trt_log((name, "hit", p.name),
+                 "%s: 命中 %s 引擎 %s（md5=%s sm=%d trt%s）%s"
+                 % (name, prec, p.name, md5, sm, trt_v,
+                    ("；%s 引擎不存在，已按顺序回退" % "/".join(missed)) if missed else ""))
+        sess.precision = prec
+        return sess
+
+    # 没命中：把"到底缺什么"说清楚（md5 变了？SM 变了？TRT 版本变了？文件还是旧命名？）
+    siblings = []
+    try:
+        siblings = sorted(x.name for x in d.glob("%s_*.engine" % name))
+    except Exception:                                          # noqa: BLE001
+        pass
+    legacy = [x.name for x in d.glob("%s_*.engine" % name) if "trt" not in x.name] if siblings else []
+    detail = ""
+    if siblings:
+        detail = "；目录里同名的引擎：%s" % ", ".join(siblings[:4]) + ("" if len(siblings) <= 4 else " …")
+    if legacy:
+        detail += "（其中 %s 是旧命名，不含 md5/SM/trt，永远不会被命中）" % ", ".join(legacy[:3])
+    _trt_log((name, "miss", md5, sm, trt_v),
+             "%s: 没有 md5=%s sm=%d trt%s 的 %s 引擎（找过 %s）%s → 回退 onnxruntime"
+             % (name, md5, sm, trt_v, "/".join(precs), ", ".join(tried), detail))
+    return None

@@ -13,7 +13,7 @@ class YoloV11nFace:
         return get_available_devices_info()
 
     def __init__(self, device_info: ORTDeviceInfo):
-        path = weights.path('onnx/YoloV11nFace/yolov11n-face.onnx')
+        path = weights.path('yolov11n_face.onnx')
         self._sess = InferenceSession_with_device(str(path), device_info)
 
         # ── TRT BF16 加速 ──────────────────────

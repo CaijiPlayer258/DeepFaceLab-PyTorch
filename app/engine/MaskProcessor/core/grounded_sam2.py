@@ -38,10 +38,11 @@ from xlib.models.grounding_dino.groundingdino.util.inference import load_model, 
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
-# 权重与代码分离：.pth/.pt 放在 <仓库根>/weights 下（可用 DFL_WEIGHTS_DIR 覆盖）
+# 权重与代码分离 + **平铺**：.pth/.pt 直接在 <仓库根>/weights/ 根下（可用 DFL_WEIGHTS_DIR 覆盖）
 WEIGHTS_DIR = Path(os.environ.get("DFL_WEIGHTS_DIR") or (PROJECT_ROOT.parent.parent / "weights"))
-SAM2_CKPT_DIR = WEIGHTS_DIR / "sam2" / "checkpoints"
-GDINO_CKPT_DIR = WEIGHTS_DIR / "grounding_dino" / "gdino_checkpoints"
+# 平铺布局：sam2.1_hiera_*.pt / groundingdino_*.pth 都在权重根，没有模型子目录
+SAM2_CKPT_DIR = WEIGHTS_DIR
+GDINO_CKPT_DIR = WEIGHTS_DIR
 
 # ---------------------------------------------------------------------------
 # Model registries

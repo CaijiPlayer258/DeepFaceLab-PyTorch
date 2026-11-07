@@ -648,6 +648,78 @@ class SAEHDModel(ModelBase):
             except Exception:
                 pass
 
+    # --- 分辨率自动重建（Inter 权重） ---
+    def _auto_resize_inter(self, resolution):
+        """dat 的 resolution 与 Inter 权重不一致时，按 resize_inter 自动重建 Inter。
+
+        修复的坑：手工把 liae 的 dat resolution 改大（192→256）却没跑工具时，Inter 权重还是
+        旧网格 → load_weights 形状不符 → 随机初始化 + 一行 [WARN]，占 82% 参数的 inter 全丢。
+        现在改成：先 plan_resize() 判定，needs_resize 才重建（LIAE 的 _inter_AB/_inter_B 一起）。
+
+        三条硬约束：
+          · 正常模型（dat 与权重同分辨率）只做**只读**探测，不写任何文件；
+          · 判定不了（DFLite / 架构多解 / 权重缺失 / dat 异常）→ 打一行说明，走原流程，不抛异常；
+          · 重建失败（resize_inter 内部已回滚）→ 打 ERROR，退回权重实际分辨率继续加载，
+            训练照常启动 —— 绝不让"重建没成"变成"模型起不来"。
+        返回本次加载实际要用的 resolution。
+        """
+        try:
+            from models.Model_SAEHD.resize_inter import ResizeError, apply_plan, plan_resize
+        except Exception as _e:                       # 模块缺失也不该阻断训练
+            io.log_info(f'[RESIZE] 跳过：resize_inter 不可用（{type(_e).__name__}: {_e}）')
+            return resolution
+
+        try:
+            plan = plan_resize(Path(self.get_model_root_path()), resolution)
+        except ResizeError as _e:
+            io.log_info(f'[RESIZE] 跳过：{_e}')
+            return resolution
+        except Exception as _e:
+            io.log_info(f'[RESIZE] 跳过：判定失败（{type(_e).__name__}: {_e}）')
+            return resolution
+
+        # plan_resize() 本身不碰磁盘；need_resize=False 是正常模型的常态，直接什么都不做。
+        if not plan.need_resize:
+            io.log_info('[RESIZE] 跳过：已是目标分辨率')
+            return resolution
+
+        _label = 'liae，inter_AB+inter_B' if plan.archi_type == 'liae' else 'df，inter'
+        io.log_info(f'[RESIZE] {plan.old_res} → {plan.new_res}（{_label}）自动重建')
+
+        # apply_plan 就是 resize_model(..., dry_run=False) 的写盘分支（备份→写临时→校验→
+        # replace→写 dat→整体校验，失败自动回滚）。这里复用上面已经算好的 plan，
+        # 避免 resize_model 内部再 plan 一次，也保证"一次加载只重采样一次"。
+        try:
+            apply_plan(plan, verbose=True)
+        except ResizeError as _e:
+            io.log_info(f'[RESIZE] 失败：{_e}（继续用原权重）')
+            return self._resize_fallback_resolution(plan)
+        except Exception as _e:
+            io.log_info(f'[RESIZE] 失败：{type(_e).__name__}: {_e}（继续用原权重）')
+            return self._resize_fallback_resolution(plan)
+
+        # dat 已被写成新分辨率（+ _resize_history），重读一遍保证 options 与磁盘一致
+        try:
+            import pickle
+            _dat = Path(self.get_strpath_storage_for_file('data.dat'))
+            self.options.update(pickle.loads(_dat.read_bytes()).get('options', {}))
+            resolution = int(self.options['resolution'])
+        except Exception as _e:
+            io.log_info(f'[RESIZE] 警告：dat 重读失败（{type(_e).__name__}: {_e}），'
+                        f'沿用 resolution={resolution}')
+        io.log_info(f'[RESIZE] 完成：Inter 已重建到 {resolution}（Encoder/Decoder 与分辨率无关，未动）')
+        # 优化器状态按参数形状存档：inter 形状变了，src_dst_opt 必然读不回去 → 会被重置。
+        # 这不是权重丢失（encoder/inter/decoder 全部完好），只是动量/二阶矩从头开始。
+        io.log_info('[RESIZE] 提示：优化器状态与 inter 形状绑定，重建后优化器会被重置'
+                    '（随后的 src_dst_opt [WARN] 属预期，网络权重未受影响）。')
+        return resolution
+
+    def _resize_fallback_resolution(self, plan):
+        """重建失败后：退回权重的实际分辨率，让原权重能被完整加载（而不是被随机初始化顶掉）。"""
+        io.log_info(f'[RESIZE] [ERROR] 本次按原分辨率 {plan.old_res} 继续训练（Inter 未重建，原权重完好）；'
+                    f'dat 里仍记着 {plan.new_res}，排除故障后重启会自动重试。')
+        return int(plan.old_res)
+
     # --- initialization ---
     def on_initialize(self):
         eager = self.options.get('eager_mode', False)
@@ -666,32 +738,14 @@ class SAEHDModel(ModelBase):
 
         self.resolution = resolution = int(self.options['resolution'])
 
-        # ── 分辨率自动缩放 ──────────────────────────
-        _inter_pth = Path(self.get_model_root_path()) / f'{self.get_model_name()}_inter.pth'
-        if _inter_pth.exists() and not self.is_first_run():
-            try:
-                from models.Model_SAEHD.resize_inter import load_saveable
-                _ckpt = load_saveable(_inter_pth)
-                _param_keys = sorted([k for k in _ckpt if k.startswith('param_')])
-                if _param_keys:
-                    _d1w = _ckpt[_param_keys[0]]
-                    _e_dims = int(self.options.get('e_dims', 64))
-                    _C = _e_dims * 8
-                    _saved_hw = int(int(np.sqrt(_d1w.shape[0] / _C)))
-                    _archi = self.options.get('archi', '')
-                    _archi_opts = _archi.split('-')[1] if '-' in _archi else ''
-                    _is_t = 't' in _archi_opts
-                    _saved_res = _saved_hw * (32 if _is_t else 16)
-                    if _saved_res != resolution:
-                        io.log_info(f'[RESIZE] Inter {_saved_res} → {resolution}')
-                        from models.Model_SAEHD.resize_inter import resize_model
-                        resize_model(Path(self.get_model_root_path()), resolution, dry_run=False, verbose=True)
-                        with open(Path(self.get_strpath_storage_for_file(self.get_model_name() + '_data.dat')), 'rb') as _f:
-                            self.options.update(pickle.load(_f).get('options', {}))
-                        resolution = int(self.options['resolution'])
-                        self.resolution = resolution
-            except Exception as _e:
-                io.log_info(f'[RESIZE] Auto-detect failed ({_e})')
+        # ── 分辨率自动重建 ──────────────────────────
+        # 唯一入口：plan_resize() 判定 → needs_resize 才 apply_plan()。
+        # 首次运行（还没有权重）直接跳过；其余情况由 _auto_resize_inter 负责
+        # "跳过 / 重建 / 失败回退"三种结局，且绝不抛异常。
+        if not self.is_first_run():
+            resolution = self._auto_resize_inter(resolution)
+            self.resolution = resolution
+
         self.face_type = {
             'h': FaceType.HALF,
             'mf': FaceType.MID_FULL,
@@ -945,6 +999,23 @@ class SAEHDModel(ModelBase):
             OptimizerClass = optimizer_map.get(optimizer_name, nn.AdaBelief)
             clipnorm = 1.0 if bool(self.options['clipgrad']) else 0.0
 
+            # ---- 优化器状态精度 ----
+            # 权重和梯度始终是 fp32（存档的 .pth 也是 fp32，不受影响）；
+            # 只有 ms/vs 这类每参数一份的内部状态按需降到 bf16：
+            #   每个参数 4B -> 2B（AdaBelief 两份状态，1.12B 参数能省 4.2 GB）。
+            # ★ 已停用（2026-11-05）：优化器状态一律 fp32。
+            # 这个特性曾经默认跟着 use_bf16 打开，结果：
+            #   - v（二阶矩）存 bf16 后精度只有 8 位，sqrt(v) 抖动 -> step 被放大
+            #     -> 中间层激活从 8.8 一路涨到 136/1074 -> decoder 的 sigmoid 被顶进饱和区
+            #     -> 输出恒为 1.0（预览整块全白）、梯度归零，模型永久报废；
+            #   - 换算下来省的那点显存，换的是"跑几百步后模型变白"这种不可逆损失；
+            #   - 而且 bf16 状态走分块就地更新的路径实测极慢（GPU 利用率长期 5%）。
+            # 现在即使 dat 里写了 opt_state_bf16=True 也忽略，只打一行提示。
+            state_bf16 = False
+            if bool(self.options.get('opt_state_bf16', False)):
+                io.log_info('[提示] opt_state_bf16 已停用（曾导致训练发散），'
+                            '优化器状态固定用 fp32。')
+
             # LR warmup：0 = 关闭。乘 lr 的动作在优化器 _get_lr_value() 里做，
             # 这里只按 lr_cos 的同一套方式把选项传给优化器。
             lr_warmup_steps = int(self.options.get('lr_warmup_steps', 0) or 0)
@@ -1000,6 +1071,7 @@ class SAEHDModel(ModelBase):
                 lr_plateau_min_ratio=lr_plateau_min_ratio,
                 lr_plateau_partitions=lr_plateau_partitions,
                 clipnorm=clipnorm,
+                state_bf16=state_bf16,
                 name='src_dst_opt',
             )
             self.model_filename_list += [(self.src_dst_opt, 'src_dst_opt.pth')]
@@ -1018,6 +1090,7 @@ class SAEHDModel(ModelBase):
                     lr_plateau_min_ratio=lr_plateau_min_ratio,
                     lr_plateau_partitions=lr_plateau_partitions,
                     clipnorm=clipnorm,
+                    state_bf16=state_bf16,
                     name='D_code_opt',
                 )
                 self.model_filename_list += [(self.D_code_opt, 'D_code_opt.pth')]
@@ -1036,6 +1109,7 @@ class SAEHDModel(ModelBase):
                     lr_plateau_min_ratio=lr_plateau_min_ratio,
                     lr_plateau_partitions=lr_plateau_partitions,
                     clipnorm=clipnorm,
+                    state_bf16=state_bf16,
                     name='GAN_opt',
                 )
                 self.model_filename_list += [(self.D_src_dst_opt, 'GAN_opt.pth')]
@@ -2088,6 +2162,17 @@ class SAEHDModel(ModelBase):
         if self.use_bf16:
             fw = {k: (v.float() if isinstance(v, torch.Tensor) else v) for k, v in fw.items()}
 
+        # 输出饱和检测：pred 一旦退化成常数（整块全白/全黑），梯度就没了，继续训也回不来。
+        # 只报警、不动权重（安全）；每 200 迭代看一次，代价是一次 std()。
+        if self.is_training and (self.get_iter() % 200 == 0):
+            try:
+                _sd = float(fw['pred_src_src'].detach().float().std())
+                if _sd < 1e-4:
+                    io.log_info('[警告] pred 输出已饱和 (std=%.2e，恒为常数)：模型已退化，'
+                                '建议回滚备份或重开模型' % _sd)
+            except Exception:
+                pass
+
         # Inter code 分布日志
         _log_interval = int(self.options.get('log_code_stats', 0))
         if _log_interval > 0 and self.get_iter() % _log_interval == 0:
@@ -2413,7 +2498,12 @@ class SAEHDModel(ModelBase):
         #             dst 组放在 dst-pred 之后、dst-src 之前。
         #   冻结 dst 解码器时不给 dst 组（此时 dst 支路不参与训练）。
         from core.imagelib import reinhard_color_transfer as _rct_pv
-        _freeze_dst_pv = ('df' in self.archi_type) and bool(self.options.get('freeze_decoder_dst', False))
+        # dst 解码器不参与训练的情况有两种：显式冻结，以及「预训练单解码器」支路。
+        # 后者以前没算进来 —— 预览仍显示 dst 那一列，而对应权重从没训过，
+        # 看起来就是一块纯色（红/白），非常容易误判成"模型炸了"。
+        _freeze_dst_pv = ('df' in self.archi_type) and (
+            bool(self.options.get('freeze_decoder_dst', False))
+            or bool(getattr(self, 'pretrain_single_decoder', False)))
         _cast_on_pv = ((str(getattr(self, 'random_color_alg', 'none')).lower() != 'none')
                        and (float(getattr(self, 'random_color_power', 0.0)) > 0.0))
         _show_src_cast = bool(_cast_on_pv and (cast_src is not None))

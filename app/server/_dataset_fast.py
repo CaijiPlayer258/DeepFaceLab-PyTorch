@@ -26,8 +26,52 @@ _THUMB = 64          # 统一缩略尺寸（灰度）
 
 
 def list_images(root: Path):
-    return sorted(p for p in root.iterdir()
-                  if p.is_file() and p.suffix.lower() in _EXTS)
+    """**只数这一层**的图片：不递归、不进子目录、不碰 _/点 开头的缓存。
+
+    这是全仓唯一的「数据集里有多少张图」口径，所有计数都必须走它 ——
+    app.py: _count_images 的注释记过一次教训（以前用 rglob，分组后根目录
+    空了还照样报 1204 张）。同一类坑的第二个现场：data_src/1 根上 670 张、
+    _trash/ 里 534 张，任何一次 rglob / **/*.jpg 都会报 1204，UI 和用户
+    自己数的 670 对不上，聚类却只处理 670 张。
+    """
+    try:
+        return sorted(p for p in root.iterdir()
+                      if p.is_file() and p.suffix.lower() in _EXTS
+                      and not p.name.startswith((".", "_")))
+    except OSError:
+        return []
+
+
+def count_images(root: Path) -> int:
+    """等价于 len(list_images(root))；单独开一个名字方便调用方自解释。"""
+    return len(list_images(root))
+
+
+def skipped_subdirs(root: Path, budget: int = 200000):
+    """这一层的子目录里**不参与**统计的图片各有多少张 —— 只用于给用户核对。
+
+    返回 [{"name": "_trash", "images": 534}, ...]，按张数倒序。
+    遍历带 budget 上限，几十万张的目录也不会把接口拖住。
+    """
+    out = []
+    try:
+        subs = [d for d in root.iterdir() if d.is_dir()]
+    except OSError:
+        return out
+    for d in subs:
+        n = 0
+        try:
+            for _p in d.rglob("*"):
+                budget -= 1
+                if budget <= 0:
+                    break
+                if _p.is_file() and _p.suffix.lower() in _EXTS:
+                    n += 1
+        except OSError:
+            pass
+        out.append({"name": d.name, "images": n})
+    out.sort(key=lambda x: -x["images"])
+    return out
 
 
 def _features_one(path: Path):

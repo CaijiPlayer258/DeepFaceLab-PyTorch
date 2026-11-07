@@ -64,3 +64,19 @@ weights/**/*.pth
 weights/**/*.pt
 weights/**/*.engine
 !weights/manifest.json
+
+# 登录凭据：任何位置的 cookie / 用户信息都不入库
+**/bilibili_cookie.txt
+**/bilibili_cookie.txt.bak
+**/user_info.json
+app/engine/ui/user/
+
+# 根目录调试残留（截图 / 日志 / 临时脚本）
+/_*.log
+/_*.png
+/_*.txt
+/_*.json
+
+# B վ WBI ǩ������
+.wbi_cache.json
+**/.wbi_cache.json

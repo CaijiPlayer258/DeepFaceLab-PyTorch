@@ -21,8 +21,8 @@ class FAN:
     def __init__(self, device_info: ORTDeviceInfo, landmarks_3D: bool = False):
         if device_info not in FAN.get_available_devices():
             raise Exception(f'device_info {device_info} not available')
-        name = '3DFAN.onnx' if landmarks_3D else '2DFAN.onnx'
-        path = weights.path('onnx/FAN/' + name)
+        name = 'fan_3d.onnx' if landmarks_3D else 'fan_2d.onnx'
+        path = weights.path(name)
         self._sess = InferenceSession_with_device(str(path), device_info)
         self._input_name = self._sess.get_inputs()[0].name
         # ── TRT BF16 加速 ──────────────────────

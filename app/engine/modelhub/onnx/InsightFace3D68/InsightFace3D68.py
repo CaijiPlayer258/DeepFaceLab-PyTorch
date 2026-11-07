@@ -21,7 +21,7 @@ class InsightFace3D68:
     def __init__(self, device_info: ORTDeviceInfo):
         if device_info not in InsightFace3D68.get_available_devices():
             raise Exception(f'device_info {device_info} not available')
-        path = weights.path('onnx/InsightFace3D68/1k3d68.onnx')
+        path = weights.path('insightface_3d68.onnx')
         self._sess = InferenceSession_with_device(str(path), device_info)
         self._input_name = self._sess.get_inputs()[0].name
 

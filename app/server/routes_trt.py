@@ -25,9 +25,13 @@ _engine_job = {"running": False, "name": "", "log": [], "error": "", "done": Fal
 
 
 def _engine_roots():
-    """能找 onnx 的根目录：工作区优先，其次引擎仓。"""
-    return [WORKSPACE, Path(__file__).resolve().parents[2],
-            Path(__file__).resolve().parents[3] / "DeepFaceLab-PyTorch"]
+    """能找 onnx 的根目录：工作区 → weights/ 平铺根 → 仓库根。
+
+    4.0 仓库（parents[3]/DeepFaceLab-PyTorch）不再兜底：权重已经全部平铺在
+    <仓库>/weights/ 下，继续认 4.0 只会把「没下载」报成「找到了」。
+    """
+    from ._paths import weights_dir
+    return [WORKSPACE, weights_dir(), Path(__file__).resolve().parents[2]]
 
 
 def _engines_verify_all():
@@ -172,9 +176,10 @@ def engines_build(payload: dict | None = None):
     return {"ok": True, "name": name}
 
 
-def _modelhub_dir():
-    from ._paths import modelhub_dir
-    return modelhub_dir()
+def _weights_dir():
+    """权重根（平铺布局：onnx 直接在根下，没有模型子目录）。"""
+    from ._paths import weights_dir
+    return weights_dir()
 
 
 @router.post("/api/perf/bench")
@@ -223,7 +228,7 @@ def perf_bench(payload: dict | None = None):
     # 3) 检测
     try:
         from ._detect import TinyMogDet
-        onnx = _modelhub_dir() / "onnx" / "TinyMog" / "TinyMog.onnx"
+        onnx = _weights_dir() / "tinymog.onnx"
         if onnx.is_file():
             det = TinyMogDet(str(onnx), workspace=WORKSPACE)
             canvas = cv2.resize(imgs[0], (640, 640))
@@ -234,7 +239,7 @@ def perf_bench(payload: dict | None = None):
     # 4) 特征点
     try:
         from ._landmarks106 import InsightFace106
-        onnx = _modelhub_dir() / "onnx" / "InsightFace2d106" / "InsightFace2D106.onnx"
+        onnx = _weights_dir() / "insightface_2d106.onnx"
         if onnx.is_file():
             lm = InsightFace106(str(onnx), workspace=WORKSPACE)
             face = cv2.resize(imgs[0], (192, 192))

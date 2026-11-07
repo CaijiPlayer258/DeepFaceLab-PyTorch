@@ -39,7 +39,7 @@ class TinyMog:
         if device_info not in TinyMog.get_available_devices():
             raise Exception(f"device_info {device_info} not available for TinyMog")
 
-        model_path = weights.path("onnx/TinyMog/TinyMog.onnx")
+        model_path = weights.path("tinymog.onnx")
         if not model_path.exists():
             raise FileNotFoundError(f"TinyMog ONNX model not found at {model_path}")
 

@@ -28,8 +28,21 @@ def _free_port(start: int = 8760) -> int:
     raise RuntimeError("no free port")
 
 
+def _apply_flags(argv) -> None:
+    """命令行开关。目前只有 --mock：把 B 站相关路由切到占位数据。
+
+    占位数据以前是默认行为（前端 biliMockFetch 直接随机生成），现在反过来：
+    默认全真，只有显式 --mock（或等价的环境变量 DFL_BILI_MOCK=1）才给占位。
+    """
+    if "--mock" in argv:
+        os.environ["DFL_BILI_MOCK"] = "1"
+        print("[mock] DFL_BILI_MOCK=1：B 站列表/下载将返回占位数据", flush=True)
+
+
 def main() -> int:
     import uvicorn
+
+    _apply_flags(sys.argv[1:])
 
     from server.app import app as fastapi_app
 

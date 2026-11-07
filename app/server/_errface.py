@@ -13,8 +13,10 @@
 from __future__ import annotations
 
 import glob
+import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -22,18 +24,33 @@ import numpy as np
 from ._align import read_dfljpg_meta
 
 _APP = Path(__file__).resolve().parent.parent
+# 权重平铺：errface_xgb.ubj 直接在权重根下（weights/errface_xgb.ubj）
 _CAND_MODEL_DIRS = [
-    Path(os.environ.get("DFL_WEIGHTS_DIR") or (_APP.parent / "weights")) / "errface",
-    _APP / "engine" / "modelhub" / "errface",     # 迁移前的位置
-    _APP / "modelhub" / "errface",                # 更早的位置
+    Path(os.environ.get("DFL_WEIGHTS_DIR") or (_APP.parent / "weights")),
+    _APP.parent / "weights",
+    _APP / "engine" / "modelhub",                 # 迁移前的位置（老布局）
 ]
 _MODEL_DIR = next((d for d in _CAND_MODEL_DIRS if d.is_dir()), _CAND_MODEL_DIRS[0])
-# 统一命名：errface_xgb.ubj（旧名 CL.ubj / CL.model 只作兼容回退）
+# 统一命名：errface_xgb.ubj（旧名 CL.ubj / CL.model、老布局 weights/errface/ 只作兼容回退）
 _MODEL = _MODEL_DIR / "errface_xgb.ubj"
-_LEGACY = [_MODEL_DIR / "CL.ubj", _MODEL_DIR / "CL.model"]
+_LEGACY = ([d / "errface" / "errface_xgb.ubj" for d in _CAND_MODEL_DIRS]
+           + [_MODEL_DIR / "CL.ubj", _MODEL_DIR / "CL.model"]
+           + [d / "errface" / "CL.ubj" for d in _CAND_MODEL_DIRS])
 _BOOSTER = None
-_LOAD_TRIED = False
+_BOOSTER_KEY = None    # 加载成功/失败时那个文件的指纹（换了文件要重新加载）
+_BOOSTER_ERR = ""      # 上次加载失败的原因（同一个文件不重复付代价）
+_XGB_MOD = None
+_XGB_WHY = ""
 _LM106 = False        # False=未尝试, None=不可用, 否则为模型对象
+
+# 「能力」状态：文件在不在 / 读不读得了 / 运行库在不在 / 模型加载得起来吗。
+# 前端靠它置灰按钮，而不是等用户点了再抛 409 —— 缺模型是状态，不是故障。
+_MB = 2 ** 20
+_ST = {"key": None, "at": 0.0, "val": None}
+_ST_TTL = 2.0
+_INSTALL_ZH = "把 errface_xgb.ubj 放进 weights/ 根目录（平铺），或在「设置 → 权重包」里下载 core 包"
+_INSTALL_EN = ("Drop errface_xgb.ubj into the weights folder root (flat layout), "
+               "or download the core pack in Settings → Weight packs")
 
 
 def model_path() -> Path:
@@ -49,26 +66,182 @@ def _resolved() -> Path | None:
     return None
 
 
-def available() -> bool:
-    return _resolved() is not None
+def _file_key(p) -> tuple:
+    """文件指纹：路径 + mtime + 大小。换了文件才重新加载（用户拷模型进来不用重启后端）。"""
+    if p is None:
+        return ("", 0, 0)
+    try:
+        st = p.stat()
+        return (str(p), int(st.st_mtime_ns), int(st.st_size))
+    except OSError:
+        return ("", 0, 0)
+
+
+def _xgb():
+    """(xgboost 模块, 失败说明)。import 只试一次 —— 缺依赖时别每次点击都付一遍代价。"""
+    global _XGB_MOD, _XGB_WHY
+    if _XGB_MOD is not None or _XGB_WHY:
+        return _XGB_MOD, _XGB_WHY
+    try:
+        import xgboost as xgb
+        _XGB_MOD = xgb
+    except Exception as ex:
+        _XGB_WHY = "缺 xgboost 运行库（%s）" % (str(ex) or type(ex).__name__)
+    return _XGB_MOD, _XGB_WHY
+
+
+def _readable(p) -> tuple:
+    """存在之外还要「读得动」：0 字节 / 打不开 都算不可用。→ (ok, 中文原因, 英文原因)"""
+    try:
+        st = p.stat()
+    except OSError as ex:
+        e = getattr(ex, "strerror", None) or ex
+        return False, "打不开（%s）" % e, "cannot be opened (%s)" % e
+    if st.st_size <= 0:
+        return False, "是 0 字节", "is 0 bytes"
+    try:
+        with open(p, "rb") as f:
+            if not f.read(1):
+                return False, "读不到内容", "cannot be read"
+    except OSError as ex:
+        e = getattr(ex, "strerror", None) or ex
+        return False, "读不了（%s）" % e, "cannot be read (%s)" % e
+    return True, "", ""
+
+
+def _manifest_entry() -> dict:
+    """清单里 errface_xgb.ubj 那一条（size / group 用来告诉用户还差多少、下载哪一组）。"""
+    cands = []
+    try:
+        from ._paths import weights_dir
+        cands.append(Path(weights_dir()) / "manifest.json")
+    except Exception:
+        pass
+    cands.append(_APP.parent / "weights" / "manifest.json")
+    seen = set()
+    for c in cands:
+        k = str(c)
+        if k in seen:
+            continue
+        seen.add(k)
+        try:
+            if not c.is_file():
+                continue
+            data = json.loads(c.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for e in (data.get("files") or []):
+            if isinstance(e, dict) and str(e.get("path") or "").replace("\\", "/") in ("errface_xgb.ubj", "errface/errface_xgb.ubj"):
+                return e
+    return {}
 
 
 def _booster():
-    global _BOOSTER, _LOAD_TRIED
-    if _BOOSTER is not None or _LOAD_TRIED:
-        return _BOOSTER
-    _LOAD_TRIED = True
+    global _BOOSTER, _BOOSTER_KEY, _BOOSTER_ERR
     path = _resolved()
+    key = _file_key(path)
+    if _BOOSTER is not None and _BOOSTER_KEY == key:
+        return _BOOSTER
+    if _BOOSTER_KEY == key and _BOOSTER_ERR:
+        return None                     # 同一个文件失败过：结论复用，不反复解析
     if path is None:
+        _BOOSTER, _BOOSTER_KEY, _BOOSTER_ERR = None, key, "缺 %s" % _MODEL.name
+        return None
+    xgb, why = _xgb()
+    if xgb is None:
+        _BOOSTER, _BOOSTER_KEY, _BOOSTER_ERR = None, key, why
         return None
     try:
-        import xgboost as xgb
         b = xgb.Booster()
         b.load_model(str(path))
-        _BOOSTER = b
-    except Exception:
-        _BOOSTER = None
-    return _BOOSTER
+    except Exception as ex:
+        _BOOSTER, _BOOSTER_KEY, _BOOSTER_ERR = None, key, ("加载失败：%s"
+                                                           % (str(ex)[:180] or type(ex).__name__))
+        return None
+    _BOOSTER, _BOOSTER_KEY, _BOOSTER_ERR = b, key, ""
+    return b
+
+
+def status(force: bool = False) -> dict:
+    """能力状态：一次把「能不能用 / 为什么不能用 / 怎么装好」说清。
+
+    可用的判定（存在且可读才算）：
+      1) errface_xgb.ubj 在（含旧名 CL.ubj / CL.model 的回退）
+      2) 读得动（能打开、非 0 字节）
+      3) xgboost 装得上
+      4) Booster 真的加载得起来
+    任何一条不满足 → available=False，并带回给人看的原因（中英各一份，前端直接贴）。
+    """
+    resolved = _resolved()
+    key = (_file_key(resolved), _file_key(_MODEL))
+    now = time.time()
+    if not force and _ST["val"] is not None and _ST["key"] == key and (now - _ST["at"]) < _ST_TTL:
+        return dict(_ST["val"])
+
+    ent = _manifest_entry()
+    want = int(ent.get("size") or 0)
+    group = str(ent.get("group") or "core")
+    mb = round(want / _MB, 1) if want else 0.0
+    zh_size = "（约 %.1f MB）" % mb if want else ""
+    en_size = " (about %.1f MB)" % mb if want else ""
+    out = {
+        "capability": "errface",
+        "available": False,
+        "model": _MODEL.name,
+        "path": str(_MODEL),
+        "file": str(resolved) if resolved else "",
+        "size_mb": mb,
+        "group": group,
+        "tried": [str(d) for d in _CAND_MODEL_DIRS],
+        "deps": {"xgboost": ""},
+        "reason": "",
+        "reason_en": "",
+        "install": "",
+        "install_en": "",
+        "checked_at": now,
+    }
+
+    def done():
+        _ST.update(key=key, at=now, val=dict(out))
+        return dict(out)
+
+    if resolved is None:
+        out["reason"] = "缺 %s%s —— 在「设置 → 权重包」里下载 %s 包" % (_MODEL.name, zh_size, group)
+        out["reason_en"] = ("%s is missing%s — download the %s pack in Settings → Weight packs"
+                            % (_MODEL.name, en_size, group))
+        out["install"], out["install_en"] = _INSTALL_ZH, _INSTALL_EN
+        return done()
+
+    ok, why_zh, why_en = _readable(resolved)
+    if not ok:
+        out["reason"] = "%s 在 %s，但%s —— 重新拷一份进去" % (_MODEL.name, resolved, why_zh)
+        out["reason_en"] = "%s exists at %s but %s — copy it in again" % (_MODEL.name, resolved, why_en)
+        out["install"], out["install_en"] = _INSTALL_ZH, _INSTALL_EN
+        return done()
+
+    xgb, why = _xgb()
+    out["deps"]["xgboost"] = str(getattr(xgb, "__version__", "") or "") if xgb is not None else ""
+    if xgb is None:
+        out["reason"] = "%s 已在，但%s" % (_MODEL.name, why)
+        out["reason_en"] = "%s is present, but the xgboost runtime is not installed" % _MODEL.name
+        out["install"] = ("在引擎环境里装 xgboost：runtime\\engine\\python.exe -m pip install xgboost")
+        out["install_en"] = "Install xgboost into the engine env: runtime\\engine\\python.exe -m pip install xgboost"
+        return done()
+
+    if _booster() is None:
+        out["reason"] = "%s 加载失败：%s" % (_MODEL.name, _BOOSTER_ERR or "未知原因")
+        out["reason_en"] = "%s failed to load: %s" % (_MODEL.name, "unknown error" if _BOOSTER_ERR else "")
+        out["install"], out["install_en"] = _INSTALL_ZH, _INSTALL_EN
+        return done()
+
+    out.update(available=True,
+               reason="", reason_en="", install="", install_en="")
+    return done()
+
+
+def available() -> bool:
+    """有模型 + 读得了 + xgboost 在 + 加载得起来，才算「能用」。"""
+    return bool(status().get("available"))
 
 
 def _img_h(path: Path) -> int:
@@ -193,11 +366,11 @@ def _landmark_model():
     _LM106 = None
     try:
         from ._landmarks106 import InsightFace106
-        from ._ortcuda import _candidate_roots
-        for root in _candidate_roots():
-            for rel in ("modelhub/onnx/InsightFace2d106/InsightFace2D106.onnx",
-                        "DeepFaceLab-PyTorch/modelhub/onnx/InsightFace2d106/InsightFace2D106.onnx"):
-                cand = Path(root) / rel
+        # 平铺布局：<weights>/insightface_2d106.onnx；老的分目录布局作兜底
+        for base in _CAND_MODEL_DIRS:
+            for rel in ("insightface_2d106.onnx",
+                        "onnx/InsightFace2d106/InsightFace2D106.onnx"):
+                cand = Path(base) / rel
                 if cand.is_file():
                     _LM106 = InsightFace106(str(cand), engine_name="insightface_2d106")
                     return _LM106
@@ -229,7 +402,13 @@ def scan(directory, threshold=0.5, limit=0, percent=0.0, progress=None, estimate
     """扫描一个对齐脸目录，返回被判为「错脸」的文件。"""
     booster = _booster()
     if booster is None:
-        return {"ok": False, "error": "模型不可用：缺 %s（需要 xgboost）" % _MODEL.name}
+        # 缺文件 / 缺 xgboost / 加载失败 是三件事，别把它们混成一句「缺 ubj」
+        st = status(force=True)
+        return {"ok": False, "unavailable": True, "capability": "errface",
+                "reason": st.get("reason") or ("%s 不可用" % _MODEL.name),
+                "install": st.get("install") or "",
+                "status": st,
+                "error": st.get("reason") or ("模型不可用：%s" % _MODEL.name)}
 
     files = sorted(glob.glob(os.path.join(str(directory), "*.jpg")))
     if limit:

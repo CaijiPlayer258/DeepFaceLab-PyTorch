@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -33,7 +34,8 @@ class TrtEmbedder:
     """固定 batch 的 ArcFace 推理器：run(np[HWC float32]) -> np[N,512]。"""
 
     def __init__(self, onnx_path: str, batch: int = 32, fp16: bool = True,
-                 cache_dir: str | None = None, input_name: str | None = None):
+                 cache_dir: str | None = None, input_name: str | None = None,
+                 allow_build: bool = True):
         _dll_dirs()
         import tensorrt as trt
         import torch
@@ -46,28 +48,89 @@ class TrtEmbedder:
         # 这样编译页里能看到它、也能重建；构建完成后两边共用同一份文件。
         eng_dir = Path(cache_dir or (Path(__file__).resolve().parents[2] / "runtime" / "engine" / "trt_direct"))
         eng_dir.mkdir(parents=True, exist_ok=True)
-        cache = None
+        logger = trt.Logger(trt.Logger.WARNING)
+        t_all = time.time()
+
+        # ---- 选引擎：**必须真的反序列化成功才算数** ----
+        # 以前这里是 sorted(hits)[0]，直接开第一个文件读字节。换过 TensorRT 版本
+        # （这台机器上的 _engines/*.bf16.engine 都是 TRT 10.9 编的，运行时是 10.13.3.9）
+        # 就会：
+        #   1) 白读 9.6 MB；
+        #   2) deserialize_cuda_engine 返回 None 而不抛异常；
+        #   3) 下一行 self.engine.create_execution_context() 抛 AttributeError；
+        #   4) 上层 except 吞掉，回退 onnxruntime+TRT EP，再花 ~2 s 建会话。
+        #   每次点击都付一遍这笔钱 —— 这就是「初始化加载模型很慢」。
+        cands = []
+        want = None
         try:
             from ._engines import engine_path as _ep
             ws = Path(os.environ.get("DFL_WORKSPACE") or (Path(__file__).resolve().parents[2] / "workspace"))
-            cache = _ep(ws, "arcface_mbf", str(src))
+            want = _ep(ws, "arcface_mbf", str(src))
         except Exception:
-            cache = None
-        if cache is not None:
+            want = None
+        if want is not None:
+            cands.append(want)
             # server 环境没装 tensorrt，trt_version() 读作 0，文件名会带 _trt0；
-            # engine 环境能读到真实版本。两边命名不一致 → 直接按前缀找已有引擎。
-            hits = sorted(cache.parent.glob("arcface_mbf_*.bf16.engine"))
-            if hits:
-                cache = hits[0]
-        if cache is None:
-            key = hashlib.md5(src.read_bytes()).hexdigest()[:16]
-            cache = eng_dir / f"{src.stem}_{key}_b{batch}_{'fp16' if fp16 else 'fp32'}.engine"
+            # engine 环境能读到真实版本。两边命名不一致 → 同目录里新到旧全试一遍。
+            try:
+                cands.extend(sorted(want.parent.glob("arcface_mbf_*.bf16.engine"),
+                                    key=lambda q: q.stat().st_mtime, reverse=True))
+            except OSError:
+                pass
+        key = hashlib.md5(src.read_bytes()).hexdigest()[:16]
+        prec = "fp16" if fp16 else "fp32"
+        try:
+            trt_ver = str(trt.__version__)
+        except Exception:
+            trt_ver = "0"
+        # 重建出来的那份（名字里带 TRT 版本，换版本就自动不复用）
+        cands.append(eng_dir / ("%s_%s_trt%s_b%d_%s.engine" % (src.stem, key, trt_ver, batch, prec)))
+        for pat in ("%s_%s_*.engine" % (src.stem, key), "%s_*.engine" % src.stem, "*.bf16.engine"):
+            try:
+                cands.extend(sorted(eng_dir.glob(pat),
+                                    key=lambda q: q.stat().st_mtime, reverse=True))
+            except OSError:
+                pass
 
-        logger = trt.Logger(trt.Logger.WARNING)
-        if cache.exists():
-            with open(cache, "rb") as f:
-                serialized = f.read()
-        else:
+        state = {"engine": None, "file": None, "rebuilt": False, "tried": 0, "bad": []}
+
+        def _deserialize(path):
+            if not path or not path.is_file():
+                return None
+            state["tried"] += 1
+            try:
+                data = path.read_bytes()
+            except OSError:
+                return None
+            try:
+                eng = trt.Runtime(logger).deserialize_cuda_engine(data)
+            except Exception:
+                eng = None
+            if eng is None:
+                state["bad"].append(path.name)
+            return eng
+
+        seen = set()
+        for cand in cands:
+            k = str(cand).lower()
+            if k in seen:
+                continue
+            seen.add(k)
+            eng = _deserialize(cand)
+            if eng is not None:
+                state["engine"], state["file"] = eng, str(cand)
+                break
+
+        if state["engine"] is None and not allow_build:
+            # 点击路径上绝不等 75 秒的构建：直接告诉上层「没引擎」，退 onnxruntime。
+            # 重建交给预热（--serve 的 warm / 引擎编译页），下次点击就是 0.6 s 反序列化。
+            raise RuntimeError("没有可用的 TRT 引擎（试过 %d 个：%s），需要重建或先用 ONNX 回退"
+                               % (state["tried"], ", ".join(state["bad"][:3]) or "-"))
+
+        if state["engine"] is None:
+            # 一个都用不了（典型就是换过 TensorRT 版本）→ 重建一份。
+            # 写到 cache_dir（runtime/engine/trt_direct，可写），**不覆盖**
+            # workspace/_engines 里用户可见的旧引擎 —— 那边交给「引擎编译」页重建。
             builder = trt.Builder(logger)
             net = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
             parser = trt.OnnxParser(net, logger)
@@ -85,10 +148,22 @@ class TrtEmbedder:
             if serialized is None:
                 raise RuntimeError("engine 构建失败")
             serialized = bytes(serialized)
-            with open(cache, "wb") as f:
-                f.write(serialized)
+            out = eng_dir / ("%s_%s_trt%s_b%d_%s.engine" % (src.stem, key, trt_ver, batch, prec))
+            try:
+                with open(out, "wb") as f:
+                    f.write(serialized)
+            except OSError:
+                out = None
+            state["engine"] = trt.Runtime(logger).deserialize_cuda_engine(serialized)
+            state["file"], state["rebuilt"] = (str(out) if out else None), True
+            if state["engine"] is None:
+                raise RuntimeError("engine 重建后仍然无法反序列化")
 
-        self.engine = trt.Runtime(logger).deserialize_cuda_engine(serialized)
+        self.engine = state["engine"]
+        # 给上层（CLI / 接口）看的现场：用了哪个文件、试了几个、有没有重建
+        self.report = {"engine": state["file"], "rebuilt": bool(state["rebuilt"]),
+                       "tried": state["tried"], "bad": state["bad"][:4],
+                       "ms": int((time.time() - t_all) * 1000)}
         self.ctx = self.engine.create_execution_context()
         self.input_name = input_name or self.engine.get_tensor_name(0)
         self.ctx.set_input_shape(self.input_name, (batch, 3, 112, 112))

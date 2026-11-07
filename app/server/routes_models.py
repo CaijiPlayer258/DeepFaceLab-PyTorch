@@ -16,25 +16,62 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import FileResponse, StreamingResponse
 
-from .app import (MODEL_DIR, WORKSPACE, _CFG_STRUCTURAL, _DFL_PY, _DFL_TOOL, _HOT_OPTIONS, _NO_WINDOW, _PRESETS, _arch_of, _archi_parts, _archi_spec, _export_job, _export_job_lock, _export_worker, _find_model_preview, _gpu_cached, _gpu_list, _model_dat, _model_entry, _recommend_for, _safe_model_name, _spec_tables, _train_job, _train_job_lock, _training_pid, _webui_post)
+from .app import (MODEL_DIR, WORKSPACE, _CFG_STRUCTURAL, _DFL_PY, _DFL_TOOL, _HOT_OPTIONS, _NO_WINDOW, _PRESETS, _arch_of, _archi_parts, _archi_spec, _export_job, _export_job_lock, _export_worker, _find_model_preview, _gpu_cached, _gpu_list, _model_dat, _model_entry, _read_dat_info, _recommend_for, _safe_model_name, _spec_tables, _train_job, _train_job_lock, _training_pid, _webui_post)
 
 router = APIRouter()
 
 @router.get("/api/models/{name}/config")
 def model_config_get(name: str):
-    """读一个模型当前保存的训练参数。"""
-    import pickle
+    """读一个模型当前保存的训练参数。
+
+    TF 时代（DFL 1.x / 2.0）的 dat 先由 server/_legacy.py 翻成 4.1 的 options 再返回：
+    参数页读到的键必须和训练时引擎读到的一致，否则「改了一项没生效」。
+    返回值里的 legacy 是那条非阻塞提示用的（迁了几项、忽略了什么、要不要转权重）。
+    """
+    dat = _model_dat(name)
+    if dat is None:
+        raise HTTPException(404, "找不到模型 " + name)
+    from ._legacy import describe, notice
+    try:
+        # 参数页只要 options：走 describe（命中缓存就一次 stat），不读整份 dat ——
+        # 122MB 的模型整份 pickle 要 0.85s，而这里要的是 50 个键。
+        info = describe(dat)
+        legacy = notice(dat)
+    except Exception as e:
+        raise HTTPException(500, "读取 _data.dat 失败: " + str(e))
+    opts = info["options"] or {}
+    return {"name": name, "iter": info["iter"],
+            "options": {k: v for k, v in opts.items() if isinstance(v, (int, float, str, bool)) or v is None},
+            "readonly": sorted([k for k in opts if k in _CFG_STRUCTURAL]),
+            "legacy": legacy}
+
+
+@router.get("/api/models/{name}")
+def model_detail(name: str):
+    """单个模型的现状：卡片字段 + 完整 options + legacy 迁移信息。
+
+    就是 /api/models 里那一条再补上参数页要用的 options —— 界面不用为了
+    「这个模型是不是 TF 时代的、迁了几项」再发两个请求。
+    """
+    name = _safe_model_name(name)
     dat = _model_dat(name)
     if dat is None:
         raise HTTPException(404, "找不到模型 " + name)
     try:
-        data = pickle.loads(dat.read_bytes())
+        entry = _model_entry(dat)          # 卡片字段 + 迁移信息（顺手把缓存填好）
     except Exception as e:
-        raise HTTPException(500, "读取 _data.dat 失败: " + str(e))
-    opts = data.get("options") or {}
-    return {"name": name, "iter": data.get("iter", 0),
-            "options": {k: v for k, v in opts.items() if isinstance(v, (int, float, str, bool)) or v is None},
-            "readonly": sorted([k for k in opts if k in _CFG_STRUCTURAL])}
+        raise HTTPException(500, "读取模型失败: " + str(e))
+    from ._legacy import describe
+    try:
+        info = describe(dat)               # 只要 options：不为了 50 个键去解整份 dat
+    except Exception:
+        info = {"options": {}, "iter": entry.get("iter", 0)}
+    opts = info.get("options") or {}
+    return {"name": name, "dat": str(dat), "iter": info.get("iter", entry.get("iter", 0)),
+            "options": {k: v for k, v in opts.items()
+                        if isinstance(v, (int, float, str, bool)) or v is None},
+            "readonly": sorted([k for k in opts if k in _CFG_STRUCTURAL]),
+            "legacy": entry.get("legacy") or {"detected": False}, "model": entry}
 
 
 @router.post("/api/models/{name}/config")
@@ -53,40 +90,19 @@ def model_config_set(name: str, body: dict):
         raise HTTPException(400, "这些是创建后不可改的结构参数: " + ", ".join(blocked))
 
     try:
-        data = pickle.loads(dat.read_bytes())
+        # 读进来时 options 已经是 4.1 的形状：老 dat 的 learn_mask/ed_ch_dims 在
+        # 这里就被换成了 masked_training/e_dims+d_dims，写回去的也是一份干净的
+        # 新格式 dat（原文件先落 .dat.bak）。
+        data, legacy = _read_dat_info(dat)
     except Exception as e:
         raise HTTPException(500, "读取 _data.dat 失败: " + str(e))
 
     opts = data.get("options") or {}
 
-    # 按原字段的类型收敛：界面送上来的都是字符串，"" 表示「这项没填，别动」
-    bad = []
-    clean = {}
-    for k, v in list(patch.items()):
-        cur = opts.get(k)
-        if isinstance(v, str):
-            v = v.strip()
-            if v == "":
-                continue                      # 空着 = 不改这一项
-        try:
-            if isinstance(cur, bool):
-                if isinstance(v, str):
-                    v = v.lower() in ("1", "true", "yes", "on", "开")
-                else:
-                    v = bool(v)
-            elif isinstance(cur, int) and not isinstance(cur, bool):
-                v = int(round(float(v)))
-            elif isinstance(cur, float):
-                v = float(v)
-            elif isinstance(cur, str):
-                v = str(v)
-        except (TypeError, ValueError):
-            bad.append(k)
-            continue
-        clean[k] = v
+    # 与 create 共用同一套解析：类型按现有 options 收敛，空串表示「不改这一项」
+    patch, bad = _clean_options(patch, opts)
     if bad:
         raise HTTPException(400, "这些参数不是有效数字: " + ", ".join(bad))
-    patch = clean
     if not patch:
         return {"ok": True, "name": name, "changed": {}, "count": 0}
 
@@ -130,9 +146,16 @@ def model_config_set(name: str, body: dict):
         except Exception as e:
             hot_error = str(e)[:120]
 
+    # 保存后 dat 已经是 4.1 格式（上面的迁移结果被写回去了）：迁移那部分提示可以撤掉。
+    # 但「权重还是 TF 的 .npy」这件事没变，needs_convert 和命令照旧返回，
+    # 界面据此只去掉「已迁移 N 项」那一行，转换提示留着。
+    legacy_after = dict(legacy or {})
+    legacy_after.update({"detected": False, "source": "saved", "report": [],
+                         "counts": {}, "reasons": []})
     return {"ok": True, "name": name, "changed": changed, "count": len(changed),
             "hot": hot, "need_restart": cold,
-            "hot_applied": hot_applied, "hot_error": hot_error}
+            "hot_applied": hot_applied, "hot_error": hot_error,
+            "legacy": legacy_after}
 
 
 @router.post("/api/models/{name}/delete")
@@ -210,11 +233,76 @@ def gpu_info():
     return {"gpus": gpus, "best": best, "recommend": rec, "presets": presets}
 
 
+# ============================================================================
+#  参数解析协议（create / config 共用同一套）
+#
+#  前端只做一件事：把页面上的值收集成一个 JSON 发过来。后端负责：
+#    * 按 base（预设默认值 / 已有 dat）的类型做类型收敛（"1" -> 1、1 -> True …）
+#    * 空串表示「这一项没填，别动」
+#    * 结构性字段（分辨率 / 架构 / 各维度 / face_type）不许走 options：
+#      创建后改不了，要么走 spec，要么直接拒绝
+#  返回里带上「实际生效的 options」，界面按它渲染就不会和磁盘对不上。
+# ============================================================================
+_STRUCTURAL_KEYS = {
+    "resolution", "archi", "e_dims", "ae_dims", "d_dims", "d_mask_dims", "face_type",
+}
+
+
+def _clean_options(raw, base):
+    """把前端发来的 JSON options 收敛成能直接写进 dat 的字典。
+
+    raw  : 前端 JSON（值可能是数字/布尔/字符串，也可能是 "1"/"true"）
+    base : 默认值或已有 options，用来决定每一项该是什么类型
+    返回 (clean, bad)，bad 是类型不对的键名列表。
+    """
+    clean, bad = {}, []
+    if not isinstance(raw, dict):
+        return clean, bad
+    for k, v in raw.items():
+        if k in _STRUCTURAL_KEYS:
+            continue                      # 结构参数不在这里改
+        if isinstance(v, str):
+            v = v.strip()
+            if v == "":
+                continue                  # 空着 = 不改
+        cur = base.get(k)
+        try:
+            if isinstance(cur, bool):
+                # 界面上的开关/分段派出来的是字符串：'bf16' / 'on' / '1' / '开' 都算真，
+                # 'fp32' / 'off' / '0' / 'n' 算假。只认 "1" 会把"训练精度=bf16"判成 False。
+                _s = str(v).strip().lower()
+                clean[k] = v if isinstance(v, bool) else _s in (
+                    "1", "true", "yes", "on", "y", "开", "bf16")
+            elif isinstance(cur, int) and not isinstance(cur, bool):
+                clean[k] = int(round(float(v)))
+            elif isinstance(cur, float):
+                clean[k] = float(v)
+            elif isinstance(cur, str):
+                clean[k] = str(v)
+            elif isinstance(v, bool):
+                clean[k] = v
+            elif isinstance(v, int):
+                clean[k] = v
+            elif isinstance(v, float):
+                clean[k] = v
+            else:
+                clean[k] = v
+        except (TypeError, ValueError):
+            bad.append(k)
+    return clean, bad
+
 @router.post("/api/models/create")
 def model_create(body: dict):
     """按档位建一个模型（写一份 iter=1 的 data.dat，4.0 见到就当作已有模型）。"""
     import pickle as _pk
     body = body or {}
+    # 协议：{ name, spec:{结构}, options:{训练参数} }；老的平铺写法继续兼容
+    spec_in = body.get("spec") if isinstance(body.get("spec"), dict) else {}
+
+    def _s(key):
+        v = spec_in.get(key)
+        return body.get(key) if (v is None or v == "") else v
+
     name = _safe_model_name(body.get("name"))
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     dat_path = MODEL_DIR / (name + "_SAEHD_data.dat")
@@ -231,7 +319,7 @@ def model_create(body: dict):
     p = dict(_PRESETS[preset_key])
 
     def _pick(key, cast, fallback):
-        v = body.get(key)
+        v = _s(key)
         if v is None or v == "":
             return fallback
         try:
@@ -242,30 +330,40 @@ def model_create(body: dict):
     # 架构字符串：优先用「架构 + 子分支 + 算子」三段式（和 4.0 的 GUI 同一套规则），
     # 也允许直接传 archi。合法性交给 4.0 的 parse_archi_string 判，不在 4.1 里另写一份。
     spec = _archi_spec()
-    archi_display = str(body.get("archi_display") or "").strip()
+    archi_display = str(_s("archi_display") or "").strip()
     if archi_display:
         archi = spec.build_archi_string(archi_display,
-                                        str(body.get("subarchi") or ""),
-                                        str(body.get("kernel_label") or spec.default_kernel_label()))
+                                        str(_s("subarchi") or ""),
+                                        str(_s("kernel_label") or spec.default_kernel_label()))
         if spec.parse_archi_string(archi) is None:
             raise HTTPException(400, "架构组合不合法：" + archi)
     else:
-        archi = str(body.get("archi") or p["archi"])
+        archi = str(_s("archi") or p["archi"])
         if spec.parse_archi_string(archi) is None:
             raise HTTPException(400, "架构写法不合法：" + archi)
 
-    def _clamp(v, lo, hi, step):
-        v = max(lo, min(hi, int(v)))
-        return int(round(v / float(step)) * step)
+    # 被夹过的参数都记下来：以前是**静默**改数字（填 1024 建成 640，界面上什么都不说），
+    # 用户以为自己在训 1024 的模型，其实参数是 640 的。
+    _clamped = {}
+
+    def _clamp(key, v, lo, hi, step):
+        iv = int(v)
+        cv = max(lo, min(hi, iv))
+        cv = int(round(cv / float(step)) * step)
+        if cv != iv:
+            _clamped[key] = {"requested": iv, "used": cv, "allowed": [lo, hi], "step": step}
+        return cv
 
     options = {
-        "resolution": _clamp(_pick("resolution", int, p["resolution"]), 64, 640, 32),
-        "face_type": str(body.get("face_type") or "wf"),
+        # 上限从 640 放到 1536：1024/1536 这类"挑战型"模型允许建，
+        # 但显存装不下时界面会红字提示（估算已改为读面板里的分辨率）。
+        "resolution": _clamp("resolution", _pick("resolution", int, p["resolution"]), 64, 1536, 32),
+        "face_type": str(_s("face_type") or "wf"),
         "archi": archi,
-        "ae_dims": _clamp(_pick("ae_dims", int, p["ae_dims"]), 64, 1024, 8),
-        "e_dims": _clamp(_pick("e_dims", int, p["e_dims"]), 16, 256, 8),
-        "d_dims": _clamp(_pick("d_dims", int, p["d_dims"]), 16, 256, 8),
-        "d_mask_dims": _clamp(_pick("d_mask_dims", int, p["d_mask_dims"]), 8, 128, 8),
+        "ae_dims": _clamp("ae_dims", _pick("ae_dims", int, p["ae_dims"]), 64, 1024, 8),
+        "e_dims": _clamp("e_dims", _pick("e_dims", int, p["e_dims"]), 16, 256, 8),
+        "d_dims": _clamp("d_dims", _pick("d_dims", int, p["d_dims"]), 16, 256, 8),
+        "d_mask_dims": _clamp("d_mask_dims", _pick("d_mask_dims", int, p["d_mask_dims"]), 8, 128, 8),
         "batch_size": _pick("batch_size", int, rec["batch_size"]),
         "target_iter": max(0, _pick("target_iter", int, 0)),
         "optimizer": str(body.get("optimizer") or "adabelief"),
@@ -278,10 +376,34 @@ def model_create(body: dict):
         "random_warp": True,
         "gan_power": 0.0,
         "true_face_power": 0.0,
+        # 备份/崩溃检测这三项 4.0 一直有，4.1 的 create 以前没写 →
+        # 模型的 dat 里没有这几个键，引擎就只能用缺省值（max_backups=24、backup_interval=500），
+        # 界面上填的「最大备份数」也存不进去（collectCfgPatch 对没有基线的行会跳过）。
+        "max_backups": max(1, _pick("max_backups", int, 3)),
+        "backup_interval": max(0, _pick("backup_interval", int, 1000)),
+        "crash_threshold": float(body.get("crash_threshold") or 0.0),
         "pretrain": False,
+        # 预训练时只跑 encoder/inter/decoder_src 一条支路，decoder_dst 不参与前向/反向，
+        # 保存时权重自动同步过去。设计上预训练就是"训一个共享主干 + 一个解码器"，
+        # 所以默认开；只在 pretrain=True 时生效，普通训练完全无视它。
+        # 收益实测（1024/ae256）：峰值显存 24.43 -> 18.03 GiB，20 GB 卡不再溢出。
+        "pretrain_single_decoder": bool(body.get("pretrain_single_decoder", True)),
         "use_fast_generator": True,
         "models_opt_on_gpu": True,
+        # BF16 混合精度：4.0 新模型默认就是开的，4.1 的 create 以前漏了这一项 ——
+        # 结果新模型一律 fp32 训练，640 这种分辨率光权重+梯度就要多占一倍显存。
+        "use_bf16": bool(body.get("use_bf16", True)),
+        # 梯度检查点：省激活显存（权重/梯度/优化器状态它省不了）
+        "gradient_checkpointing": bool(body.get("gradient_checkpointing", False)),
     }
+    # ★ 协议核心：body.options 里是训练参数（批次大小 / 预训练 / 优化器 / 学习率 …），
+    #   按默认值的类型收敛后一次性合并。前端不需要再发第二个 config 请求。
+    _opts_in = body.get("options")
+    if _opts_in:
+        _clean, _bad = _clean_options(_opts_in, options)
+        if _bad:
+            raise HTTPException(400, "这些参数类型不对: " + ", ".join(_bad))
+        options.update(_clean)
     for k in ("src", "dst"):
         v = str(body.get(k) or "").strip()
         if v:
@@ -303,11 +425,14 @@ def model_create(body: dict):
     except Exception:
         pass
 
-    return {"ok": True, "name": name, "preset": preset_key,
+    if _clamped:
+        print("[models] create 时被夹过：" + ", ".join(
+            "%s %s->%s" % (k, v["requested"], v["used"]) for k, v in _clamped.items()), flush=True)
+
+    return {"ok": True, "name": name, "preset": preset_key, "clamped": _clamped,
             "dat": str(dat_path),
-            "options": {k: options[k] for k in
-                        ("resolution", "batch_size", "archi", "face_type",
-                         "ae_dims", "e_dims", "d_dims", "d_mask_dims")},
+            # 返回**实际生效的全部 options**：界面按这个渲染就不会和磁盘对不上
+            "options": options,
             "note": p["note"]}
 
 

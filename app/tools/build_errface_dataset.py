@@ -83,10 +83,13 @@ def main() -> int:
             if det is None:
                 from server._detect import TinyMogDet
                 from server._landmarks106 import InsightFace106
-                from server._ortcuda import _candidate_roots
-                det = TinyMogDet("modelhub/onnx/TinyMog/TinyMog.onnx")
-                for r in _candidate_roots():
-                    cand = Path(r) / "modelhub/onnx/InsightFace2d106/InsightFace2D106.onnx"
+                from server._paths import weights_dir
+                # 权重平铺在 weights/ 根下（老的分目录布局作兜底）
+                _w = Path(weights_dir())
+                det = TinyMogDet(str(_w / "tinymog.onnx"))
+                for _rel in ("insightface_2d106.onnx",
+                             "onnx/InsightFace2d106/InsightFace2D106.onnx"):
+                    cand = _w / _rel
                     if cand.is_file():
                         lm106 = InsightFace106(str(cand))
                         break

@@ -21,7 +21,7 @@ class GenderAge:
     def __init__(self, device_info: ORTDeviceInfo):
         if device_info not in GenderAge.get_available_devices():
             raise Exception(f'device_info {device_info} not available')
-        path = weights.path('onnx/GenderAge/genderage.onnx')
+        path = weights.path('genderage.onnx')
         self._sess = InferenceSession_with_device(str(path), device_info)
         self._input_name = self._sess.get_inputs()[0].name
 

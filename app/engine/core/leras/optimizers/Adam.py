@@ -3,6 +3,7 @@ from typing import Iterable, List, Optional
 
 import numpy as np
 import torch
+from . import _chunked as _ch
 
 from core.leras import nn
 
@@ -46,6 +47,7 @@ class Adam(nn.OptimizerBase):
         lr_plateau_min_ratio: float = 0.1,
         lr_plateau_partitions: int = 1,
         clipnorm: float = 0.0,
+        state_bf16: bool = False,
         name: Optional[str] = None,
         **kwargs,
     ):
@@ -83,6 +85,7 @@ class Adam(nn.OptimizerBase):
         self._lr_best_base = None    # 判定基准：只前移不回退
         self._best_loss = {}
         self.clipnorm = float(clipnorm)
+        self._state_dtype = torch.bfloat16 if state_bf16 else torch.float32
 
         self.iterations = torch.tensor(0, dtype=torch.int64)
 
@@ -126,8 +129,10 @@ class Adam(nn.OptimizerBase):
                 params.extend([p for p in item.parameters() if isinstance(p, torch.nn.Parameter)])
 
         self.params = params
-        self.ms = [torch.zeros_like(p, device=p.device, dtype=p.dtype) for p in self.params]
-        self.vs = [torch.zeros_like(p, device=p.device, dtype=p.dtype) for p in self.params]
+        self.ms = [torch.zeros_like(p, device=p.device, dtype=self._state_dtype) for p in self.params]
+        # 二阶矩**固定 fp32**：bf16 的 v 精度只有 8 位尾数，sqrt(v) 在梯度很小时会抖，
+        # step = m/sqrt(v) 直接放大 —— 实测能把 640/ae512 的模型几迭代打成 NaN。
+        self.vs = [torch.zeros_like(p, device=p.device, dtype=torch.float32) for p in self.params]
 
         # lr_dropout 的掩码**不在这里生成**。
         # 原来只在初始化时抽一次、之后每步复用，等于「训练全程固定冻结同一批参数」，
@@ -292,13 +297,7 @@ class Adam(nn.OptimizerBase):
 
         scale = 1.0
         if self.clipnorm > 0.0:
-            sq_sum = None
-            for p in self.params:
-                if p.grad is None:
-                    continue
-                g = p.grad
-                v = (g.detach().float() ** 2).sum()
-                sq_sum = v if sq_sum is None else (sq_sum + v)
+            sq_sum = _ch.grad_norm_sq(self.params)
             if sq_sum is not None:
                 norm = torch.sqrt(sq_sum)
                 n = float(norm.item())
@@ -319,6 +318,25 @@ class Adam(nn.OptimizerBase):
 
                 m = self.ms[i]
                 v = self.vs[i]
+                if m.dtype != torch.float32:
+                    # ★ bf16 状态分块原地更新（见 _chunked.py 的说明）
+                    mp = _ch.flat(m); vp = _ch.flat(v)
+                    gp = _ch.flat(g); pp = _ch.flat(p)
+                    eps_c = float(np.finfo(_torch_to_numpy_dtype(p.dtype)).resolution)
+                    for s, e in _ch.chunks(gp.numel()):
+                        gs = gp[s:e]
+                        if scale != 1.0:
+                            gs = gs * scale
+                        mc = mp[s:e].float(); vc = vp[s:e].float()
+                        mt = b1 * mc + (1.0 - b1) * gs
+                        vt = b2 * vc + (1.0 - b2) * gs.pow(2)
+                        sd = (-lr) * mt / (torch.sqrt(vt) + eps_c)
+                        if self.lr_dropout != 1.0:
+                            sd = sd * torch.bernoulli(torch.full_like(sd, self.lr_dropout))
+                        pp[s:e].add_(sd)
+                        mp[s:e].copy_(mt); vp[s:e].copy_(vt)
+                    self.ms[i] = m; self.vs[i] = v
+                    continue
 
                 m_t = b1 * m + (1.0 - b1) * g
                 v_t = b2 * v + (1.0 - b2) * g.pow(2)
@@ -335,8 +353,8 @@ class Adam(nn.OptimizerBase):
                     step_delta = step_delta * mask
 
                 p.add_(step_delta)
-                self.ms[i] = m_t
-                self.vs[i] = v_t
+                self.ms[i] = m_t.to(self._state_dtype)
+                self.vs[i] = v_t.to(self._state_dtype)
 
 
 nn.Adam = Adam

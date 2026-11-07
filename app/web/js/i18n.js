@@ -108,6 +108,28 @@
   "合并子文件夹": "Merge subfolders",
   "错脸": "Wrong face",
   "坏图": "Broken",
+  /* ---- 遮挡率排序器（数据处理 · 只排序不删） ---- */
+  "遮挡率（排序）": "Occlusion (ranked)",
+  "68 点凸包（不含眉毛）内 XSeg 遮罩的软面积占比：100% = 整张脸被挡住，0% = 一点没挡。只排序，移走要你确认": "Soft XSeg-mask coverage inside the 68-pt hull (eyebrows excluded): 100% = face fully covered, 0% = nothing covering it. Ranking only — moving files needs your confirmation",
+  "遮挡率排序": "Occlusion ranking",
+  "撤销": "Undo",
+  "中位": "Median",
+  "最大": "Max",
+  "未参与": "Skipped",
+  "没有 68 点 landmarks（不是 DFLJPG）": "No 68-point landmarks (not a DFLJPG)",
+  "没有 xseg 遮罩（APP15 里没有 xseg_mask）": "No xseg mask (no xseg_mask in APP15)",
+  "凸包面积小于图面积 0.5%（点集失效）": "Hull smaller than 0.5% of the image (bad landmarks)",
+  "文件读不出来或图片解不开": "File unreadable or image cannot be decoded",
+  "读 landmarks 与 XSeg 遮罩…": "Reading landmarks and XSeg masks…",
+  "遮挡率已排好": "Occlusion ranking ready",
+  "遮挡率扫描失败": "Occlusion scan failed",
+  "重扫失败": "Rescan failed",
+  "正在移走…": "Moving…",
+  "移动失败": "Move failed",
+  "还原失败": "Restore failed",
+  "没有凸包/遮罩的图算不出遮挡率，不参与统计": "Without hull or mask there is no occlusion figure — these stay out of the stats",
+  "超过这个百分比就算遮挡": "Anything above this percentage counts as occluded",
+  "只排序不删，超过阈值的才由用户点按钮移进 _trash": "Ranking only — nothing is removed until you click the button for items above the threshold",
   "清晰度": "Sharpness",
   "角度": "Angle",
   "时间": "Time",
@@ -436,6 +458,7 @@
     "下载选中": "Download selected",
     "标题": "Title",
     "BV 号": "BV id",
+    "时长": "Length",
     "合作": "Collab",
     "暂无视频数据，请先搜索 UID": "No videos yet — look up a UID first",
     "下载中": "Downloading",
@@ -506,6 +529,7 @@
   "高性能 · TinyMog": "Fast · TinyMog",
   "检测器": "Detector",
     "人脸类型": "Face type",
+    "新建模型时按这一项确定，建完就固定在模型里": "Decided when the model is created, then locked in",
     "检测策略": "Detect policy",
     "总是重检": "Always re-detect",
     "沿用 DFL": "Reuse DFL",
@@ -1437,6 +1461,30 @@
     "已扫码，请在手机上确认": "Scanned — confirm on your phone"
   });
 
+  /* 权重包（设置页）+ 错脸检测能力门控（缺模型时置灰，点了只说怎么装） */
+  Object.assign(DICT, {
+    "权重包": "Weight packs",
+    "未检测": "Not checked",
+    "未知": "Unknown",
+    "已装": "Installed",
+    "齐全": "All installed",
+    "重新检测": "Check again",
+    "镜像": "Mirror",
+    "正在读取权重清单…": "Reading the weight list…",
+    "https://你的镜像/weights（留空则只用本地已有的）": "https://your-mirror/weights (empty = local files only)",
+    "错脸（未安装）": "Errface (not installed)",
+    "错脸检测未安装": "Errface check is not installed",
+    "错脸检测未安装 · 见右下角提示": "Errface check is not installed — see the notice",
+    "缺 errface_xgb.ubj": "errface_xgb.ubj is missing",
+    "准备中…": "Preparing…",
+    "读不到权重清单：": "Cannot read the weight list: ",
+    "清单里没有功能包": "The list declares no packs",
+    "读不到下载进度": "Cannot read download progress",
+    "下载完成，重新检测…": "Download finished — re-checking…",
+    "下载没能启动：": "The download could not start: ",
+    "下载失败：": "Download failed: "
+  });
+
   /* ---------- 动态渲染的补翻 ----------
      问题：i18n 只在切换语言那一刻扫一遍 DOM。之后由 JS 渲染出来的内容
      （数据处理页的模式行、下拉选项、列表项……）都是新建节点，永远保持中文。
@@ -1477,6 +1525,23 @@
     });
     mo.observe(document.body, { childList: true, subtree: true });
   }
+
+  /* 参数页顶部的 TF 时代 dat 迁移提示（js/legacy_notice.js）。
+     带数字的副行不在这里 —— 那种整句对不上字典，留给中文原文。 */
+  Object.assign(DICT, {
+  "该 dat 来自 TF 版本，需用 app/tools/import_legacy_dat.py --convert 转换权重":
+    "This dat is from the TF build — convert the weights with app/tools/import_legacy_dat.py --convert",
+  "这份 dat 是 4.1 格式，但目录里的权重还是 TF 的 *.npy，需用 app/tools/import_legacy_dat.py --convert 转换权重":
+    "The dat is 4.1 format, but the weights are still TF *.npy — convert them with app/tools/import_legacy_dat.py --convert",
+  "这份 dat 来自 TF 版本，参数已自动迁移": "This dat is from the TF build — parameters were migrated automatically",
+  "判定依据": "Why it counts as legacy",
+  "明细": "Details",
+  "收起": "Hide",
+  "复制": "Copy",
+  "已复制": "Copied",
+  "转权重：粘到 PowerShell 里跑": "Convert weights: paste into PowerShell"
+  });
+
 
   window.I18N = {
     apply: apply,

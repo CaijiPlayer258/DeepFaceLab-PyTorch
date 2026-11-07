@@ -30,7 +30,7 @@ class FaceMesh:
         if device_info not in FaceMesh.get_available_devices():
             raise Exception(f'device_info {device_info} is not in available devices for FaceMesh')
 
-        path = weights.path('onnx/FaceMesh/FaceMesh.onnx')
+        path = weights.path('facemesh.onnx')
         if not path.exists():
             raise FileNotFoundError(f'{path} not found')
             

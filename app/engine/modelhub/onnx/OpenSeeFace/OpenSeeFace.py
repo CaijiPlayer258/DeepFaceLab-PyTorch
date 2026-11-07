@@ -13,8 +13,8 @@ class OpenSeeFace:
     def get_available_devices():
         return ['CPU']
 
-    def __init__(self, device_info=None, model_name='lm_model0_opt.onnx'):
-        path = weights.path('onnx/OpenSeeFace/' + model_name)
+    def __init__(self, device_info=None, model_name='openseeface_lm0.onnx'):
+        path = weights.path(model_name)
         if not path.exists():
             raise FileNotFoundError(f'Model not found: {path}')
         self._sess = onnxruntime.InferenceSession(str(path), providers=['CPUExecutionProvider'])
