@@ -1364,9 +1364,14 @@ if (WEB / "mask-editor").is_dir():
 
 @app.middleware("http")
 async def _no_cache(request, call_next):
-    """开发期不让 Chromium 缓存界面资源，否则改完 CSS 看不到效果。"""
+    """开发期不让 Chromium 缓存界面资源，否则改完 CSS 看不到效果。
+
+    例外：人脸库缩略图（/api/merge/faces/thumb）是带 ETag 的静态缓存，
+    必须保留 public/max-age，否则每划一次列表就重新解码一张原图。
+    """
     resp = await call_next(request)
-    resp.headers["Cache-Control"] = "no-store, must-revalidate"
+    if not request.url.path.startswith("/api/merge/faces/thumb"):
+        resp.headers["Cache-Control"] = "no-store, must-revalidate"
     return resp
 
 
@@ -3523,3 +3528,7 @@ from .routes_errface import router as _errface_router
 app.include_router(_errface_router)
 from .routes_weights import router as _weights_router
 app.include_router(_weights_router)
+
+# 人脸数据库（一个合成项目一个库：workspace/merge/<视频名>/_faces）
+from .routes_faces import router as _faces_router
+app.include_router(_faces_router)
