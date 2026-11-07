@@ -30,6 +30,11 @@
 | POST | `/api/merge/export` | 启动合成：`project` + `model`（或 `dfm`）+ `settings` + `encoder/hwaccel/workers` |
 | GET | `/api/merge/export/status` | 进度：`running/ok/pct/stage/msg/out/log` |
 | POST | `/api/merge/export/cancel` | 终止合成子进程 |
+| POST | `/api/merge/preview-frame` | 静态帧文件 → 检测/换脸/合成 → 图（项目模式预览用） |
+| POST | `/api/merge/export-project` | **DFL 项目模式**：逐帧合成到 `<项目>/merged/` 再编码；支持 `force` 重做 |
+| GET | `/api/merge/export-project/status` | 项目导出进度：`done/total/frame_fps/skipped/failed/warnings/missing/encode` |
+| POST | `/api/merge/export-project/cancel` | 取消项目导出（已写好的帧保留） |
+| POST | `/api/merge/reveal` | 在资源管理器里定位文件/目录（「打开所在目录」） |
 
 ## 三、为什么要「抽帧 + 对齐」两步
 
@@ -37,12 +42,16 @@
 `/api/merge/prepare` 就是把这两件事补齐：
 
 ```
-<项目>/000001.jpg        原帧（ffmpeg 逐帧，6 位序号）
-<项目>/aligned/000001_0.jpg   对齐脸（DFLJPG，带 landmarks / source_filename）
+<项目>/000000.jpg        原帧（ffmpeg 逐帧，6 位序号，从 0 起）
+<项目>/aligned/000000_0.jpg   对齐脸（DFLJPG，带 landmarks / source_filename）
+<项目>/merged/000000.jpg      项目导出的产物：换脸后的整帧
 ```
 
-序号必须对得上：`_align_stream` 写 `source_filename = "%06d" % idx`，
-抽帧也用 6 位、从 1 开始，于是 `stage_project` 里能一一对应上。
+序号必须对得上：`_align_stream` 按解码顺序写 `source_filename = "%06d" % idx`（**idx 从 0 起**），
+`_extract_frames` 也必须从 0 起（`-start_number 0`）—— 以前这儿写的是 1，两边整整差一位，
+于是 `stage_project` 认不出任何一张对齐脸（"没有任何对齐脸能对上帧"）。
+`_proj_scan_aligned` 认帧时先按原名，再按去扩展名，最后才试整体平移 ±1（老项目兼容），
+三条都对不上就进 `missing_source` 并明确报出来，不瞎配。
 
 ## 四、合成本体
 
@@ -67,7 +76,35 @@ staging（硬链接）→ 载入 DFM → 逐帧合成 → ffmpeg 编码 → 清�
 - **帧率**：合成的是「帧序列」，fps 由源视频真实帧率决定（`prepare` 时记下来）。
 - **调试**：`DFL_MERGE_KEEP=1` 跑 `_merge_runner.py` 会保留 staging 目录，方便看 `proj/merged`。
 
-## 五、怎么验收
+## 五、项目模式导出（/api/merge/export-project）
+
+「导出」是 4.0 MergeStudio 子进程一口气出 mp4；「导出项目」是另一条路，就在本进程里跑：
+
+```
+<项目>/<帧名>.jpg  ──检测→68 点→DFM 换脸→遮罩→合成──▶  <项目>/merged/<帧名>.jpg
+                                                        │
+              ffmpeg -framerate <原fps> -i merged/%06d.jpg -i <原视频> -map 0:v -map 1:a?
+                     -c:v libx264 -crf 16 -pix_fmt yuv420p -c:a copy -movflags +faststart <out>
+```
+
+- **逐帧合成不另写一套**：走的就是单帧预览的 `_preview_job`（`routes_merge.py`），
+  只把「从视频里按时刻取帧」换成「直接读 `<项目>/<帧名>`」。所以同一帧走预览
+  （`/api/merge/preview-frame`）和走导出，输出是同一份字节。
+- **帧序**：以源帧文件名的字典序为准（= ffmpeg image2 的读取顺序）；`aligned/*.jpg` 只用来
+  决定「这一帧有没有脸」和点名缺帧，认不出来的进 `missing_source`，不猜。
+- **断点续跑**：`merged/<帧名>` 存在且非空就跳过（`force: true` 才重做）。落盘是
+  `.part` → `os.replace`，被杀不会留下半张图被当成已完成。
+- **没脸的帧**：原帧**原样 copy** 进 merged（不重编码，不掉画质），所以成片长度和原片一致。
+- **缺帧**：编码前对账，`merged` 比源帧少就明确报「缺哪几张」（能按命名规律推算时就点名），
+  并把「成片会比原片短 N 秒」写进 warnings。编号有洞时按顺序硬链接重排成 `%06d` 再编 ——
+  image2 遇到第一个洞就会停，否则成片会被悄悄截短。
+- **fps / 分辨率 / 音轨**：一律来自原视频（`_video_probe`）；读不到就报错，不猜。
+  默认输出名 `<项目目录>.mp4`，如果它正好等于原视频文件则改用 `<项目目录>_merged.mp4`，
+  绝不覆盖素材。
+- **不要 `-shortest`**：音轨比画面长时它会把成片截短（4.0 那边踩过）。
+  编码前把 `scale=out_range=tv` 挂上，否则 JPEG 帧（full range）会让成片标成 `yuvj420p`。
+
+## 六、怎么验收
 
 ```
 python app/tools/merge_accept.py                 # 默认样片，跑到「导出启动 + 取消」为止，约 30 秒
@@ -77,10 +114,29 @@ python app/tools/merge_accept.py 视频.mp4 --keep  # 连导出一起跑完（�
 它起后端、用 CDP 驱动无头 Edge **真实点击**，逐项断言：导入素材 / 选模型 / 检测出框 /
 时间轴换帧 / 合成视图 / 参数采集 / 导出启动 / 进度 / 取消。全部 PASS 才算过。
 
-## 六、已知限制
+> 注意：脚本里 `RL = Path(__file__).resolve().parents[1]` 假定自己在 `<仓库>/tools/`，
+> 而它现在在 `app/tools/`，直接跑会拿到 `<仓库>/app/app` 这个不存在的目录
+> （`NotADirectoryError`）。临时验证时把文件复制到 `<仓库>/tools/` 再跑即可。
+
+项目模式导出的验收（不在 merge_accept 里）：
+
+```
+python app/tools/test_merge_api.py        # 接口层
+# 端到端：prepare 一个 3 秒 90 帧的项目 → POST /api/merge/export-project
+#        → merged/ 90 张、尺寸与源帧一致、ffmpeg 报 90/30=3.0s + aac 音轨
+#        → 删一半 merged 再跑（只补缺的）、删源帧再跑（点名缺哪几张）
+```
+
+## 七、已知限制
 
 - 「人脸库」这一步（分组 / 去重 / 计算特征）还没做，导出流程**跳过**它 ——
   合成本身不需要人脸库，MergeStudio 靠 DFLJPG 元数据定位人脸。
 - 速度约 4~5 帧/秒（1080p，含解码 / 遮罩 / 编码），和 4.0 的原管线一致；
   瓶颈在逐帧 PNG 落盘与遮罩计算，不在 DFM 推理。
+  项目模式实测 1080x1920 / 416 的 DFM：逐帧 3.9~4.4 帧/秒，90 帧总计 23~25 秒
+  （其中编码 1.1 秒）。
+- 项目模式的 merged 帧和源帧同名同格式（jpg→jpg / png→png）。jpg 会按 quality（默认 92，
+  与单帧预览一致）重编码一次；没脸的帧走原文件 copy，不重编码。
+- CUDA 推理的浮点累加顺序不保证逐次一致：同一帧连跑两次，像素可能差 0~8/255（JPEG 量化会
+  放大这点差异）。逐字节一致是常态（实测 10 帧里 5 帧完全相同，其余最大差 ≤8）。
 - 质量（JPEG 百分比）与帧缓存格式目前不影响最终视频，编码走 ffmpeg 的默认质量。

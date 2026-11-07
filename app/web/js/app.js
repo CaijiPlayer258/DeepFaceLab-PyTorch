@@ -3980,7 +3980,8 @@
         v.classList.toggle("in", v.dataset.view === name);
       });
       if (step) {
-        var label = { facedb: "人脸库", settings: "导出设置" }[name] || "";
+        var label = { facedb: "人脸库", settings: "导出设置",
+                      project: "导出项目", progress: "导出进度" }[name] || "";
         step.textContent = label;
         step.hidden = !label;
       }
@@ -3996,6 +3997,10 @@
         { t: "合成工作室", step: "main" },
         { t: "导出设置", step: "settings" },
         { t: "导出进度", step: "progress" }
+      ];
+      if (name === "project") trail = [
+        { t: "合成工作室", step: "main" },
+        { t: "导出项目", step: "project" }
       ];
       CRUMBS.merge = trail;
       renderCrumbs("merge");
@@ -4029,6 +4034,211 @@
           return;
         }
         if (window.mgStep) window.mgStep("settings");
+      });
+    }
+
+    /* ============================================================
+       导出项目（标准 DFL 项目模式）
+       ------------------------------------------------------------
+       <项目>/000000.jpg + aligned/ → 逐帧合成 → <项目>/merged/000000.jpg
+       → 按原 fps/音轨编码成 <项目>.mp4。和上面那个「导出」（4.0 MergeStudio
+       一口气出 mp4）并列：断点续跑、失败帧可追、产物可一张张复查。
+       ============================================================ */
+    var MGPJ_POLL = null;
+    window.__mgpjExporting = false;
+
+    function mgpj(id) { return document.getElementById(id); }
+
+    function mgpjSetList(boxId, listId, items, render) {
+      var box = mgpj(boxId), list = mgpj(listId);
+      if (!box || !list) return;
+      list.innerHTML = "";
+      var n = (items || []).length;
+      box.hidden = n === 0;
+      for (var i = 0; i < n; i++) {
+        var li = document.createElement("li");
+        var r = render ? render(items[i]) : { b: "", t: String(items[i]) };
+        if (r.b) {
+          var b = document.createElement("b");
+          b.textContent = r.b;
+          li.appendChild(b);
+        }
+        var sp = document.createElement("span");
+        sp.textContent = r.t;
+        li.appendChild(sp);
+        list.appendChild(li);
+      }
+    }
+
+    function mgpjRender(d) {
+      var total = Number(d.total) || 0;
+      var done = Number(d.done) || 0;
+      var p = Math.max(0, Math.min(100, Number(d.pct) || 0));
+      var fill = mgpj("mgpjFill"), pctEl = mgpj("mgpjPct");
+      var fr = mgpj("mgpjFrames"), sp = mgpj("mgpjSpeed"), eta = mgpj("mgpjEta");
+      var fileEl = mgpj("mgpjFile"), outEl = mgpj("mgpjOut"), hint = mgpj("mgpjHint");
+      if (fill) fill.style.width = p + "%";
+      if (pctEl) pctEl.textContent = p + "%";
+      if (fr) fr.textContent = total ? ("已处理 " + done + " / " + total + " 帧")
+                                    : (d.msg || "准备中…");
+      var rate = Number(d.frame_fps) || 0;
+      if (sp) sp.textContent = rate > 0 ? (rate.toFixed(1) + " 帧/秒") : ("— 帧/秒");
+      if (eta) {
+        var left = Number(d.eta_s);
+        eta.textContent = d.running
+          ? (left > 0 ? ("剩余 " + left + " 秒") : "剩余 —")
+          : (d.phase === "done" ? "完成" : "已停");
+      }
+      if (fileEl) {
+        var proj = String(d.project || "");
+        fileEl.textContent = proj ? (proj.split(/[\\/]/).pop() + " · merged/") : "—";
+      }
+      if (outEl && d.out_video) outEl.textContent = String(d.out_video);
+      if (hint) {
+        var bits = [];
+        if (d.msg) bits.push(String(d.msg));
+        if (Number(d.swapped)) bits.push("换脸 " + d.swapped + " 帧");
+        if (Number(d.copied)) bits.push("原样 " + d.copied + " 帧");
+        if (Number(d.skipped)) bits.push("续跑跳过 " + d.skipped + " 帧");
+        if (d.encode && d.encode.seconds) bits.push("编码 " + d.encode.seconds + " 秒");
+        hint.textContent = bits.join(" · ");
+      }
+      mgpjSetList("mgpjWarnBox", "mgpjWarn", d.warnings, null);
+      mgpjSetList("mgpjFailBox", "mgpjFailed", d.failed_frames, function (f) {
+        return { b: String((f && f.frame) || "?"), t: String((f && f.error) || "失败") };
+      });
+      var cnt = mgpj("mgpjFailCount");
+      if (cnt) cnt.textContent = String((d.failed_frames || []).length);
+    }
+
+    function mgpjStopPoll() {
+      if (MGPJ_POLL) { clearInterval(MGPJ_POLL); MGPJ_POLL = null; }
+    }
+
+    function mgpjTerminal(d) {
+      mgpjStopPoll();
+      window.__mgpjExporting = false;
+      var okAll = d.phase === "done";
+      var cancelled = d.phase === "cancelled";
+      var openBtn = mgpj("mgpjOpen");
+      if (openBtn) openBtn.disabled = !(okAll && d.out_video);
+      var cb = mgpj("mgpjCancel");
+      if (cb) { cb.disabled = false; cb.textContent = "返回合成器"; }
+      var eta = mgpj("mgpjEta");
+      if (eta) eta.textContent = okAll ? "完成" : (cancelled ? "已取消" : "失败");
+      if (okAll) {
+        toast("导出项目完成", String(d.out_video || ""), "success");
+      } else if (cancelled) {
+        toast("已取消导出项目", "merged/ 里已经写好的帧会留着，下次接着跑", "info");
+      } else {
+        toast("导出项目失败", String(d.error || "").slice(0, 120), "error");
+      }
+    }
+
+    function mgpjPoll() {
+      mgpjStopPoll();
+      MGPJ_POLL = setInterval(function () {
+        fetch("/api/merge/export-project/status").then(function (r) { return r.json(); })
+          .then(function (d) {
+            mgpjRender(d);
+            if (!d.running) mgpjTerminal(d);
+          }).catch(function () {});
+      }, 1000);
+    }
+
+    function mgpjStart() {
+      if (window.__mgpjExporting) { toast("正在导出项目", "上一次还没结束", "info"); return; }
+      var projectDir = window.__mergeInputDir || "";
+      if (!projectDir) {
+        toast("还没有素材", "先导入一段视频（会自动抽帧 + 对齐）或打开一个 DFL 项目", "warn");
+        return;
+      }
+      var p = (window.MergePages && window.MergePages.settings) ? window.MergePages.settings() : {};
+      var body = {
+        project_dir: projectDir,
+        models: mgModelsPayload(),
+        model: (document.querySelector("#mgModels .mgitem.on .nm") || {}).textContent || "",
+        detector: p.detector || "",
+        thresh: 0.5,
+        settings: mgMergeSettings(p)
+      };
+      /* 输出路径：填的是 .mp4 就当文件名；填的是目录就放 <项目名>_merged.mp4 */
+      var outRaw = String(p.output_path || "").trim();
+      if (/^[A-Za-z]:[\\/]/.test(outRaw)) {
+        body.out_video = /\.mp4$/i.test(outRaw)
+          ? outRaw
+          : (outRaw.replace(/[\\/]+$/, "") + "\\" +
+             String(projectDir).split(/[\\/]/).pop() + "_merged.mp4");
+      }
+
+      window.__mgpjExporting = true;
+      var cb0 = mgpj("mgpjCancel");
+      if (cb0) { cb0.disabled = false; cb0.textContent = "取消导出"; }
+      var open0 = mgpj("mgpjOpen");
+      if (open0) open0.disabled = true;
+      mgpjSetList("mgpjWarnBox", "mgpjWarn", [], null);
+      mgpjSetList("mgpjFailBox", "mgpjFailed", [], null);
+      var fill0 = mgpj("mgpjFill");
+      if (fill0) fill0.style.width = "0%";
+      if (window.mgStep) window.mgStep("project");
+
+      fetch("/api/merge/export-project", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      }).then(function (r) {
+        return r.json().then(function (d) {
+          if (!r.ok || d.ok === false) throw new Error(d.detail || d.error || "启动失败");
+          return d;
+        });
+      }).then(function (d) {
+        mgpjRender(d);
+        toast("开始导出项目", String(d.out_video || "").slice(-46), "info");
+        mgpjPoll();
+      }).catch(function (e) {
+        window.__mgpjExporting = false;
+        toast("导出项目未启动", String((e && e.message) || e).slice(0, 140), "error");
+      });
+    }
+    window.mgpjStart = mgpjStart;
+
+    var pjBtn = $("mgExportProject");
+    if (pjBtn && !pjBtn.dataset.bound) {
+      pjBtn.dataset.bound = "1";
+      pjBtn.addEventListener("click", function () { mgpjStart(); });
+    }
+
+    var pjCancel = $("mgpjCancel");
+    if (pjCancel && !pjCancel.dataset.bound) {
+      pjCancel.dataset.bound = "1";
+      pjCancel.addEventListener("click", function () {
+        if (!window.__mgpjExporting) { if (window.mgStep) window.mgStep("main"); return; }
+        pjCancel.disabled = true;
+        fetch("/api/merge/export-project/cancel", { method: "POST" })
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            toast(d.ok ? "正在取消" : "取消失败",
+                  d.ok ? "跑完当前这一帧就停" : String(d.error || d.reason || ""),
+                  d.ok ? "info" : "error");
+          })
+          .catch(function () {})
+          .then(function () { setTimeout(function () { pjCancel.disabled = false; }, 2000); });
+      });
+    }
+
+    var pjOpen = $("mgpjOpen");
+    if (pjOpen && !pjOpen.dataset.bound) {
+      pjOpen.dataset.bound = "1";
+      pjOpen.addEventListener("click", function () {
+        var path = (mgpj("mgpjOut") || {}).textContent || "";
+        if (!path || path === "—") return;
+        fetch("/api/merge/reveal", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: path })
+        }).then(function (r) { return r.json(); }).then(function (d) {
+          if (!d.ok) toast("打不开所在目录", String(d.error || "").slice(0, 110), "error");
+        }).catch(function (e) {
+          toast("打不开所在目录", String((e && e.message) || e).slice(0, 110), "error");
+        });
       });
     }
 
@@ -4091,6 +4301,31 @@
       toSet.dataset.bound = "1";
       toSet.addEventListener("click", function () { if (window.mgStep) window.mgStep("settings"); });
     }
+    /* 合成参数：界面上的控件 → 后端 settings（/export 和 /export-project 共用这一份） */
+    function mgMergeSettings(payload) {
+      payload = payload || {};
+      return {
+        mode: payload.mode || "overlay",
+        /* 界面上是两个 seg：遮罩来源（DFM / XSeg / XSegLite）× 遮罩模式（prd×dst / prd / dst）。
+           这里合成 MergeStudio 的 mask_mode 整数：
+             DFM   → 4 / 2 / 1      XSeg → 8 / 6 / 7 */
+        mask_mode: (function () {
+          var src = (document.querySelector('#p-merge .seg[data-k="seg"] b.on') || {}).textContent || "DFM";
+          var md = (document.querySelector('#p-merge .seg[data-k="mask"] b.on') || {}).textContent || "prd×dst";
+          md = md.trim();
+          var isX = src.trim().indexOf("XSeg") === 0;
+          if (isX) return md === "dst" ? 7 : (md === "prd" ? 6 : 8);
+          return md === "dst" ? 1 : (md === "prd" ? 2 : 4);
+        })(),
+        erode_mask: payload.erode_mask,
+        blur_mask: payload.blur_mask,
+        color_transfer: payload.color_transfer,
+        face_type: payload.face_type,
+        image_format: payload.image_format || "jpg"
+      };
+    }
+    window.mgMergeSettings = mgMergeSettings;
+
     /* 真跑一次合成。工作台里的「导出」会先走到导出设置页，
        两个「开始导出」（#mgStartExport2 在工作台、#mgStartExport 在子页）共用这一份逻辑。 */
     function mgRunExport(payload) {
@@ -4117,25 +4352,7 @@
         workers: parseInt(payload.num_workers, 10) || 0,
         encoder: payload.encoder || "h264_nvenc",
         hwaccel: payload.hwaccel === "" ? "off" : (payload.hwaccel || "auto"),
-        settings: {
-          mode: payload.mode || "overlay",
-          /* 界面上是两个 seg：遮罩来源（DFM / XSeg / XSegLite）× 遮罩模式（prd×dst / prd / dst）。
-             这里合成 MergeStudio 的 mask_mode 整数：
-               DFM   → 4 / 2 / 1      XSeg → 8 / 6 / 7 */
-          mask_mode: (function () {
-            var src = (document.querySelector('#p-merge .seg[data-k="seg"] b.on') || {}).textContent || "DFM";
-            var md = (document.querySelector('#p-merge .seg[data-k="mask"] b.on') || {}).textContent || "prd×dst";
-            md = md.trim();
-            var isX = src.trim().indexOf("XSeg") === 0;
-            if (isX) return md === "dst" ? 7 : (md === "prd" ? 6 : 8);
-            return md === "dst" ? 1 : (md === "prd" ? 2 : 4);
-          })(),
-          erode_mask: payload.erode_mask,
-          blur_mask: payload.blur_mask,
-          color_transfer: payload.color_transfer,
-          face_type: payload.face_type,
-          image_format: payload.image_format || "jpg"
-        }
+        settings: mgMergeSettings(payload)
       };
       if (payload.output_path) {
         if (/^[A-Za-z]:[\\/]/.test(payload.output_path)) {
@@ -7859,10 +8076,8 @@
   var PPF = { '1': 2, '0.5': 1, '0.25': 0.5, '0.125': 0.25 };
 
   var RULER_STEP = 500;   /* 刻度尺每 500px 一个数字 */
-  var N_VIDEO = 40;       /* 视频轨缩略占位块 */
-  var N_FACE = 25;        /* 人脸轨块数 */
-  var N_CUT = 6;          /* 剪切区段数 */
-  var N_ANGLE = 3;        /* 角度色带数 */
+  /* 视频轨以前铺 40 个均匀「缩略占位块」，纯装饰、和真实帧无关 ——
+     用户明确要求不画（见 buildData）。这里不再保留占位块常量。 */
 
   var PLAY_SVG = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M5.4 3.6 12.4 8l-7 4.4V3.6Z" fill="currentColor"/></svg>';
   var PAUSE_SVG = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="4.6" y="3.8" width="2.6" height="8.4" rx="0.8" fill="currentColor"/><rect x="8.8" y="3.8" width="2.6" height="8.4" rx="0.8" fill="currentColor"/></svg>';
@@ -7898,18 +8113,13 @@
 
   /* ---------- 占位数据：形状与 4.0 的 cutSegments / angleSegments 一致 ---------- */
   function buildData(total) {
-    var d = { video: [], faces: [], cuts: [], angles: [] };
-    var i, span, s, e;
-
-    /* 视频帧条：40 个缩略占位块，均匀铺满整条轴 */
-    span = total / N_VIDEO;
-    for (i = 0; i < N_VIDEO; i++) {
-      d.video.push({ s: Math.round(i * span), e: Math.round((i + 1) * span) });
-    }
-
-    /* 剪切 / 角度：既然还没接后端，就不要造假数据 —— 空的轨道比假的红块诚实。
-       有真实数据时由 MergeTimeline.setData({cuts, angles}) 填。 */
-    return d;
+    /* 四条轨一律从「没有块」开始：
+         · 视频轨 —— 以前那 40 个均匀占位块（缩略图条）是纯装饰，和真实帧一点关系
+           都没有，而且一眼看上去像是「已经切好了片段」。用户要求直接不画，
+           所以 video 恒为 []，只留刻度尺（renderRuler）和播放头。
+         · 人脸 / 剪切 / 角度 —— 还没接后端就不造假数据，空轨道比假的红块诚实。
+       有真实数据时由 MergeTimeline.setData({faces, cuts, angles}) 填。 */
+    return { video: [], faces: [], cuts: [], angles: [] };
   }
 
   /* ---------- 渲染 ---------- */
@@ -7951,6 +8161,10 @@
     var i, d = S.data;
     if (!host || !d) return;
     clear(host);
+    /* 没有块就整行收起（左边的「视频」标签一起收）—— 和其他三条轨同一套规矩。
+       video 恒为 []，所以这一轨平时不出现；将来 setData({video:[…]}) 给了真数据
+       会自己长回来。 */
+    hideRow(host, !d.video.length);
     for (i = 0; i < d.video.length; i++) {
       addBlock(host, 'mtl-blk--video', d.video[i].s, d.video[i].e, '帧 ' + d.video[i].s + ' ~ ' + d.video[i].e);
     }
@@ -8307,6 +8521,7 @@
     /* 用真实数据覆盖演示数据（人脸轨、剪切段、角度带） */
     setData: function (partial) {
       if (!S.data || !partial) return;
+      if (partial.video) S.data.video = partial.video;
       if (partial.faces) S.data.faces = partial.faces;
       if (partial.cuts) S.data.cuts = partial.cuts;
       if (partial.angles) S.data.angles = partial.angles;

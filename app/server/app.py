@@ -317,7 +317,9 @@ def _dfljpg_dict(path):
 # ============================================================
 # 合成器：把一段视频变成「能合成」的项目（抽帧 + 对齐）
 # 4.1 的提取器只落对齐脸，不落原帧；而合成必须要有原帧才能把脸贴回去。
-# 所以这里补一条 视频 → <项目>/000001.jpg + <项目>/aligned/000001_0.jpg 的路。
+# 所以这里补一条 视频 → <项目>/000000.jpg + <项目>/aligned/000000_0.jpg 的路。
+# 序号从 0 起（iperov 的 data_dst 就是 0 起）：_align_stream 的 idx 也是 0 起，
+# 两边对不上就会让 DFLJPG 的 source_filename 找不到原帧（曾经是 1 起，差一位）。
 # ============================================================
 _merge_prep = {"running": False, "ok": None, "error": "", "pct": 0, "msg": "",
                "stage": "", "project": "", "frames": 0, "aligned": 0, "video": ""}
@@ -405,7 +407,13 @@ def _open_video(src, out_params, first=False, in_params=None):
 
 def _extract_frames(video: Path, out_dir: Path, total_hint: int = 0,
                     on_frame=None) -> int:
-    """把视频逐帧抽成 000001.jpg…（6 位，和 aligned 的 source_filename 对齐）。"""
+    """把视频逐帧抽成 000000.jpg…（6 位，和 aligned 的 source_filename 对齐）。
+
+    从 0 开始编号：_align_stream 的帧号 idx 也是 0 起，两边同号才能让
+    aligned/000000_0.jpg 的 source_filename="000000" 指回真实的
+    000000.jpg —— 以前这条写的是 -start_number 1，整整差一位，于是
+    stage_project 认不出任何一张对齐脸（"没有任何对齐脸能对上帧"）。
+    """
     import subprocess
     out_dir.mkdir(parents=True, exist_ok=True)
     for old in out_dir.glob("*.jpg"):
@@ -414,7 +422,7 @@ def _extract_frames(video: Path, out_dir: Path, total_hint: int = 0,
         except OSError:
             pass
     cmd = [_ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error", "-nostats",
-           "-i", str(video), "-q:v", "2", "-start_number", "1",
+           "-i", str(video), "-q:v", "2", "-start_number", "0",
            "-progress", "pipe:1", str(out_dir / "%06d.jpg")]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                             text=True, encoding="utf-8", errors="replace",

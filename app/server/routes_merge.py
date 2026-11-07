@@ -43,6 +43,24 @@
      没用过的（LRU）再加载新的，卸载时 gc + 清 CUDA 缓存；一帧里检测到几张脸就
      按分配一张一张贴，没分配的用第 0 个。返回体多给 models_used / faces / swaps。
      /api/merge/preview/warm 同样认 models 数组，一次热一组（上限仍是 3）。
+
+  9) 标准 DFL 项目模式（iperov 布局，本文件末尾那一大段）：
+     POST /api/merge/export-project —— <项目>/<帧名> + aligned/ → 逐帧合成 →
+     <项目>/merged/<帧名>（整帧）→ 按原 fps / 音轨编码成 <项目>.mp4。
+     · 逐帧合成不另写一套：复用 _preview_job（检测 → 68 点 → 换脸/遮罩/合成），
+       只把「从视频按时刻取帧」换成「直接读帧文件」；POST /api/merge/preview-frame
+       是同一份逻辑的静态帧入口。
+     · 帧序 = 源帧文件名字典序（= ffmpeg image2 的读取顺序）；aligned 的
+       source_filename 只用来决定「这一帧有没有脸」和点名缺帧（认不出就报，不猜）。
+     · 断点续跑：merged 里存在且非空的帧跳过（force=true 才重做）；落盘是
+       .part → os.replace，不会把半张图当成已完成。
+     · 编码前对账：merged 比源帧少就点名缺哪几张，并写明成片会短多少秒；
+       编号有洞时先硬链接重排成 %06d 再编（image2 遇洞会停住，成片被悄悄截短）。
+     · fps / 分辨率 / 音轨只认原视频（读不到就报错）；默认输出 <项目目录>.mp4，
+       和原视频重名时改用 <项目目录>_merged.mp4，绝不覆盖素材。
+     · 编码命令刻意不带 -shortest（音轨比画面长会把成片截短），并挂
+       scale=out_range=tv，否则 JPEG 帧会让成片标成 yuvj420p。
+     · POST /api/merge/reveal —— 资源管理器里定位产物（「打开所在目录」）。
 """
 from __future__ import annotations
 
@@ -55,6 +73,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -1964,11 +1983,21 @@ def main():
                         out = fo
                     per.append({"dfm": f_dfm, "size": size_k,
                                 "ms": round((time.time() - t_k) * 1000.0, 1)})
-            ok, buf = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), q])
-            if not ok:
-                raise RuntimeError("JPEG 编码失败")
+            # 编码：默认 jpg（预览一直是这条，行为不变）；fmt=png 给「整帧落盘」用
+            # —— 项目模式导出要把 merged 当中间素材再编码，JPEG 每帧掉一次画质没意义。
+            fmt = str(req.get("fmt") or "jpg").strip().lower()
+            if fmt == "png":
+                ok, buf = cv2.imencode(".png", out, [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
+                if not ok:
+                    raise RuntimeError("PNG 编码失败")
+            else:
+                fmt = "jpg"
+                ok, buf = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), q])
+                if not ok:
+                    raise RuntimeError("JPEG 编码失败")
             _say({"id": rid, "ok": True,
                   "size": (per[0]["size"] if per else 256),
+                  "fmt": fmt,
                   "jpeg": base64.b64encode(buf.tobytes()).decode("ascii"),
                   "swap_ms": round((time.time() - t0) * 1000.0, 1),
                   "swaps": len(per), "per_face": per,
@@ -2799,6 +2828,36 @@ def _jpeg_bytes(img, quality=_PREVIEW_QUALITY) -> bytes:
     return buf.tobytes()
 
 
+def _img_bytes(img, fmt="jpg", quality=_PREVIEW_QUALITY) -> bytes:
+    """整帧编码。fmt=png 走无损（项目模式导出落盘用，避免每帧掉一次画质）；
+    其余一律还是 jpg，和预览完全一致。"""
+    if str(fmt or "jpg").strip().lower() != "png":
+        return _jpeg_bytes(img, quality)
+    import cv2
+    ok, buf = cv2.imencode(".png", img, [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
+    if not ok:
+        raise _BadInput("这一帧编不出 PNG", 500)
+    return buf.tobytes()
+
+
+def _plain_frame(job: dict, frame, box_wh, timings, note="", has_face=True) -> dict:
+    """这一帧没换脸时的返回。
+
+    默认还是「整帧编一张图回给预览」（质量 88，和以前完全一样）。项目模式导出
+    会带 job["no_face_copy"]：没脸 = 原帧原样进 merged，重编码一遍只会白掉一档
+    画质 —— 所以这里不编码，交一张 copy=True 的凭据，让调用方直接搬源文件。
+    """
+    if job.get("no_face_copy"):
+        return {"copy": True, "jpg": None, "img": None, "box": box_wh,
+                "has_face": bool(has_face), "swapped": False, "timings": timings,
+                "note": note, "faces": [], "models_used": [], "swaps": 0}
+    fmt = str(job.get("fmt") or "jpg").strip().lower()
+    img = _img_bytes(frame, fmt, 88)
+    return {"jpg": img, "img": img, "box": box_wh, "has_face": bool(has_face),
+            "swapped": False, "timings": timings, "note": note,
+            "faces": [], "models_used": [], "swaps": 0}
+
+
 def _preview_multi(job: dict, frame, boxes, box_wh, timings, stage_fn, state) -> dict:
     """多模型换脸：检测到的每张脸都按 models 里的分配换，没分配的用第 0 个。
 
@@ -2812,6 +2871,8 @@ def _preview_multi(job: dict, frame, boxes, box_wh, timings, stage_fn, state) ->
     import numpy as np
 
     models = job["models"]
+    fmt = str(job.get("fmt") or "jpg").strip().lower()       # "jpg"（预览）/ "png"（落盘）
+    q = int(job.get("quality") or _PREVIEW_QUALITY)
     stage_fn("faces")
     t_lm = time.time()
     plan, skipped = [], []
@@ -2837,9 +2898,7 @@ def _preview_multi(job: dict, frame, boxes, box_wh, timings, stage_fn, state) ->
     timings["faces"] = len(plan)
 
     if not plan:
-        return {"jpg": _jpeg_bytes(frame, 88), "box": box_wh, "has_face": True,
-                "swapped": False, "timings": timings, "faces": [], "models_used": [],
-                "note": "检出人脸但 68 点算不出来 —— 只回原帧"}
+        return _plain_frame(job, frame, box_wh, timings, note="检出人脸但 68 点算不出来 —— 只回原帧")
 
     # 声明要用的整组（去重、按 models 顺序）。worker 只常驻 3 个，多出来的它自己
     # LRU 换 —— 这里截到上限就行，免得让它在一次请求里反复横跳。
@@ -2863,7 +2922,8 @@ def _preview_multi(job: dict, frame, boxes, box_wh, timings, stage_fn, state) ->
         "load": load,
         "xseg": str(job.get("xseg") or ""),
         "config": dict(job["config"]),
-        "jpeg_quality": _PREVIEW_QUALITY,
+        "jpeg_quality": q,
+        "fmt": fmt,
     }
     resp = _WORKER.call(payload, on_stage=lambda st: state.__setitem__("stage", st))
     if not resp.get("ok"):
@@ -2884,7 +2944,7 @@ def _preview_multi(job: dict, frame, boxes, box_wh, timings, stage_fn, state) ->
     if len(boxes or []) > _PREVIEW_MAX_SWAPS:
         note = (note + "；" if note else "") + ("只换前 %d 张脸（这一帧检出 %d 张）"
                                                 % (_PREVIEW_MAX_SWAPS, len(boxes)))
-    return {"jpg": jpg, "box": box_wh, "has_face": True, "swapped": True,
+    return {"jpg": jpg, "img": jpg, "box": box_wh, "has_face": True, "swapped": True,
             "timings": timings, "model_size": resp.get("size"), "note": note,
             "faces": [{"face": p["face"], "model": p["name"], "dfm": p["dfm"],
                        "box": p["box"]} for p in plan],
@@ -2907,6 +2967,8 @@ def _preview_job(job: dict) -> dict:
     stop = job["stop"]
     state = job["state"]
     timings = {}
+    fmt = str(job.get("fmt") or "jpg").strip().lower()       # "jpg"（预览）/ "png"（落盘）
+    q = int(job.get("quality") or _PREVIEW_QUALITY)
 
     def _stage(name):
         state["stage"] = name
@@ -2915,8 +2977,15 @@ def _preview_job(job: dict) -> dict:
 
     _stage("grab")
     t0 = time.time()
-    frame = _grab_frame_at(job["video"], job["t"], stop)
-    timings["grab_ms"] = round((time.time() - t0) * 1000.0, 1)
+    src = job.get("frame")
+    if src is not None:
+        # 项目模式：帧已经是内存里的 BGR（调用方从 <项目>/000000.jpg 读的），
+        # 不用再走视频定位 —— 检测/换脸/合成这些活一模一样。
+        frame = src
+        timings["grab_ms"] = 0.0
+    else:
+        frame = _grab_frame_at(job["video"], job["t"], stop)
+        timings["grab_ms"] = round((time.time() - t0) * 1000.0, 1)
 
     _stage("detect")
     t0 = time.time()
@@ -2941,8 +3010,8 @@ def _preview_job(job: dict) -> dict:
             box_xyxy, box_wh = None, None
 
     if box_wh is None:
-        return {"jpg": _jpeg_bytes(frame, 88), "box": None, "has_face": False,
-                "swapped": False, "timings": timings, "note": "这一帧没检出人脸"}
+        return _plain_frame(job, frame, None, timings, note="这一帧没检出人脸",
+                            has_face=False)
 
     if job.get("models"):                      # 多模型：每张脸各用各的模型
         return _preview_multi(job, frame, boxes, box_wh, timings, _stage, state)
@@ -2952,9 +3021,8 @@ def _preview_job(job: dict) -> dict:
     lm68 = _frame_landmarks(frame, best, box_xyxy)
     timings["landmarks_ms"] = round((time.time() - t0) * 1000.0, 1)
     if lm68 is None:
-        return {"jpg": _jpeg_bytes(frame, 88), "box": box_wh, "has_face": True,
-                "swapped": False, "timings": timings,
-                "note": "检出人脸但 68 点算不出来 —— 只回原帧"}
+        return _plain_frame(job, frame, box_wh, timings,
+                            note="检出人脸但 68 点算不出来 —— 只回原帧")
 
     _stage("swap")
     state["stage"] = "queued"          # worker 一次只跑一帧：排队时间不算进 15s
@@ -2966,7 +3034,8 @@ def _preview_job(job: dict) -> dict:
         "xseg": str(job.get("xseg") or ""),
         "box": list(box_wh),
         "config": dict(job["config"]),
-        "jpeg_quality": _PREVIEW_QUALITY,
+        "jpeg_quality": q,
+        "fmt": fmt,
     }
     resp = _WORKER.call(payload, on_stage=lambda st: state.__setitem__("stage", st))
     if not resp.get("ok"):
@@ -2979,7 +3048,7 @@ def _preview_job(job: dict) -> dict:
         raise _BadInput("换脸结果为空", 500)
     timings["swap_ms"] = resp.get("swap_ms")
     timings["swap_wall_ms"] = round((time.time() - t0) * 1000.0, 1)
-    return {"jpg": jpg, "box": box_wh, "has_face": True, "swapped": True,
+    return {"jpg": jpg, "img": jpg, "box": box_wh, "has_face": True, "swapped": True,
             "timings": timings, "model_size": resp.get("size"), "note": ""}
 
 
@@ -3143,6 +3212,68 @@ def merge_preview(body: dict):
 def merge_preview_status():
     """预览 worker 的现状（排障用：起没起、加载过哪些模型、跑在哪个 provider 上）。"""
     return _ok(**_WORKER.status())
+
+@router.post("/api/merge/preview-frame")
+@_api
+def merge_preview_frame(body: dict):
+    """一张**静态帧文件** -> 检测 -> 换脸 -> 遮罩 -> 合成 -> 图（data: URL）。
+
+    和 /api/merge/preview 只差一点：帧不是按时刻从视频里取的，而是直接读一个
+    图片文件（项目模式就是 <项目>/000000.jpg）。检测 / 68 点 / 换脸 / 合成
+    仍然是 _preview_job 那一份 —— 同一帧走预览和走项目导出，输出是同一份字节。
+    """
+    t_start = time.time()
+    body = _as_dict(body)
+    fp = _norm_path(body.get("frame_file") or body.get("image") or body.get("path"))
+    if fp is None:
+        raise _BadInput("缺少 frame_file：要一张帧图（jpg/png）的路径")
+    if not fp.is_file():
+        raise _BadInput("帧图不存在：%s" % fp, 404)
+    if fp.suffix.lower() not in _IMAGE_EXT:
+        raise _BadInput("不是图片：%s（只认 %s）"
+                        % (fp.suffix or "无扩展名", " ".join(sorted(_IMAGE_EXT))))
+
+    models = _models_of(body)                 # None = 老的单模型路径
+    if models:
+        dfm, model_name = Path(models[0]["dfm"]), models[0]["name"]
+    else:
+        dfm, model_name = _dfm_of(body)
+    settings = _settings_val(body.get("settings"))
+    cfg = _merge_settings_to_config(settings)
+    detector = str(body.get("detector") or "det_500m").strip() or "det_500m"
+    thresh = _float_val("thresh", body.get("thresh"), 0.0, 1.0, 0.5)
+    xseg = _xseg_of(body)
+    fmt = "png" if str(body.get("fmt") or "jpg").strip().lower() == "png" else "jpg"
+    quality = _int_val("quality", body.get("quality"), 1, 100, _PREVIEW_QUALITY)
+
+    frame = _app_mod._imread_any(fp)
+    if frame is None:
+        raise _BadInput("这张帧图解不开：%s" % fp.name, 422)
+    stop = threading.Event()
+    state = {"stage": "start"}
+    res = _preview_job({"frame": frame, "models": models, "dfm": dfm,
+                        "xseg": xseg, "config": cfg, "detector": detector,
+                        "thresh": float(thresh), "stop": stop, "state": state,
+                        "fmt": fmt, "quality": int(quality)})
+    img = res.get("img") or res.get("jpg") or b""
+    if not img:
+        raise _BadInput("这一帧没有产出图", 500)
+    mime = "image/png" if fmt == "png" else "image/jpeg"
+    resp = _ok(png="data:%s;base64,%s" % (mime, _b64.b64encode(img).decode("ascii")),
+               ms=int(round((time.time() - t_start) * 1000.0)),
+               frame_file=str(fp), fmt=fmt, bytes=len(img),
+               box=res.get("box"), has_face=bool(res.get("has_face")),
+               swapped=bool(res.get("swapped")), note=res.get("note") or "",
+               timings=res.get("timings") or {},
+               model=model_name, dfm=str(dfm), xseg=xseg, detector=detector,
+               settings=settings)
+    if models:
+        resp["models"] = [{"name": m["name"], "dfm": m["dfm"],
+                           "faces": list(m["faces"])} for m in models]
+        resp["faces"] = list(res.get("faces") or [])
+        resp["swaps"] = int(res.get("swaps") or 0)
+    return resp
+
 
 
 # ============================================================
@@ -3467,3 +3598,841 @@ def merge_preview_warm(body: dict = None):
 def merge_preview_warm_status():
     """预热状态：{ready, model, ms, warming, cold, error, worker_pid, …}。"""
     return _ok(**_warm_status())
+
+
+# ============================================================
+# DFL 项目模式（iperov 布局）· 逐帧合成落盘 + 按原 fps/音轨重新编码
+# ------------------------------------------------------------
+# 项目目录（和 iperov 的 data_dst 结构一致）：
+#
+#   <项目>/000000.jpg              原帧（6 位序号，按顺序）
+#   <项目>/aligned/000000_0.jpg    对齐脸 DFLJPG；元数据 source_filename 指回
+#                                  "000000"（也认 "000000.jpg"）
+#   <项目>/merged/000000.jpg       产物：换脸后的**整帧**（本接口写的）
+#
+# 和 /api/merge/export 的分工：
+#   /export          -> 4.0 MergeStudio 子进程一口气出 mp4，断了要从头再跑
+#   /export-project  -> 逐帧合成落盘到 merged/，再单独编码；能断点续跑、
+#                       能报失败帧、产物可以一张张复查
+#
+# 「逐帧合成」这一段不另写一套：直接复用单帧预览的 _preview_job
+# （检测 -> 2D106 的 68 点 -> DFM 换脸 + 遮罩 + 合成），只把「从视频里取帧」
+# 换成「从 <项目>/<帧名> 读图」。同一帧走预览和走导出，输出是同一份字节。
+# ============================================================
+
+_PROJ_LOCK = threading.RLock()
+_PROJ_PCT_SWAP = 96          # 逐帧合成占 0~96%，剩下的给编码
+_PROJ_MAX_LIST = 200         # 失败帧 / 缺帧清单最多回传这么多条
+_PROJ_FRAME_EXT = {".jpg", ".jpeg", ".png"}
+_PROJ_JOB = {
+    "running": False, "ok": None, "phase": "idle", "cancelled": False,
+    "error": "", "error_detail": "", "stage": "idle", "pct": 0, "msg": "",
+    "project": "", "frames_dir": "", "aligned": "", "merged": "",
+    "video": "", "out_video": "", "fps": 0.0, "width": 0, "height": 0,
+    "video_frames": 0, "total": 0, "done": 0, "swapped": 0, "copied": 0,
+    "skipped": 0, "failed": 0, "frame_fps": 0.0, "eta_s": None, "elapsed": 0.0,
+    "started_at": None, "finished_at": None, "force": False,
+    "dfm": "", "model": "", "models": [], "settings": {}, "detector": "",
+    "warnings": [], "failed_frames": [], "missing": [], "missing_source": [],
+    "aligned_faces": 0, "merged_frames": 0, "encode": {}, "log": [],
+    "want_cancel": False,
+}
+
+
+class _ProjCancel(Exception):
+    """用户取消（和失败分开记：取消不是错误）。"""
+
+
+def _proj_snap() -> dict:
+    with _PROJ_LOCK:
+        snap = dict(_PROJ_JOB)
+        for k in ("warnings", "failed_frames", "missing", "missing_source",
+                  "models", "log"):
+            snap[k] = list(snap.get(k) or [])
+        snap["settings"] = dict(snap.get("settings") or {})
+        snap["encode"] = dict(snap.get("encode") or {})
+        return snap
+
+
+def _proj_set(**kw):
+    with _PROJ_LOCK:
+        _PROJ_JOB.update(kw)
+
+
+def _proj_log(msg):
+    line = str(msg)[:300]
+    with _PROJ_LOCK:
+        log = _PROJ_JOB.get("log")
+        if not isinstance(log, list):
+            log = []
+            _PROJ_JOB["log"] = log
+        log.append(line)
+        if len(log) > 300:
+            del log[:-300]
+
+
+def _proj_warn(msg):
+    """记一条警告：进 warnings（给界面看）同时进 log（给排障用）。"""
+    text = str(msg)[:400]
+    with _PROJ_LOCK:
+        warns = _PROJ_JOB.get("warnings")
+        if not isinstance(warns, list):
+            warns = []
+            _PROJ_JOB["warnings"] = warns
+        if text not in warns:
+            warns.append(text)
+            if len(warns) > 40:
+                del warns[:-40]
+    _proj_log("[warn] " + text)
+
+
+def _proj_cancelled() -> bool:
+    with _PROJ_LOCK:
+        return bool(_PROJ_JOB.get("want_cancel"))
+
+
+def _proj_frame_files(dirp) -> list:
+    """目录里的帧图名（按文件名排序 = ffmpeg image2 的读取顺序）。"""
+    out = []
+    try:
+        with os.scandir(str(dirp)) as it:
+            for e in it:
+                try:
+                    if e.is_file() and Path(e.name).suffix.lower() in _PROJ_FRAME_EXT:
+                        out.append(e.name)
+                except OSError:
+                    continue
+    except OSError:
+        return []
+    return sorted(out)
+
+
+def _proj_head_meta(path, limit=96 * 1024) -> dict:
+    """只读文件头就把 DFLJPG 里的 APP15（pickle）解出来。
+
+    app._dfljpg_dict() 是整份读进内存 —— 四万张对齐脸就是几 GB 的读放大。
+    APP15 紧跟 SOI，96KB 足够；段长超过窗口时才回退到整份读。
+    """
+    try:
+        with open(str(path), "rb") as fh:
+            data = fh.read(int(limit))
+    except OSError:
+        return {}
+    i, n = 0, len(data)
+    while i < n - 1:
+        if data[i] != 0xFF:
+            return {}
+        marker = data[i + 1]
+        if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+            i += 2
+            continue
+        if i + 4 > n:
+            return {}
+        seg_len = int.from_bytes(data[i + 2:i + 4], "big")
+        if seg_len < 2:
+            return {}
+        if marker == 0xEF:                        # APP15
+            end = i + 2 + seg_len
+            if end > n:                           # 段比窗口还长：退回整份读
+                try:
+                    return _app_mod._dfljpg_dict(Path(path)) or {}
+                except Exception:
+                    return {}
+            try:
+                d = _app_mod._safe_loads(data[i + 4:end])
+            except Exception:
+                return {}
+            return d if isinstance(d, dict) else {}
+        i += 2 + seg_len
+    return {}
+
+
+def _proj_match_frame(src, frame_set, by_stem, shift=0):
+    """DFLJPG 的 source_filename -> 真实存在的帧名；认不出来回 None（不猜）。"""
+    s = str(src or "").strip().replace("\\", "/")
+    if not s:
+        return None
+    base = s.rsplit("/", 1)[-1]
+    if base in frame_set:
+        return base
+    stem = Path(base).stem
+    if stem in by_stem:
+        return by_stem[stem]
+    if shift and stem.isdigit():
+        alt = str(int(stem) + int(shift))
+        if len(alt) < len(stem):
+            alt = alt.zfill(len(stem))
+        if alt in by_stem:
+            return by_stem[alt]
+    return None
+
+
+def _proj_scan_aligned(aligned_dir, frames) -> dict:
+    """aligned 目录 -> 每个源帧对应哪几张对齐脸。
+
+    返回 {map: {帧名: [脸文件名…]}, missing: [认不出原帧的 source_filename…],
+          no_meta: 几张没有元数据, shift: 用到的人数偏移, faces: 总脸数}
+
+    认帧顺序：source_filename 原名 -> 去扩展名 -> 整体平移 ±1（老项目帧从
+    000001 起、对齐从 000000 起，差一位）。三种都对不上就进 missing，绝不瞎配。
+    """
+    frame_set = set(frames)
+    by_stem = {}
+    for n in frames:
+        by_stem.setdefault(Path(n).stem, n)
+    try:
+        names = sorted(n for n in os.listdir(str(aligned_dir))
+                       if Path(n).suffix.lower() in (".jpg", ".jpeg"))
+    except OSError:
+        names = []
+    pairs, no_meta = [], 0
+    for n in names:
+        meta = _proj_head_meta(Path(str(aligned_dir)) / n)
+        if not meta:
+            no_meta += 1
+            continue
+        src = str(meta.get("source_filename") or "").strip()
+        if not src:                       # 没有这个字段：按文件名前缀认
+            src = n.rsplit("_", 1)[0] if "_" in n else Path(n).stem
+        pairs.append((n, src))
+    def _hits(shift):
+        return sum(1 for _n, s in pairs
+                   if _proj_match_frame(s, frame_set, by_stem, shift))
+
+    best_shift = 0
+    if pairs and _hits(0) <= 0:
+        # 一条都对不上才怀疑是「整体差一位」的老项目（帧 000001 起、对齐 000000 起）。
+        # 只要原名能对上就别平移：总数上「多对上一张」也可能把 A 的脸贴到 B 上。
+        scored = sorted(((_hits(s), s) for s in (1, -1)), reverse=True)
+        if scored and scored[0][0] > 0:
+            best_shift = scored[0][1]
+    out, missing = {}, []
+    for n, src in pairs:
+        cand = _proj_match_frame(src, frame_set, by_stem, best_shift)
+        if cand is None:
+            if len(missing) < _PROJ_MAX_LIST:
+                missing.append(str(src) or n)
+            continue
+        out.setdefault(cand, []).append(n)
+    return {"map": out, "missing": missing, "no_meta": int(no_meta),
+            "shift": int(best_shift), "faces": len(pairs)}
+
+
+def _proj_seq_info(names, contiguous=True):
+    """帧名列表 -> (prefix, 数字位宽, 后缀, 起始编号, 编号列表)；认不出就 None。
+
+    认不出来（前缀/后缀/位宽不统一、编号不连号）的帧序列没法用 image2 的
+    %0Nd 写法喂给 ffmpeg —— 有洞时它会在第一个洞停住，成片被悄悄截短。
+    """
+    if not names:
+        return None
+    rx = re.compile(r"^(.*?)(\d+)(\D*)$")
+    parsed = []
+    for n in names:
+        m = rx.match(str(n))
+        if not m:
+            return None
+        parsed.append((m.group(1), int(m.group(2)), len(m.group(2)), m.group(3)))
+    prefix, suffix, width = parsed[0][0], parsed[0][3], parsed[0][2]
+    for p, _num, w, suf in parsed:
+        if p != prefix or suf != suffix or w != width:
+            return None
+    nums = [x[1] for x in parsed]
+    if sorted(nums) != nums:
+        return None
+    if contiguous and nums[-1] - nums[0] + 1 != len(nums):
+        return None                        # 编号有洞（image2 会在这儿停住）
+    return prefix, int(width), suffix, int(nums[0]), nums
+
+
+def _proj_pattern(names):
+    """帧名列表 -> (image2 的 pattern, 起始编号)；认不出 / 编号有洞就 None。"""
+    info = _proj_seq_info(names)
+    if info is None:
+        return None
+    prefix, width, suffix, start, _nums = info
+    return prefix + "%0" + str(width) + "d" + suffix, int(start)
+
+
+def _proj_put(dst: Path, data=None, src=None):
+    """原子落盘：先写 .part 再 os.replace。
+
+    中途被杀 / 断电只会留下 .part，不会把「写了一半的图」当成已完成 ——
+    断点续跑靠的就是「文件存在且非空」这一条判据。
+    """
+    tmp = Path(str(dst) + ".part")
+    try:
+        if data is not None:
+            with open(str(tmp), "wb") as fh:
+                fh.write(data)
+        else:
+            shutil.copyfile(str(src), str(tmp))
+        os.replace(str(tmp), str(dst))
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
+def _proj_encode(pattern, start, fps, video, out_video, total) -> dict:
+    """按需求里那条命令编码：merged 帧 + 原视频音轨，libx264 / crf16 / faststart。
+
+    刻意**不加 -shortest**：音轨比画面长时它会把成片截短（4.0 那边踩过）。
+    """
+    ffmpeg = str(_app_mod._ffmpeg_exe())
+    ext = Path(str(out_video)).suffix.lower()
+    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-nostats", "-nostdin",
+           "-framerate", "%.6g" % float(fps),
+           "-start_number", str(int(start)), "-i", str(pattern),
+           "-i", str(video),
+           "-map", "0:v:0", "-map", "1:a?",
+           # 1) 奇数宽高在 yuv420p 下会被 libx264 直接拒绝，垫一像素最省事；
+           # 2) merged 是 JPEG（full range），不显式转 limited 的话成片的 pix_fmt
+           #    会被标成 yuvj420p(pc)，很多播放器按 tv 解释 → 整体发灰。
+           "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2,scale=out_range=tv",
+           "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p",
+           "-c:a", "copy"]
+    if ext in (".mp4", ".mov", ".m4v"):
+        cmd += ["-movflags", "+faststart"]
+    cmd += ["-progress", "pipe:1", str(out_video)]
+
+    err_path = None
+    code = -1
+    fh = tempfile.NamedTemporaryFile(delete=False, suffix=".ffmpeg.log")
+    err_path = fh.name
+    fh.close()
+    try:
+        with open(str(err_path), "wb") as errfp:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errfp,
+                                    text=True, encoding="utf-8", errors="replace",
+                                    creationflags=getattr(_app_mod, "_NO_WINDOW", 0))
+            try:
+                for line in proc.stdout:
+                    if _proj_cancelled():
+                        _kill_proc_tree(proc)
+                        raise _ProjCancel()
+                    line = line.strip()
+                    if not line or "=" not in line:
+                        continue
+                    k, _eq, v = line.partition("=")
+                    if k != "frame":
+                        continue
+                    try:
+                        done = int(v)
+                    except ValueError:
+                        continue
+                    pct = _PROJ_PCT_SWAP
+                    if total > 0:
+                        pct = _PROJ_PCT_SWAP + int((100 - _PROJ_PCT_SWAP) * done / total)
+                    _proj_set(pct=min(99, pct), stage="编码",
+                              msg="编码 %d/%d 帧" % (done, total))
+            finally:
+                code = proc.wait()
+    finally:
+        tail = ""
+        try:
+            with open(str(err_path), "rb") as rf:
+                raw = rf.read()[-4000:]
+            tail = raw.decode("utf-8", "ignore").strip()
+        except OSError:
+            tail = ""
+        try:
+            os.unlink(str(err_path))
+        except OSError:
+            pass
+    return {"code": int(code), "tail": tail[-1200:],
+            "cmd": " ".join('"%s"' % a if " " in str(a) else str(a) for a in cmd)}
+
+
+def _proj_source_video(raw, project: Path, frames_dir: Path):
+    """原视频（fps / 分辨率 / 音轨的唯一来源）：显式 > prepare 记下的 > 项目里唯一的片子。
+
+    找不到就回 (None, 原因) 让调用方报错 —— 这里绝不猜一个 fps 出来。
+    """
+    cands = []
+    raw = str(raw or "").strip()
+    if raw:
+        p = _norm_path(raw)
+        if p is None or not p.is_file():
+            raise _BadInput("指定的原视频不存在：%s" % (p or raw), 404)
+        cands.append(p)
+    for d in (str(frames_dir), str(project)):
+        try:
+            src = _app_mod._merge_source_video(d)
+        except Exception:
+            src = ""
+        if src:
+            cands.append(Path(src))
+            break
+    for d in (project, project.parent):
+        try:
+            vids = sorted(x for x in Path(str(d)).iterdir()
+                          if x.is_file() and x.suffix.lower() in _VIDEO_EXT)
+        except OSError:
+            vids = []
+        vids = [v for v in vids if ".merge_" not in v.name]
+        same = [v for v in vids
+                if v.stem in (Path(str(project)).name, Path(str(frames_dir)).name)]
+        cands.extend(same or (vids if len(vids) == 1 else []))
+    for p in cands:
+        try:
+            if p is not None and Path(str(p)).is_file():
+                return Path(str(p)), ""
+        except OSError:
+            continue
+    return None, "项目目录里找不到原视频（.mp4）—— 用 video 参数指定一个"
+
+
+def _proj_run(cfg: dict):
+    project = Path(cfg["project"])
+    frames_dir = Path(cfg["frames_dir"])
+    aligned_dir = Path(cfg["aligned"])
+    merged_dir = Path(cfg["merged"])
+    force = bool(cfg.get("force"))
+
+    merged_dir.mkdir(parents=True, exist_ok=True)
+    frames = _proj_frame_files(frames_dir)
+    if not frames:
+        raise _BadInput("项目里没有帧图（.jpg/.png）：%s" % frames_dir, 422)
+    ext_count = {}
+    for n in frames:
+        e = Path(n).suffix.lower()
+        ext_count[e] = ext_count.get(e, 0) + 1
+    frame_ext = sorted(ext_count, key=lambda k: (-ext_count[k], k))[0]
+    if len(ext_count) > 1:
+        _proj_warn("帧目录里有多种扩展名（%s），只用 %s 参与编码"
+                   % ("、".join(sorted(ext_count)), frame_ext))
+
+    info = _proj_scan_aligned(aligned_dir, frames)
+    face_map = info["map"]
+    _proj_set(total=len(frames), aligned_faces=int(info["faces"]),
+              missing_source=list(info["missing"]))
+    _proj_log("项目 %s：%d 帧，%d 张对齐脸，能对上帧的 %d 帧"
+              % (project.name, len(frames), info["faces"], len(face_map)))
+    if info["no_meta"]:
+        _proj_warn("%d 张对齐脸读不出 DFLJPG 元数据（不是 DFLJPG？），已跳过"
+                   % int(info["no_meta"]))
+    if info["missing"]:
+        _proj_warn("aligned 里有 %d 条 source_filename 找不到对应原帧（帧被删了？）：%s"
+                   % (len(info["missing"]),
+                      "、".join(info["missing"][:6])))
+    if info["shift"]:
+        _proj_warn("对齐脸的 source_filename 与帧号整体差 %+d（老项目），已按偏移对上"
+                   % int(info["shift"]))
+    if not face_map:
+        _proj_warn("没有任何一张对齐脸能对上帧 —— 这次只是把原帧原样搬进 merged/")
+
+    stop = threading.Event()
+    state = {"stage": ""}
+    q = int(cfg.get("quality") or _PREVIEW_QUALITY)
+    models = cfg.get("models") or None
+
+    t0 = time.time()
+    total = len(frames)
+    done = swapped = copied = skipped = 0
+    failed_frames, face_miss = [], []
+    for name in frames:
+        if _proj_cancelled():
+            stop.set()
+            raise _ProjCancel()
+        src_p = frames_dir / name
+        dst_p = merged_dir / name
+        # ---- 断点续跑：merged 里已经有非空文件就跳过（--force 时才重做）----
+        if not force and dst_p.is_file() and dst_p.stat().st_size > 0:
+            skipped += 1
+        else:
+            frame = None
+            try:
+                frame = _app_mod._imread_any(src_p)
+            except Exception:
+                frame = None
+            if frame is None:
+                failed_frames.append({"frame": name, "error": "这一帧读不出来（损坏？）"})
+            elif not (face_map.get(name) or []):
+                # 有没有脸：aligned 说了算。没有就原样搬（无损，也不白跑一次检测）
+                try:
+                    _proj_put(dst_p, src=src_p)
+                    copied += 1
+                except Exception as e:              # noqa: BLE001
+                    failed_frames.append({"frame": name,
+                                          "error": "搬运失败：%s" % str(e)[:120]})
+            else:
+                fmt = "png" if Path(name).suffix.lower() == ".png" else "jpg"
+                try:
+                    res = _preview_job({"frame": frame, "models": models,
+                                        "dfm": cfg["dfm"], "xseg": cfg["xseg"],
+                                        "config": cfg["config"],
+                                        "detector": cfg["detector"],
+                                        "thresh": float(cfg["thresh"]),
+                                        "stop": stop, "state": state,
+                                        "fmt": fmt, "quality": q,
+                                        "no_face_copy": True})
+                except _BadInput as e:
+                    res = None
+                    failed_frames.append({"frame": name, "error": str(e.msg)[:200]})
+                except Exception as e:              # noqa: BLE001
+                    res = None
+                    traceback.print_exc()
+                    failed_frames.append({"frame": name,
+                                          "error": "%s: %s" % (e.__class__.__name__,
+                                                               str(e)[:160])})
+                if res is not None:
+                    try:
+                        if res.get("copy"):
+                            _proj_put(dst_p, src=src_p)
+                            copied += 1
+                            if not res.get("has_face"):
+                                # 有对齐脸但检测不到脸：记下来，别让它悄悄过
+                                if len(face_miss) < _PROJ_MAX_LIST:
+                                    face_miss.append(name)
+                        else:
+                            _proj_put(dst_p, data=res.get("img") or res.get("jpg"))
+                            swapped += 1
+                    except Exception as e:          # noqa: BLE001
+                        failed_frames.append({"frame": name,
+                                              "error": "落盘失败：%s" % str(e)[:120]})
+        done += 1
+        el = max(0.001, time.time() - t0)
+        # 帧速只按真正干过活的帧算：续跑跳过的不算，否则「全跳过」会报出 3 万帧/秒
+        rate = (swapped + copied + len(failed_frames)) / el
+        _proj_set(done=done, swapped=swapped, copied=copied, skipped=skipped,
+                  failed=len(failed_frames), elapsed=round(el, 1),
+                  frame_fps=round(rate, 2),
+                  eta_s=(int((total - done) / rate) if rate > 0 and done < total else 0),
+                  pct=min(_PROJ_PCT_SWAP, int(_PROJ_PCT_SWAP * done / float(total))),
+                  msg="合成 %d/%d 帧 · %.1f 帧/秒%s"
+                      % (done, total, rate, ("（跳过 %d）" % skipped) if skipped else ""))
+        if len(failed_frames) > _PROJ_MAX_LIST:
+            del failed_frames[_PROJ_MAX_LIST:]
+        if done % 20 == 0 or done == total:
+            _proj_log("合成 %d/%d 帧 · 换脸 %d · 原样 %d · 跳过 %d · 失败 %d"
+                      % (done, total, swapped, copied, skipped, len(failed_frames)))
+
+    if face_miss:
+        _proj_warn("%d 帧有对齐脸但没检出人脸，已按原帧落盘：%s"
+                   % (len(face_miss), "、".join(face_miss[:6])))
+    # frame_fps 保留循环里最后一次的值（按真正处理过的帧算，跳过的不算）
+    _proj_set(failed_frames=failed_frames)
+
+    # ---- 编码前对账：缺帧必须说清楚缺哪几张，别让成片悄悄变短 ----
+    merged_names = [n for n in _proj_frame_files(merged_dir)
+                    if Path(n).suffix.lower() == frame_ext]
+    merged_set = set(merged_names)
+    frames_set = set(frames)
+    missing = [n for n in frames if n not in merged_set]       # 有源帧、没产物
+    v_frames = int(cfg.get("video_frames") or 0)
+    fps = max(0.001, float(cfg["fps"]))
+    # 项目和视频本该一一对应才比较帧数（抽帧按 2fps 之类的本来就对不上）
+    near_full = bool(v_frames) and (len(frames) + 10 >= v_frames)
+    if v_frames and near_full and len(frames) < v_frames:
+        # 按命名规律点名缺了哪几张（编号本来就有洞，contiguous=False）
+        info_seq = _proj_seq_info(frames, contiguous=False)
+        if info_seq is not None:
+            prefix, width, suffix, start, _nums = info_seq
+            want = [prefix + str(i).zfill(width) + suffix
+                    for i in range(int(start), int(start) + v_frames)]
+            gone = [n for n in want if n not in frames_set]
+            if gone:
+                _proj_warn("源视频 %d 帧，项目里缺 %d 帧：%s（这些帧不会出现在成片里）"
+                           % (v_frames, len(gone), "、".join(gone[:12])))
+                missing = gone + missing
+    _proj_set(missing=missing[: _PROJ_MAX_LIST], merged_frames=len(merged_names))
+    if len(merged_names) < len(frames):
+        lack = [n for n in missing if n in frames_set]
+        _proj_warn("merged 只有 %d 帧 < 源帧 %d 帧 —— 缺 %d 帧%s"
+                   % (len(merged_names), len(frames), len(frames) - len(merged_names),
+                      ("：" + "、".join(lack[:12])) if lack else ""))
+    if v_frames and near_full and len(merged_names) < v_frames:
+        _proj_warn("成片只会有 %d 帧（源视频 %d 帧），比原片短 %.2f 秒"
+                   % (len(merged_names), v_frames,
+                      (v_frames - len(merged_names)) / fps))
+    if not merged_names:
+        raise _BadInput("merged/ 里一帧都没有，没法编码：%s" % merged_dir, 422)
+
+    # ---- 编码 ----
+    _proj_set(stage="编码", pct=_PROJ_PCT_SWAP,
+              msg="编码 %d 帧 → %s" % (len(merged_names),
+                                       Path(str(cfg["out_video"])).name))
+    pat = _proj_pattern(merged_names)
+    seq_dir = None
+    try:
+        if pat is None:
+            # 编号有洞（缺帧 / 名字不规则）：按顺序硬链接成 %06d 再编码。
+            # 不这么做的话 image2 会在第一个洞停住，成片被截短，而界面上写着「成功」。
+            seq_dir = project / "_encode_seq"
+            shutil.rmtree(str(seq_dir), ignore_errors=True)
+            seq_dir.mkdir(parents=True, exist_ok=True)
+            for i, n in enumerate(merged_names):
+                d = seq_dir / ("%06d%s" % (i, frame_ext))
+                try:
+                    os.link(str(merged_dir / n), str(d))
+                except OSError:
+                    shutil.copyfile(str(merged_dir / n), str(d))
+            # 注意别写成 "%06d%s" % (...)：那样 %06d 会被当场格式化掉，
+            # image2 拿到的是一个具体文件名 → 只编出 1 帧
+            pat = ("%06d" + frame_ext, 0)
+            _proj_log("帧编号不连续，已按顺序重排 %d 帧到 %s" % (len(merged_names), seq_dir))
+        pattern = str(Path(str(merged_dir if seq_dir is None else seq_dir)) / pat[0])
+        t_enc = time.time()
+        enc = _proj_encode(pattern, pat[1], float(cfg["fps"]), cfg["video"],
+                           cfg["out_video"], len(merged_names))
+        enc["seconds"] = round(time.time() - t_enc, 2)
+        _proj_set(encode=enc)
+        _proj_log("编码：%s" % enc.get("cmd"))
+        if enc.get("code") != 0:
+            raise _BadInput("编码失败（ffmpeg 退出码 %s）：%s"
+                            % (enc.get("code"), (enc.get("tail") or "")[-500:]), 500)
+    finally:
+        if seq_dir is not None:
+            shutil.rmtree(str(seq_dir), ignore_errors=True)
+
+    el = time.time() - t0
+    _proj_set(done=total, pct=100, stage="完成", msg="完成：%d 帧 → %s"
+              % (len(merged_names), Path(str(cfg["out_video"])).name),
+              elapsed=round(el, 1), eta_s=0)
+
+
+def _proj_worker(cfg: dict):
+    """线程入口：所有异常在这里落成终态，绝不让状态永远停在 running。"""
+    try:
+        _proj_run(cfg)
+        with _PROJ_LOCK:
+            _PROJ_JOB.update({"running": False, "ok": True, "phase": "done",
+                              "cancelled": False, "finished_at": time.time(),
+                              "stage": "完成",
+                              "msg": "完成：%d 帧 → %s"
+                                     % (int(_PROJ_JOB.get("merged_frames") or 0),
+                                        Path(str(cfg["out_video"])).name)})
+    except _ProjCancel:
+        with _PROJ_LOCK:
+            _PROJ_JOB.update({"running": False, "ok": False, "phase": "cancelled",
+                              "cancelled": True, "stage": "已取消", "pct": 0,
+                              "msg": "已取消", "finished_at": time.time(),
+                              "error": "已取消（merged/ 里已写好的帧留着，下次接着跑）"})
+    except _BadInput as e:
+        with _PROJ_LOCK:
+            _PROJ_JOB.update({"running": False, "ok": False, "phase": "failed",
+                              "stage": "失败", "pct": 0, "msg": "导出失败",
+                              "error": str(e.msg)[:1200],
+                              "finished_at": time.time()})
+    except Exception as e:                          # noqa: BLE001
+        traceback.print_exc()
+        with _PROJ_LOCK:
+            log = list(_PROJ_JOB.get("log") or [])
+            _PROJ_JOB.update({"running": False, "ok": False, "phase": "failed",
+                              "stage": "失败", "pct": 0, "msg": "导出失败",
+                              "error": "%s: %s" % (e.__class__.__name__, str(e)[:600]),
+                              "error_detail": "\n".join(log[-20:])[:4000],
+                              "finished_at": time.time()})
+
+
+@router.post("/api/merge/export-project")
+@_api
+def merge_export_project(body: dict):
+    """标准 DFL 项目 -> 换脸后的整帧图（merged/）+ 按原 fps/音轨编码成片。
+
+    入参：
+      project_dir   必填，<视频名>/ 目录（帧图 + aligned/）
+      frames_dir    可选，帧目录（默认就是 project_dir）
+      aligned_dir   可选，默认 <project_dir>/aligned
+      merged_dir    可选，默认 <project_dir>/merged
+      video         可选，原视频（fps / 分辨率 / 音轨都从它来）
+      out_video     可选，默认 <项目目录>.mp4
+      models / model / dfm / settings / xseg_onnx / detector / thresh
+                    —— 和 /api/merge/export、/api/merge/preview 同一套协议
+      force         可选，true = 忽略 merged 里已有的帧，全部重做
+      quality       可选，jpg 帧的编码质量（默认 92，和单帧预览一致）
+    """
+    body = _as_dict(body)
+    project = _norm_path(body.get("project_dir") or body.get("project"))
+    if project is None:
+        raise _BadInput("缺少 project_dir：要一个 DFL 项目目录（<视频名>/）")
+    if not project.exists():
+        raise _BadInput("项目目录不存在：%s" % project, 404)
+    if not project.is_dir():
+        raise _BadInput("project_dir 不是目录：%s" % project)
+
+    frames_dir = _norm_path(body.get("frames_dir")) or project
+    if not frames_dir.is_dir():
+        raise _BadInput("帧目录不存在：%s" % frames_dir, 404)
+    if not _scan_first(frames_dir, _PROJ_FRAME_EXT, 1):
+        raise _BadInput("帧目录里没有帧图（.jpg/.png）：%s —— 先抽帧" % frames_dir)
+
+    aligned = _norm_path(body.get("aligned_dir")) or (project / "aligned")
+    if not aligned.is_dir():
+        raise _BadInput("找不到对齐集 aligned/：%s —— 先跑一次人脸对齐" % aligned, 404)
+    if not _scan_first(aligned, {".jpg", ".jpeg"}, 1):
+        raise _BadInput("对齐集是空的：%s" % aligned)
+    merged = _norm_path(body.get("merged_dir")) or (project / "merged")
+
+    # ---- 模型：和 /export、/preview 完全同一套协议 ----
+    models = _models_of(body)
+    if models:
+        dfm, model_name = Path(models[0]["dfm"]), models[0]["name"]
+    else:
+        dfm, model_name = _dfm_of(body)
+    settings = _settings_val(body.get("settings"))
+    cfg_main = _merge_settings_to_config(settings)
+    detector = str(body.get("detector") or "det_500m").strip() or "det_500m"
+    thresh = _float_val("thresh", body.get("thresh"), 0.0, 1.0, 0.5)
+    xseg = _xseg_of(body)
+    quality = _int_val("quality", body.get("quality"), 1, 100, _PREVIEW_QUALITY)
+    force = bool(body.get("force"))
+
+    # ---- 原视频 / fps / 分辨率：读不到就报错，不猜 ----
+    video, why = _proj_source_video(body.get("video") or body.get("source_video"),
+                                    project, frames_dir)
+    if video is None:
+        raise _BadInput("%s（项目：%s）" % (why, project), 422)
+    try:
+        v_frames, v_fps, v_w, v_h = _app_mod._video_probe(video)
+    except Exception as e:                          # noqa: BLE001
+        raise _BadInput("原视频解析不出来（ffmpeg/imageio）：%s（%s）"
+                        % (video.name, str(e)[:160]), 422)
+    fps_body = _float_val("fps", body.get("fps"), 1.0, 240.0, None)
+    if fps_body is not None:
+        fps = float(fps_body)
+    elif v_fps and float(v_fps) > 0:
+        fps = float(v_fps)
+    else:
+        raise _BadInput("读不出原视频的 fps：%s —— 不猜，先确认这个文件能正常解码"
+                        % video, 422)
+
+    # ---- 输出 ----
+    out_raw = str(body.get("out_video") or body.get("out") or "").strip()
+    out_video = _norm_path(out_raw) if out_raw else Path(str(project) + ".mp4")
+    if out_video.suffix.lower() not in _VIDEO_EXT:
+        out_video = out_video.with_suffix(".mp4")
+    if out_video.is_dir():
+        raise _BadInput("输出路径是个目录：%s（要 .mp4 文件）" % out_video)
+    if _same_path(out_video, video):
+        if out_raw:                     # 用户明确指到原片上：拒绝，别把素材覆盖了
+            raise _BadInput("输出路径不能是原视频本身：%s" % out_video)
+        # 默认名 <项目目录>.mp4 正好和原视频同名（把视频放在项目目录旁边时就是这样）：
+        # 换个名字，绝不覆盖素材
+        out_video = Path(str(project) + "_merged.mp4")
+    try:
+        out_video.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise _BadInput("输出目录建不出来：%s（%s）" % (out_video.parent, e))
+
+    cfg = {"project": str(project), "frames_dir": str(frames_dir),
+           "aligned": str(aligned), "merged": str(merged),
+           "video": str(video), "out_video": str(out_video),
+           "fps": float(fps), "video_frames": int(v_frames or 0),
+           "width": int(v_w or 0), "height": int(v_h or 0),
+           "models": models, "dfm": str(dfm), "model": str(model_name),
+           "config": cfg_main, "settings": settings, "xseg": xseg,
+           "detector": detector, "thresh": float(thresh), "quality": int(quality),
+           "force": force}
+
+    with _PROJ_LOCK:
+        if _PROJ_JOB.get("running"):
+            raise _BadInput("已经在导出项目（%s）—— 等它结束或点取消"
+                            % (_PROJ_JOB.get("project") or "?"), 409)
+        _PROJ_JOB.update({
+            "running": True, "ok": None, "phase": "running", "cancelled": False,
+            "want_cancel": False, "error": "", "error_detail": "", "log": [],
+            "stage": "准备", "pct": 0, "msg": "启动…", "elapsed": 0.0,
+            "project": str(project), "frames_dir": str(frames_dir),
+            "aligned": str(aligned), "merged": str(merged),
+            "video": str(video), "out_video": str(out_video), "fps": float(fps),
+            "width": int(v_w or 0), "height": int(v_h or 0),
+            "video_frames": int(v_frames or 0), "total": 0, "done": 0,
+            "swapped": 0, "copied": 0, "skipped": 0, "failed": 0,
+            "frame_fps": 0.0, "eta_s": None, "started_at": time.time(),
+            "finished_at": None, "force": force, "dfm": str(dfm),
+            "model": str(model_name),
+            "models": [{"name": m["name"], "dfm": m["dfm"],
+                        "faces": list(m["faces"])} for m in (models or [])],
+            "settings": settings, "detector": detector, "aligned_faces": 0,
+            "merged_frames": 0, "warnings": [], "failed_frames": [], "missing": [],
+            "missing_source": [], "encode": {},
+        })
+    threading.Thread(target=_proj_worker, args=(cfg,), daemon=True,
+                     name="merge-export-project").start()
+
+    snap = _proj_snap()
+    snap.pop("want_cancel", None)
+    snap.pop("log", None)
+    return _ok(**snap)
+
+
+@router.get("/api/merge/export-project/status")
+@_api
+def merge_export_project_status():
+    """项目导出的进度。ok = 任务是否成功（和 /export/status 一个口径）。"""
+    snap = _proj_snap()
+    ok = snap.get("ok")
+    cancelled = bool(snap.get("cancelled"))
+    want = bool(snap.get("want_cancel"))
+    running = bool(snap.get("running")) and not cancelled
+    if running:
+        phase = "running"
+    elif ok is True:
+        phase = "done"
+    elif cancelled:
+        phase = "cancelled"
+    elif ok is False:
+        phase = "failed"
+    else:
+        phase = "idle"
+    if phase in ("failed", "cancelled"):
+        snap["pct"] = 0
+    started = snap.get("started_at")
+    try:
+        el = round(float((snap.get("finished_at") or time.time()) - started), 1) \
+            if started else None
+    except Exception:
+        el = None
+    snap.update({"phase": phase, "running": running, "success": ok,
+                 "cancelling": bool(want and running), "elapsed": el,
+                 "log": list(snap.get("log") or [])[-12:]})
+    snap.pop("want_cancel", None)
+    return snap
+
+
+@router.post("/api/merge/export-project/cancel")
+@_api
+def merge_export_project_cancel():
+    """取消项目导出。幂等：没在跑、重复点都回 ok=true。"""
+    with _PROJ_LOCK:
+        running = bool(_PROJ_JOB.get("running"))
+        _PROJ_JOB["want_cancel"] = True
+        if running:
+            _PROJ_JOB["msg"] = "正在取消…"
+    if not running:
+        return _ok(cancelled=False, running=False, already=True,
+                   reason="没有正在进行的项目导出")
+    return _ok(cancelled=True, running=True, already=False, reason="已请求取消")
+
+
+@router.post("/api/merge/reveal")
+@_api
+def merge_reveal(body: dict):
+    """在资源管理器里定位一个文件/目录（「打开所在目录」）。"""
+    body = _as_dict(body)
+    p = _norm_path(body.get("path"))
+    if p is None:
+        raise _BadInput("缺少 path：要一个文件或目录")
+    if not p.exists():
+        raise _BadInput("路径不存在：%s" % p, 404)
+    target = p if p.is_dir() else p.parent
+    try:
+        import sys as _sys
+        flags = getattr(_app_mod, "_NO_WINDOW", 0)
+        if _sys.platform.startswith("win"):
+            if p.is_dir():
+                subprocess.Popen(["explorer", "/e,", str(p)], creationflags=flags)
+            else:
+                subprocess.Popen(["explorer", "/select," + str(p)], creationflags=flags)
+        elif _sys.platform == "darwin":
+            subprocess.Popen(["open", "-R" if p.is_file() else "", str(p)])
+        else:
+            subprocess.Popen(["xdg-open", str(target)])
+    except Exception as e:                            # noqa: BLE001
+        raise _BadInput("打不开所在目录：%s" % str(e)[:160], 500)
+    return _ok(path=str(p), dir=str(target))
+

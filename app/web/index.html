@@ -706,6 +706,10 @@
 
             <div class="mgsec mgexport">
               <button class="btn pri" id="mgExport" style="width:100%">导出</button>
+              <!-- 标准 DFL 项目模式：先逐帧合成到 <项目>/merged/，再编码成片。
+                   和上面那个「导出」（4.0 MergeStudio 一口气出 mp4）并列，两条路都在。 -->
+              <button class="btn" id="mgExportProject" style="width:100%;margin-top:8px"
+                      title="逐帧合成到 &lt;项目&gt;/merged/ 再编码成片 · 可断点续跑">导出项目</button>
             </div>
           </aside>
         </div>
@@ -903,6 +907,49 @@
 
             <div class="mgprog-foot">
               <button class="btn" id="mgpCancel">取消导出</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 项目导出（DFL 项目模式）：逐帧合成 → merged/ → 编码。进度/警告/失败帧/输出都在这一页 -->
+        <div class="mgview" data-view="project">
+          <div class="mgprog">
+            <div class="mgprog-hd">
+              <b>导出项目</b>
+              <span class="mgprog-file" id="mgpjFile">—</span>
+            </div>
+
+            <div class="mgprog-bar">
+              <i id="mgpjFill" style="width:0%"></i>
+            </div>
+            <div class="mgprog-meta">
+              <span id="mgpjPct">0%</span>
+              <span id="mgpjFrames">已处理 0 / 0 帧</span>
+              <span id="mgpjSpeed">— 帧/秒</span>
+              <span id="mgpjEta">剩余 —</span>
+            </div>
+
+            <div class="mgpj-sec" id="mgpjWarnBox" hidden>
+              <div class="mgpj-hd">警告</div>
+              <ul class="mgpj-list mgpj-list--warn" id="mgpjWarn"></ul>
+            </div>
+
+            <div class="mgpj-sec" id="mgpjFailBox" hidden>
+              <div class="mgpj-hd">失败帧 <b id="mgpjFailCount">0</b></div>
+              <ul class="mgpj-list mgpj-list--fail" id="mgpjFailed"></ul>
+            </div>
+
+            <div class="mgpj-sec">
+              <div class="mgpj-hd">输出</div>
+              <div class="mgpj-out">
+                <span class="mono" id="mgpjOut">—</span>
+                <button class="btn" id="mgpjOpen" type="button" disabled>打开所在目录</button>
+              </div>
+              <div class="mgpj-hint" id="mgpjHint"></div>
+            </div>
+
+            <div class="mgprog-foot">
+              <button class="btn" id="mgpjCancel">取消导出</button>
             </div>
           </div>
         </div>

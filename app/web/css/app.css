@@ -3147,6 +3147,63 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
 /* 进度页不该铺满整宽，收到一个舒服的阅读宽度 */
 #p-merge .mgview[data-view="progress"] { max-width: 760px; }
 
+/* 项目导出页（导出项目）：进度 / 警告 / 失败帧 / 输出路径 */
+#p-merge .mgview[data-view="project"] { max-width: 760px; }
+#p-merge .mgpj-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+#p-merge .mgpj-sec[hidden] { display: none; }
+#p-merge .mgpj-hd { font-size: 12px; font-weight: 600; color: var(--ink-2); }
+#p-merge .mgpj-hd b { color: var(--ink-1); font-weight: 650; }
+#p-merge .mgpj-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 168px;
+  overflow-y: auto;
+  font-size: 11.5px;
+  color: var(--ink-1);
+}
+#p-merge .mgpj-list li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--panel-2);
+  font-variant-numeric: tabular-nums;
+}
+#p-merge .mgpj-list li b {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-weight: 500;
+  flex: none;
+}
+#p-merge .mgpj-list--warn li { background: rgba(245, 158, 11, .10); }
+#p-merge .mgpj-list--fail li { background: rgba(239, 68, 68, .10); }
+#p-merge .mgpj-out { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+#p-merge .mgpj-out .mono {
+  flex: 1 1 320px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--ink-2);
+}
+/* 按钮本身用全局 .btn（它的背景/文字带 !important，这里不再重复声明颜色） */
+#p-merge .mgpj-out .btn { height: 30px; padding: 0 14px; border-radius: 8px; font-size: 12px; }
+#p-merge .mgpj-out .btn[disabled] { opacity: .45; cursor: default; }
+#p-merge .mgpj-hint { font-size: 11.5px; color: var(--ink-3); min-height: 14px; }
+
+
 /* ============================================================================
    降低主题色密度：紫只留给「进度 / 焦点 / 强调」，其余走向黑白灰
    —— 侧边栏选中、主按钮、选项卡、开关、进度条全部改用墨色（近黑/近白）
