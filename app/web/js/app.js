@@ -3322,7 +3322,9 @@
     warned: false,     /* 「轻提示」只给一次，不刷屏 */
     playing: false,
     streamDown: false, /* /api/merge/video 挂了（404/501）：退回逐帧预览 */
-    syncing: 0         /* >0：这一拍帧事件来自视频自身，别再回灌 video */
+    syncing: 0,        /* >0：这一拍帧事件来自视频自身，别再回灌 video */
+    ctl: null,         /* 当前这一发预览的 AbortController（切帧时 abort） */
+    retryTimer: null   /* 超时后自动重试的定时器（新请求/切帧就作废） */
   };
 
   var MG_PLAY_SVG = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M5.4 3.6 12.4 8l-7 4.4V3.6Z" fill="currentColor"/></svg>';
@@ -3416,6 +3418,7 @@
     st.playing = false;
     st.streamDown = false;
     mgHideOverlay();
+    mgPrevFlag("");          /* 退回逐帧模式：别把「仍在解码…」留在舞台上 */
     mgSetPlayIcon(false);
     if (v) {
       try { v.pause(); } catch (e) {}
@@ -3751,68 +3754,193 @@
     st.wait = setTimeout(function () { st.wait = null; window.mgPreviewNow(); }, 120);
   };
 
-  window.mgPreviewNow = function () {
+  /* ---------- 预览请求：超时自动重试一次 ----------
+     冷启动（ffmpeg 首帧解码慢 / 机械盘 / 4K 高码率）时 5 秒根本不够：以前前端一 abort 就只能等
+     用户下一次 seek —— 表现就是「第一次拖没反应，再拖一次才好」。
+     现在：第一次 5 秒超时 → 不清画面、不弹错，后台按「当前」帧号再发一次（超时放宽到 15 秒）；
+     两次都超时才提示一次，提示里带「重试」。
+     并发：新的预览一定 ++seq 并 abort 上一发；落地前再比一次 seq + 帧号，
+     上一帧的结果绝不会贴到新帧上。 */
+  var MG_PREV_TMO = 5000;          /* 首次请求超时（毫秒） */
+  var MG_PREV_TMO_RETRY = 15000;   /* 自动重试的超时（毫秒）：放宽，够一次冷解码 */
+  var MG_PREV_COOL = 3000;         /* 失败冷却（毫秒）：只挡用户主动连拖 */
+  var MG_PREV_GAP = 200;           /* 首次超时 → 自动重试之间的间隔 */
+
+  /* 舞台左下角一枚「仍在解码…」小胶囊：pointer-events:none，不遮画面、不吃拖动。
+     呼吸灯走 Web Animations，不动 app.css。 */
+  function mgPrevFlag(text) {
+    var stage = document.getElementById("mgStage");
+    if (!stage || !stage.appendChild) return;
+    var el = document.getElementById("mgPrevChip");
+    if (!text) { if (el) el.style.opacity = "0"; return; }
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "mgPrevChip";
+      el.style.cssText = "position:absolute;left:10px;bottom:10px;z-index:5;pointer-events:none;" +
+        "display:flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;" +
+        "font-size:11px;line-height:1.6;color:#fff;background:rgba(12,16,24,.55);" +
+        "box-shadow:0 1px 6px rgba(0,0,0,.18);opacity:0;transition:opacity .16s ease";
+      var dot = document.createElement("i");
+      dot.style.cssText = "width:6px;height:6px;border-radius:50%;background:#7dd3fc;flex:none";
+      var tx = document.createElement("span");
+      tx.id = "mgPrevChipTx";
+      tx.style.cssText = "font-size:11px;line-height:1.6;color:#fff";
+      el.appendChild(dot);
+      el.appendChild(tx);
+      stage.appendChild(el);
+      /* 呼吸灯：WAAPI，不需要改样式表 */
+      if (dot.animate) {
+        try {
+          dot.animate([{ opacity: 0.25 }, { opacity: 1 }, { opacity: 0.25 }],
+                      { duration: 1100, iterations: Infinity, easing: "ease-in-out" });
+        } catch (e) { /* 没有 WAAPI 就留个静态点，功能不受影响 */ }
+      }
+    }
+    var span = el.querySelector ? el.querySelector("span") : null;
+    if (span && span.textContent !== text) span.textContent = text;
+    el.style.opacity = "1";
+  }
+  window.mgPrevFlag = mgPrevFlag;
+
+  /* 两次都失败：右下角提示一次，带「重试」按钮（跳过冷却 + 重新计数提示） */
+  function mgPrevFailTip(isTimeout, detail) {
+    var st = window.__mgVideo;
+    if (st.warned) return;                        /* 同一轮失败只提示一次 */
+    st.warned = true;
+    var el = null;
+    try {
+      el = toast(isTimeout ? "预览超时" : "预览不可用",
+                 isTimeout ? (detail || "这一帧解码太慢，已自动重试一次")
+                           : String(detail || "").slice(0, 80),
+                 isTimeout ? "warn" : "error", 12000);
+    } catch (e) { el = null; }
+    if (!el || !el.querySelector) return;
+    var tt = el.querySelector(".tt");
+    var host = tt ? tt.parentNode : null;
+    if (!host || !host.appendChild) return;
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "重试";
+    btn.style.cssText = "margin-top:6px;padding:2px 10px;font-size:11px;line-height:1.6;" +
+      "border-radius:6px;border:1px solid currentColor;background:transparent;" +
+      "color:var(--accent);cursor:pointer";
+    btn.addEventListener("click", function () {
+      try { dismissToast(el); } catch (e) {}
+      st.blockUntil = 0;
+      st.warned = false;
+      window.mgPreviewNow({ force: true });
+    });
+    host.appendChild(btn);
+  }
+  window.mgPrevFailTip = mgPrevFailTip;
+
+  window.mgPreviewNow = function (opt) {
+    opt = opt || {};
     var st = window.__mgVideo, v = mgVid();
     if (!v || !mgVideoMode()) return Promise.resolve(null);
     if (st.streamDown) return Promise.resolve(null);
-    if (!v.paused) return Promise.resolve(null);                  /* 播放中不要预览 */
-    if (Date.now() < st.blockUntil) return Promise.resolve(null);  /* 失败冷却 3 秒 */
+    if (!v.paused) return Promise.resolve(null);                   /* 播放中不要预览 */
+    /* 3 秒冷却只挡「用户主动连拖」：自动重试（retry）和手动重试（force）都不受影响 */
+    if (!opt.force && !opt.retry && Date.now() < st.blockUntil) return Promise.resolve(null);
 
     var seq = ++st.seq;
-    var ctrl = (typeof AbortController === "function") ? new AbortController() : null;
-    var timer = ctrl ? setTimeout(function () { try { ctrl.abort(); } catch (e) {} }, 5000) : null;
     var fps = (window.__mv || {}).fps || 30;
-    var body = {
-      video: mgVidPath(),
-      t: Math.round(v.currentTime * 1000) / 1000,
-      model: mgPreviewModel(),
-      /* 多选契约：models=[{name, faces}]；单模型时 faces=[]（= 全部脸，向后兼容） */
-      models: mgModelsPayload(),
-      settings: mgPreviewSettings()
-    };
+    if (opt.force) st.warned = false;                              /* 手动重试：允许再提示一次 */
+    if (st.retryTimer) { clearTimeout(st.retryTimer); st.retryTimer = null; }
+    if (st.ctl) { try { st.ctl.abort(); } catch (e) {} st.ctl = null; }   /* 切帧：上一发真的掐掉 */
+    mgPrevFlag("");
 
-    return fetch("/api/merge/preview", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: ctrl ? ctrl.signal : undefined
-    }).then(function (r) {
-      return r.json().then(function (d) {
-        if (!r.ok || !d || d.ok !== true) {
-          var err = new Error((d && d.detail) || ("HTTP " + r.status));
-          err.status = r.status;
-          throw err;
+    function frameIdx() { return Math.round(v.currentTime * fps); }
+    function body(t) {
+      return {
+        video: mgVidPath(),
+        t: t,
+        model: mgPreviewModel(),
+        /* 多选契约：models=[{name, faces}]；单模型时 faces=[]（= 全部脸，向后兼容） */
+        models: mgModelsPayload(),
+        settings: mgPreviewSettings()
+      };
+    }
+
+    /* round 0 = 首次（5 秒），round 1 = 自动重试（15 秒）。每一发都重读 currentTime：
+       重试必须带「当前」帧号，不能沿用上一发写死的 t。 */
+    function send(round) {
+      var ctrl = (typeof AbortController === "function") ? new AbortController() : null;
+      var timedOut = false;
+      var t = Math.round(v.currentTime * 1000) / 1000;
+      var idx = frameIdx();
+      var timer = ctrl ? setTimeout(function () {
+        timedOut = true;
+        try { ctrl.abort(); } catch (e) {}
+      }, round > 0 ? MG_PREV_TMO_RETRY : MG_PREV_TMO) : null;
+      st.ctl = ctrl;
+
+      return fetch("/api/merge/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body(t)),
+        signal: ctrl ? ctrl.signal : undefined
+      }).then(function (r) {
+        return r.json().then(function (d) {
+          if (!r.ok || !d || d.ok !== true) {
+            var err = new Error((d && d.detail) || ("HTTP " + r.status));
+            err.status = r.status;
+            throw err;
+          }
+          return d;
+        });
+      }).then(function (d) {
+        if (timer) clearTimeout(timer);
+        if (seq !== st.seq) return null;            /* 过期响应，丢掉 */
+        if (frameIdx() !== idx) {                   /* 帧已经换了：别贴到新帧上 */
+          mgPrevFlag("");
+          return null;
         }
+        st.ctl = null;
+        st.warned = false;
+        mgPrevFlag("");
+        window.__mv.lastPreviewMs = d.ms;
+        if (d.has_face === false || !d.png) {
+          st.png = "";
+          mgHideOverlay();
+          mgHint("这一帧没有检测到人脸");
+          return null;
+        }
+        mgHint("");
+        window.mgShowOverlay(d.png);
+        /* 检测视图下让框跟这一帧对齐 */
+        if (mgCurView() === "det") window.mvDetect(Math.round(v.currentTime * fps));
         return d;
-      });
-    }).then(function (d) {
-      if (timer) clearTimeout(timer);
-      if (seq !== st.seq) return null;            /* 过期响应，丢掉 */
-      st.warned = false;
-      window.__mv.lastPreviewMs = d.ms;
-      if (d.has_face === false || !d.png) {
-        st.png = "";
-        mgHideOverlay();
-        mgHint("这一帧没有检测到人脸");
+      }).catch(function (e) {
+        if (timer) clearTimeout(timer);
+        if (seq !== st.seq) return null;            /* 已被新请求取代：不提示、不冷却 */
+        var isTimeout = !!(e && e.name === "AbortError") || timedOut;
+        if (isTimeout && round === 0) {
+          /* 第一次超时：画面保持上一帧，后台换 15 秒再来一次 */
+          mgPrevFlag("仍在解码…（自动重试）");
+          if (st.retryTimer) clearTimeout(st.retryTimer);
+          st.retryTimer = setTimeout(function () {
+            st.retryTimer = null;
+            if (seq !== st.seq) return;               /* 这期间用户已经切帧：不再发 */
+            if (!v.paused || st.streamDown) { mgPrevFlag(""); return; }
+            var p = send(1);
+            if (p && p.catch) p.catch(function () {});
+          }, MG_PREV_GAP);
+          return null;
+        }
+        /* 第二次也超时 / 非超时错误：清状态 → 3 秒冷却 → 提示一次 */
+        mgPrevFlag("");
+        st.ctl = null;
+        st.blockUntil = Date.now() + MG_PREV_COOL;
+        var secs = Math.round((round > 0 ? MG_PREV_TMO_RETRY : MG_PREV_TMO) / 1000);
+        mgPrevFailTip(isTimeout,
+          isTimeout ? ("这一帧解码超过 " + secs + " 秒，已自动重试一次仍没出来")
+                    : ((e && e.message) || String(e)));
         return null;
-      }
-      mgHint("");
-      window.mgShowOverlay(d.png);
-      /* 检测视图下让框跟这一帧对齐 */
-      if (mgCurView() === "det") window.mvDetect(Math.round(v.currentTime * fps));
-      return d;
-    }).catch(function (e) {
-      if (timer) clearTimeout(timer);
-      if (seq !== st.seq) return null;
-      /* 501/404/超时/非 ok：overlay 保持上一帧，3 秒内不再重试，右下角只提示一次 */
-      st.blockUntil = Date.now() + 3000;
-      if (!st.warned) {
-        st.warned = true;
-        var why = (e && e.name === "AbortError") ? "预览请求超时" : String((e && e.message) || e).slice(0, 80);
-        toast("预览不可用", why + " · 稍后自动重试", "info", 2400);
-      }
-      return null;
-    });
+      });
+    }
+
+    return send(0);
   };
 
   /* 进合成页：已有视频就把上次停下的时间点接回来（window.__mv.t） */
