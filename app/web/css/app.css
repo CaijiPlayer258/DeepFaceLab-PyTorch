@@ -4670,6 +4670,9 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
 
 /* 未分组：固定在顶部，整条横向排列 */
 .fdb-lane {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   flex: none;
   min-width: 0;
   padding: 9px 10px 10px;
@@ -5137,3 +5140,106 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   .fdb-stats { gap: 7px; }
   .fdb-keys { display: none; }
 }
+
+/* ============================================================================
+   合成视图 · 检测框 chip / ＋ / 飞入动画（app.js「合成视图」段配套）
+   框本身只有 canvas 上那 2px 描边，一个像素都不填；每张脸的模型 chip 和
+   「＋」是 DOM，贴在框的右上角 / 右下角外侧，才能点、才能开主题化下拉。
+   ========================================================================== */
+.mgdbentry {
+  position: absolute; top: 8px; left: 8px; z-index: 5;
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 26px; padding: 0 10px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel); color: var(--ink-2);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .08);
+  font-family: inherit; font-size: 11px; line-height: 1; cursor: pointer;
+  transition: color .13s ease, border-color .13s ease;
+}
+.mgdbentry:hover { color: var(--ink-1); border-color: var(--line-strong); }
+.mgdbentry .ic { width: 13px; height: 13px; flex: none; }
+.mgdbbdg {
+  min-width: 15px; height: 15px; padding: 0 4px; border-radius: 999px;
+  background: var(--accent); color: #fff;
+  font-size: 9.5px; font-style: normal; line-height: 15px; text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.mgdbbdg[hidden] { display: none !important; }
+
+/* chip / ＋ 的挂载层：和 canvas 同一个 6px 内缩盒子，坐标才能直接用 canvas 算出来的 */
+.mgflayer { position: absolute; inset: 6px; z-index: 4; pointer-events: none; }
+.mgflayer > * { pointer-events: auto; }
+
+/* 零尺寸锚点落在框的右上角；子元素从锚点往「上 / 下 / 左」长，就是「外侧」 */
+.mgfc { position: absolute; width: 0; height: 0; }
+.mgfc > .mgfdd { position: absolute; right: 0; bottom: 3px; }
+.mgfc > .mgplus { position: absolute; right: 0; }
+
+/* 模型 chip：复用 .ddbtn 的骨架，压成小胶囊（不引原生 <select> 的弹层） */
+.mgfb {
+  width: auto; max-width: 148px; height: 20px; padding: 0 8px;
+  gap: 4px; border-radius: 999px;
+  font-size: 10.5px; line-height: 1;
+  background: var(--panel);
+  box-shadow: 0 1px 5px rgba(0, 0, 0, .16);
+}
+.mgfb .ddtxt { max-width: 124px; font-weight: 500; }
+.mgfb.has { font-weight: 600; }
+/* 小胶囊上的箭头再小一号 */
+.mgfb::after { border-left-width: 3px; border-right-width: 3px; border-top-width: 4px; }
+.mgfmenu {
+  min-width: 132px; max-width: 200px; max-height: 190px;
+  top: calc(100% + 5px); right: 0; left: auto;
+  transform-origin: bottom right;
+}
+.mgfmenu .ddopt { font-size: 11.5px; padding: 6px 9px; }
+
+/* 重算中的细进度环：只圈这一张脸，不整屏遮罩 */
+.mgfring {
+  position: absolute; left: -15px; bottom: 4px;
+  width: 13px; height: 13px; border-radius: 50%;
+  border: 1.6px solid rgba(140, 146, 160, .3);
+  border-top-color: var(--accent);
+  pointer-events: none;
+}
+.mgfring[hidden] { display: none !important; }
+
+/* 右下角外侧的「＋」 */
+.mgplus {
+  display: flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; padding: 0;
+  border: 1px solid var(--line-strong); border-radius: 999px;
+  background: var(--panel); color: var(--ink-2);
+  font-family: inherit; font-size: 12px; line-height: 1; cursor: pointer;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, .16);
+  transition: color .13s ease, border-color .13s ease, transform .13s ease;
+}
+.mgplus:hover { color: var(--accent); border-color: var(--accent); transform: scale(1.08); }
+.mgplus:disabled { opacity: .45; cursor: default; transform: none; }
+
+/* 「正在合成…」：画面右下角的小字，不吃点击、不遮画面 */
+.mgcnote {
+  position: absolute; right: 10px; bottom: 10px; z-index: 6;
+  padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--panel);
+  font-size: 11px; line-height: 1.6; color: var(--ink-2);
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+.mgcnote[hidden] { display: none !important; }
+
+/* 飞入人脸数据库的缩略图：fixed 定位，WAAPI 只动 transform / opacity */
+.mgfly {
+  position: fixed; z-index: 9999;
+  width: 44px; height: 44px; border-radius: 9px; overflow: hidden;
+  pointer-events: none;
+  border: 1px solid rgba(255, 255, 255, .55);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, .28);
+  background: var(--panel);
+  will-change: transform, opacity;
+}
+.mgfly img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.mgfly.ph { background: var(--accent-soft); }
+
+/* 「框」开关和其它 b 同一套观感，只多一条分隔 */
+#mgBoxTog { margin-left: 2px; border-left: 1px solid var(--line); padding-left: 9px; border-radius: 0 6px 6px 0; }

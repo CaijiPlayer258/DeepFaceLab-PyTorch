@@ -341,10 +341,30 @@ _HWACCEL = {"auto": "auto", "on": "auto", "1": "auto", "true": "auto",
 # MergeStudio.core.config.mode_dict
 _MERGE_MODES = ("overlay", "original", "hist-match", "seamless",
                 "seamless-hist-match", "raw-rgb", "raw-predict", "debug")
-# MergeStudio.core.config.ctm_dict
+# MergeStudio.core.config.ctm_dict（+ "sot" 这个直白写法：worker 的 ct_map 把它
+# 折成 ctm_dict 里那一档，见 _PREVIEW_WORKER_SRC 的 ct_map["sot"]）
 _COLOR_TRANSFER = ("none", "rct", "lct", "mkl", "mkl-m", "idt", "idt-m",
-                   "sot-m", "mix-m", "mt", "lut")
+                   "sot", "sot-m", "mix-m", "mt", "lut")
+# 接口契约里的两条主参数（★ 默认值就是「不传 settings」时的结果，改这里 = 改默认）
+_CT_MODES = ("mt", "rct", "lct", "mkl", "sot")
+_BLEND_MODES = ("seamless", "overlay")
+DEFAULT_CT_MODE = "mt"
+DEFAULT_BLEND = "seamless"
 _IMG_FORMATS = {"jpg": "jpg", "jpeg": "jpg", "png": "png"}
+
+# ---- 检测器白名单 ----
+# 4.1 只有这两个：tinymog（默认，快）/ retinaface_10g（重，召回好）。
+# retinaface_500m 这个模型不存在，已经从所有列表里删掉；再点到它要明确 400，
+# 不许"就近退一个能用的顶上"（静默回退曾让用户以为在跑 500m）。
+_DETECTORS = ("tinymog", "retinaface_10g")
+_DET_ALIAS_API = {
+    "tinymog": "tinymog",
+    "retinaface_10g": "retinaface_10g", "retinaface10g": "retinaface_10g",
+    "det_10g": "retinaface_10g", "retinaface": "retinaface_10g",
+}
+_REMOVED_DETECTORS = ("retinaface_500m", "retinaface500m", "det_500m",
+                      "retinaface_500m.onnx", "det_500m.onnx")
+_DEFAULT_DETECTOR = "tinymog"      # ★ 默认检测器（所有 entrypoint 共用这一个常量）
 
 
 def _encoder_val(raw) -> str:
@@ -400,25 +420,45 @@ def _settings_val(raw) -> dict:
         raise _BadInput("settings 要是一个 JSON 对象，收到 %s" % type(raw).__name__)
 
     out = dict(raw)                                # 保留用户原值，方便回显
-    mode = str(raw.get("mode") or "overlay").strip().lower()
+
+    def _first(*names):
+        """按顺序取第一个非空值（两代键名：新的在前）。"""
+        for n in names:
+            v = raw.get(n)
+            if v is None or (isinstance(v, str) and not v.strip()):
+                continue
+            return v
+        return None
+
+    # ---- blend（= MergeStudio 的 mode）----
+    # 契约字段叫 blend（seamless / overlay），老写法叫 mode；认一个就够，
+    # 两个都给时以 blend 为准。缺省 = seamless。
+    mode = str(_first("blend", "mode") or DEFAULT_BLEND).strip().lower() or DEFAULT_BLEND
     if mode not in _MERGE_MODES:
-        raise _BadInput("settings.mode 只认 %s，收到 %r"
-                        % (" / ".join(_MERGE_MODES), raw.get("mode")))
-    out["mode"] = mode
+        raise _BadInput("settings.blend 只认 %s，收到 %r"
+                        % (" / ".join(_MERGE_MODES), raw.get("blend", raw.get("mode"))))
+    out["blend"] = mode
+    out["mode"] = mode                             # 老键名照样回显，前端不用改
     out["mask_mode"] = _mask_mode_val(raw.get("mask_mode"), 6)
 
-    ct = raw.get("color_transfer_mode", raw.get("color_transfer", "none"))
-    ct = str(ct if ct is not None else "none").strip().lower() or "none"
+    # ---- ct_mode（= MergeStudio 的 color_transfer_mode）----
+    ct = str(_first("ct_mode", "color_transfer_mode", "color_transfer")
+             or DEFAULT_CT_MODE).strip().lower() or DEFAULT_CT_MODE
     if ct not in _COLOR_TRANSFER:
-        raise _BadInput("settings.color_transfer 只认 %s，收到 %r"
-                        % (" / ".join(_COLOR_TRANSFER), raw.get("color_transfer")))
+        raise _BadInput("settings.ct_mode 只认 %s（也认 %s），收到 %r"
+                        % (" / ".join(_CT_MODES), " / ".join(_COLOR_TRANSFER),
+                           raw.get("ct_mode", raw.get("color_transfer"))))
+    out["ct_mode"] = ct
     out["color_transfer_mode"] = ct
     out["color_transfer"] = ct
 
-    erode = raw.get("erode_mask_modifier", raw.get("erode_mask"))
-    blur = raw.get("blur_mask_modifier", raw.get("blur_mask"))
-    out["erode_mask_modifier"] = _int_val("settings.erode_mask", erode, -100, 100, 0)
-    out["blur_mask_modifier"] = _int_val("settings.blur_mask", blur, -100, 100, 0)
+    # ---- 遮罩腐蚀 / 羽化（mask_erode / mask_blur 是契约字段）----
+    erode = _first("mask_erode", "erode_mask_modifier", "erode_mask")
+    blur = _first("mask_blur", "blur_mask_modifier", "blur_mask")
+    out["mask_erode"] = _int_val("settings.mask_erode", erode, -100, 100, 0)
+    out["mask_blur"] = _int_val("settings.mask_blur", blur, -100, 100, 0)
+    out["erode_mask_modifier"] = out["mask_erode"]
+    out["blur_mask_modifier"] = out["mask_blur"]
 
     fmt = str(raw.get("image_format") or "jpg").strip().lower()
     if fmt not in _IMG_FORMATS:
@@ -890,16 +930,51 @@ def _check_idx(snap: dict, idx: int) -> int:
     return idx
 
 
-@router.get("/api/merge/frame/{idx}")
-@_api
-def merge_frame(idx: int, w: int = 900):
-    maxw = max(200, min(int(w), 1600))
-    if idx < 0:                          # 参数错先说参数错，别被“没打开素材”盖住
-        raise _BadInput("帧号不能是负数：%d" % idx)
-    snap = _cache_snap()
-    mode = _check_cache_ready(snap)
-    idx = _check_idx(snap, idx)
+# ============================================================
+# 带参数的整帧合成：GET/POST /api/merge/frame/{idx} 与 /api/merge/merged/{idx}
+# ------------------------------------------------------------
+# 用户报的 BUG：「右侧改参数，画面不动」。
+# 根因不是 worker 不认参数 —— /api/merge/preview 一直是通的 —— 而是这两个接口
+# **根本没把参数带进合成链路**：
+#   · /frame  原样把源帧编成 JPEG 就返回（settings 一个字节都没用上）
+#   · /merged 从「上一次导出的成片」里抠一帧（那是导出那一刻的参数，改滑块当然不动）
+# 现在两条都走下面 _frame_payload()：帧 → 检测 → 68 点 → worker 换脸/遮罩/合成
+# （和 /preview 完全同一份 _preview_job），settings / model / models 逐项透传，
+# 且在**同一帧同一模型**下只改一项，像素就必须变。
+#
+# 兼容：
+#   · 不带 settings = 用当前默认值（ct_mode=mt、blend=seamless、detector=tinymog），
+#     和显式传同一组默认参数**逐字节一致**（同一份 _settings_val → 同一个 cfg）
+#   · raw=1（或 compose=0）= 老行为：原样返回源帧（界面「原图 / 检测」两视图用）
+#   · 没有可用 .dfm 时不报错，退化成原帧并在 note 里说明（老调用不会突然 4xx）
+# ============================================================
+_COMPOSE_CACHE = collections.OrderedDict()      # 整帧合成结果（含 data URL）
+_COMPOSE_CACHE_LOCK = threading.Lock()
+_COMPOSE_CACHE_MAX = 6                          # 拖滑块来回切参数时命中率最高的几个
 
+
+def _bool_val(raw, default=False) -> bool:
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return default
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    text = str(raw).strip().lower()
+    if text in ("1", "true", "yes", "on", "y"):
+        return True
+    if text in ("0", "false", "no", "off", "n"):
+        return False
+    raise _BadInput("「%r」不是布尔值（认 1/0、true/false、on/off）" % (raw,))
+
+
+def _source_frame(snap: dict, mode: str, idx: int):
+    """按当前打开的东西取第 idx 帧的**原图**（BGR，不缩放）。返回 (图像, 显示名)。
+
+    视频模式走 _grab_frame_at：它复用常开句柄 + 上一帧缓存，比每次重开
+    cv2.VideoCapture / 起 ffmpeg 都快，而且和 /preview 用的是同一条取帧路径
+    （同一帧走 /preview 和走 /frame，合成输入是同一份像素）。
+    """
     if mode == "project":
         names = snap.get("names") or []
         if not names:
@@ -907,31 +982,284 @@ def merge_frame(idx: int, w: int = 900):
         fp = Path(str(snap.get("srcdir"))) / names[idx]
         if not fp.is_file():
             raise _BadInput("图片不见了：%s" % fp, 404)
-        try:
-            import cv2
-            img = _imread_any(fp)
-            if img is None:
-                raise RuntimeError("解不开")
-            h0, w0 = img.shape[:2]
-            if w0 > maxw:
-                img = cv2.resize(img, (maxw, int(h0 * maxw / w0)),
-                                 interpolation=cv2.INTER_AREA)
-            good, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
-            if not good:
-                raise RuntimeError("编码失败")
-        except Exception as e:                   # 文件在、但解不出来（半张/损坏）
-            raise _BadInput("这张图解不开（不是有效图片？）：%s（%s）"
-                            % (fp.name, str(e)[:120]), 422)
-        return _ok(idx=idx, total=len(names), name=names[idx],
-                   png="data:image/jpeg;base64," + _b64.b64encode(buf.tobytes()).decode())
+        img = _imread_any(fp)
+        if img is None:
+            raise _BadInput("这张图解不开（不是有效图片？）：%s" % fp.name, 422)
+        return img, names[idx]
 
-    path = str(snap.get("path"))
+    path = str(snap.get("path") or "")
+    if not path:
+        raise _BadInput("还没有打开视频", 409)
     try:
-        png = _video_frame_jpeg(path, idx, maxw=maxw)
-    except Exception as e:
+        fps = float(snap.get("fps") or 0.0) or 30.0
+    except (TypeError, ValueError):
+        fps = 30.0
+    try:
+        img = _grab_frame_at(path, float(idx) / fps, None)
+    except _BadInput:
+        raise
+    except Exception as e:                     # noqa: BLE001
         raise _BadInput("取帧失败（ffmpeg）：%s" % str(e)[:200], 500)
-    return _ok(idx=idx, total=int(snap.get("frames") or 0),
-               png="data:image/jpeg;base64," + _b64.b64encode(png).decode())
+    if img is None:
+        raise _BadInput("这一帧读不出来：%d" % idx, 422)
+    return img, os.path.basename(path)
+
+
+def _encode_frame(img, maxw: int, fmt: str, quality: int) -> bytes:
+    """整帧 → 字节。先按 maxw 缩（接口一直只用缩略图给界面看），再编码。"""
+    import cv2
+    h0, w0 = img.shape[:2]
+    if w0 > maxw:
+        img = cv2.resize(img, (maxw, int(h0 * maxw / w0)), interpolation=cv2.INTER_AREA)
+    if str(fmt or "jpg").strip().lower() == "png":
+        ok, buf = cv2.imencode(".png", img, [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
+    else:
+        ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
+    if not ok:
+        raise _BadInput("这一帧编码失败", 500)
+    return buf.tobytes()
+
+
+def _compose_sig(snap: dict, mode: str, idx: int, name: str, cfg: dict, dfm: str,
+                 models, xseg: str, detector: str, thresh: float,
+                 fmt: str, quality: int, maxw: int, no_swap=None) -> str:
+    """合成结果的身份：**参数一个都不能漏**，漏了就是"改了参数画面不动"的老 bug。"""
+    if mode == "project":
+        ident = ["project", str(snap.get("srcdir")), str(name)]
+    else:
+        ident = ["video"] + list(_grab_key(str(snap.get("path") or "")))
+    try:
+        tail = json.dumps([int(idx), cfg, str(dfm), str(xseg), str(detector),
+                           round(float(thresh), 4),
+                           [[m["name"], m["dfm"], list(m["faces"])] for m in (models or [])],
+                           str(fmt), int(quality), int(maxw),
+                           sorted(int(x) for x in (no_swap or ()))],
+                          sort_keys=True, default=str)
+    except Exception:                          # noqa: BLE001
+        tail = repr([idx, cfg, dfm, xseg, detector, thresh, fmt, quality, maxw])
+    return json.dumps(ident, default=str) + "|" + tail
+
+
+def _compose_cached(sig: str):
+    if not sig:
+        return None
+    with _COMPOSE_CACHE_LOCK:
+        hit = _COMPOSE_CACHE.get(sig)
+        if hit is not None:
+            _COMPOSE_CACHE.move_to_end(sig)
+    return dict(hit) if hit is not None else None
+
+
+def _compose_store(sig: str, resp: dict):
+    if not sig:
+        return
+    with _COMPOSE_CACHE_LOCK:
+        _COMPOSE_CACHE[sig] = dict(resp)
+        _COMPOSE_CACHE.move_to_end(sig)
+        while len(_COMPOSE_CACHE) > _COMPOSE_CACHE_MAX:
+            _COMPOSE_CACHE.popitem(last=False)
+
+
+def _merge_query_into(payload: dict, **kw):
+    """query 参数并进 payload：**body 优先**（GET 没 body 时全靠它）。"""
+    for k, v in kw.items():
+        if v is None:
+            continue
+        if isinstance(v, str) and not v.strip():
+            continue
+        if k in payload and payload[k] not in (None, ""):
+            continue
+        payload[k] = v
+
+
+def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
+    """第 idx 帧 → 按 payload 里的合成参数出图（data URL）。
+
+    payload 认的键（全部可选）：
+        w / fmt / quality / raw / compose
+        settings: {ct_mode, blend, mask_mode, mask_erode, mask_blur, …}
+        model: "<dfm 名>"        models: [{"name","dfm","faces"}]
+        detector / thresh / xseg_onnx
+    """
+    t_start = time.time()
+    payload = _as_dict(payload)
+    maxw = max(200, min(int(payload.get("w") or default_w or 900), 1600))
+    if idx < 0:                          # 参数错先说参数错，别被“没打开素材”盖住
+        raise _BadInput("帧号不能是负数：%d" % idx)
+
+    snap = _cache_snap()
+    mode = _check_cache_ready(snap)
+    idx = _check_idx(snap, idx)
+    total = int(snap.get("frames") or 0) or len(snap.get("names") or [])
+
+    fmt = "png" if str(payload.get("fmt") or "jpg").strip().lower() == "png" else "jpg"
+    quality = _int_val("quality", payload.get("quality"), 1, 100,
+                       88 if fmt == "jpg" else 92)
+    raw_only = _bool_val(payload.get("raw"), False) or (
+        "compose" in payload and not _bool_val(payload.get("compose"), True))
+
+    frame, name = _source_frame(snap, mode, idx)
+
+    # ---- 1) raw：老行为，一个字节都不动（原图 / 检测两个视图要它）----
+    if raw_only:
+        buf = _encode_frame(frame, maxw, fmt, quality)
+        mime = "image/png" if fmt == "png" else "image/jpeg"
+        return _ok(idx=idx, total=total, name=name, raw=True, composed=False,
+                   fmt=fmt, bytes=len(buf), ms=int(round((time.time() - t_start) * 1000.0)),
+                   png="data:%s;base64,%s" % (mime, _b64.b64encode(buf).decode("ascii")))
+
+    # ---- 2) 参数（缺省 = 当前默认值，和显式给默认值走同一条路）----
+    settings = _settings_val(payload.get("settings"))
+    cfg = _merge_settings_to_config(settings)
+    # 检测器：顶层 detector 优先，其次 settings.detector（界面把它塞在 settings 里）
+    detector = _detector_val(payload.get("detector") or settings.get("detector"))
+    thresh = _float_val("thresh", payload.get("thresh"), 0.0, 1.0, 0.5)
+    models = _models_of(payload)
+    asked_model = bool(str(payload.get("model") or payload.get("dfm") or "").strip()
+                       or models)
+    try:
+        if models:
+            dfm, model_name = Path(models[0]["dfm"]), models[0]["name"]
+        else:
+            dfm, model_name = _dfm_of(payload)
+    except _BadInput as e:
+        if asked_model or e.status != 409:
+            raise                      # 点名要了却没有 → 照实报，别装成"原帧"
+        buf = _encode_frame(frame, maxw, fmt, quality)
+        mime = "image/png" if fmt == "png" else "image/jpeg"
+        return _ok(idx=idx, total=total, name=name, composed=False, swapped=False,
+                   fmt=fmt, bytes=len(buf), settings=settings, detector=detector,
+                   ms=int(round((time.time() - t_start) * 1000.0)),
+                   note="没有可用的 .dfm 模型：只回原帧（%s）" % e.msg,
+                   png="data:%s;base64,%s" % (mime, _b64.b64encode(buf).decode("ascii")))
+    xseg = _xseg_of(payload)
+    # 点名"不换"的脸（前端「不换脸」勾选）。没给 = 老行为（未声明的脸兜给第 0 个模型）。
+    no_swap = _face_ids_val("no_swap_faces",
+                            payload.get("no_swap_faces",
+                                        payload.get("skip_faces",
+                                                    settings.get("no_swap_faces"))))
+
+    # ---- 3) 命中缓存就直接回（同一帧 + 同一组参数，拖滑块回退时立刻出图）----
+    sig = _compose_sig(snap, mode, idx, name, cfg, str(dfm), models, xseg,
+                       detector, float(thresh), fmt, int(quality), int(maxw),
+                       no_swap)
+    hit = _compose_cached(sig)
+    if hit is not None:
+        hit["cached"] = True
+        hit["ms"] = int(round((time.time() - t_start) * 1000.0))
+        tm = dict(hit.get("timings") or {})
+        tm["cache_hit"] = 1
+        hit["timings"] = tm
+        return hit
+
+    # ---- 4) 真合成：和 /preview、/preview-frame 共用 _preview_job ----
+    stop = threading.Event()
+    state = {"stage": "start"}
+    # fmt=png 让 worker 直接给无损的中间结果（逐参数对比要看真实像素差，
+    # 不能被 JPEG 量化噪声盖住）；jpg 就用 worker 编好的那一份，不再二次压缩。
+    want_png = (fmt == "png")
+    res = _preview_job({"frame": frame, "models": models, "dfm": dfm, "xseg": xseg,
+                        "config": cfg, "detector": detector, "thresh": float(thresh),
+                        "stop": stop, "state": state,
+                        "fmt": "png" if want_png else "jpg",
+                        "quality": int(quality),
+                        "no_swap": list(no_swap),
+                        # png 请求要的是"能逐像素对比"的结果 → 帧无损发给 worker
+                        "send_lossless": bool(want_png)})
+    img = res.get("img") or res.get("jpg") or b""
+    if not img:
+        raise _BadInput("这一帧没有产出图", 500)
+    import cv2
+    import numpy as np
+    out = cv2.imdecode(np.frombuffer(img, np.uint8), cv2.IMREAD_COLOR)
+    if out is None:
+        raise _BadInput("合成结果解不开", 500)
+    if want_png or out.shape[1] > maxw:   # png 一律重编（要缩到 maxw）；jpg 只在超大时缩
+        img = _encode_frame(out, maxw, fmt, quality)
+    mime = "image/png" if fmt == "png" else "image/jpeg"
+
+    resp = _ok(idx=int(idx), total=int(total), name=name, composed=True,
+               swapped=bool(res.get("swapped")), has_face=bool(res.get("has_face")),
+               box=res.get("box"), fmt=fmt, bytes=len(img),
+               ms=int(round((time.time() - t_start) * 1000.0)),
+               model=model_name, dfm=str(dfm), detector=detector,
+               thresh=float(thresh), settings=settings, effective=cfg,
+               mask_mode=int(cfg.get("mask_mode") or 0),
+               mode=cfg.get("mode"), ct_mode=cfg.get("color_transfer_mode"),
+               erode_mask=cfg.get("erode_mask_modifier"),
+               blur_mask=cfg.get("blur_mask_modifier"),
+               xseg=xseg, timings=res.get("timings") or {},
+               no_swap_faces=list(no_swap), skipped=list(res.get("skipped") or []),
+               cached=False, note=res.get("note") or "",
+               png="data:%s;base64,%s" % (mime, _b64.b64encode(img).decode("ascii")))
+    if models:
+        resp["models"] = [{"name": m["name"], "dfm": m["dfm"],
+                           "faces": list(m["faces"])} for m in models]
+        resp["models_used"] = list(res.get("models_used") or [])
+        resp["faces"] = list(res.get("faces") or [])
+        resp["swaps"] = int(res.get("swaps") or 0)
+    _compose_store(sig, resp)
+    return resp
+
+
+def _body_idx(payload: dict) -> int:
+    """帧号从 body 里取：idx > frame > n（三种写法前端都在用）。"""
+    for k in ("idx", "frame", "n", "index", "frame_idx"):
+        if payload.get(k) not in (None, ""):
+            return _int_val("idx", payload.get(k), 0, None, 0)
+    raise _BadInput("缺少帧号：body 里给 idx（也认 frame / n），或者用 /api/merge/frame/{idx}")
+
+
+def _frame_body(idx: int, body, **query) -> dict:
+    """POST body + query 合成一个 payload（body 优先）。"""
+    payload = dict(_as_dict(body))
+    _merge_query_into(payload, **query)
+    return payload
+
+
+@router.get("/api/merge/frame/{idx}")
+@router.post("/api/merge/frame/{idx}")
+@_api
+def merge_frame(idx: int, body: dict = None, w: int = 900, settings: str = "",
+                model: str = "", models: str = "", detector: str = "",
+                thresh: float = None, fmt: str = "", quality: int = None,
+                raw: str = "", compose: str = "", xseg_onnx: str = "",
+                no_swap_faces: str = ""):
+    """第 idx 帧的**合成结果**（data URL）。GET 走 query、POST 走 JSON body，两套都认。
+
+    body（全部可选，缺省 = 当前 UI 默认值）：
+        settings: {"ct_mode":"mt"|"rct"|"lct"|"mkl"|"sot",
+                   "blend":"seamless"|"overlay",
+                   "mask_mode":0~9, "mask_erode":-100~100, "mask_blur":-100~100}
+        model: "<dfm 名>"  或  models: [{"name":"<dfm>","faces":[0,1]}]
+        detector / thresh / w / fmt(png|jpg) / quality / xseg_onnx
+    raw=1（或 compose=0）：不合成，原样返回源帧（界面「原图 / 检测」用）。
+    """
+    payload = _frame_body(idx, body, w=w, settings=settings, model=model,
+                          models=models, detector=detector, thresh=thresh,
+                          fmt=fmt, quality=quality, raw=raw, compose=compose,
+                          xseg_onnx=xseg_onnx, no_swap_faces=no_swap_faces)
+    return _frame_payload(idx, payload, default_w=w)
+
+
+@router.post("/api/merge/frame")
+@_api
+def merge_frame_post(body: dict = None, w: int = 900, settings: str = "",
+                     model: str = "", models: str = "", detector: str = "",
+                     thresh: float = None, fmt: str = "", quality: int = None,
+                     raw: str = "", compose: str = "", xseg_onnx: str = "",
+                     no_swap_faces: str = ""):
+    """POST /api/merge/frame —— 帧号放在 body 里（idx / frame / n），其余同 {idx} 版。
+
+    前端在视频模式下拿的是「时间轴第几帧」而不是 URL 段，所以契约里这个不带路径参数
+    的写法必须也认；两套走的是同一个 _frame_payload。
+    """
+    payload = dict(_as_dict(body))
+    _merge_query_into(payload, w=w, settings=settings, model=model, models=models,
+                      detector=detector, thresh=thresh, fmt=fmt, quality=quality,
+                      raw=raw, compose=compose, xseg_onnx=xseg_onnx,
+                      no_swap_faces=no_swap_faces)
+    return _frame_payload(_body_idx(payload), payload, default_w=w)
 
 
 @router.post("/api/merge/export")
@@ -1127,14 +1455,8 @@ def merge_export_status():
             "dfm": snap.get("dfm")}
 
 
-@router.get("/api/merge/merged/{idx}")
-@_api
-def merge_merged_frame(idx: int, w: int = 900):
-    """从「最近一次导出的成片」里取一帧，给工作台的「合成」标签用。"""
-    if idx < 0:
-        raise _BadInput("帧号不能是负数：%d" % idx)
-    maxw = max(200, min(int(w), 1600))
-
+def _merged_from_export(idx: int, maxw: int, payload: dict = None) -> dict:
+    """老行为：从「最近一次导出的成片」里抠一帧（没有打开的素材时才走这条）。"""
     with _merge_job_lock:
         last_out = str(_merge_job.get("out") or "").strip()
     cands = []
@@ -1147,7 +1469,7 @@ def merge_merged_frame(idx: int, w: int = 900):
         cands.append(Path(d) / "merged.mp4")
     out = next((p for p in cands if p and p.is_file()), None)
     if out is None:
-        raise _BadInput("还没有导出的成片 —— 先点一次导出", 409)
+        raise _BadInput("还没有导出的成片 —— 先点一次导出（或者先打开素材再看合成）", 409)
 
     import cv2
     cap = cv2.VideoCapture(str(out))
@@ -1169,14 +1491,81 @@ def merge_merged_frame(idx: int, w: int = 900):
     finally:
         cap.release()
 
-    h0, w0 = frame.shape[:2]
-    if w0 > maxw:
-        frame = cv2.resize(frame, (maxw, int(h0 * maxw / w0)), interpolation=cv2.INTER_AREA)
-    good2, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
-    if not good2:
-        raise _BadInput("成片这一帧编码失败", 500)
-    return _ok(idx=int(idx), total=total, out=str(out),
-               png="data:image/jpeg;base64," + _b64.b64encode(buf.tobytes()).decode())
+    fmt = "png" if str((payload or {}).get("fmt") or "jpg").strip().lower() == "png" else "jpg"
+    buf = _encode_frame(frame, maxw, fmt, 88)
+    mime = "image/png" if fmt == "png" else "image/jpeg"
+    return _ok(idx=int(idx), total=total, out=str(out), source="export",
+               composed=False, fmt=fmt, bytes=len(buf),
+               png="data:%s;base64,%s" % (mime, _b64.b64encode(buf).decode("ascii")))
+
+
+@router.get("/api/merge/merged/{idx}")
+@router.post("/api/merge/merged/{idx}")
+@_api
+def merge_merged_frame(idx: int, body: dict = None, w: int = 900, settings: str = "",
+                       model: str = "", models: str = "", detector: str = "",
+                       thresh: float = None, fmt: str = "", quality: int = None,
+                       raw: str = "", compose: str = "", xseg_onnx: str = "",
+                       no_swap_faces: str = ""):
+    """第 idx 帧的成片图（data URL）——**现算**，参数改了就立刻变。
+
+    以前这里只会去「最近一次导出的成片」里抠一帧：那是导出那一刻的参数，
+    所以右侧改 ct_mode / blend / 遮罩，画面一动不动（用户报的就是这个）。
+    现在：
+      · 有打开的素材（视频 / 帧目录）→ 和第 idx 帧**现算**一遍（和 /frame 同一条
+        合成链路、同一份参数），响应里 source="live"
+      · 没有素材、只有历史成片 → 仍退回「最近一次导出的成片」里那一帧（source="export"）
+    body 和 /api/merge/frame 完全一致（settings / model / models / detector / …）。
+    """
+    if idx < 0:
+        raise _BadInput("帧号不能是负数：%d" % idx)
+    payload = _frame_body(idx, body, w=w, settings=settings, model=model,
+                          models=models, detector=detector, thresh=thresh,
+                          fmt=fmt, quality=quality, raw=raw, compose=compose,
+                          xseg_onnx=xseg_onnx, no_swap_faces=no_swap_faces)
+
+    snap = _cache_snap()
+    mode = _cache_mode(snap)
+    if mode:
+        try:
+            _check_cache_ready(snap)
+        except _BadInput:
+            mode = ""                        # 素材没了：退到成片那条路
+    if mode:
+        resp = _frame_payload(idx, payload, default_w=w)
+        resp["source"] = "live"
+        return resp
+    maxw = max(200, min(int(payload.get("w") or 900), 1600))
+    return _merged_from_export(idx, maxw, payload)
+
+
+@router.post("/api/merge/merged")
+@_api
+def merge_merged_post(body: dict = None, w: int = 900, settings: str = "",
+                      model: str = "", models: str = "", detector: str = "",
+                      thresh: float = None, fmt: str = "", quality: int = None,
+                      raw: str = "", compose: str = "", xseg_onnx: str = "",
+                      no_swap_faces: str = ""):
+    """POST /api/merge/merged —— 帧号放在 body 里，其余同 {idx} 版。"""
+    payload = dict(_as_dict(body))
+    _merge_query_into(payload, w=w, settings=settings, model=model, models=models,
+                      detector=detector, thresh=thresh, fmt=fmt, quality=quality,
+                      raw=raw, compose=compose, xseg_onnx=xseg_onnx,
+                      no_swap_faces=no_swap_faces)
+    idx = _body_idx(payload)
+    snap = _cache_snap()
+    mode = _cache_mode(snap)
+    if mode:
+        try:
+            _check_cache_ready(snap)
+        except _BadInput:
+            mode = ""
+    if mode:
+        resp = _frame_payload(idx, payload, default_w=w)
+        resp["source"] = "live"
+        return resp
+    return _merged_from_export(idx, max(200, min(int(payload.get("w") or 900), 1600)),
+                               payload)
 
 
 @router.post("/api/merge/export/cancel")
@@ -1235,8 +1624,29 @@ def _frame_image(idx: int):
     return frame, total
 
 
-def _detector(name):
-    key = str(name or "det_500m").strip() or "det_500m"
+def _detector_val(raw) -> str:
+    """检测器入参 → 规范名（tinymog / retinaface_10g）；缺省 = tinymog。
+
+    只有白名单里的两个名字能过。retinaface_500m / det_500m **明确 400**：
+    这个模型不存在（4.1 已移除），以前它靠别名的兜底也能"成功"，属于静默回退。
+    """
+    key = str(raw or "").strip()
+    low = key.lower().replace("-", "_")
+    if low.endswith(".onnx"):
+        low = low[:-len(".onnx")]
+    if not low:
+        return _DEFAULT_DETECTOR
+    if low in _REMOVED_DETECTORS:
+        raise _BadInput("检测器 %s 不存在（4.1 已移除 RetinaFace_500m），可选：%s"
+                        % (key, " / ".join(_DETECTORS)))
+    canon = _DET_ALIAS_API.get(low)
+    if canon is None:
+        raise _BadInput("未知检测器 %r，只认：%s" % (key, " / ".join(_DETECTORS)))
+    return canon
+
+
+def _detector(name=None):
+    key = _detector_val(name)
     try:
         with _det_load_lock:              # 加载要几百毫秒，别让并发请求各建一份
             return _get_detector(key)
@@ -1248,11 +1658,15 @@ def _detector(name):
 
 @router.get("/api/merge/detect/{idx}")
 @_api
-def merge_detect(idx: int, model: str = "det_500m", thresh: float = 0.5):
-    """对当前帧做人脸检测，返回原图坐标的框。视频 / 项目两种模式都支持。"""
+def merge_detect(idx: int, model: str = _DEFAULT_DETECTOR, thresh: float = 0.5):
+    """对当前帧做人脸检测，返回原图坐标的框。视频 / 项目两种模式都支持。
+
+    model 缺省 = tinymog。retinaface_500m / det_500m / 任何没见过的名字 → 400。
+    """
     t = _float_val("thresh", thresh, 0.0, 1.0, 0.5)
+    det_name = _detector_val(model)
     frame, total = _frame_image(idx)
-    det = _detector(model)
+    det = _detector(det_name)
     with _det_run_lock:                    # thresh 是共享检测器上的可变字段
         det.thresh = t
         try:
@@ -1261,22 +1675,23 @@ def merge_detect(idx: int, model: str = "det_500m", thresh: float = 0.5):
             raise _BadInput("检测失败：%s" % str(e)[:200], 500)
     h, w = frame.shape[:2]
     return _ok(idx=int(idx), total=int(total or 0), width=int(w), height=int(h),
-               model=model, thresh=t, boxes=boxes)
+               model=model, detector=det_name, thresh=t, boxes=boxes)
 
 
 @router.get("/api/merge/analyze")
 @_api
-def merge_analyze(step: int = 12, model: str = "det_500m", thresh: float = 0.5):
+def merge_analyze(step: int = 12, model: str = _DEFAULT_DETECTOR, thresh: float = 0.5):
     """按步长扫全片，统计每帧的人脸数，给时间轴的人脸轨用。
-    486 帧 / step=12 → 41 次推理，约 20 秒。"""
+    486 帧 / step=12 → 41 次推理，约 20 秒。model 缺省 = tinymog。"""
     step = _int_val("step", step, 1, 500, 12)
+    det_name = _detector_val(model)
     t = _float_val("thresh", thresh, 0.0, 1.0, 0.5)
     snap = _cache_snap()
     total = int(snap.get("frames") or 0)
     _check_cache_ready(snap)
     if total <= 0:
         raise _BadInput("还没有打开素材（先 /api/merge/open 或 /api/merge/prepare）", 409)
-    det = _detector(model)
+    det = _detector(det_name)
 
     marks, idx, scanned, broken = [], 0, 0, ""
     while idx < total:
@@ -1295,8 +1710,9 @@ def merge_analyze(step: int = 12, model: str = "det_500m", thresh: float = 0.5):
                       "box": boxes[0]["box"] if boxes else None})
         scanned += 1
         idx += step
-    return _ok(total=total, step=step, scanned=scanned, model=model, thresh=t,
-               marks=marks, truncated=bool(broken), error=broken)
+    return _ok(total=total, step=step, scanned=scanned, model=model,
+               detector=det_name, thresh=t, marks=marks, truncated=bool(broken),
+               error=broken)
 
 
 @router.post("/api/merge/project")
@@ -1644,6 +2060,10 @@ def main():
 
     ct_map = {str(v).strip().lower(): int(k) for k, v in ctm_dict.items()}
     ct_map["none"] = 0
+    # "sot" 是 ct_mode 契约里的直白写法；ctm_dict 里只有 "sot-m"（带遮罩的 SOT，
+    # 见 merger.py 的 ct_functions[7]）。不补这一行的话，ct_mode="sot" 会落到
+    # .get(...,0) = 0（none），改参数画面不动 —— 正是这次要修的那类透传洞。
+    ct_map.setdefault("sot", ct_map.get("sot-m", 7))
 
     # 常驻的 DFM。显存保护：最多 _MAX_MODELS 个（4G 卡上一张脸一个 1.6GB 的 DFM，
     # 三个就是极限），超了先卸最久没用过的那个（LRU），再建新的。
@@ -1898,9 +2318,12 @@ def main():
                 raise RuntimeError("帧解码失败")
 
             c = req.get("config") or {}
+            # config 就是父进程 _merge_settings_to_config() 的产物，**这一帧的参数
+            # 只从这里来**：不读任何全局/缓存值，也不回落到"默认参数"。
+            # 逐项都在这儿落地，少一项 = 那一项改了画面不动。
             cfg = MergerConfigMasked(
-                face_type=FaceType.WHOLE_FACE,
-                mode=str(c.get("mode") or "overlay"),
+                face_type=str(c.get("face_type") or "whole_face"),
+                mode=str(c.get("mode") or "seamless"),
                 mask_mode=max(0, min(9, int(c.get("mask_mode", 6)))),
                 color_transfer_mode=ct_map.get(
                     str(c.get("color_transfer_mode") or "none").strip().lower(), 0),
@@ -2728,6 +3151,34 @@ def _faces_val(pos, raw) -> list:
     return out
 
 
+def _face_ids_val(name: str, raw) -> list:
+    """脸索引列表 → 去重保序的 int 列表（no_swap_faces 这类"点名的脸"）。
+
+    认 [1,3] / "1,3" / " 1 3 " / "[1,3]"（前端偶尔把数组 encode 成字符串）。
+    序号就是检测顺序，从 0 起，和 /api/merge/detect 的 boxes 下标一致。
+    """
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return []
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text[:1] in ("[", "("):
+            try:
+                raw = json.loads(text)
+            except Exception:
+                raise _BadInput("「%s」不是合法 JSON 数组：%s" % (name, text[:60]))
+        else:
+            raw = [x for x in re.split(r"[,，s]+", text) if x]
+    if not isinstance(raw, (list, tuple)):
+        raise _BadInput("「%s」要是一个数组（人脸序号），收到 %s"
+                        % (name, type(raw).__name__))
+    out = []
+    for v in raw:
+        i = _int_val(name, v, 0, 63)
+        if i not in out:
+            out.append(int(i))
+    return out
+
+
 def _models_of(body: dict):
     """body 的 models 数组 → [{name, dfm, faces, index}, …]；没给 / 空数组 → None。
 
@@ -2840,6 +3291,21 @@ def _img_bytes(img, fmt="jpg", quality=_PREVIEW_QUALITY) -> bytes:
     return buf.tobytes()
 
 
+def _send_frame_b64(frame, job: dict) -> str:
+    """整帧发给 worker 的 base64。
+
+    job["send_lossless"]（= 请求 fmt=png）时走 PNG：**只有无损传输，没被换的脸
+    才可能和原帧逐像素相同**（no_swap_faces 的验收条件就是"脸区域差异为 0"）。
+    jpg（界面预览那条路）仍旧是 q95 JPEG，速度优先，眼睛看不出来。
+    """
+    if job.get("send_lossless"):
+        import cv2
+        ok, buf = cv2.imencode(".png", frame, [int(cv2.IMWRITE_PNG_COMPRESSION), 1])
+        if ok:
+            return _b64.b64encode(buf.tobytes()).decode("ascii")
+    return _b64.b64encode(_jpeg_bytes(frame, _PREVIEW_SEND_QUALITY)).decode("ascii")
+
+
 def _plain_frame(job: dict, frame, box_wh, timings, note="", has_face=True) -> dict:
     """这一帧没换脸时的返回。
 
@@ -2876,7 +3342,13 @@ def _preview_multi(job: dict, frame, boxes, box_wh, timings, stage_fn, state) ->
     stage_fn("faces")
     t_lm = time.time()
     plan, skipped = [], []
+    # 「不换脸」的脸：直接不参与合成 —— 既不算进 plan，也不兜给第 0 个模型。
+    # 这条必须在 _model_for_face 之前判掉，否则"未声明"会被兜底成第 0 个模型。
+    no_swap = {int(x) for x in (job.get("no_swap") or ())}
     for i, b in enumerate((boxes or [])[:_PREVIEW_MAX_SWAPS]):
+        if int(i) in no_swap:
+            skipped.append({"face": int(i), "why": "no_swap_faces：按要求保持原像素"})
+            continue
         try:
             x1, y1, x2, y2 = [float(v) for v in (b.get("box") or ())]
         except Exception:
@@ -2898,6 +3370,9 @@ def _preview_multi(job: dict, frame, boxes, box_wh, timings, stage_fn, state) ->
     timings["faces"] = len(plan)
 
     if not plan:
+        if no_swap and all(s.get("why", "").startswith("no_swap_faces") for s in skipped):
+            return _plain_frame(job, frame, box_wh, timings,
+                                note="这一帧的脸都在 no_swap_faces 里 —— 整帧保持原像素")
         return _plain_frame(job, frame, box_wh, timings, note="检出人脸但 68 点算不出来 —— 只回原帧")
 
     # 声明要用的整组（去重、按 models 顺序）。worker 只常驻 3 个，多出来的它自己
@@ -2916,7 +3391,7 @@ def _preview_multi(job: dict, frame, boxes, box_wh, timings, stage_fn, state) ->
     state["stage"] = "queued"          # worker 一次只跑一帧：排队时间不算进 15s
     t0 = time.time()
     payload = {
-        "frame": _b64.b64encode(_jpeg_bytes(frame, _PREVIEW_SEND_QUALITY)).decode("ascii"),
+        "frame": _send_frame_b64(frame, job),
         "faces": [{"dfm": p["dfm"], "landmarks": p["landmarks"], "box": p["box"]}
                   for p in plan],
         "load": load,
@@ -3016,6 +3491,15 @@ def _preview_job(job: dict) -> dict:
     if job.get("models"):                      # 多模型：每张脸各用各的模型
         return _preview_multi(job, frame, boxes, box_wh, timings, _stage, state)
 
+    # 单模型路径：主角那张脸被点名"不换"就整帧原样回去（不能假装换过）
+    no_swap = {int(x) for x in (job.get("no_swap") or ())}
+    if no_swap:
+        best_i = next((i for i, b in enumerate(boxes) if b is best), None)
+        if best_i is not None and best_i in no_swap:
+            return _plain_frame(job, frame, box_wh, timings,
+                                note="第 %d 张脸在 no_swap_faces 里 —— 整帧保持原像素"
+                                     % best_i)
+
     _stage("landmarks")
     t0 = time.time()
     lm68 = _frame_landmarks(frame, best, box_xyxy)
@@ -3028,7 +3512,7 @@ def _preview_job(job: dict) -> dict:
     state["stage"] = "queued"          # worker 一次只跑一帧：排队时间不算进 15s
     t0 = time.time()
     payload = {
-        "frame": _b64.b64encode(_jpeg_bytes(frame, _PREVIEW_SEND_QUALITY)).decode("ascii"),
+        "frame": _send_frame_b64(frame, job),
         "landmarks": np.asarray(lm68, dtype=np.float64).round(2).tolist(),
         "dfm": str(job["dfm"]),
         "xseg": str(job.get("xseg") or ""),
@@ -3087,7 +3571,7 @@ def merge_preview(body: dict):
         dfm, model_name = _dfm_of(body)
     settings = _settings_val(body.get("settings"))
     cfg = _merge_settings_to_config(settings)
-    detector = str(body.get("detector") or "det_500m").strip() or "det_500m"
+    detector = _detector_val(body.get("detector"))
     thresh = _float_val("thresh", body.get("thresh"), 0.0, 1.0, 0.5)
     xseg = _xseg_of(body)
 
@@ -3136,7 +3620,9 @@ def merge_preview(body: dict):
                                         "models": models,
                                         "xseg": xseg, "config": cfg,
                                         "detector": detector, "thresh": float(thresh),
-                                        "stop": stop, "state": state})
+                                        "stop": stop, "state": state,
+                                        "no_swap": _face_ids_val(
+                                            "no_swap_faces", body.get("no_swap_faces"))})
         except _BadInput as e:
             holder["e"] = e
         except Exception as e:                  # noqa: BLE001
@@ -3240,7 +3726,7 @@ def merge_preview_frame(body: dict):
         dfm, model_name = _dfm_of(body)
     settings = _settings_val(body.get("settings"))
     cfg = _merge_settings_to_config(settings)
-    detector = str(body.get("detector") or "det_500m").strip() or "det_500m"
+    detector = _detector_val(body.get("detector"))
     thresh = _float_val("thresh", body.get("thresh"), 0.0, 1.0, 0.5)
     xseg = _xseg_of(body)
     fmt = "png" if str(body.get("fmt") or "jpg").strip().lower() == "png" else "jpg"
@@ -3254,7 +3740,10 @@ def merge_preview_frame(body: dict):
     res = _preview_job({"frame": frame, "models": models, "dfm": dfm,
                         "xseg": xseg, "config": cfg, "detector": detector,
                         "thresh": float(thresh), "stop": stop, "state": state,
-                        "fmt": fmt, "quality": int(quality)})
+                        "fmt": fmt, "quality": int(quality),
+                        "no_swap": _face_ids_val("no_swap_faces",
+                                                 body.get("no_swap_faces")),
+                        "send_lossless": (fmt == "png")})
     img = res.get("img") or res.get("jpg") or b""
     if not img:
         raise _BadInput("这一帧没有产出图", 500)
@@ -3324,14 +3813,16 @@ _WARM_STATE = {
 
 
 def _det_cached(name) -> bool:
-    """检测器是不是已经在父进程里了 —— 和 app._get_detector 看同一张缓存表。"""
+    """检测器是不是已经在父进程里了 —— 和 app._get_detector 看同一张缓存表。
+
+    缓存键就是规范名（tinymog / retinaface_10g），所以这里先把入参归一。
+    """
     cache = getattr(_app_mod, "_det_cache", None) or {}
-    key = str(name or "det_500m").strip()
-    low = key.lower().replace("-", "_")
-    if low.startswith("tinymog"):
-        return "tinymog" in cache
-    alias = getattr(_app_mod, "_DET_ALIAS", {}).get(low, key)
-    return alias in cache
+    try:
+        canon = _detector_val(name)
+    except _BadInput:
+        return False
+    return canon in cache
 
 
 def _worker_pid():
@@ -3573,7 +4064,7 @@ def merge_preview_warm(body: dict = None):
     else:
         dfm, model_name = _dfm_of(body)        # 模型不存在：这里就 404，不进线程
         dfms, names = [str(dfm)], [str(model_name or "")]
-    det_name = str(body.get("detector") or "det_500m").strip() or "det_500m"
+    det_name = _detector_val(body.get("detector"))
 
     hot, why = _warm_note_hot(dfms, names, det_name)
     ms = int(round((time.time() - t_req) * 1000.0))
@@ -4275,7 +4766,7 @@ def merge_export_project(body: dict):
         dfm, model_name = _dfm_of(body)
     settings = _settings_val(body.get("settings"))
     cfg_main = _merge_settings_to_config(settings)
-    detector = str(body.get("detector") or "det_500m").strip() or "det_500m"
+    detector = _detector_val(body.get("detector"))
     thresh = _float_val("thresh", body.get("thresh"), 0.0, 1.0, 0.5)
     xseg = _xseg_of(body)
     quality = _int_val("quality", body.get("quality"), 1, 100, _PREVIEW_QUALITY)

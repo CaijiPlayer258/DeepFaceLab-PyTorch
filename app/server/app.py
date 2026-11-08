@@ -557,42 +557,70 @@ _det_cache = {}
 
 # 界面下拉里写的是模型名（RetinaFace_10g / TinyMog …），接口里用的是文件名。
 # 两张表都认，免得前端还得记住磁盘上的命名。
+#
+# 4.1 只保留两个检测器，**规范名 = 缓存键 = worker 里认的名字**：
+#   tinymog        —— 快（SCRFD+MobileNetV1，2.7 MB），默认
+#   retinaface_10g —— 重（召回更好）
+# retinaface_500m 这个模型**不存在**（weights/ 里那份是 4.0 的遗留文件，从来没被
+# 接进 4.1 的下拉）。以前它靠 alias 落成 det_500m → 有人传它也能"成功"，属于
+# 静默回退；现在从别名表里删掉，并且显式 400（见 _removed_detector()）。
 _DET_ALIAS = {
-    "retinaface_10g": "det_10g", "retinaface10g": "det_10g", "det_10g": "det_10g",
-    "retinaface_500m": "det_500m", "retinaface500m": "det_500m", "det_500m": "det_500m",
-    "retinaface": "det_10g",
+    "tinymog": "tinymog",
+    "retinaface_10g": "retinaface_10g", "retinaface10g": "retinaface_10g",
+    "det_10g": "retinaface_10g", "retinaface": "retinaface_10g",
 }
+# 规范名 → weights/ 根下的平铺文件名
+_DET_ONNX = {"tinymog": "tinymog.onnx", "retinaface_10g": "retinaface_10g.onnx"}
+# 已移除 / 从不存在——点到名要明确报错，不能"就近找个能用的顶上"
+_REMOVED_DETECTORS = {"retinaface_500m", "retinaface500m", "det_500m",
+                      "retinaface_500m.onnx", "det_500m.onnx"}
+DEFAULT_DETECTOR = "tinymog"
 
 
-def _get_detector(name="det_500m"):
+def detector_key(name) -> str:
+    """检测器入参 → 规范名（tinymog / retinaface_10g）。
+
+    未知名字抛 400（不是 404、也不是静默回退）：前端一旦把名字写错，要能立刻看见。
+    retinaface_500m / det_500m 单独给一句人话——它是"以前能用、现在没有了"的那一个。
+    """
+    key = str(name or "").strip()
+    low = key.lower().replace("-", "_")
+    if low.endswith(".onnx"):
+        low = low[:-len(".onnx")]
+    if not low:
+        return DEFAULT_DETECTOR
+    if low in _REMOVED_DETECTORS:
+        raise HTTPException(
+            400, "检测器 %s 不存在（4.1 已移除 RetinaFace_500m），可选：%s"
+            % (key, " / ".join(sorted(_DET_ONNX))))
+    canon = _DET_ALIAS.get(low)
+    if canon is None:
+        raise HTTPException(
+            400, "未知检测器 %r，只认：%s" % (key, " / ".join(sorted(_DET_ONNX))))
+    return canon
+
+
+def _get_detector(name=None):
     """按需加载检测器（权重平铺在 weights/ 根下，只读引用）。
 
-    支持文件名（det_10g / det_500m）和界面名（RetinaFace_10g / TinyMog）。
+    默认 TinyMog。认界面名（TinyMog / RetinaFace_10g）、文件名（det_10g）和规范名；
+    retinaface_500m / det_500m 以及任何没见过的名字都 400，不再"退一个能用的"。
     """
-    key = str(name or "det_500m").strip()
-    low = key.lower().replace("-", "_")
-    if low.startswith("tinymog"):
-        if "tinymog" in _det_cache:
-            return _det_cache["tinymog"]
+    canon = detector_key(name)
+    if canon in _det_cache:
+        return _det_cache[canon]
+    flat = _DET_ONNX[canon]
+    p = _detector_path(flat)
+    if p is None:
+        raise HTTPException(404, "找不到检测模型 %s（weights/%s）" % (canon, flat))
+    if canon == "tinymog":
         from ._detect import TinyMogDet
-        p = _detector_path("tinymog.onnx")
-        if p is not None:
-            det = TinyMogDet(str(p), workspace=WORKSPACE, engine_name="tinymog")
-            _det_cache["tinymog"] = det
-            return det
-        raise HTTPException(404, "找不到 TinyMog 模型")
-
-    file_name = _DET_ALIAS.get(low, key)
-    if file_name in _det_cache:
-        return _det_cache[file_name]
-    from ._detect import RetinaFaceDet
-    # det_10g → retinaface_10g.onnx（平铺在 weights/ 根下）
-    p = _detector_path("retinaface_%s.onnx" % file_name.replace("det_", ""))
-    if p is not None:
+        det = TinyMogDet(str(p), workspace=WORKSPACE, engine_name="tinymog")
+    else:
+        from ._detect import RetinaFaceDet
         det = RetinaFaceDet(p, 640)
-        _det_cache[file_name] = det
-        return det
-    raise HTTPException(404, "找不到检测模型 " + key)
+    _det_cache[canon] = det
+    return det
 
 
 # ============================================================
@@ -783,17 +811,36 @@ def _mask_mode_int(v, default=6):
 
 
 def _merge_settings_to_config(settings: dict) -> dict:
-    """把 4.1 界面的合成参数翻成 MergeStudio 的键名。"""
+    """把 4.1 界面的合成参数翻成 MergeStudio 的键名。
+
+    两代键名都认（**新的优先**）：
+        blend       = overlay / seamless / …      <-> mode
+        ct_mode     = mt / rct / lct / mkl / sot  <-> color_transfer_mode
+        mask_erode  = -100~100                    <-> erode_mask_modifier
+        mask_blur   = -100~100                    <-> blur_mask_modifier
+
+    默认值：ct_mode = "mt"、blend = "seamless"（和 /api/merge/frame、/merged、
+    /preview 缺省 settings 时的结果**逐字节一致**，两边共用这一份默认值）。
+    """
     settings = settings or {}
+
+    def _pick(*names, default=None):
+        for n in names:
+            v = settings.get(n)
+            if v is None or (isinstance(v, str) and not v.strip()):
+                continue
+            return v
+        return default
+
     cfg = {
-        "mode": settings.get("mode", "overlay"),
+        "mode": _pick("blend", "mode", default="seamless"),
         "mask_mode": _mask_mode_int(settings.get("mask_mode"), 6),
-        "color_transfer_mode": settings.get("color_transfer_mode",
-                                           settings.get("color_transfer", "none")),
-        "erode_mask_modifier": settings.get("erode_mask_modifier",
-                                            settings.get("erode_mask", 0)),
-        "blur_mask_modifier": settings.get("blur_mask_modifier",
-                                           settings.get("blur_mask", 0)),
+        "color_transfer_mode": _pick("ct_mode", "color_transfer_mode",
+                                     "color_transfer", default="mt"),
+        "erode_mask_modifier": _pick("mask_erode", "erode_mask_modifier",
+                                     "erode_mask", default=0),
+        "blur_mask_modifier": _pick("mask_blur", "blur_mask_modifier",
+                                    "blur_mask", default=0),
     }
     # 4.1 的键名有两代：界面现在发 erode_mask / blur_mask，别处会发 mask_erode /
     # mask_feather。两条都认，并且用别名给的值覆盖归一键 —— routes_merge 那边的
@@ -3098,7 +3145,7 @@ _heavy_detector_cache = {"m": None, "tried": False}
 _LEGACY_ONNX = {
     "tinymog.onnx": "onnx/TinyMog/TinyMog.onnx",
     "retinaface_10g.onnx": "onnx/RetinaFace/det_10g.onnx",
-    "retinaface_500m.onnx": "onnx/RetinaFace/det_500m.onnx",
+    # retinaface_500m.onnx 已移除：4.1 不提供这个检测器（见 _REMOVED_DETECTORS）
     "insightface_2d106.onnx": "onnx/InsightFace2d106/InsightFace2D106.onnx",
 }
 
@@ -3141,7 +3188,7 @@ def _get_fast_detector():
 
 
 def _get_heavy_detector():
-    """重检测器：det_10g（召回更好），没有就退到 det_500m。"""
+    """重检测器：只认 retinaface_10g（召回更好）。det_500m 已移除，不再回退。"""
     if _heavy_detector_cache.get("error") is not None:
         raise _heavy_detector_cache["error"]
     if _heavy_detector_cache["tried"]:
@@ -3149,7 +3196,7 @@ def _get_heavy_detector():
     _heavy_detector_cache["tried"] = True
     try:
         from ._detect import RetinaFaceDet
-        for nm in ("retinaface_10g.onnx", "retinaface_500m.onnx"):
+        for nm in ("retinaface_10g.onnx",):
             p = _detector_path(nm)
             if p is not None:
                 _heavy_detector_cache["m"] = RetinaFaceDet(

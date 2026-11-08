@@ -1674,6 +1674,26 @@
     "同步分组失败": "Could not sync groups"
   });
 
+  /* 合成视图：检测框开关、每张脸的模型 chip、＋ 加进人脸库、实时预览提示。
+     第 1 条「原图」上面已有（Source），这里只补新增的文案，不覆盖旧值。 */
+  Object.assign(DICT, {
+    "框": "Boxes",
+    "显示检测框": "Show detection boxes",
+    "选择模型": "Choose model",
+    "不换脸": "No swap",
+    "给这张脸选一个模型": "Pick a model for this face",
+    "左栏还没选模型": "No model selected yet",
+    "融合方式": "Blending",
+    "叠加": "Overlay",
+    "无缝": "Seamless",
+    "正在合成…": "Composing…",
+    "正在合成…（旧接口）": "Composing… (legacy endpoint)",
+    "把当前人脸添加到人脸数据库": "Add this face to the face database",
+    "已加入人脸数据库": "Added to the face database",
+    "未指定模型": "No model specified",
+    "选模型后立刻重算这一帧": "Re-composes this frame as soon as a model is picked"
+  });
+
   window.I18N = {
     apply: apply,
     refresh: function () { apply(lang); },

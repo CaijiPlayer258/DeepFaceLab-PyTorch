@@ -649,20 +649,33 @@
           </aside>
 
           <div class="mgcenter">
+            <!-- 顶部入口：人脸数据库。也是「＋」飞入动画的落点，角标 = 本次已加进去的张数 -->
+            <button class="mgdbentry" id="mgDbEntry" type="button" title="人脸数据库">
+              <svg class="ic"><use href="#i-layers"/></svg>
+              <span>人脸数据库</span>
+              <i class="mgdbbdg" id="mgDbBadge" hidden>0</i>
+            </button>
+            <!-- 检测视图与合成视图合并成一个画面：默认就显示换脸结果，
+                 「框」只切换是否叠加检测框（不再整页切视图） -->
             <div class="mgviews" id="mgViews">
-              <b class="on" data-v="orig">原图</b>
-              <b data-v="det">检测</b>
-              <b data-v="swap">合成</b>
+              <b class="on" data-v="swap">合成</b>
+              <b data-v="orig">原图</b>
+              <b class="on" data-v="boxes" id="mgBoxTog" title="显示检测框">框</b>
             </div>
-            <div class="mgstage" id="mgStage"><span id="mgStageHint">选择视频后显示</span><video id="mgVideo" playsinline muted preload="metadata"></video><img id="mgPreview" alt=""></div>
+            <div class="mgstage" id="mgStage"><span id="mgStageHint">选择视频后显示</span><video id="mgVideo" playsinline muted preload="metadata"></video><img id="mgPreview" alt="">
+              <!-- 每张脸的模型 chip / ＋ 按钮挂在这一层（canvas 只负责 2px 描边） -->
+              <div class="mgflayer" id="mgFaceLayer"></div>
+              <span class="mgcnote" id="mgCmpNote" hidden>正在合成…</span>
+            </div>
           </div>
 
           <aside class="mgright">
             <div class="mgsec">
               <div class="mggrphd"><i class="dot"></i>检测</div>
               <div class="mgrow"><span class="f">检测器</span>
+                <!-- 500m 这个权重根本不存在，已从选项里删掉；默认 TinyMog（快） -->
                 <select class="mgsel" id="mgDetector">
-                    <option>RetinaFace_10g</option><option>RetinaFace_500m</option><option>TinyMog</option>
+                    <option>TinyMog</option><option>RetinaFace_10g</option>
                   </select>
               </div>
               <div class="mgrow"><span class="f">特征点</span><span class="mgval">insightface-2d106det</span></div>
@@ -689,17 +702,21 @@
               <div class="mgrow"><span class="f">遮罩来源</span>
                 <div class="seg" data-k="seg"><b class="on">DFM</b><b>XSeg</b><b>XSegLite</b></div>
               </div>
+              <div class="mgrow"><span class="f">融合方式</span>
+                <!-- data-v 就是接口契约里的 blend：overlay / seamless -->
+                <div class="seg" data-k="blend"><b data-v="overlay">叠加</b><b class="on" data-v="seamless">无缝</b></div>
+              </div>
               <div class="mgrow"><span class="f">遮罩模式</span>
                 <div class="seg" data-k="mask"><b class="on">prd×dst</b><b>prd</b><b>dst</b></div>
               </div>
               <div class="mgrow"><span class="f">色域迁移</span>
+                <!-- ct_mode：只留契约里的 5 档，默认 mt -->
                 <select class="mgsel" id="mgColor">
-                  <option>rct</option><option>mt</option><option>lut</option><option>lct</option>
-                  <option>mkl</option><option>idt</option><option>sot-m</option><option>mix-m</option><option>none</option>
+                  <option>mt</option><option>rct</option><option>lct</option><option>mkl</option><option>sot</option>
                 </select>
               </div>
-              <div class="mgrow"><span class="f">遮罩腐蚀</span><div class="mgnum"><input class="mgtiny" value="0" title="范围 −100 ~ 100"></div></div>
-              <div class="mgrow"><span class="f">遮罩羽化</span><div class="mgnum"><input class="mgtiny" value="4" title="范围 −100 ~ 100"></div></div>
+              <div class="mgrow"><span class="f">遮罩腐蚀</span><div class="mgnum"><input class="mgtiny" id="mgErode" value="0" title="范围 −100 ~ 100"></div></div>
+              <div class="mgrow"><span class="f">遮罩羽化</span><div class="mgnum"><input class="mgtiny" id="mgBlur" value="4" title="范围 −100 ~ 100"></div></div>
             </div>
 
     

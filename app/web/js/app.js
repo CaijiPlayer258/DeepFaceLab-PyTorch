@@ -2842,9 +2842,8 @@
     }
     img.style.display = "block";
     img.onload = function () {
-      /* 只看「检测」视图时才补画，别的视图不该出现框 */
-      var onDet = document.querySelector('#mgViews b[data-v="det"].on');
-      if (onDet) window.mvRedrawBoxes();
+      /* 「框」开着就补画一次：图是异步换的，画早了会按旧尺寸画在空气里 */
+      if (window.mgBoxesOn && window.mgBoxesOn()) window.mvRedrawBoxes();
     };
     img.src = dataUrl;
     var hint = document.getElementById("mgStageHint");
@@ -2857,12 +2856,33 @@
      这里给每个视图一个自增序号，回来时序号不是最新的就直接丢弃。 */
   var MV_SEQ = { orig: 0, swap: 0, det: 0 };
 
+  /* 成片预览：契约要求 /api/merge/merged 也接受合成参数，
+     所以先按 POST + {frame, settings, models} 发；后端还是老版本（404/405/501）
+     再退回老的 GET /api/merge/merged/<n>?w=900。 */
   window.mvMerged = function (n) {
     n = parseInt(n, 10) || 0;
     var seq = ++MV_SEQ.swap;
-    fetch("/api/merge/merged/" + n + "?w=900").then(function (r) {
+    var body = {
+      frame: n, idx: n, n: n, w: 900,
+      model: (window.mgFaceSingleModel ? window.mgFaceSingleModel() : ""),
+      models: (window.mgFaceModelsPayload ? window.mgFaceModelsPayload() : []),
+      settings: (window.mgCmpSettings ? window.mgCmpSettings() : {})
+    };
+    function legacy() {
+      return fetch("/api/merge/merged/" + n + "?w=900").then(function (r) {
+        return r.json().then(function (d) {
+          if (!r.ok) throw new Error(d.detail || "取不到成片");
+          return d;
+        });
+      });
+    }
+    fetch("/api/merge/merged", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      if (r.status === 404 || r.status === 405 || r.status === 501) return legacy();
       return r.json().then(function (d) {
-        if (!r.ok) throw new Error(d.detail || "取不到成片");
+        if (!r.ok) throw new Error((d && d.detail) || ("HTTP " + r.status));
         return d;
       });
     }).then(function (d) {
@@ -3187,6 +3207,9 @@
 
   window.mvClearBoxes = function () {
     window.__mvBoxes = null;
+    /* 框、chip、＋ 三样是同一份数据的三种画法：清框必须连 DOM 层一起清，
+       否则会留下一排指向上一个素材的 chip。 */
+    mgResetFaces();
     var cv = document.querySelector("#mgStage canvas.mgovl");
     if (!cv) return;
     var ctx = cv.getContext("2d");
@@ -3205,6 +3228,10 @@
     }
   };
 
+  /* 画框：只描边、不填充。
+     以前框里压一层 rgba(128,128,140,.14)，脸被盖住看不见换没换成功；现在画布上
+     除了 2px 描边一个像素都不落（验收里按像素读：框内 = 全透明）。
+     颜色 = 这张脸分到的 dfm 的专属色；没分配 = 灰色。 */
   window.mvDrawBoxes = function (boxes, ow, oh) {
     var cv = window.mvOverlay();
     if (!cv || !ow || !oh) return;
@@ -3228,26 +3255,20 @@
     var ox = (cv.width - ow * s) / 2;
     var oy = (cv.height - oh * s) / 2;
 
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = (getComputedStyle(document.documentElement).getPropertyValue("--ink-2") || "#17171a").trim();
-    ctx.fillStyle = "rgba(128,128,140,.14)";
-    boxes.forEach(function (b) {
+    var rects = [], raw = [];
+    ctx.lineWidth = 2;                     /* 契约：2px */
+    (boxes || []).forEach(function (b, i) {
       var x1 = b.box[0], y1 = b.box[1], x2 = b.box[2], y2 = b.box[3];
-      var rx = ox + x1 * s, ry = oy + y1 * s;
-      var rw = (x2 - x1) * s, rh = (y2 - y1) * s;
-      ctx.fillRect(rx, ry, rw, rh);
+      /* +0.5 让 2px 线正好压在像素格上，缩放后也是实心两象素、不发虚 */
+      var rx = Math.round(ox + x1 * s) + 0.5, ry = Math.round(oy + y1 * s) + 0.5;
+      var rw = Math.round((x2 - x1) * s), rh = Math.round((y2 - y1) * s);
+      var name = mgFaceModel(i);
+      ctx.strokeStyle = name ? mgModelColor(name) : mgUnassignedColor();
       ctx.strokeRect(rx, ry, rw, rh);
-      if (b.score != null) {
-        var tag = Math.round(b.score * 100) + "%";
-        ctx.font = "10px ui-monospace, monospace";
-        var tw = ctx.measureText(tag).width + 6;
-        ctx.fillStyle = "rgba(128,128,140,.92)";
-        ctx.fillRect(rx, Math.max(0, ry - 14), tw, 13);
-        ctx.fillStyle = "#fff";
-        ctx.fillText(tag, rx + 3, Math.max(10, ry - 4));
-        ctx.fillStyle = "rgba(128,128,140,.14)";
-      }
+      rects[i] = { x: rx - 0.5, y: ry - 0.5, w: rw, h: rh };
+      raw[i] = { box: [x1, y1, x2, y2], score: b.score };
     });
+    mgSetRects(rects, raw);
   };
 
   /* 窗口尺寸变了：canvas 的位图尺寸只在 mvDrawBoxes 里算过一次，之后全靠 CSS 拉伸，
@@ -3261,8 +3282,7 @@
       if (!b) return;
       var page = document.getElementById("p-merge");
       if (!page || !page.classList || !page.classList.contains("on")) return;
-      var det = document.querySelector("#mgViews b.on");
-      if (!det || det.getAttribute("data-v") !== "det") return;
+      if (!window.mgBoxesOn || !window.mgBoxesOn()) return;
       if (!document.querySelector("#mgStage canvas.mgovl")) return;
       window.mvDrawBoxes(b.boxes, b.w, b.h);
     }, 120);
@@ -3296,7 +3316,8 @@
 
   function mgDetectorName() {
     var sel = document.getElementById("mgDetector");
-    return (sel && sel.value) || "det_500m";
+    /* 默认 TinyMog：500m 的权重不存在，以前那个兜底值会让后端去找一个没有的模型 */
+    return (sel && sel.value) || "TinyMog";
   }
   window.mgDetectorName = mgDetectorName;
 
@@ -3357,30 +3378,35 @@
   }
   window.mgHint = mgHint;
 
+  /* 当前底图：swap（换脸结果，默认）/ orig（原片）。
+     「框」不是视图，是叠加开关（data-v="boxes"），不参与这里的选择。 */
   function mgCurView() {
-    var on = document.querySelector('#mgViews b[data-v].on');
-    return on ? on.getAttribute("data-v") : "orig";
+    var on = document.querySelector('#mgViews b[data-v="swap"].on, #mgViews b[data-v="orig"].on');
+    return on ? String(on.getAttribute("data-v")) : "swap";
   }
+  window.mgCurView = mgCurView;
 
   function mgSetPlayIcon(on) {
     var b = document.getElementById("mtlPlay");
     if (b) b.innerHTML = on ? MG_PAUSE_SVG : MG_PLAY_SVG;
   }
 
-  /* 三态只切叠加层：原图 = 只有 video；检测 = video + 检测框；
-     合成 = video + 预览 overlay（没有 overlay 就退回 video 那一帧，不空屏）。 */
+  /* 只剩两态：原图 = 只有 video；合成 = video + 预览 overlay（没有 overlay 就退回
+     video 那一帧，不空屏）。检测框不再是视图，是「框」开关：开着就叠在合成画面上。 */
   function mgApplyView(view) {
-    if (!mgVideoMode()) return;
     view = view || mgCurView();
-    var st = window.__mgVideo;
+    var st = window.__mgVideo || {};
     var p = mgPrevImg();
+    var boxes = (view === "swap") && !!(window.mgBoxesOn && window.mgBoxesOn());
     var cv = document.querySelector("#mgStage canvas.mgovl");
-    if (cv) cv.style.display = (view === "det") ? "" : "none";
+    if (cv) cv.style.display = boxes ? "" : "none";
+    var layer = document.getElementById("mgFaceLayer");
+    if (layer) layer.style.display = boxes ? "" : "none";
     if (p) {
       var show = (view === "swap") && !!st.png && !st.playing;
       p.style.display = show ? "block" : "none";
     }
-    if (view === "det" && window.mvRedrawBoxes) window.mvRedrawBoxes();
+    if (boxes && window.mvRedrawBoxes) window.mvRedrawBoxes();
   }
   window.mgApplyView = mgApplyView;
 
@@ -3590,22 +3616,29 @@
     }
   };
 
-  /* 右栏当前参数 → 预览请求（字段名和后端契约一致：video / t / model / settings） */
+  /* 右栏当前参数 → 预览请求（字段名和后端契约一致：video / t / model / settings）。
+     新契约的 settings 由 mgCmpSettings() 组装（ct_mode / blend / mask_mode /
+     mask_erode / mask_blur），这里只保留老预览接口要的那一组做兜底。 */
   function mgPreviewSettings() {
     var s = {};
     try {
       s = (window.MergePages && window.MergePages.settings) ? window.MergePages.settings() : {};
     } catch (e) { s = {}; }
-    return {
-      mode: s.mode || "overlay",
-      detector: s.detector || "RetinaFace_500m",
+    var neo = (window.mgCmpSettings ? window.mgCmpSettings() : {});
+    var out = {
+      mode: s.mode || neo.blend || "seamless",
+      detector: s.detector || "TinyMog",
       face_type: s.face_type || "whole_face",
+      /* 默认值同步：色域迁移 = mt、融合 = seamless */
       mask_source: s.mask_source || "DFM",
       mask_mode: s.mask_mode || "prd×dst",
-      color_transfer: s.color_transfer || "rct",
+      color_transfer: s.color_transfer || "mt",
       erode_mask: s.erode_mask || 0,
       blur_mask: (s.blur_mask == null ? 4 : s.blur_mask)
     };
+    /* 新字段一并带上：后端认哪个用哪个，互不覆盖 */
+    Object.keys(neo).forEach(function (k) { out[k] = neo[k]; });
+    return out;
   }
 
   /* ---------- 合成器预热：趁用户还在看，先让后端把模型读进显存 ---------- */
@@ -3862,12 +3895,16 @@
 
     function frameIdx() { return Math.round(v.currentTime * fps); }
     function body(t) {
+      var idx = frameIdx();
       return {
+        /* 新契约：/api/merge/frame 与 /api/merge/merged 都收 frame + settings + models。
+           老预览接口只认 video/t，多带的字段它自己会忽略。 */
+        frame: idx, idx: idx, n: idx,
         video: mgVidPath(),
         t: t,
-        model: mgPreviewModel(),
+        model: mgFaceSingleModel(),
         /* 多选契约：models=[{name, faces}]；单模型时 faces=[]（= 全部脸，向后兼容） */
-        models: mgModelsPayload(),
+        models: (window.mgFaceModelsPayload ? window.mgFaceModelsPayload() : mgModelsPayload()),
         settings: mgPreviewSettings()
       };
     }
@@ -3918,8 +3955,8 @@
         }
         mgHint("");
         window.mgShowOverlay(d.png);
-        /* 检测视图下让框跟这一帧对齐 */
-        if (mgCurView() === "det") window.mvDetect(Math.round(v.currentTime * fps));
+        /* 「框」开着就让框跟这一帧对齐（不再依赖某个视图名） */
+        if (window.mgBoxesOn && window.mgBoxesOn()) window.mvDetect(Math.round(v.currentTime * fps));
         return d;
       }).catch(function (e) {
         if (timer) clearTimeout(timer);
@@ -4003,6 +4040,694 @@
   window.mgBindTransport = mgBindTransport;
 
 
+  /* ============================================================
+     合成视图 · 检测框 / 每张脸的模型分配 / 参数实时预览 / 加进人脸库
+     ------------------------------------------------------------
+     以前「检测」和「合成」是两个页面级视图，互相切换：看框的时候看不到换脸
+     结果，看结果时又没有框。现在只有一个画面（换脸结果），框只是叠加层，
+     由「框」开关控制显隐；每个框右上角外侧是这张脸用哪个 dfm 的 chip，
+     右下角外侧是「＋ 加进人脸数据库」。
+
+     后端契约（后端并行改，字段对不上时用旧字段兜底）：
+       POST /api/merge/frame   { frame|n, video|t, settings, models, model }
+       POST /api/merge/merged  { frame, settings, models }
+       settings = { ct_mode, blend, mask_mode, mask_erode, mask_blur }
+       models   = [{ name, faces: [脸序号] }]        ← 沿用导出协议
+       POST /api/merge/faces/extract { project, frame, dfm, box }
+     ============================================================ */
+  var MG_COLOR_CARD = ["#e8590c", "#1c7ed6", "#2f9e44", "#a61e4d",
+                       "#7048e8", "#0c8599", "#d6336c", "#f08c00"];
+  var MG_COLORS = {};          /* dfm 名 → 颜色；同一模型任何一帧都是这个色 */
+  var MG_COLORS_KEY = "dfl-merge-model-colors";
+  var MG_FACE_MODEL = {};      /* 脸序号 → dfm 名；没有键 = 未分配（灰框） */
+  var MG_FACE_BUSY = {};       /* 脸序号 → true：这一张正在重算（画细进度环） */
+  var MG_RECTS = [];           /* 脸序号 → 画布内矩形（chip / ＋ 的定位依据） */
+  var MG_FACE_RAW = [];        /* 脸序号 → 原图坐标里的 box（提取人脸时回传） */
+  var MG_CMP = { seq: 0, ctl: null, wait: null, lastMs: 0 };
+
+  (function loadColors() {
+    try {
+      var raw = window.localStorage.getItem(MG_COLORS_KEY);
+      if (!raw) return;
+      var o = JSON.parse(raw);
+      Object.keys(o || {}).forEach(function (k) {
+        if (typeof o[k] === "string" && o[k]) MG_COLORS[k] = o[k];
+      });
+    } catch (e) { /* 无痕模式 / 关掉存储：内存里随机一份照样能用 */ }
+  })();
+  function mgSaveColors() {
+    try { window.localStorage.setItem(MG_COLORS_KEY, JSON.stringify(MG_COLORS)); } catch (e) {}
+  }
+
+  /* 固定色卡里随机抽一个；抽过就不再变（= 同一模型跨帧同色） */
+  function mgModelColor(name) {
+    var n = String(name || "");
+    if (!n) return "";
+    if (MG_COLORS[n]) return MG_COLORS[n];
+    var used = {};
+    Object.keys(MG_COLORS).forEach(function (k) { used[MG_COLORS[k]] = 1; });
+    var free = MG_COLOR_CARD.filter(function (c) { return !used[c]; });
+    var pool = free.length ? free : MG_COLOR_CARD;
+    var c = pool[Math.floor(Math.random() * pool.length)];
+    MG_COLORS[n] = c;
+    mgSaveColors();
+    return c;
+  }
+  window.mgModelColor = mgModelColor;
+
+  function mgUnassignedColor() {
+    var v = "";
+    try {
+      v = (getComputedStyle(document.documentElement).getPropertyValue("--ink-3") || "").trim();
+    } catch (e) { v = ""; }
+    return v || "#8b8f98";
+  }
+  window.mgUnassignedColor = mgUnassignedColor;
+
+  function mgFaceModel(i) {
+    return Object.prototype.hasOwnProperty.call(MG_FACE_MODEL, i) ? String(MG_FACE_MODEL[i] || "") : "";
+  }
+  window.mgFaceModel = mgFaceModel;
+
+  /* 「框」开关：data-v="boxes" 那颗 b 的 .on 就是开关本身 */
+  function mgBoxesOn() {
+    var t = document.getElementById("mgBoxTog");
+    return !!(t && t.classList.contains("on"));
+  }
+  window.mgBoxesOn = mgBoxesOn;
+
+  function mgSetRects(rects, raw) {
+    MG_RECTS = rects || [];
+    MG_FACE_RAW = raw || [];
+    mgRenderFaces();
+  }
+
+  function mgResetFaces() {
+    MG_RECTS = [];
+    MG_FACE_RAW = [];
+    var layer = document.getElementById("mgFaceLayer");
+    if (layer) layer.innerHTML = "";
+  }
+  window.mgResetFaces = mgResetFaces;
+
+  /* ---------- chip 层：每张脸一个小卡片 + 一个 ＋，全部是 DOM ---------- */
+  function mgRenderFaces() {
+    var layer = document.getElementById("mgFaceLayer");
+    if (!layer) return;
+    layer.innerHTML = "";
+    if (!mgBoxesOn()) return;
+    for (var i = 0; i < MG_RECTS.length; i++) {
+      var r = MG_RECTS[i];
+      if (!r || !(r.w > 0) || !(r.h > 0)) continue;
+      layer.appendChild(mgMakeFaceCard(i, r));
+    }
+  }
+  window.mgRenderFaces = mgRenderFaces;
+
+  function mgCloseChipMenus(except) {
+    Array.prototype.forEach.call(document.querySelectorAll("#mgFaceLayer .mgfdd.open"), function (d) {
+      if (d !== except) d.classList.remove("open");
+    });
+  }
+
+  function mgMakeFaceCard(i, r) {
+    var mname = mgFaceModel(i);
+    var color = mname ? mgModelColor(mname) : "";
+
+    /* 零尺寸锚点落在「框的右上角」：left 要加宽度，否则 anchor 停在左边线，
+       chip 会跑到框外左侧、压到左栏上去（点都点不到） */
+    var card = document.createElement("div");
+    card.className = "mgfc" + (MG_FACE_BUSY[i] ? " busy" : "");
+    card.setAttribute("data-face", String(i));
+    card.style.left = (r.x + r.w) + "px";
+    card.style.top = r.y + "px";
+
+    /* 右上角外侧：模型 chip（.dd / .ddbtn / .ddopt 是项目里的主题化下拉） */
+    var dd = document.createElement("div");
+    dd.className = "dd mgfdd";
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "ddbtn mgfb" + (color ? " has" : "");
+    btn.title = mname ? ("这张脸用 " + mname + "（点击换）") : "给这张脸选一个模型";
+    if (color) { btn.style.borderColor = color; btn.style.color = color; }
+    var txt = document.createElement("span");
+    txt.className = "ddtxt";
+    txt.textContent = mname || "选择模型";
+    btn.appendChild(txt);
+
+    var menu = document.createElement("div");
+    menu.className = "ddmenu mgfmenu";
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      var open = dd.classList.contains("open");
+      mgCloseChipMenus(null);
+      if (open) { dd.classList.remove("open"); return; }
+      menu.innerHTML = "";
+      /* 选项 = 左栏已选中的 dfm + 「不换脸」 */
+      var names = mgSelNames();
+      var opts = names.concat([""]);
+      if (!names.length) {
+        var none = document.createElement("div");
+        none.className = "ddopt off";
+        none.textContent = "左栏还没选模型";
+        menu.appendChild(none);
+      }
+      opts.forEach(function (nm) {
+        var it = document.createElement("div");
+        it.className = "ddopt" + ((mgFaceModel(i) || "") === nm ? " on" : "");
+        it.textContent = nm || "不换脸";
+        if (nm) it.style.color = mgModelColor(nm);
+        it.addEventListener("click", function (ev) {
+          ev.stopPropagation();
+          dd.classList.remove("open");
+          mgAssignFace(i, nm);
+        });
+        menu.appendChild(it);
+      });
+      dd.classList.add("open");
+    });
+    dd.appendChild(btn);
+    dd.appendChild(menu);
+
+    /* 重算中的细进度环（只圈这一张脸，不整屏 loading） */
+    var ring = document.createElement("i");
+    ring.className = "mgfring";
+    ring.hidden = !MG_FACE_BUSY[i];
+    if (!ring.hidden && ring.animate) {
+      try {
+        ring.animate([{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }],
+                     { duration: 720, iterations: Infinity, easing: "linear" });
+      } catch (e) { /* 没有 WAAPI 就留一个静态环 */ }
+    }
+    dd.appendChild(ring);
+
+    /* 右下角外侧：加进人脸数据库 */
+    var plus = document.createElement("button");
+    plus.type = "button";
+    plus.className = "mgplus";
+    plus.textContent = "+";
+    plus.title = "把当前人脸添加到人脸数据库";
+    plus.setAttribute("data-tip", "把当前人脸添加到人脸数据库");
+    plus.setAttribute("aria-label", "把当前人脸添加到人脸数据库");
+    plus.style.top = Math.round(r.h + 3) + "px";
+    plus.addEventListener("click", function (e) {
+      e.stopPropagation();
+      mgAddFaceToDb(i, plus);
+    });
+
+    card.appendChild(dd);
+    card.appendChild(plus);
+    return card;
+  }
+
+  /* 只改已存在卡片的外观（换色 / 换字 / 进度环），不重建 DOM：
+     重建会把正在 hover 的下拉关掉，也会让动画闪。 */
+  function mgSyncFaceCards() {
+    var layer = document.getElementById("mgFaceLayer");
+    if (!layer) return;
+    Array.prototype.forEach.call(layer.querySelectorAll(".mgfc"), function (card) {
+      var i = parseInt(card.getAttribute("data-face"), 10);
+      var nm = mgFaceModel(i);
+      var color = nm ? mgModelColor(nm) : "";
+      var btn = card.querySelector(".mgfb");
+      var tx = card.querySelector(".ddtxt");
+      if (tx) tx.textContent = nm || "选择模型";
+      if (btn) {
+        btn.classList.toggle("has", !!color);
+        btn.style.borderColor = color || "";
+        btn.style.color = color || "";
+        btn.title = nm ? ("这张脸用 " + nm + "（点击换）") : "给这张脸选一个模型";
+      }
+      var ring = card.querySelector(".mgfring");
+      if (ring) ring.hidden = !MG_FACE_BUSY[i];
+      card.classList.toggle("busy", !!MG_FACE_BUSY[i]);
+    });
+  }
+
+  /* ---------- 每张脸分到哪个模型 → models payload ---------- */
+  function mgFaceModelsPayload() {
+    var byName = {}, order = [];
+    Object.keys(MG_FACE_MODEL).forEach(function (k) {
+      var i = parseInt(k, 10), nm = String(MG_FACE_MODEL[k] || "");
+      if (!nm || isNaN(i)) return;
+      if (!byName[nm]) { byName[nm] = []; order.push(nm); }
+      byName[nm].push(i);
+    });
+    /* 一张都没分配：沿用「左栏选中 = 全部脸」的老行为，老调用不受影响 */
+    if (!order.length) return (typeof mgModelsPayload === "function") ? mgModelsPayload() : [];
+    return order.map(function (nm) {
+      return { name: nm, faces: byName[nm].sort(function (a, b) { return a - b; }) };
+    });
+  }
+  window.mgFaceModelsPayload = mgFaceModelsPayload;
+
+  function mgFaceSingleModel() {
+    var keys = Object.keys(MG_FACE_MODEL);
+    if (keys.length) {
+      var k = keys.sort(function (a, b) { return Number(a) - Number(b); })[0];
+      return String(MG_FACE_MODEL[k] || "");
+    }
+    try { return mgPreviewModel(); } catch (e) { return ""; }
+  }
+  window.mgFaceSingleModel = mgFaceSingleModel;
+
+  /* ---------- 右栏参数 → 请求里的 settings ---------- */
+  var MG_MASK_INT = { "prd": 1, "dst": 2, "prd×dst": 3 };   /* 位标志：1=prd 2=dst 3=both */
+  function mgSegVal(key, dflt) {
+    var b = document.querySelector('#p-merge .seg[data-k="' + key + '"] b.on');
+    if (!b) return dflt;
+    var dv = b.getAttribute("data-v");
+    return (dv == null) ? String(b.textContent || "").trim() : String(dv);
+  }
+  function mgNumVal(id, dflt) {
+    var el = document.getElementById(id);
+    var v = parseFloat(el ? el.value : "");
+    return isFinite(v) ? v : dflt;
+  }
+  function mgCmpSettings() {
+    var ct = String((document.getElementById("mgColor") || {}).value || "mt");
+    var blend = mgSegVal("blend", "seamless");
+    if (blend !== "overlay") blend = "seamless";
+    var mm = mgSegVal("mask", "prd×dst") || "prd×dst";
+    var maskInt = (MG_MASK_INT[mm] == null) ? 3 : MG_MASK_INT[mm];
+    var erode = mgNumVal("mgErode", 0);
+    var blur = mgNumVal("mgBlur", 4);
+    var modeSel = (document.getElementById("mgMode") || {}).value || "";
+    return {
+      /* —— 新契约 —— */
+      ct_mode: ct,
+      blend: blend,
+      mask_mode: maskInt,
+      mask_erode: erode,
+      mask_blur: blur,
+      /* —— 旧字段兜底：后端还是老版本时认这一组 —— */
+      mode: modeSel || blend,
+      color_transfer: ct,
+      mask_source: mgSegVal("seg", "DFM"),
+      mask_style: mm,
+      erode_mask: erode,
+      blur_mask: blur,
+      detector: mgDetectorName(),
+      face_type: String((document.getElementById("mgFaceType") || {}).value || "whole_face")
+    };
+  }
+  window.mgCmpSettings = mgCmpSettings;
+
+  function mgCmpFrameIdx() {
+    if (window.MergeTimeline && window.MergeTimeline.getFrame) {
+      var n = window.MergeTimeline.getFrame();
+      if (typeof n === "number" && isFinite(n)) return Math.max(0, Math.round(n));
+    }
+    var f = document.getElementById("mtlFrame");
+    return Math.max(0, parseInt(f ? f.value : 0, 10) || 0);
+  }
+  window.mgCmpFrameIdx = mgCmpFrameIdx;
+
+  /* 画面右下角的小字「正在合成…」：不遮画面、不吃点击 */
+  function mgCmpNote(on, text) {
+    var el = document.getElementById("mgCmpNote");
+    if (!el) return;
+    if (!on) { el.hidden = true; return; }
+    el.textContent = text || "正在合成…";
+    el.hidden = false;
+  }
+  window.mgCmpNote = mgCmpNote;
+
+  function mgCmpBusyAll(ids) {
+    MG_FACE_BUSY = {};
+    (ids || []).forEach(function (i) { MG_FACE_BUSY[i] = true; });
+    mgSyncFaceCards();
+  }
+  function mgCmpBusyClear() {
+    MG_FACE_BUSY = {};
+    mgSyncFaceCards();
+  }
+
+  /* ---------- 重算当前帧 ----------
+     主路：POST /api/merge/frame（settings + models 分配）
+     兜底：POST 不认（404/405/501）→ 老 GET /api/merge/frame/<n>?w=900
+           再不行（视频模式）→ 老 POST /api/merge/preview
+     每次新请求都 ++seq 并 abort 上一发：旧结果永远盖不到新画面上。 */
+  function mgCmpNow(opt) {
+    opt = opt || {};
+    var mv = window.__mv || {};
+    var frame = (opt.frame == null) ? mgCmpFrameIdx() : Math.max(0, parseInt(opt.frame, 10) || 0);
+    if (!mv.path && !mgVidPath()) return Promise.resolve(null);
+
+    var seq = ++MG_CMP.seq;
+    if (MG_CMP.ctl) { try { MG_CMP.ctl.abort(); } catch (e) {} MG_CMP.ctl = null; }
+    var v = mgVid();
+    var fps = mv.fps || 30;
+    var t = (v && mgVideoMode()) ? (Math.round(v.currentTime * 1000) / 1000) : (frame / fps);
+    var body = {
+      frame: frame, idx: frame, n: frame,
+      video: mgVidPath(), t: t, w: 900,
+      model: mgFaceSingleModel(),
+      models: mgFaceModelsPayload(),
+      settings: mgCmpSettings()
+    };
+    var ctrl = (typeof AbortController === "function") ? new AbortController() : null;
+    MG_CMP.ctl = ctrl;
+    mgCmpNote(true);
+    var t0 = (window.performance && performance.now) ? performance.now() : Date.now();
+
+    return fetch("/api/merge/frame", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: ctrl ? ctrl.signal : undefined
+    }).then(function (r) {
+      return r.json().then(function (d) {
+        if (!r.ok || !d) {
+          var err = new Error((d && d.detail) || ("HTTP " + r.status));
+          err.status = r.status;
+          throw err;
+        }
+        return d;
+      }, function () {
+        var err = new Error("HTTP " + r.status);
+        err.status = r.status;
+        throw err;
+      });
+    }).then(function (d) {
+      if (seq !== MG_CMP.seq) return null;            /* 过期响应：丢掉 */
+      MG_CMP.ctl = null;
+      MG_CMP.lastMs = ((window.performance && performance.now) ? performance.now() : Date.now()) - t0;
+      mgCmpBusyClear();
+      mgCmpNote(false);
+      var png = d.png || d.image || d.data || d.frame_png || "";
+      if (png) { window.mgShowOverlay(png); mgHint(""); }
+      return d;
+    }).catch(function (e) {
+      if (seq !== MG_CMP.seq) return null;
+      if (e && e.name === "AbortError") return null;   /* 被新请求取代，不算失败 */
+      MG_CMP.ctl = null;
+      mgCmpBusyClear();
+      mgCmpNote(false);
+      var stt = e && e.status;
+      if (stt === 404 || stt === 405 || stt === 501 || stt === 400 || stt === 422) {
+        /* 新接口还没上线：老 GET 先兜住，画面不能停在上一帧 */
+        return mgCmpLegacy(frame);
+      }
+      return null;
+    });
+  }
+  window.mgCmpNow = mgCmpNow;
+
+  function mgCmpLegacy(frame) {
+    var seq = MG_CMP.seq;                    /* 不 ++：还是同一发 */
+    mgCmpNote(true, "正在合成…（旧接口）");
+    return fetch("/api/merge/frame/" + frame + "?w=900").then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    }).then(function (d) {
+      if (seq !== MG_CMP.seq) return null;
+      mgCmpNote(false);
+      if (d && d.png) { window.mgShowOverlay(d.png); mgHint(""); }
+      return d;
+    }).catch(function () {
+      if (seq !== MG_CMP.seq) return null;
+      mgCmpNote(false);
+      /* 逐帧接口也没有：视频模式退回老的预览接口（它自己也带 settings/models） */
+      if (mgVideoMode() && window.mgPreviewNow) return window.mgPreviewNow({ force: true });
+      return null;
+    });
+  }
+
+  /* 参数改一下 → 150ms 防抖 → 重算一击。连拖滑块 10 次只发最后一次。 */
+  function mgCmpSoon() {
+    if (MG_CMP.wait) clearTimeout(MG_CMP.wait);
+    MG_CMP.wait = setTimeout(function () {
+      MG_CMP.wait = null;
+      mgCmpNow();
+    }, 150);
+  }
+  window.mgCmpSoon = mgCmpSoon;
+
+  /* 「原图」那一态：后端 /api/merge/frame 默认出的是合成结果，
+     原片要显式 raw=1（契约里 raw=1 或 compose=0 就是不合成）。
+     老后端不认 raw → 404/400 时退回 mvFrame 那条路，画面不至于空着。 */
+  window.mgRawFrame = function (n) {
+    n = Math.max(0, parseInt(n, 10) || 0);
+    var seq = ++MV_SEQ.orig;
+    return fetch("/api/merge/frame/" + n + "?w=900&raw=1").then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    }).then(function (d) {
+      if (seq !== MV_SEQ.orig) return null;
+      if (d && d.png) window.mvStage(d.png);
+      return d;
+    }).catch(function () { return window.mvFrame(n); });
+  };
+
+  /* 帧变了：框先出来（快），重算随后（慢，单独一个请求） */
+  function mgCmpSync(opt) {
+    opt = opt || {};
+    var mv = window.__mv || {};
+    if (!mv.path && !mgVidPath()) return;
+    var n = mgCmpFrameIdx();
+    if (!opt.skipDetect) {
+      try { window.mvDetect(n); } catch (e) {}
+    }
+    mgCmpNow({ frame: n });
+  }
+  window.mgCmpSync = mgCmpSync;
+
+  /* ---------- 分配模型 → 立刻重算 ---------- */
+  function mgAssignFace(i, name) {
+    name = String(name || "");
+    if (name) MG_FACE_MODEL[i] = name;
+    else delete MG_FACE_MODEL[i];
+    MG_FACE_BUSY[i] = true;
+    /* 先用 canvas 换色 + 卡片换字（不等网络），再发重算 */
+    window.mvRedrawBoxes();
+    mgSyncFaceCards();
+    var p = mgCmpNow();
+    if (p && p.catch) p.catch(function () {});
+  }
+  window.mgAssignFace = mgAssignFace;
+
+  /* ---------- 「＋」：把这张脸加进人脸数据库 ---------- */
+  function mgPostExtract(payload) {
+    return fetch("/api/merge/faces/extract", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }).then(function (r) {
+      return r.json().then(function (d) {
+        /* 后端「这一帧没有脸」是正常结果：200 + ok:false + reason:"no_face"，
+           不是错误，交给上面按空列表提示，别报「提取失败 HTTP 200」。 */
+        if (d && d.ok === false && d.reason === "no_face") return d;
+        if (r.ok && d && d.ok !== false) return d;
+        var err = new Error((d && (d.detail || d.error)) || ("HTTP " + r.status));
+        err.status = r.status;
+        throw err;
+      }, function () {
+        var err = new Error("HTTP " + r.status);
+        err.status = r.status;
+        throw err;
+      });
+    });
+  }
+
+  /* 接口只认 frame 不认 box 时：按「离这个框最近」挑一张，而不是整帧都塞进去 */
+  function mgPickNearestFace(d, box) {
+    var faces = (d && d.faces) || [];
+    if (!faces.length) return null;
+    if (faces.length === 1 || !box) return faces[0];
+    var cx = (box[0] + box[2]) / 2, cy = (box[1] + box[3]) / 2;
+    var best = faces[0], bd = Infinity;
+    faces.forEach(function (f) {
+      var fb = f.box || f.bbox || f.rect;
+      if (!fb || fb.length < 4) return;
+      var dx = (fb[0] + fb[2]) / 2 - cx, dy = (fb[1] + fb[3]) / 2 - cy;
+      var dd = dx * dx + dy * dy;
+      if (dd < bd) { bd = dd; best = f; }
+    });
+    return best;
+  }
+
+  function mgAddFaceToDb(i, btn) {
+    var rec = MG_FACE_RAW[i] || null;
+    var box = rec && rec.box ? rec.box.slice() : null;
+    var frame = mgCmpFrameIdx();
+    var dfm = mgFaceModel(i) || (mgSelNames()[0] || "");
+    var payload = { project: window.__mergeInputDir || "", frame: frame, dfm: dfm };
+    if (box) payload.box = box;
+    if (btn) btn.disabled = true;
+    mgPostExtract(payload).catch(function (e) {
+      /* 老接口只吃 frame：去掉 box 再来一次，拿回来自己按距离配对 */
+      if (e && e.status && payload.box && (e.status === 400 || e.status === 422)) {
+        var p2 = { project: payload.project, frame: payload.frame, dfm: payload.dfm };
+        return mgPostExtract(p2);
+      }
+      throw e;
+    }).then(function (d) {
+      if (btn) btn.disabled = false;
+      var faces = (d && d.faces) || [];
+      if (!faces.length) { toast("没有检测到人脸", "换一帧再试", "warn"); return; }
+      var hit = mgPickNearestFace(d, box);
+      var added = faces.length;
+      toast("已加入人脸数据库", (dfm || "未指定模型") + " · " + added + " 张脸" +
+            (hit && hit.id ? " · " + hit.id : ""), "success");
+      mgFlyToDb(i, box);
+      /* 角标 = 这一次点了几个「＋」：一个框加一张脸，就 +1 */
+      mgDbBadgeBump(1);
+      /* 人脸库开着就地刷新，别让用户以为没加进去 */
+      try { if (window.FaceDB && window.FaceDB.refresh && window.FaceDB.isOpen()) window.FaceDB.refresh(); } catch (e) {}
+    }).catch(function (e) {
+      if (btn) btn.disabled = false;
+      toast("提取失败", String((e && e.message) || e).slice(0, 120), "error");
+    });
+  }
+  window.mgAddFaceToDb = mgAddFaceToDb;
+
+  function mgDbBadgeBump(delta) {
+    var el = document.getElementById("mgDbBadge");
+    if (!el) return 0;
+    var n = Math.max(0, (parseInt(el.textContent, 10) || 0) + (delta == null ? 1 : delta));
+    el.textContent = String(n);
+    el.hidden = n === 0;
+    return n;
+  }
+  window.mgDbBadgeBump = mgDbBadgeBump;
+
+  /* 从当前合成帧里裁这一块当飞行缩略图（纯 dataURL，画布不会跨域污染） */
+  function mgCropThumb(i) {
+    try {
+      var img = document.getElementById("mgPreview");
+      if (!img || !img.naturalWidth || img.style.display === "none") return "";
+      var r = MG_RECTS[i];
+      if (!r) return "";
+      var stage = document.getElementById("mgStage");
+      var sr = stage.getBoundingClientRect();
+      var ix = img.getBoundingClientRect();
+      /* 和 object-fit: contain 用同一套映射：屏幕坐标 → 图片像素 */
+      var s = Math.min(ix.width / img.naturalWidth, ix.height / img.naturalHeight);
+      var ox = ix.left + (ix.width - img.naturalWidth * s) / 2;
+      var oy = ix.top + (ix.height - img.naturalHeight * s) / 2;
+      var sx = ((sr.left + 6 + r.x) - ox) / s;
+      var sy = ((sr.top + 6 + r.y) - oy) / s;
+      var sw = r.w / s, sh = r.h / s;
+      var S = 44;
+      var cv = document.createElement("canvas");
+      cv.width = S; cv.height = S;
+      var ctx = cv.getContext("2d");
+      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, S, S);
+      return cv.toDataURL("image/png");
+    } catch (e) { return ""; }
+  }
+
+  /* 飞入动画：WAAPI，不引库。缩略图从框的位置抛物线飞向顶部「人脸数据库」入口。 */
+  function mgFlyToDb(i, box) {
+    var entry = document.getElementById("mgDbEntry");
+    var stage = document.getElementById("mgStage");
+    if (!entry || !stage) return null;
+    var sr = stage.getBoundingClientRect();
+    var r = MG_RECTS[i] || { x: 0, y: 0, w: 40, h: 40 };
+    var S = 44;
+    var from = {
+      left: sr.left + 6 + r.x + Math.max(0, (r.w - S) / 2),
+      top: sr.top + 6 + r.y + Math.max(0, (r.h - S) / 2)
+    };
+    var to = entry.getBoundingClientRect();
+    var fly = document.createElement("div");
+    fly.className = "mgfly";
+    fly.id = "mgFlyThumb";
+    var src = mgCropThumb(i);
+    if (src) {
+      var im = document.createElement("img");
+      im.src = src;
+      im.alt = "";
+      fly.appendChild(im);
+    } else {
+      fly.classList.add("ph");
+    }
+    fly.style.left = Math.round(from.left) + "px";
+    fly.style.top = Math.round(from.top) + "px";
+    document.body.appendChild(fly);
+
+    var dx = (to.left + to.width / 2) - (from.left + S / 2);
+    var dy = (to.top + to.height / 2) - (from.top + S / 2);
+    if (fly.animate) {
+      var anim = fly.animate([
+        { transform: "translate(0,0) scale(1)", opacity: 1, offset: 0 },
+        { transform: "translate(" + (dx * 0.62) + "px," + (dy * 0.62 - 34) + "px) scale(.66)", opacity: 1, offset: 0.6 },
+        { transform: "translate(" + dx + "px," + dy + "px) scale(.1)", opacity: 0, offset: 1 }
+      ], { duration: 640, easing: "cubic-bezier(.4,0,.2,1)" });
+      anim.onfinish = function () { if (fly.parentNode) fly.parentNode.removeChild(fly); };
+      /* 落点回弹：告诉眼睛「加到这个入口了」 */
+      if (entry.animate) {
+        try {
+          entry.animate([{ transform: "scale(1)" }, { transform: "scale(1.1)" }, { transform: "scale(1)" }],
+                        { duration: 300, delay: 560, easing: "ease-out" });
+        } catch (e) {}
+      }
+    } else {
+      setTimeout(function () { if (fly.parentNode) fly.parentNode.removeChild(fly); }, 640);
+    }
+    return fly;
+  }
+  window.mgFlyToDb = mgFlyToDb;
+
+  /* ---------- 事件绑定（合成器主视图） ---------- */
+  function mgBindCmp() {
+    var page = document.getElementById("p-merge");
+    if (!page) return;
+
+    /* 参数实时预览：右栏任何控件动一下就防抖重算 */
+    var right = page.querySelector(".mgright");
+    if (right && !right.dataset.cmpBound) {
+      right.dataset.cmpBound = "1";
+      right.addEventListener("change", mgCmpSoon);
+      right.addEventListener("input", mgCmpSoon);
+      right.addEventListener("click", function (e) {
+        var b = e.target && e.target.closest ? e.target.closest(".seg b") : null;
+        if (!b) return;
+        var seg = b.closest(".seg[data-k]");
+        if (!seg) return;
+        var k = seg.getAttribute("data-k");
+        if (k === "blend" || k === "mask" || k === "seg" || k === "detect") mgCmpSoon();
+      });
+    }
+
+    /* 点页面空白处收起 chip 下拉 */
+    if (!page.dataset.cmpDocBound) {
+      page.dataset.cmpDocBound = "1";
+      document.addEventListener("click", function () { mgCloseChipMenus(null); });
+      document.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") mgCloseChipMenus(null);
+      });
+    }
+
+    /* 顶部「人脸数据库」入口 */
+    var entry = document.getElementById("mgDbEntry");
+    if (entry && !entry.dataset.bound) {
+      entry.dataset.bound = "1";
+      entry.addEventListener("click", function () {
+        var project = window.__mergeInputDir || "";
+        if (!project) { toast("还没有素材", "先导入视频或打开 DFL 项目", "warn"); return; }
+        if (window.FaceDB && window.FaceDB.open) {
+          window.FaceDB.open({ project: project, mode: "export", allowExtract: true,
+                               onCancel: function () { if (window.mgStep) window.mgStep("main"); } });
+        } else {
+          toast("人脸数据库没有加载", "face_db.js 版本不匹配，刷新页面再试", "error");
+        }
+      });
+    }
+
+    /* 色域迁移存着老值（lut / idt / sot-m …）时回落到 mt，别让下拉空着 */
+    var color = document.getElementById("mgColor");
+    if (color) {
+      var ok = Array.prototype.some.call(color.options, function (o) { return o.value === color.value; });
+      if (!ok) {
+        color.value = "mt";
+        try { color.dispatchEvent(new Event("change", { bubbles: true })); } catch (e) {}
+      }
+    }
+  }
+  window.mgBindCmp = mgBindCmp;
+
   /* 遮罩绘制：把 MaskProcessor 的 WebUI 直接嵌进来 */
   function mkOpenEditor() {
     var inp = document.getElementById("mkDir");
@@ -4067,6 +4792,10 @@
       var st = document.querySelector(".mtl-stack");
       var sc = document.querySelector(".mtl-scroll");
       if (st && sc) st.style.width = Math.max(st.scrollWidth, sc.clientWidth) + "px";
+      /* 合成视图：chip / 参数实时预览的绑定（幂等），有素材就把框和画面都补齐 */
+      if (window.mgBindCmp) window.mgBindCmp();
+      if (window.mgApplyView) window.mgApplyView();
+      if (window.mgCmpSync) window.mgCmpSync();
     }, 60);
 
     if (page.dataset.bound) return;
@@ -4081,34 +4810,46 @@
         b.classList.add("on");
       });
     });
+    /* 视图切换：合成 / 原图 —— 底图二选一；
+       「框」是叠加开关，任何一态都能单独开关，不换底图。 */
     var views = $("mgViews");
     if (views) {
       views.addEventListener("click", function (e) {
         var b = e.target.closest("b[data-v]");
-        if (!b) return;
-        Array.prototype.forEach.call(views.children, function (x) { x.classList.remove("on"); });
-        b.classList.add("on");
-        var view = b.dataset.v;
+        if (!b || !views.contains(b)) return;
+        var view = String(b.dataset.v || "");
         var f = document.getElementById("mtlFrame");
         var idx = parseInt(f ? f.value : 0, 10) || 0;
-        /* 视频模式：三态都在 <video> 上切，不取帧图 */
-        if (window.mgVideoMode && window.mgVideoMode() && !(window.__mgVideo || {}).streamDown) {
-          window.mvClearBoxes();
-          window.mgApplyView(view);
-          if (view === "det") window.mvDetect(idx);
-          else if (view === "swap") window.mgPreviewSoon();   /* 还没 overlay 就现取一张 */
+
+        /* 「框」：只切显隐，画面不动 */
+        if (view === "boxes") {
+          b.classList.toggle("on");
+          if (window.mgApplyView) window.mgApplyView();
+          if (b.classList.contains("on")) {
+            if (window.__mvBoxes) window.mvRedrawBoxes();
+            else window.mvDetect(idx);
+          }
           return;
         }
-        if (view === "det") {
-          /* 检测：先把原图取回来再重检，否则框会画在上一帧/成片上 */
-          window.mvClearBoxes();
-          window.mvFrame(idx).then(function () { window.mvDetect(idx); });
-        } else {
-          /* 原图/合成都不该留框 */
-          window.mvClearBoxes();
-          if (view === "swap") window.mvMerged(idx);
-          else window.mvFrame(idx);
+
+        Array.prototype.forEach.call(views.children, function (x) {
+          if (x.dataset.v !== "boxes") x.classList.remove("on");
+        });
+        b.classList.add("on");
+        window.mgApplyView(view);
+
+        /* 视频模式：底图就是 <video> 本身，合成层现取一张 */
+        if (window.mgVideoMode && window.mgVideoMode() && !(window.__mgVideo || {}).streamDown) {
+          if (view === "orig") return;              /* 原图 = 直接看 <video>，合成层由 mgApplyView 收掉 */
+          if (!(window.__mgVideo || {}).png) window.mgPreviewSoon();
+          if (window.mgBoxesOn && window.mgBoxesOn() && !window.__mvBoxes) window.mvDetect(idx);
+          return;
         }
+        /* 帧目录（DFL 项目）：合成 = 现算这一帧（带 settings + models 分配）；
+           原图 = 后端只要 raw=1 的源帧，别把合成结果当成原片 */
+        if (view === "swap") window.mgCmpNow({ frame: idx });
+        else window.mgRawFrame(idx);
+        if (window.mgBoxesOn && window.mgBoxesOn() && !window.__mvBoxes) window.mvDetect(idx);
       });
     }
 
@@ -4574,16 +5315,16 @@
         var n = (e.detail && e.detail.frame) || 0;
         /* 视频模式：播放头只写 video.currentTime；要不要取预览由 video 自己的事件说了算 */
         if (window.mgVideoMode && window.mgVideoMode() && !(window.__mgVideo || {}).streamDown) {
-          if (document.querySelector('#mgViews b[data-v="det"].on') && window.mvClearBoxes) window.mvClearBoxes();
           window.mgVideoSeek(n);
+          if (window.mgBoxesOn && window.mgBoxesOn()) window.mvDetect(n);
           return;
         }
-        var onSwap = document.querySelector('#mgViews b[data-v="swap"].on');
-        var onDet = document.querySelector('#mgViews b[data-v="det"].on');
+        /* 帧目录：合成态 = 这一帧现算（带 settings + models 分配）；原图态取 raw */
         if (window.mvClearBoxes) window.mvClearBoxes();
-        if (onSwap) window.mvMerged(n);
-        else if (onDet) { window.mvFrame(n).then(function () { window.mvDetect(n); }); }
+        if (window.mgCurView && window.mgCurView() === "orig" && window.mgRawFrame) window.mgRawFrame(n);
+        else if (window.mgCmpNow) window.mgCmpNow({ frame: n });
         else window.mvFrame(n);
+        if (window.mgBoxesOn && window.mgBoxesOn()) window.mvDetect(n);
       });
     }
 
@@ -8836,11 +9577,19 @@
         mask_source: segOf('seg'),
         mask_mode: segOf('mask'),
         color_transfer: byId('mgColor'),
+        /* 新契约：ct_mode / blend / mask_mode(int) / mask_erode / mask_blur。
+           导出和预览共用这一份，别让两条路各说一套。 */
+        ct_mode: byId('mgColor') || 'mt',
+        blend: this.readSeg('blend') || 'seamless',
+        mask_mode_num: ({ 'prd': 1, 'dst': 2, 'prd×dst': 3 })[segOf('mask')] || 3,
+        mask_erode: tiny('遮罩腐蚀'),
+        mask_blur: tiny('遮罩羽化'),
         erode_mask: tiny('遮罩腐蚀'),
         blur_mask: tiny('遮罩羽化'),
         model: (document.querySelector('#mgModels .mgitem.on .nm') || {}).textContent || '',
-        /* 多选契约：models=[{name, faces}]，导出事件 detail 里也带上 */
-        models: mgModelsPayload()
+        /* 多选契约：models=[{name, faces}]，导出事件 detail 里也带上。
+           合成视图里按框分配过的，以那个为准（按脸分配优先于左栏多选）。 */
+        models: (window.mgFaceModelsPayload ? window.mgFaceModelsPayload() : mgModelsPayload())
       };
     },
 
