@@ -37,6 +37,7 @@
     sizes: {},
     onContinue: null,
     onCancel: null,
+    browseOnly: false,
     modal: null,
     modalPrev: null,
     drag: null,
@@ -67,7 +68,10 @@
   }
 
   function projectName(p) {
-    return String(p || "").split(/[\\/]/).filter(Boolean).pop() || "—";
+    var base = String(p || "").split(/[\\/]/).filter(Boolean).pop() || "";
+    if (base) return base;
+    /* 空串 = 视频模式：库是默认库 <工作区>/merge，后端自己建/自己认 */
+    return "默认库 merge";
   }
 
   function frameLabel(n) {
@@ -165,7 +169,8 @@
   /* ---------- 当前帧 / DFM ---------- */
   function currentFrame() {
     if (state.frame != null && state.frame !== "") return Number(state.frame) || 0;
-    if (!state.project) return null;
+    /* 不再因为 project 是空串就返回 null：视频模式的库是默认库，当前帧只取决于
+       合成器有没有打开素材（没打开就是 null，提取按钮自己会说「还没有当前帧」）。 */
     var mv = window.__mv || {};
     if (!(Number(mv.frames) > 0)) return null;
     if (window.MergeTimeline && window.MergeTimeline.getFrame) {
@@ -271,6 +276,13 @@
     state.data = d;
     state.loaded = true;
     state.loading = false;
+    /* 后端回的是解析后的**绝对**项目目录（空 project 时就是默认库
+       <工作区>/merge）。采纳它：之后缩略图/移动/回收站/分组同步都带这条真路径，
+       前端不再自己猜「默认库在哪」。 */
+    if (d.project && String(d.project) !== state.project) {
+      state.project = String(d.project);
+      updateHeader();
+    }
     state.order = [];
     var groups = {};
     d.groups.forEach(function (g) { groups[g.id] = g; });
@@ -297,9 +309,28 @@
     render();
   }
 
+  /* 首屏就失败时把上一份库的卡片清掉：错误态底下压着别人家 6 张脸，
+     用户会以为「库还在、只是报了个错」。刷新失败（已经有数据）则保留。 */
+  function clearBoard() {
+    ["fdbUngroupedGrid", "fdbGroups", "fdbTrashList"].forEach(function (id) {
+      var n = $(id);
+      if (n) n.innerHTML = "";
+    });
+    ["fdbUngroupedCount", "fdbTrashCount", "fdbStatTotal", "fdbStatGrouped",
+     "fdbStatUngrouped", "fdbStatTrash"].forEach(function (id) {
+      var n = $(id);
+      if (n) n.textContent = "0";
+    });
+    state.order = [];
+    state.selected = {};
+    var empty = $("fdbEmpty");
+    if (empty) empty.hidden = true;
+  }
+
   function failLoad(e) {
     state.loading = false;
     state.loaded = false;
+    if (!state.data) clearBoard();
     var box = $("fdbError");
     var msg = $("fdbErrorMsg");
     if (msg) msg.textContent = String((e && e.message) || e || "未知错误").slice(0, 180);
@@ -311,7 +342,8 @@
   }
 
   function load() {
-    if (!state.project) { failLoad(new Error("没有项目路径")); return; }
+    /* 不再要求 state.project 非空：空串就是默认库，后端 resolve_library 会认，
+       请求里 project= 空着也能拿到库内容。 */
     var seq = ++state.seq;
     state.loading = true;
     state.loaded = false;
@@ -433,7 +465,8 @@
     var allBtn = $("fdbPickAll");
     if (allBtn) allBtn.disabled = dis || state.order.length === 0;
     var continueBtn = $("fdbContinue");
-    if (continueBtn) continueBtn.disabled = dis;
+    /* browse 模式下这个按钮是「关闭」：读库失败/加载中也必须能按 */
+    if (continueBtn) continueBtn.disabled = state.browseOnly ? false : dis;
     var rAll = $("fdbRestoreAll");
     if (rAll) rAll.disabled = dis || trashN === 0;
     var pAll = $("fdbPurgeAll");
@@ -448,8 +481,8 @@
     if (!btn) return;
     if (!state.allowExtract) { btn.disabled = true; return; }
     var reason = "";
-    if (!state.project) reason = "还没有项目";
-    else if (currentFrame() == null) reason = "还没有当前帧";
+    /* 默认库（视频模式）也能提取：后端用它自己的默认库目录落盘 */
+    if (currentFrame() == null) reason = "还没有当前帧";
     else if (state.loading) reason = "人脸库还在读取";
     else if (state.extracting) reason = "正在提取";
     else if (state.busy) reason = "还有操作在进行";
@@ -1186,7 +1219,8 @@
     var project = $("fdbProject");
     if (project) {
       project.textContent = projectName(state.project);
-      project.title = state.project;
+      /* 空串（视频模式、还没拿到后端解析结果）→ 明确写默认库，别只给个「—」 */
+      project.title = state.project || "默认库：<工作区>/merge";
     }
     var mode = $("fdbMode");
     if (mode) mode.textContent = state.mode === "export-project" ? "项目导出" : "常规导出";
@@ -1199,16 +1233,18 @@
 
   function open(opts) {
     opts = opts || {};
-    if (!opts.project) {
-      toast("还没有素材", "先导入视频或打开 DFL 项目", "warn");
-      return false;
-    }
+    /* project 空串 = 视频模式：**不是错误**。后端把空 project 解析成默认库
+       <工作区>/merge（不存在就建），列表/缩略图/移动/回收站全都认这一条。
+       以前这里直接 return false，于是合成器点「人脸数据库」什么都不会发生。 */
     closeModal(false);
     state.open = true;
-    state.project = String(opts.project);
+    state.project = String(opts.project || "");
     state.mode = opts.mode === "export-project" ? "export-project" : "export";
     state.onContinue = typeof opts.onContinue === "function" ? opts.onContinue : null;
     state.onCancel = typeof opts.onCancel === "function" ? opts.onCancel : null;
+    /* 没有 onContinue = 只是来看库的（合成器顶部入口）：不当导出流程拦，
+       关闭就是回合成视图，也不再问「返回会取消本次导出？」 */
+    state.browseOnly = !state.onContinue;
     state.allowExtract = opts.allowExtract !== false;
     state.frame = (opts.frame != null) ? opts.frame : currentFrameSnapshot();
     state.selected = {};
@@ -1222,6 +1258,11 @@
     state.dfm = selectedDfms()[0] || "";
     state.seq++;
     updateHeader();
+    var cont = $("fdbContinue");
+    if (cont) {
+      cont.textContent = state.browseOnly ? "关闭" : "继续导出";
+      cont.title = state.browseOnly ? "回合成视图（只看人脸库，不导出）" : "";
+    }
     var empty = $("fdbEmpty"); if (empty) empty.hidden = true;
     var er = $("fdbError"); if (er) er.hidden = true;
     var ld = $("fdbLoading"); if (ld) ld.hidden = false;
@@ -1258,6 +1299,8 @@
   }
 
   function askCancel() {
+    /* 只看库（没有 onContinue）就没有「导出」可取消：直接回合成视图，不弹确认 */
+    if (state.browseOnly) { cancel(); return; }
     confirmDialog(
       "返回会取消本次导出？",
       "已经整理的人脸组会保留；这次不会开始导出。",
@@ -1268,6 +1311,8 @@
   }
 
   function proceed() {
+    /* 顶部入口进来的「关闭」：不导出，只回合成视图（加载中/出错也允许走） */
+    if (state.browseOnly) { cancel(); return; }
     if (state.loading) { toast("还在读取人脸库", "等列表出来再继续", "info"); return; }
     if (!state.loaded) { toast("人脸库没有就绪", "先处理加载错误再继续", "warn"); return; }
     if (state.busy) { toast("还有操作在进行", "等当前操作完成", "info"); return; }

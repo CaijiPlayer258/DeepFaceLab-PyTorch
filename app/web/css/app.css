@@ -4395,6 +4395,24 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
 .lgHost{margin-top:14px}
 .lgHost[hidden]{display:none}
 .alert.warn{border-color:rgba(220,170,60,.45);background:rgba(220,170,60,.08)}
+
+/* 训练页「模块加载失败」常驻横幅（js/loadbanner.js 控制显隐）。
+   沿用 .alert.warn 的深色主题配色，只补三样：左侧强调条、模块名小标签、
+   标题的警示色。它是状态而不是 toast —— 会一直挂着直到用户关掉。 */
+.loadbanner{margin:14px 0 0;position:relative;overflow:hidden}
+.loadbanner.hide{display:none}
+.loadbanner::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;
+  background:var(--warn,#f0b429);opacity:.85}
+.loadbanner .lbico{display:inline-grid;place-items:center;width:16px;height:16px;flex:none;
+  border-radius:50%;background:rgba(220,170,60,.18);color:var(--warn,#f0b429);
+  font-size:11px;font-weight:800;line-height:1;font-style:normal}
+.loadbanner .alhd b{color:var(--warn,#f0b429)}
+.loadbanner .albd{white-space:pre-line}
+.loadbanner .lblist{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.loadbanner .lblist:empty{display:none}
+.loadbanner .lbchip{font-family:var(--mono,ui-monospace,Consolas,monospace);font-size:11.5px;
+  padding:2px 7px;border-radius:6px;border:1px solid rgba(220,170,60,.45);
+  background:rgba(220,170,60,.10);color:var(--warn,#f0b429);white-space:nowrap}
 .alert .lgToggle{margin-left:auto}
 .alert .lgSub{font-variant-numeric:tabular-nums}
 .alert .lgNote{margin-top:6px;font-size:12px;color:var(--ink-3)}
@@ -5131,9 +5149,25 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   background: var(--panel); color: var(--ink-2);
   box-shadow: 0 2px 8px rgba(0, 0, 0, .08);
   font-family: inherit; font-size: 11px; line-height: 1; cursor: pointer;
-  transition: color .13s ease, border-color .13s ease;
+  transition: color .13s ease, border-color .13s ease, background-color .13s ease,
+              box-shadow .13s ease, transform .08s ease;
 }
-.mgdbentry:hover { color: var(--ink-1); border-color: var(--line-strong); }
+/* 可点反馈：hover 抬一档（底色+描边+文字都动），active 真的「按下去」。
+   它是绝对定位的悬浮按钮，光靠 cursor:pointer 用户看不出「这里能点」——
+   视频模式下点它以前什么都不会发生，没有反馈就更容易被当成坏按钮。 */
+.mgdbentry:hover {
+  color: var(--ink-1);
+  border-color: var(--line-strong);
+  background: var(--panel-2);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .14);
+}
+.mgdbentry:active {
+  transform: translateY(1px);
+  background: var(--panel-2);
+  border-color: var(--accent);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .10);
+}
+.mgdbentry:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .mgdbentry .ic { width: 13px; height: 13px; flex: none; }
 .mgdbbdg {
   min-width: 15px; height: 15px; padding: 0 4px; border-radius: 999px;

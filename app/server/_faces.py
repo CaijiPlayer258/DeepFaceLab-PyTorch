@@ -148,6 +148,20 @@ def resolve_project(raw) -> Path:
     return _resolve_project(raw, create=False)[0]
 
 
+def resolve_library(raw) -> Path:
+    """人脸库读写用的项目目录：**project 为空就落到默认库 <工作区>/merge**。
+
+    视频模式下前端没有 DFL 项目，合成器点「人脸数据库」时传的就是空串；
+    默认库还不存在也要能读（第一次进库看到的就是一份空库），所以这条路径
+    带 create —— 但它只对默认库生效：显式给了 project 却不存在，仍然是 404，
+    不替用户凭空造项目。
+    """
+    text = _text(raw)
+    if not text:
+        return _resolve_project(str(default_project()), create=True)[0]
+    return _resolve_project(text, create=False)[0]
+
+
 def resolve_project_for_write(raw, default=None):
     """写库用的 project → (目录, 是否新建)；缺省/空 → default（默认库）。"""
     text = _text(raw)

@@ -247,21 +247,108 @@ def _face_crop68(img, det, box, size):
     return crop, lm, ""
 
 
+def _material_snap():
+    """合成器当前打开着的素材 → (snap dict, 模式 "video"/"project"/"")。"""
+    try:
+        from .routes_merge import _cache_mode, _cache_snap
+        snap = _cache_snap() or {}
+        return snap, str(_cache_mode(snap) or "")
+    except Exception:                                     # noqa: BLE001
+        return {}, ""
+
+
+def _frame_probe(proj_raw, frame, body=None):
+    """「现在到底能不能拿到这一帧的图」—— add 和 faces/source 唯一的口径。
+
+    取图顺序和「点＋」实际走的那条完全一致：
+      1. 项目帧图 / 项目里的源视频（项目模式）；
+      2. body 里的 frame_path / frame_b64（前端自己截的那一张）；
+      3. 合成器打开着的素材（视频模式，或打开着的帧目录）。
+
+    返回 dict：img / source / project / mode / why。
+      img      BGR 图；拿不到就是 None
+      mode     "project" / "video" / "upload" / "none"；拿不到图时是**当前模式**
+      why      拿不到时的原因。**必须**说清楚「当前是视频模式/项目模式、缺的是
+               哪一样」—— 前端原样弹这一句，不再自己猜。
+    """
+    proj_text = str(proj_raw or "").strip()
+    snap, cache_mode = _material_snap()
+    material_path = str(snap.get("path") or "")
+    project, why_project = None, ""
+
+    if proj_text:
+        try:
+            project = store.resolve_project(proj_text)
+        except store.FacesError as e:
+            why_project = "项目目录打不开（%s）" % e.msg
+        else:
+            try:
+                img, src = _load_frame(project, frame)
+                if img is not None:
+                    return {"img": img, "source": src, "project": project,
+                            "mode": "project", "why": ""}
+            except store.FacesError as e:
+                why_project = "项目里的帧读不出来（%s）" % e.msg
+            except Exception as e:                        # noqa: BLE001
+                why_project = "项目里的帧读不出来（%s）" % str(e)[:160]
+
+    if body:
+        for key, reader in (("frame_path", _read_image_path),
+                            ("frame_b64", _decode_b64_image)):
+            if not body.get(key):
+                continue
+            img = reader(body.get(key))
+            if img is not None:
+                return {"img": img, "source": None, "project": project,
+                        "mode": "upload", "why": ""}
+            why_project = why_project or ("%s 里的图解不开" % key)
+
+    why_material = ""
+    if cache_mode:
+        try:
+            from .routes_merge import _frame_image
+            img, _total = _frame_image(int(frame))
+            if img is not None:
+                name = Path(material_path).name if material_path else (
+                    project.name if project is not None else "")
+                return {"img": img, "source": {"video": name, "frame": int(frame)},
+                        "project": project, "mode": cache_mode, "why": ""}
+            why_material = "这一帧读不出来"
+        except Exception as e:                            # noqa: BLE001
+            why_material = str(getattr(e, "msg", "") or e)[:200]
+
+    # 传了 project 就算「项目模式」（哪怕这个目录根本打不开）：报错才不至于说成
+    # 「既没有打开视频、也没有项目目录」—— 用户明明给了一个项目路径。
+    mode = cache_mode or ("project" if (project is not None or proj_text) else "none")
+    if mode == "project":
+        head = "当前是项目模式"
+        lack = why_project or why_material or "项目里这一帧既没有帧图也没有源视频"
+    elif mode == "video":
+        head = "当前是视频模式"
+        lack = why_material or "还没打开素材（先导入一段视频）"
+    else:
+        head = "当前既没有打开视频、也没有项目目录"
+        lack = why_project or "先在合成器里导入一段视频或打开一个 DFL 项目"
+    return {"img": None, "source": None, "project": project, "mode": mode,
+            "why": "%s：%s（frame=%d）" % (head, lack, int(frame))}
+
+
 def _read_frame(project: Path, frame: int, created: bool = False):
     """取整帧原图：项目帧图/项目里的源视频 > merge 缓存里打开着的素材（视频模式）。
 
     两条路都是 cv2 解码同一份字节，所以 extract 和 add 拿到的像素完全一样。
+    created=True 表示项目是这次新建的（肯定还没有帧图），直接读打开着的素材。
     """
-    if not created:
-        try:
-            return _load_frame(project, frame)
-        except store.FacesError:
-            pass
-    from .routes_merge import _frame_image
-    img, _total = _frame_image(int(frame))
-    src = _source_video(project)
-    return img, {"video": (src.name if src is not None else project.name),
-                 "frame": int(frame)}
+    probe = _frame_probe("" if created else project, frame)
+    if probe["img"] is None:
+        raise store.FacesError(probe["why"]
+                               or ("取不到这一帧的图（frame=%d）" % frame), 409)
+    source = probe["source"]
+    if not source:
+        src = _source_video(project)
+        source = {"video": (src.name if src is not None else project.name),
+                  "frame": int(frame)}
+    return probe["img"], source
 
 
 def _detector_name(raw) -> str:
@@ -305,8 +392,12 @@ def _resolve_dfm(raw):
 @router.get("/api/merge/faces")
 @_api
 def list_faces(project: str = ""):
-    """整个库：groups + faces + stats。"""
-    p = store.resolve_project(project)
+    """整个库：groups + faces + stats。
+
+    project 为空（视频模式 / 默认库）→ 读 <工作区>/merge；默认库还不存在就建，
+    第一次进来看到的是一份空库而不是「缺少 project」的 400。
+    """
+    p = store.resolve_library(project)
     data = store.snapshot(p)
     data["groups"] = _decorate_groups(data["groups"])
     data["faces"] = _decorate(p, data["faces"])
@@ -429,64 +520,122 @@ def _read_image_path(raw):
         return None
 
 
+def _nearest_det(detections, box):
+    """在检测结果里挑「离传入 box 最近」的那张脸。
+
+    box 是前端画面上那个框（原图坐标）。有重叠就按 IoU 取最大；一张都没重叠
+    （用户框和这次检测差了一帧 / 抖了一下）就按框中心距离取最近。没传 box 时
+    退化成「面积最大的那张脸」—— 一帧多脸时那通常就是用户正在看的那张。
+    """
+    best, best_key = None, None
+    for det in (detections or []):
+        try:
+            b = [float(v) for v in (det.get("box") or [])[:4]]
+        except (TypeError, ValueError):
+            continue
+        if len(b) < 4:
+            continue
+        bw, bh = max(0.0, b[2] - b[0]), max(0.0, b[3] - b[1])
+        if bw <= 0 or bh <= 0:
+            continue
+        if box is None:
+            key = (-bw * bh, -float(det.get("score") or 0))
+        else:
+            iw = max(0.0, min(b[2], box[2]) - max(b[0], box[0]))
+            ih = max(0.0, min(b[3], box[3]) - max(b[1], box[1]))
+            inter = iw * ih
+            union = bw * bh + max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1]) - inter
+            iou = (inter / union) if union > 0 else 0.0
+            dx = (b[0] + b[2]) / 2 - (box[0] + box[2]) / 2
+            dy = (b[1] + b[3]) / 2 - (box[1] + box[3]) / 2
+            key = (-round(iou, 6), (dx * dx + dy * dy) ** 0.5)
+        if best_key is None or key < best_key:
+            best, best_key = det, key
+    return best
+
+
+def _server_landmarks68(img, box, detector):
+    """服务端兜底取点：这一帧 → 检测框（离传入 box 最近的那张脸）→ 2D106 → 68 点。
+
+    返回 ((kps68, box, score), None) 或 (None, {"reason", "detail"})。
+    和 /api/merge/detect 同一条链路（_frame_landmarks）：拿不到就明确失败，
+    绝不退回 5 点插值。
+    """
+    try:
+        detections = store.detect_faces_in_image(img, detector)
+    except Exception as e:                                # noqa: BLE001
+        msg = str(getattr(e, "detail", "") or e)[:160]
+        return None, {"reason": "detect_failed",
+                      "detail": "服务端跑检测时失败：%s" % (msg or "未知错误")}
+    det = _nearest_det(detections, box)
+    if det is None:
+        return None, {"reason": "no_face",
+                      "detail": "服务端在这一帧里没检测到人脸（detector=%s）"
+                                % (detector or "默认")}
+    dbox = det.get("box")
+    lm = _landmarks68(img, det, dbox)
+    if lm is None:
+        return None, {"reason": "no_landmarks68",
+                      "detail": "服务端检测到了框，但 2D106 回归 68 点失败"
+                                "（权重缺失或这一帧太糊）"}
+    return (lm, [round(float(v), 1) for v in dbox[:4]],
+            round(float(det.get("score") or 0), 4) or None), None
+
+
 @router.post("/api/merge/faces/add")
 @_api
 def add_face(body: dict):
-    """把已经知道是哪张脸的那一块直接入库（不重跑检测）。
+    """把已经知道是哪张脸的那一块直接入库（不整帧落多张）。
 
-    请求：{ project?, kps68|kps, box?, dfm?, frame, source?:{video,frame},
-            frame_b64?, frame_path? }
+    请求：{ project?, kps68?, box?, dfm?, frame, detector?, source?:{video,frame},
+            frame_path?, frame_b64? }
 
-    * kps 必须 68x2（/api/merge/detect 的每张脸都带 kps68）。只给 5 点 →
-      200 + {ok:false, reason:"no_landmarks68"}，一个文件都不落（用户明确禁止
-      5 点对齐：5 点的旋转/缩放抖动会让同一个人的两张入库图对不齐）。
+    * **kps68 可以不给**：缺了、只有 5 点、或者形状不是 68x2，后端自己从这一帧
+      的图上重跑「检测（挑离传入 box 最近的那张脸）→ 2D106 回归 68 点 → 68 点
+      仿射裁剪」，返回体里写 landmarks_from:"server"。
+      以前这里只认前端手里的 kps68：老后端（/api/merge/detect 不回 kps68）时
+      前端只能弹「缺少 68 点」，＋等于什么都没干。
+    * 真的拿不到图才失败，错误里写明「当前是视频模式 / 项目模式、缺的是哪一个」。
     * 裁剪和 extract 完全同一条 68 点仿射（align_face_68），所以同一帧同一张脸
-      两条路落下来的 PNG 逐像素相同。
+      两条路落下来的 PNG 逐像素相同；5 点插值的假点一个都不落盘。
     * project 可有可无：没有就用默认库 <工作区>/merge（后端自动建目录与
       index.json，越界到工作区外面一律 400）。
     """
     body = _as_dict(body)
     dfm_name, size = _resolve_dfm(body.get("dfm"))
+    det_name = _detector_name(body.get("detector"))
     src = body.get("source") if isinstance(body.get("source"), dict) else {}
     frame = _int_val(body.get("frame", src.get("frame", 0)), "frame", 0, 10 ** 7)
+    proj = str(body.get("project") or "").strip()
+    box = _box_val(body.get("box"))
 
     raw_kps = body.get("kps68")
     if raw_kps is None:
         raw_kps = body.get("kps")
     kps = _kps68_val(raw_kps)
-    if kps is None:
-        try:
-            got = len(raw_kps or [])
-        except Exception:
-            got = 0
-        return {"ok": False, "reason": "no_landmarks68",
-                "detail": "add 只认 68 点仿射：kps 要是 68x2，收到 %d 个点" % got,
-                "expect": "68x2", "size": int(size), "dfm": dfm_name}
+    landmarks_from = "client" if kps is not None else ""
 
-    box = _box_val(body.get("box"))
-    proj = str(body.get("project") or "").strip()
-
-    # 取整帧原图（只读）：项目帧图 > frame_path > frame_b64 > 打开着的素材
-    existing = None
-    if proj:
-        try:
-            existing = store.resolve_project(proj)
-        except store.FacesError:
-            existing = None
-    img, source = None, None
-    if existing is not None:
-        img, source = _read_frame(existing, frame)
-    if img is None and body.get("frame_path"):
-        img = _read_image_path(body.get("frame_path"))
-    if img is None and body.get("frame_b64"):
-        img = _decode_b64_image(body.get("frame_b64"))
+    probe = _frame_probe(proj, frame, body)
+    img = probe["img"]
     if img is None:
-        img, source = _read_frame(store.default_project(), frame, created=True)
-    if img is None:
-        raise store.FacesError("取不到这一帧的图（frame=%d）：先在合成器里打开素材" % frame, 409)
+        raise store.FacesError(probe["why"]
+                               or ("取不到这一帧的图（frame=%d）" % frame), 409)
+    source = probe["source"]
     if not source:
         video = str(src.get("video") or body.get("video") or "").strip()
         source = {"video": (Path(video).name if video else ""), "frame": int(frame)}
+
+    score = None
+    if kps is None:
+        got, why = _server_landmarks68(img, box, det_name)
+        if got is None:
+            return {"ok": False, "reason": why["reason"], "detail": why["detail"],
+                    "project": str(probe["project"] or ""), "frame": int(frame),
+                    "mode": str(probe["mode"] or ""), "landmarks_from": "",
+                    "size": int(size), "dfm": dfm_name, "align": "68",
+                    "expect": "68x2"}
+        kps, box, score = got
+        landmarks_from = "server"
 
     crop, _meta = align_face_68(img, kps, box, size)
     if crop is None:
@@ -496,11 +645,39 @@ def add_face(body: dict):
     if created:
         store.ensure_index(p)
     records, group = store.add_faces(p, [crop], source, dfm=dfm_name, align="68")
-    _attach_extras(p, records, [box], [None], [kps.round(2).tolist()])
+    _attach_extras(p, records, [box], [score], [kps.round(2).tolist()])
     rec = records[0]
     return {"ok": True, "project": str(p), "created": bool(created),
             "dfm": dfm_name, "group": group, "size": int(size), "align": "68",
+            "landmarks_from": landmarks_from, "detector": det_name,
+            "mode": str(probe["mode"] or ""), "box": box,
             "frame": int(frame), "count": 1, "face": rec, "faces": [rec]}
+
+
+@router.get("/api/merge/faces/source")
+@_api
+def face_source(project: str = "", frame: int = 0):
+    """「现在到底能不能拿到这一帧的图」—— 点＋ / 开人脸库之前问这一个。
+
+    以前前端只看 window.__mergeInputDir：视频模式下它永远是空串，于是画面里
+    明明有视频，点＋也会弹「还没有素材」。判定权现在在后端：项目帧（项目模式）
+    / 打开着的素材（视频模式）/ 都没有 —— why 里写清楚缺的是哪一个。
+
+    回：{ok, available, mode, project, default_project, frame, why, material, frames}
+    """
+    frame = _int_val(frame, "frame", 0, 10 ** 7)
+    probe = _frame_probe(project, frame)
+    snap, cache_mode = _material_snap()
+    return {"ok": True,
+            "available": probe["img"] is not None,
+            "mode": str(probe["mode"] or ""),
+            "frame": int(frame),
+            "why": str(probe["why"] or ""),
+            "project": str(probe["project"] or ""),
+            "default_project": str(store.default_project()),
+            "material": str(snap.get("path") or ""),
+            "material_mode": str(cache_mode or ""),
+            "frames": int(snap.get("frames") or 0)}
 
 
 @router.post("/api/merge/faces/move")
@@ -508,7 +685,7 @@ def add_face(body: dict):
 def move_faces(body: dict):
     """跨组投放：只改 face.group，文件一个字节都不动。"""
     body = _as_dict(body)
-    p = store.resolve_project(body.get("project"))
+    p = store.resolve_library(body.get("project"))
     group = body.get("group")
     if group is None:
         group = ""
@@ -523,7 +700,7 @@ def move_faces(body: dict):
 @_api
 def trash_faces(body: dict):
     body = _as_dict(body)
-    p = store.resolve_project(body.get("project"))
+    p = store.resolve_library(body.get("project"))
     faces, missing = store.trash_faces(p, body.get("ids"))
     return {"ok": True, "project": str(p), "updated": len(faces),
             "faces": _decorate(p, faces), "missing_files": missing}
@@ -533,7 +710,7 @@ def trash_faces(body: dict):
 @_api
 def restore_faces(body: dict):
     body = _as_dict(body)
-    p = store.resolve_project(body.get("project"))
+    p = store.resolve_library(body.get("project"))
     faces, missing = store.restore_faces(p, body.get("ids"))
     return {"ok": True, "project": str(p), "updated": len(faces),
             "faces": _decorate(p, faces), "missing_files": missing}
@@ -543,7 +720,7 @@ def restore_faces(body: dict):
 @_api
 def delete_faces(body: dict):
     body = _as_dict(body)
-    p = store.resolve_project(body.get("project"))
+    p = store.resolve_library(body.get("project"))
     removed, missing = store.delete_faces(p, body.get("ids"))
     return {"ok": True, "project": str(p), "deleted": removed,
             "count": len(removed), "missing_files": missing}
@@ -554,7 +731,7 @@ def delete_faces(body: dict):
 def sync_groups(body: dict):
     """同步 .dfm 组：幂等；不再选的组有脸 → orphan=true，不删脸。"""
     body = _as_dict(body)
-    p = store.resolve_project(body.get("project"))
+    p = store.resolve_library(body.get("project"))
     data = store.sync_groups(p, body.get("dfms"))
     data["groups"] = _decorate_groups(data["groups"])
     data["faces"] = _decorate(p, data["faces"])
@@ -565,7 +742,7 @@ def sync_groups(body: dict):
 def face_thumb(request: Request, project: str = "", id: str = ""):
     """128×128 JPEG 缩略图；_thumb/<id>.jpg 缓存 + ETag/Cache-Control。"""
     try:
-        p = store.resolve_project(project)
+        p = store.resolve_library(project)
         path, etag = store.ensure_thumb(p, id)
     except store.FacesError as e:
         return _err(e.status, e.msg)
