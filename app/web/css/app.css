@@ -1872,30 +1872,6 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
     linear-gradient(45deg, var(--panel-2) 25%, transparent 25%, transparent 75%, var(--panel-2) 75%) 0 0/16px 16px,
     linear-gradient(45deg, var(--panel-2) 25%, transparent 25%, transparent 75%, var(--panel-2) 75%) 8px 8px/16px 16px;
 }
-.mgviews {
-  position: absolute;
-  top: 8px; right: 8px;
-  /* 比描边层(3)和 chip 层(4)都高：脸框正好在右上角时也不会把这三颗按钮压住 */
-  z-index: 5;
-  display: flex;
-  gap: 2px;
-  padding: 2px;
-  border-radius: 8px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  box-shadow: 0 2px 8px rgba(0,0,0,.08);
-}
-.mgviews b {
-  padding: 4px 10px;
-  border-radius: 6px;
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--ink-3);
-  cursor: pointer;
-  transition: background .13s ease, color .13s ease;
-}
-.mgviews b:hover { color: var(--ink-1); }
-.mgviews b.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .mgstage {
   position: absolute;
   inset: 0;
@@ -3273,10 +3249,6 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
 
 /* 合成器里最后几处紫色：模型选中、导出胶囊、视图切换 */
 #p-merge .mgitem.on {
-  background: var(--sel) !important;
-  color: var(--ink-1) !important;
-}
-#p-merge .mgviews b.on {
   background: var(--sel) !important;
   color: var(--ink-1) !important;
 }
@@ -5246,5 +5218,20 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 .mgfly img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .mgfly.ph { background: var(--accent-soft); }
 
-/* 「框」开关和其它 b 同一套观感，只多一条分隔 */
-#mgBoxTog { margin-left: 2px; border-left: 1px solid var(--line); padding-left: 9px; border-radius: 0 6px 6px 0; }
+/* 「这张脸现在是原图」角标：贴在框的右上角内侧（chip 在本锚点上方，两边不打架）。
+   pointer-events:none —— 它盖在画面上，点它必须继续算「点框」。 */
+.mgvtag {
+  position: absolute; right: 100%; top: 2px; margin-right: 4px;
+  padding: 1px 5px; border-radius: 4px;
+  font-size: 10px; line-height: 1.6; font-style: normal; font-weight: 600;
+  white-space: nowrap; letter-spacing: .02em;
+  color: #fff; background: rgba(12, 16, 24, .72);
+  border: 1px solid rgba(255, 255, 255, .3);
+  pointer-events: none;
+}
+.mgvtag[hidden] { display: none !important; }
+/* ＋ 正在发请求：只做视觉禁用。/api/merge/faces/add 一动就落盘，
+   连点 10 次 = 10 张脸（用户的意图），所以按钮**不真 disabled** ——
+   真 disabled 会把后面 9 次点击直接吞掉；这里排队，一次只飞一发。 */
+.mgplus.busy { opacity: .45; cursor: progress; }
+

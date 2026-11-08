@@ -3284,14 +3284,18 @@
       var rx = Math.round(ox + x1 * s) + 0.5, ry = Math.round(oy + y1 * s) + 0.5;
       var rw = Math.round((x2 - x1) * s), rh = Math.round((y2 - y1) * s);
       var name = mgFaceModel(i);
-      /* 深色对比线画在**框外侧**（rect 外扩 2px、2px 线宽，整条落在框线外面），
-         框内依旧一个像素都不占 —— 验收按像素读：框内不透明像素 = 0。 */
+      /* 被「点成原图」的那张脸：框线走虚线（其它框还是实线）——点一下就能看出
+         「这张脸现在没换」。虚线只在框线上，框内一样一个像素都不落。 */
+      var rawView = (typeof mgFaceIsRawView === "function") && mgFaceIsRawView(i);
+      ctx.setLineDash(rawView ? [6, 4] : []);
       ctx.strokeStyle = MG_BOX_HALO;
       ctx.strokeRect(rx - 2, ry - 2, rw + 4, rh + 4);
       ctx.strokeStyle = name ? mgModelColor(name) : mgUnassignedColor();
       ctx.strokeRect(rx, ry, rw, rh);
+      ctx.setLineDash([]);
       rects[i] = { x: rx - 0.5, y: ry - 0.5, w: rw, h: rh };
-      raw[i] = { box: [x1, y1, x2, y2], score: b.score };
+      /* kps68 是检测回包带的 68 点：点「＋」时原样交给 /faces/add 落库 */
+      raw[i] = { box: [x1, y1, x2, y2], score: b.score, kps68: b.kps68 || null };
     });
     mgSetRects(rects, raw);
   };
@@ -3403,41 +3407,30 @@
   }
   window.mgHint = mgHint;
 
-  /* 当前底图：swap（换脸结果，默认）/ orig（原片）。
-     「框」不是视图，是叠加开关（data-v="boxes"），不参与这里的选择。 */
-  function mgCurView() {
-    var on = document.querySelector('#mgViews b[data-v="swap"].on, #mgViews b[data-v="orig"].on');
-    return on ? String(on.getAttribute("data-v")) : "swap";
-  }
-  window.mgCurView = mgCurView;
+  /* 底图只有一种：合成结果（#mgPreview）压在原片上。
+     「合成 / 原图」不再是一个整帧视图 —— 它变成**每张脸**的事：点某张脸的框，
+     只把那张脸切回原像素（请求体 no_swap_faces），其它脸照常换。
+     所以这里只剩「有没有合成图可贴」这一件事。 */
 
   function mgSetPlayIcon(on) {
     var b = document.getElementById("mtlPlay");
     if (b) b.innerHTML = on ? MG_PAUSE_SVG : MG_PLAY_SVG;
   }
 
-  /* 只剩两态：原图 = 只有 video；合成 = video + 预览 overlay（没有 overlay 就退回
-     video 那一帧，不空屏）。检测框不再是视图，是「框」开关：开着就叠在合成画面上。 */
-  function mgApplyView(view) {
-    view = view || mgCurView();
+  /* 合成图有就贴、没有就退回 video/帧图（不空屏）。检测框**始终显示**：
+     它现在是「点框切这张脸的合成/原图」的唯一入口，界面上没有开关了。 */
+  function mgApplyView() {
     var st = window.__mgVideo || {};
     var p = mgPrevImg();
-    var boxes = (view === "swap") && !!(window.mgBoxesOn && window.mgBoxesOn());
-    var cv = document.querySelector("#mgStage canvas.mgovl");
-    if (cv) cv.style.display = boxes ? "" : "none";
-    var layer = document.getElementById("mgFaceLayer");
-    if (layer) layer.style.display = boxes ? "" : "none";
-    if (!boxes) {
-      /* 关「框」要**真的清干净**：光 display:none 的话 canvas 位图里还留着上一帧的
-         描边（按像素读得出来 4776 个非透明像素）、chip 也还挂在 DOM 里。 */
-      if (cv) { try { cv.getContext("2d").clearRect(0, 0, cv.width, cv.height); } catch (e) {} }
-      if (layer) layer.innerHTML = "";
-    }
     if (p) {
-      var show = (view === "swap") && !!st.png && !st.playing;
+      var show = !!st.png && !st.playing;
       p.style.display = show ? "block" : "none";
     }
-    if (boxes && window.mvRedrawBoxes) window.mvRedrawBoxes();
+    var cv = document.querySelector("#mgStage canvas.mgovl");
+    if (cv) cv.style.display = "";
+    var layer = document.getElementById("mgFaceLayer");
+    if (layer) layer.style.display = "";
+    if (window.mvRedrawBoxes) window.mvRedrawBoxes();
   }
   window.mgApplyView = mgApplyView;
 
@@ -3455,10 +3448,12 @@
       /* 合成图是异步解码的：解完再补画一次框。mgApplyView 已经画过一遍，但那次
          量到的是「旧图还没换掉」的版面（切页/首帧时会差几像素），补这一发才对齐。 */
       p.onload = function () {
-        if (window.mgBoxesOn && window.mgBoxesOn() && window.mvRedrawBoxes) window.mvRedrawBoxes();
+        if (window.mvRedrawBoxes) window.mvRedrawBoxes();
+        mgSyncFaceCards();
       };
     }
-    mgApplyView(mgCurView());
+    mgApplyView();
+    mgSyncFaceCards();
     if (src) mgHint("");
   };
 
@@ -3480,7 +3475,7 @@
     }
     st.playing = false;
     mgSetPlayIcon(false);
-    mgApplyView(mgCurView());
+    mgApplyView();
     return v;
   };
 
@@ -4040,7 +4035,7 @@
     if (!path || !v) return;
     if (st.src !== path) { window.mgAttachVideo(path); return; }   /* loadedmetadata 里恢复 t */
     mgHint("");
-    mgApplyView(mgCurView());
+    mgApplyView();
     if (v.readyState >= 1) window.mgRestoreTime();
     if (v.paused) window.mgPreviewSoon();
   };
@@ -4096,7 +4091,10 @@
        POST /api/merge/merged  { frame, settings, models }
        settings = { ct_mode, blend, mask_mode, mask_erode, mask_blur }
        models   = [{ name, faces: [脸序号] }]        ← 沿用导出协议
-       POST /api/merge/faces/extract { project, frame, dfm, box }
+       POST /api/merge/faces/add     { project?, kps68, box, dfm, frame, source }
+                                        ← 点「＋」走这条：已知是哪张脸，68 点仿射
+                                          直接落盘，不重检测、不要求有项目
+       POST /api/merge/faces/extract { project, frame, dfm }   ← 整帧提取（老接口）
      ============================================================ */
   var MG_COLOR_CARD = ["#e8590c", "#1c7ed6", "#2f9e44", "#a61e4d",
                        "#7048e8", "#0c8599", "#d6336c", "#f08c00"];
@@ -4104,6 +4102,12 @@
   var MG_COLORS_KEY = "dfl-merge-model-colors";
   var MG_FACE_MODEL = {};      /* 脸序号 → dfm 名；没有键 = 未分配（灰框） */
   var MG_FACE_NOSWAP = {};     /* 脸序号 → true：这张脸「不换脸」，请求里走 no_swap_faces */
+  /* 脸序号 → true：这张脸被「点框」切成了原图（框线虚线 + 框角小标签）。
+     和 MG_FACE_NOSWAP 走同一个契约键 no_swap_faces，区别只是它不改模型分配：
+     用户只是想在这一帧上对比「换没换」，不是把这张脸从合成里摘出去。
+     记住是**用户偏好**：切帧/切素材都不重置（存 localStorage）。 */
+  var MG_FACE_RAWVIEW = {};
+  var MG_FACE_RAWVIEW_KEY = "dfl-merge-face-raw";
   var MG_FACE_BUSY = {};       /* 脸序号 → true：这一张正在重算（画细进度环） */
   var MG_RECTS = [];           /* 脸序号 → 画布内矩形（chip / ＋ 的定位依据） */
   var MG_FACE_RAW = [];        /* 脸序号 → 原图坐标里的 box（提取人脸时回传） */
@@ -4121,6 +4125,24 @@
   })();
   function mgSaveColors() {
     try { window.localStorage.setItem(MG_COLORS_KEY, JSON.stringify(MG_COLORS)); } catch (e) {}
+  }
+
+  /* 点框切「这张脸的原图」的偏好：按脸序号记，切帧/重开页面都还在 */
+  (function loadRawView() {
+    try {
+      var raw = window.localStorage.getItem(MG_FACE_RAWVIEW_KEY);
+      if (!raw) return;
+      var o = JSON.parse(raw);
+      Object.keys(o || {}).forEach(function (k) {
+        var i = parseInt(k, 10);
+        if (!isNaN(i) && o[k]) MG_FACE_RAWVIEW[i] = true;
+      });
+    } catch (e) { /* 无痕模式：内存里照样能用，只是不跨刷新 */ }
+  })();
+  function mgSaveRawView() {
+    try {
+      window.localStorage.setItem(MG_FACE_RAWVIEW_KEY, JSON.stringify(MG_FACE_RAWVIEW));
+    } catch (e) {}
   }
 
   /* 固定色卡里随机抽一个；抽过就不再变（= 同一模型跨帧同色） */
@@ -4157,23 +4179,140 @@
      不动），而不是"没分配 → 兜给第 0 个模型"。序号就是检测顺序，从 0 起。 */
   function mgFaceIsNoSwap(i) { return !!MG_FACE_NOSWAP[i]; }
   window.mgFaceIsNoSwap = mgFaceIsNoSwap;
+
+  /* 这张脸现在显示的是「原图」（点框切过来的） */
+  function mgFaceIsRawView(i) { return !!MG_FACE_RAWVIEW[i]; }
+  window.mgFaceIsRawView = mgFaceIsRawView;
+
+  /* 请求体的 no_swap_faces = 「不换脸」的脸 ∪ 「点成原图」的脸。
+     两件事在契约上是同一件：这张脸保持原像素。 */
   function mgFaceNoSwapIds() {
-    return Object.keys(MG_FACE_NOSWAP).filter(function (k) {
-      return !!MG_FACE_NOSWAP[k];
-    }).map(function (k) { return parseInt(k, 10); })
+    var out = {}, k;
+    [MG_FACE_NOSWAP, MG_FACE_RAWVIEW].forEach(function (m) {
+      Object.keys(m || {}).forEach(function (key) {
+        var i = parseInt(key, 10);
+        if (!isNaN(i) && m[key]) out[i] = true;
+      });
+    });
+    return Object.keys(out).map(function (x) { return parseInt(x, 10); })
       .filter(function (i) { return !isNaN(i); })
       .sort(function (x, y) { return x - y; });
   }
   window.mgFaceNoSwapIds = mgFaceNoSwapIds;
   /* 换素材/换帧不影响这里（和 MG_FACE_MODEL 一样是"这一轮合成"的设置） */
 
-  /* 「框」开关：data-v="boxes" 那颗 b 的 .on 就是开关本身 */
-  function mgBoxesOn() {
-    var t = document.getElementById("mgBoxTog");
-    return !!(t && t.classList.contains("on"));
-  }
+  /* 检测框始终显示：它是「点框切这张脸的合成/原图」的唯一入口，界面上没有开关。
+     函数留着是因为调用点一大片（都在问"要不要画框"），现在答案恒为"要"。 */
+  function mgBoxesOn() { return true; }
   window.mgBoxesOn = mgBoxesOn;
 
+  /* ---------- 点框 = 只切这一张脸的「合成 / 原图」 ----------
+     契约上就是 no_swap_faces：把这张脸的序号加进/移出请求体，后端把它原样留在
+     帧里（其它脸照常换）。视觉反馈分两半：
+       · 立刻：这条框线变虚线 + 框角出现「原图」小标签（不等网络）；
+       · 随后：整帧重算回来，这张脸是原像素、其它脸还是换过的。
+     状态按脸序号记在 localStorage 里（用户偏好），切帧不重置。 */
+  function mgToggleFaceRaw(i, opt) {
+    i = parseInt(i, 10);
+    if (isNaN(i) || i < 0) return false;
+    if (MG_FACE_RAWVIEW[i]) delete MG_FACE_RAWVIEW[i];
+    else MG_FACE_RAWVIEW[i] = true;
+    mgSaveRawView();
+    mgSyncFaceCards();
+    if (window.mvRedrawBoxes) window.mvRedrawBoxes();   /* 实线/虚线立刻换 */
+    if (opt && opt.silent) return mgFaceIsRawView(i);
+    var p = (window.mgCmpNow ? window.mgCmpNow() : null);
+    if (p && p.catch) p.catch(function () {});
+    return mgFaceIsRawView(i);
+  }
+  window.mgToggleFaceRaw = mgToggleFaceRaw;
+
+  /* 画布坐标里的点命中哪个框；没有就 -1 */
+  function mgFaceHitAt(x, y) {
+    var stage = document.getElementById("mgStage");
+    if (!stage || !MG_RECTS.length) return -1;
+    var cv = stage.querySelector("canvas.mgovl");
+    if (!cv) return -1;
+    var r = cv.getBoundingClientRect();
+    if (!r.width || !r.height) return -1;
+    var px = (x - r.left) * (cv.width / r.width);
+    var py = (y - r.top) * (cv.height / r.height);
+    for (var i = 0; i < MG_RECTS.length; i++) {
+      var b = MG_RECTS[i];
+      if (!b || !(b.w > 0) || !(b.h > 0)) continue;
+      if (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) return i;
+    }
+    return -1;
+  }
+  window.mgFaceHitAt = mgFaceHitAt;
+
+  /* 绑一次：按下→抬起位移 < 4px 才算「点框」（拖拽/选择一律不算）。
+     点在 chip / ＋ 上的不算 —— 它们是框外的按钮，有自己的事要干。 */
+  var MG_PICK = { id: null, x: 0, y: 0, t: 0 };
+  function mgBindFacePick() {
+    var stage = document.getElementById("mgStage");
+    if (!stage || window.__mgFacePickBound) return;
+    window.__mgFacePickBound = 1;
+    stage.setAttribute("data-face-pick", "1");
+    var PICK_SLOP = 4;          /* 点击判定阈值（像素）：位移 >= 4 就是拖拽 */
+
+    /* 绑在 document 上而不是舞台上：合成图 / 帧图 / <video> 三层的 pointer-events
+       各不相同，绑在舞台上时点画面未必落到舞台自己身上（实测无头 Edge 里
+       elementFromPoint 命中的是舞台里的图，不是舞台）。命中判定自己做，
+       只有落在某个框里才切，点别处一律不动。 */
+    /* 点在其它控件上不算：左右栏、时间轴、顶部的「人脸数据库」胶囊、toast…
+       它们和舞台在同一个坐标系里，光靠"点落在框的矩形里"会误判。 */
+    var PICK_SKIP = ".mgfc, button, a, input, select, label, #toastroot, " +
+                    ".mgleft, .mgright, .mtl, .mgdbentry, .mgviews";
+
+    document.addEventListener("pointerdown", function (e) {
+      if (e.button != null && e.button !== 0) { MG_PICK.id = null; return; }
+      var t = e.target;
+      if (t && t.closest && t.closest(PICK_SKIP)) { MG_PICK.id = null; return; }
+      MG_PICK.id = (e.pointerId == null ? 1 : e.pointerId);
+      MG_PICK.x = e.clientX;
+      MG_PICK.y = e.clientY;
+      MG_PICK.t = Date.now();
+    });
+
+    document.addEventListener("pointerup", function (e) {
+      var id = (e.pointerId == null ? 1 : e.pointerId);
+      if (MG_PICK.id !== id) return;
+      MG_PICK.id = null;
+      var dx = (e.clientX || 0) - MG_PICK.x;
+      var dy = (e.clientY || 0) - MG_PICK.y;
+      if (Math.sqrt(dx * dx + dy * dy) >= PICK_SLOP) return;   /* 拖拽，不算点击 */
+      if (Date.now() - MG_PICK.t > 1500) return;               /* 长按，不算点击 */
+      var i = mgFaceHitAt(e.clientX, e.clientY);
+      if (i < 0) return;
+      e.preventDefault();
+      mgToggleFaceRaw(i);
+    });
+
+    document.addEventListener("pointercancel", function () { MG_PICK.id = null; });
+  }
+  window.mgBindFacePick = mgBindFacePick;
+  /* 测试/自动化用：每个框在页面坐标里的位置 + 现在是不是「原图」状态。
+     只读，不改任何行为。 */
+  window.mgFaceRects = function () {
+    var stage = document.getElementById("mgStage");
+    var cv = stage && stage.querySelector("canvas.mgovl");
+    if (!cv) return [];
+    var r = cv.getBoundingClientRect();
+    if (!r.width || !cv.width) return [];
+    var sx = r.width / cv.width, sy = r.height / cv.height;
+    var out = [];
+    MG_RECTS.forEach(function (b, i) {
+      if (!b || !(b.w > 0) || !(b.h > 0)) return;
+      out.push({ i: i,
+                 x: r.left + b.x * sx, y: r.top + b.y * sy,
+                 w: b.w * sx, h: b.h * sy,
+                 cx: r.left + (b.x + b.w / 2) * sx,
+                 cy: r.top + (b.y + b.h / 2) * sy,
+                 raw: mgFaceIsRawView(i) });
+    });
+    return out;
+  };
   function mgSetRects(rects, raw) {
     MG_RECTS = rects || [];
     MG_FACE_RAW = raw || [];
@@ -4243,6 +4382,12 @@
     var card = document.createElement("div");
     card.className = "mgfc" + (MG_FACE_BUSY[i] ? " busy" : "");
     card.setAttribute("data-face", String(i));
+    /* 框角小标签「原图」：这张脸被点成原图时才露出来（别的框一个像素都不变）。
+       pointer-events:none —— 它盖在画面上，点它要继续算「点框」。 */
+    var vtag = document.createElement("i");
+    vtag.className = "mgvtag";
+    vtag.textContent = "原图";
+    vtag.hidden = !mgFaceIsRawView(i);
     card.style.left = (r.x + r.w) + "px";
     card.style.top = r.y + "px";
 
@@ -4320,6 +4465,7 @@
       mgAddFaceToDb(i, plus);
     });
 
+    card.appendChild(vtag);
     card.appendChild(dd);
     card.appendChild(plus);
     return card;
@@ -4354,6 +4500,8 @@
       var ring = card.querySelector(".mgfring");
       if (ring) ring.hidden = !MG_FACE_BUSY[i];
       card.classList.toggle("busy", !!MG_FACE_BUSY[i]);
+      var vt = card.querySelector(".mgvtag");
+      if (vt) vt.hidden = !mgFaceIsRawView(i);
     });
   }
 
@@ -4621,17 +4769,98 @@
   }
   window.mgAssignFace = mgAssignFace;
 
-  /* ---------- 「＋」：把这张脸加进人脸数据库 ---------- */
-  function mgPostExtract(payload) {
-    return fetch("/api/merge/faces/extract", {
+  /* ---------- 「＋」：把这张脸加进人脸数据库 ----------
+     不再走 /api/merge/faces/extract（那个要 project、要整帧重检测，视频模式下
+     没项目就直接 400）。现在点「＋」= 「我已经知道是哪张脸了，把这块存进库」：
+     前端把这一帧的 68 点（/api/merge/detect 回包里就带着，和 extract 同一条
+     2D106 链路）连同 frame/dfm 一起 POST /api/merge/faces/add，后端用**同一条
+     68 点仿射**裁成该 dfm 的输入尺寸落盘。所以同一帧同一张脸，走 extract 和
+     走 add 存下来的 PNG 逐像素相同。
+     project 可有可无：没有就用默认库 <工作区>/merge，后端自己建。 */
+  var MG_ADD = {};            /* 脸序号 → {busy, queue}：连点排队，一次只飞一发 */
+  var MG_TOAST_SEEN = {};     /* 同一条提示 2 秒内只弹一次（错误不刷屏） */
+
+  function mgToastOnce(key, title, sub, type, ms) {
+    var now = Date.now();
+    if (now - (MG_TOAST_SEEN[key] || 0) < 2000) return null;
+    MG_TOAST_SEEN[key] = now;
+    return toast(title, sub, type, ms);
+  }
+  window.mgToastOnce = mgToastOnce;
+
+  function mgPlusBtn(i) {
+    var layer = document.getElementById("mgFaceLayer");
+    if (!layer) return null;
+    return layer.querySelector('.mgfc[data-face="' + i + '"] .mgplus');
+  }
+
+  /* 连点 10 次要真的加 10 张（用户的意图），所以按钮不 disabled ——
+     只是排队：请求在飞的时候点，就把这几次记进 queue，落地后接着发下一发。 */
+  function mgAddFaceToDb(i, btn) {
+    i = parseInt(i, 10);
+    if (isNaN(i)) return;
+    var q = MG_ADD[i] || (MG_ADD[i] = { busy: false, queue: 0 });
+    q.queue += 1;
+    var b0 = btn || mgPlusBtn(i);
+    if (b0) b0.classList.add("busy");
+    if (q.busy) return;
+    mgAddFaceNext(i);
+  }
+  window.mgAddFaceToDb = mgAddFaceToDb;
+
+  function mgAddFaceNext(i) {
+    var q = MG_ADD[i];
+    if (!q) return;
+    var btn = mgPlusBtn(i);
+    if (q.queue <= 0) {
+      if (btn) btn.classList.remove("busy");
+      return;
+    }
+    q.queue -= 1;
+    q.busy = true;
+    if (btn) btn.classList.add("busy");
+
+    var rec = MG_FACE_RAW[i] || null;
+    var box = rec && rec.box ? rec.box.slice() : null;
+    var kps68 = rec && rec.kps68 ? rec.kps68 : null;
+    var frame = mgCmpFrameIdx();
+    var dfm = mgFaceModel(i) || (mgSelNames()[0] || "");
+    var video = mgVidPath() || "";
+
+    function done() {
+      q.busy = false;
+      var b = mgPlusBtn(i);
+      if (b && q.queue <= 0) b.classList.remove("busy");
+      if (q.queue > 0) mgAddFaceNext(i);
+    }
+
+    if (!kps68 || kps68.length !== 68) {
+      mgToastOnce("add-no68", "缺少 68 点",
+                  "这张脸还没拿到 68 点关键点（检测没回来 / 2D106 没跑通）—— 换一帧或重新检测再点",
+                  "warn", 5000);
+      done();
+      return;
+    }
+
+    var payload = {
+      /* 有项目用项目；没有留空 → 后端用默认库 <工作区>/merge/_faces 自己建 */
+      project: window.__mergeInputDir || "",
+      kps68: kps68,
+      dfm: dfm,
+      frame: frame,
+      source: { video: video, frame: frame }
+    };
+    if (box) payload.box = box;
+
+    fetch("/api/merge/faces/add", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     }).then(function (r) {
       return r.json().then(function (d) {
-        /* 后端「这一帧没有脸」是正常结果：200 + ok:false + reason:"no_face"，
-           不是错误，交给上面按空列表提示，别报「提取失败 HTTP 200」。 */
-        if (d && d.ok === false && d.reason === "no_face") return d;
+        /* no_landmarks68 / no_face 这类是业务结果（200 + ok:false），
+           当成正常返回交给下面按 reason 说话，别报「失败 HTTP 200」。 */
+        if (d && d.ok === false && d.reason) return d;
         if (r.ok && d && d.ok !== false) return d;
         var err = new Error((d && (d.detail || d.error)) || ("HTTP " + r.status));
         err.status = r.status;
@@ -4641,60 +4870,37 @@
         err.status = r.status;
         throw err;
       });
-    });
-  }
-
-  /* 接口只认 frame 不认 box 时：按「离这个框最近」挑一张，而不是整帧都塞进去 */
-  function mgPickNearestFace(d, box) {
-    var faces = (d && d.faces) || [];
-    if (!faces.length) return null;
-    if (faces.length === 1 || !box) return faces[0];
-    var cx = (box[0] + box[2]) / 2, cy = (box[1] + box[3]) / 2;
-    var best = faces[0], bd = Infinity;
-    faces.forEach(function (f) {
-      var fb = f.box || f.bbox || f.rect;
-      if (!fb || fb.length < 4) return;
-      var dx = (fb[0] + fb[2]) / 2 - cx, dy = (fb[1] + fb[3]) / 2 - cy;
-      var dd = dx * dx + dy * dy;
-      if (dd < bd) { bd = dd; best = f; }
-    });
-    return best;
-  }
-
-  function mgAddFaceToDb(i, btn) {
-    var rec = MG_FACE_RAW[i] || null;
-    var box = rec && rec.box ? rec.box.slice() : null;
-    var frame = mgCmpFrameIdx();
-    var dfm = mgFaceModel(i) || (mgSelNames()[0] || "");
-    var payload = { project: window.__mergeInputDir || "", frame: frame, dfm: dfm };
-    if (box) payload.box = box;
-    if (btn) btn.disabled = true;
-    mgPostExtract(payload).catch(function (e) {
-      /* 老接口只吃 frame：去掉 box 再来一次，拿回来自己按距离配对 */
-      if (e && e.status && payload.box && (e.status === 400 || e.status === 422)) {
-        var p2 = { project: payload.project, frame: payload.frame, dfm: payload.dfm };
-        return mgPostExtract(p2);
-      }
-      throw e;
     }).then(function (d) {
-      if (btn) btn.disabled = false;
+      done();
+      if (d && d.ok === false) {
+        var why = String(d.reason || "");
+        if (why === "no_landmarks68") {
+          mgToastOnce("add-no68", "缺少 68 点",
+                      String(d.detail || "后端没拿到 68 点关键点，这张脸不入库").slice(0, 120),
+                      "warn", 5000);
+        } else {
+          mgToastOnce("add-" + why, "没有加到人脸库",
+                      String(d.detail || why || "后端没有给出原因").slice(0, 120), "warn");
+        }
+        return;
+      }
       var faces = (d && d.faces) || [];
-      if (!faces.length) { toast("没有检测到人脸", "换一帧再试", "warn"); return; }
-      var hit = mgPickNearestFace(d, box);
-      var added = faces.length;
-      toast("已加入人脸数据库", (dfm || "未指定模型") + " · " + added + " 张脸" +
-            (hit && hit.id ? " · " + hit.id : ""), "success");
+      var hit = faces[0] || null;
+      toast("已加入人脸数据库", (dfm || "未指定模型") +
+            (hit && hit.id ? " · " + hit.id : "") + (d && d.created ? " · 新建了库" : ""),
+            "success");
       mgFlyToDb(i, box);
       /* 角标 = 这一次点了几个「＋」：一个框加一张脸，就 +1 */
       mgDbBadgeBump(1);
       /* 人脸库开着就地刷新，别让用户以为没加进去 */
       try { if (window.FaceDB && window.FaceDB.refresh && window.FaceDB.isOpen()) window.FaceDB.refresh(); } catch (e) {}
     }).catch(function (e) {
-      if (btn) btn.disabled = false;
-      toast("提取失败", String((e && e.message) || e).slice(0, 120), "error");
+      done();
+      var msg = String((e && e.message) || e).slice(0, 120);
+      mgToastOnce("add-err-" + msg, "添加失败", msg, "error");
     });
   }
-  window.mgAddFaceToDb = mgAddFaceToDb;
+  window.mgAddFaceNext = mgAddFaceNext;
 
   function mgDbBadgeBump(delta) {
     var el = document.getElementById("mgDbBadge");
@@ -4788,6 +4994,9 @@
   function mgBindCmp() {
     var page = document.getElementById("p-merge");
     if (!page) return;
+
+    /* 点框切这张脸的合成/原图：舞台上的指针判定（阈值 4px），只绑一次 */
+    if (window.mgBindFacePick) window.mgBindFacePick();
 
     /* 参数实时预览：右栏任何控件动一下就防抖重算 */
     var right = page.querySelector(".mgright");
@@ -4924,48 +5133,9 @@
         b.classList.add("on");
       });
     });
-    /* 视图切换：合成 / 原图 —— 底图二选一；
-       「框」是叠加开关，任何一态都能单独开关，不换底图。 */
-    var views = $("mgViews");
-    if (views) {
-      views.addEventListener("click", function (e) {
-        var b = e.target.closest("b[data-v]");
-        if (!b || !views.contains(b)) return;
-        var view = String(b.dataset.v || "");
-        var f = document.getElementById("mtlFrame");
-        var idx = parseInt(f ? f.value : 0, 10) || 0;
-
-        /* 「框」：只切显隐，画面不动 */
-        if (view === "boxes") {
-          b.classList.toggle("on");
-          if (window.mgApplyView) window.mgApplyView();
-          if (b.classList.contains("on")) {
-            if (window.__mvBoxes) window.mvRedrawBoxes();
-            else window.mvDetect(idx);
-          }
-          return;
-        }
-
-        Array.prototype.forEach.call(views.children, function (x) {
-          if (x.dataset.v !== "boxes") x.classList.remove("on");
-        });
-        b.classList.add("on");
-        window.mgApplyView(view);
-
-        /* 视频模式：底图就是 <video> 本身，合成层现取一张 */
-        if (window.mgVideoMode && window.mgVideoMode() && !(window.__mgVideo || {}).streamDown) {
-          if (view === "orig") return;              /* 原图 = 直接看 <video>，合成层由 mgApplyView 收掉 */
-          if (!(window.__mgVideo || {}).png) window.mgPreviewSoon();
-          if (window.mgBoxesOn && window.mgBoxesOn() && !window.__mvBoxes) window.mvDetect(idx);
-          return;
-        }
-        /* 帧目录（DFL 项目）：合成 = 现算这一帧（带 settings + models 分配）；
-           原图 = 后端只要 raw=1 的源帧，别把合成结果当成原片 */
-        if (view === "swap") window.mgCmpNow({ frame: idx });
-        else window.mgRawFrame(idx);
-        if (window.mgBoxesOn && window.mgBoxesOn() && !window.__mvBoxes) window.mvDetect(idx);
-      });
-    }
+    /* 「合成 / 原图」不再有分段控件，也不再是整帧视图：
+       画面永远是「合成图压在原片上」，点某张脸的框只把那张脸切回原像素
+       （= 请求体里的 no_swap_faces，见 mgToggleFaceRaw / mgBindFacePick）。 */
 
     /* 导出流程：工作台（预览/剪辑）→ 人脸库（分组）→ 导出设置 → 导出中 */
     var MG_STEPS = ["main", "facedb", "settings"];
@@ -5433,10 +5603,10 @@
           if (window.mgBoxesOn && window.mgBoxesOn()) window.mvDetect(n);
           return;
         }
-        /* 帧目录：合成态 = 这一帧现算（带 settings + models 分配）；原图态取 raw */
+        /* 帧目录：这一帧现算（带 settings + models 分配）；被点成「原图」的脸
+           走 no_swap_faces，后端按脸保留原像素 —— 不需要再单独取 raw 整帧了 */
         if (window.mvClearBoxes) window.mvClearBoxes();
-        if (window.mgCurView && window.mgCurView() === "orig" && window.mgRawFrame) window.mgRawFrame(n);
-        else if (window.mgCmpNow) window.mgCmpNow({ frame: n });
+        if (window.mgCmpNow) window.mgCmpNow({ frame: n });
         else window.mvFrame(n);
         if (window.mgBoxesOn && window.mgBoxesOn()) window.mvDetect(n);
       });
@@ -5624,8 +5794,8 @@
             /* 导出完自动切回工作台并显示成片那一帧，省得用户自己找 */
             try {
               if (window.mgStep) window.mgStep("main");
-              var sw = document.querySelector('#mgViews b[data-v="swap"]');
-              if (sw) sw.click();
+              /* 回到工作台就现算一帧合成结果（不再有「合成/原图」按钮可点） */
+              if (window.mgCmpNow) window.mgCmpNow();
             } catch (e) {}
           }
         }

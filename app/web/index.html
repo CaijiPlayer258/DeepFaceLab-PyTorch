@@ -655,13 +655,7 @@
               <span>人脸数据库</span>
               <i class="mgdbbdg" id="mgDbBadge" hidden>0</i>
             </button>
-            <!-- 检测视图与合成视图合并成一个画面：默认就显示换脸结果，
-                 「框」只切换是否叠加检测框（不再整页切视图） -->
-            <div class="mgviews" id="mgViews">
-              <b class="on" data-v="swap">合成</b>
-              <b data-v="orig">原图</b>
-              <b class="on" data-v="boxes" id="mgBoxTog" title="显示检测框">框</b>
-            </div>
+            <!-- 视图不再有分段控件：框始终显示，点框内部 = 只把那一张脸切「合成 ↔ 原图」 -->
             <div class="mgstage" id="mgStage"><span id="mgStageHint">选择视频后显示</span><video id="mgVideo" playsinline muted preload="metadata"></video><img id="mgPreview" alt="">
               <!-- 每张脸的模型 chip / ＋ 按钮挂在这一层（canvas 只负责 2px 描边） -->
               <div class="mgflayer" id="mgFaceLayer"></div>

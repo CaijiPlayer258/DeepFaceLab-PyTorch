@@ -82,13 +82,32 @@ def _has_parent(raw: str) -> bool:
     return ".." in _parts(raw)
 
 
-def resolve_project(raw) -> Path:
-    """请求里的 project → 已存在的项目目录。
+def workspace_root() -> Path:
+    """工作区根（和 app.WORKSPACE 同一条规则：DFL_WORKSPACE > <仓库>/workspace）。
+
+    这里不 import app —— 存储层要能脱离 FastAPI 单独跑（测试/脚本直接 import）。
+    """
+    raw = str(os.environ.get("DFL_WORKSPACE") or "").strip()
+    base = Path(raw) if raw else (ROOT / "workspace")
+    try:
+        return base.resolve()
+    except OSError:
+        return base
+
+
+def default_project() -> Path:
+    """没给 project 时的默认库：<工作区>/merge（它的 _faces/ 就是人脸库）。"""
+    return workspace_root() / "merge"
+
+
+def _resolve_project(raw, create: bool = False):
+    """(项目目录, 是否这次新建)。
 
     * 空 / 只有空白 → 400
     * 任何一段是 `..` → 400（不做「先规范化再看落点」的宽容处理）
     * 相对路径按 4.1 仓库根解析（和 /api/merge/open 的 _norm_path 同规矩）
-    * 目录不存在 → 404
+    * 目录不存在：create=False → 404；create=True → **只允许在工作区内新建**
+      （越界一律 400，绝不 mkdir 到工作区外面去）
     """
     text = _text(raw)
     if not text:
@@ -105,10 +124,38 @@ def resolve_project(raw) -> Path:
     except (OSError, ValueError) as e:
         raise FacesError("project 路径不合法：%r（%s）" % (text, e), 400)
     if not p.exists():
-        raise FacesError("项目目录不存在：%s" % p, 404)
+        if not create:
+            raise FacesError("项目目录不存在：%s" % p, 404)
+        root = workspace_root()
+        try:
+            target = p.resolve()
+            target.relative_to(root)
+        except (OSError, ValueError):
+            raise FacesError("project 不在工作区里，不能自动创建：%s（工作区 %s）"
+                             % (p, root), 400)
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise FacesError("项目目录建不出来：%s（%s）" % (p, e), 500)
+        return target, True
     if not p.is_dir():
         raise FacesError("project 不是目录：%s" % p, 400)
-    return p
+    return p, False
+
+
+def resolve_project(raw) -> Path:
+    """请求里的 project → 已存在的项目目录（不存在就 404）。"""
+    return _resolve_project(raw, create=False)[0]
+
+
+def resolve_project_for_write(raw, default=None):
+    """写库用的 project → (目录, 是否新建)；缺省/空 → default（默认库）。"""
+    text = _text(raw)
+    if not text:
+        if default is None:
+            raise FacesError("缺少 project：要一个合成项目目录", 400)
+        text = str(default)
+    return _resolve_project(text, create=True)
 
 
 def safe_join(base: Path, rel, what="路径") -> Path:
@@ -329,6 +376,9 @@ def normalize_index(raw) -> dict:
             "source": {"video": _text(src.get("video")), "frame": frame},
             "added_at": added,
             "trashed": bool(f.get("trashed")),
+            # 这张脸是用几个点对齐的："68" = 68 点仿射；老库没这个键 = 早期的
+            # 5 点对齐（尺寸一样、对齐略有差异），原样留着不改写。
+            "align": (_text(f.get("align")) or ""),
         })
         fids.add(fid)
 
@@ -369,6 +419,18 @@ def load_index(project: Path) -> dict:
         except OSError:
             pass
     return normalize_index(raw)
+
+
+def ensure_index(project: Path) -> dict:
+    """目录结构就位，且 _faces/index.json 一定存在（新库里写一份空清单）。
+
+    自动建出来的库要能立刻被 GET /api/merge/faces 读到，否则第一个请求回来
+    只有 "文件落盘了"、前端刷新还是「库不存在」。
+    """
+    d = ensure_layout(project)
+    if not (d / INDEX_NAME).is_file():
+        save_index(project, empty_index())
+    return load_index(project)
 
 
 def save_index(project: Path, index: dict):
@@ -466,10 +528,12 @@ def _new_face_id(index: dict) -> str:
 
 
 def add_faces(project: Path, crops: list, source: dict,
-              dfm: str = "", group: str = ""):
+              dfm: str = "", group: str = "", align: str = "68"):
     """把已经对齐好的人脸图写进库，返回 (新记录列表, 实际 group id)。
 
     先落 PNG 再写 index：index 写失败会把这次新写的图删掉，不留孤儿文件。
+    align 记的是「这张脸用几个点对齐的」：extract / add 现在都是 68 点仿射，
+    老库里没有这个键的按 5 点看待（读回来是空串）。
     """
     if not crops:
         return [], group
@@ -501,6 +565,7 @@ def add_faces(project: Path, crops: list, source: dict,
                     "source": dict(src),
                     "added_at": round(time.time(), 3),
                     "trashed": False,
+                    "align": _text(align),
                 }
                 index["faces"].append(rec)
                 records.append(dict(rec))
@@ -679,6 +744,7 @@ def _public_face(face: dict) -> dict:
         "source": dict(face.get("source") or {"video": "", "frame": 0}),
         "added_at": face.get("added_at", 0),
         "trashed": bool(face.get("trashed")),
+        "align": str(face.get("align") or ""),
     }
 
 
@@ -899,8 +965,12 @@ def dfm_input_size(path, default: int = 512) -> int:
 # ============================================================
 # 检测（复用服务器现有的 RetinaFace 检测器）
 # ============================================================
-def detect_faces_in_image(img) -> list:
-    """整帧检测，返回 [{box, kps, score}, …]；一帧多脸会全部返回。"""
+def detect_faces_in_image(img, detector: str = "") -> list:
+    """整帧检测，返回 [{box, kps, score}, …]；一帧多脸会全部返回。
+
+    detector 为空 = 服务器默认（Tinymog）；传界面名（TinyMog / RetinaFace_10g）
+    就用那一颗 —— 和 /api/merge/detect 同一个缓存实例，结果逐位相同。
+    """
     from .app import _get_detector
-    detector = _get_detector()          # 默认 TinyMog（det_500m 已随 RetinaFace_500m 移除）
-    return detector.detect(img) or []
+    det = _get_detector(detector or None)
+    return det.detect(img) or []

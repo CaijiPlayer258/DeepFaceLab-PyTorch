@@ -401,7 +401,7 @@ SNAP_JS = r"""
     exporting: !!window.__mergeExporting,
     frameInput: (document.getElementById("mtlFrame")||{}).value || "",
     tlFrame: (window.MergeTimeline && window.MergeTimeline.getFrame) ? window.MergeTimeline.getFrame() : null,
-    view: (function(){ var b = q("#mgViews b.on"); return b ? b.getAttribute("data-v") : null; })(),
+    rawFaces: (window.mgFaceNoSwapIds ? window.mgFaceNoSwapIds() : []),
     imgWhich: videoMode ? "#mgPreview" : "img.mgfrm",
     imgLen: cur ? String(cur.src||"").length : -1,
     imgSig: cur ? String(cur.src||"").slice(0, 72) : "",
@@ -734,12 +734,12 @@ def run_round(idx, opt, log_fh):
                 wait_snap(browser, lambda x: (x.get("imgLen") or -1) > 0 and x.get("imgSig") != base2.get("imgSig"),
                           T_FRAME * opt.scale, 0.25)
         if (probe or {}).get("status") == 200 and (pbody.get("boxes") or []):
-            browser.eval('document.querySelector("#mgViews b[data-v=\\"det\\"]").click(), 1')
+            # 框现在始终显示：没有「框」开关了，等画布真的落下描边就够
             ok, s, dt = wait_snap(browser, lambda x: (x.get("ink") or 0) > 500, T_DETECT * opt.scale, 0.25)
             ovl = (s or {}).get("ovl") or [0, 0]
-            r.ok(ok, "检测参数：出框", "帧 %d 画布像素 %s（%s×%s）· API boxes=%d · view=%s · %.2fs"
+            r.ok(ok, "检测参数：出框", "帧 %d 画布像素 %s（%s×%s）· API boxes=%d · raw=%s · %.2fs"
                  % (det_frame, (s or {}).get("ink"), ovl[0], ovl[1],
-                    len(pbody.get("boxes") or []), (s or {}).get("view"), dt),
+                    len(pbody.get("boxes") or []), (s or {}).get("rawFaces"), dt),
                  ctx=None if ok else {"detect": probe, "snap": s,
                                       "toasts": (s or {}).get("toasts"), "console": browser.console[-4:]})
 
@@ -762,7 +762,8 @@ def run_round(idx, opt, log_fh):
         else:
             before = browser.js(SNAP_JS)
             idx_swap = int(before.get("tlFrame") if before.get("tlFrame") is not None else f2c)
-            browser.eval('document.querySelector("#mgViews b[data-v=\\"swap\\"]").click(), 1')
+            # 没有「合成 / 原图」按钮了：让这一帧现算一次合成结果
+            browser.eval('window.mgCmpNow && window.mgCmpNow(), 1')
             ok, s, dt = wait_snap(browser,
                                   lambda x: (x.get("imgLen") or -1) > 10000 and
                                             (x.get("imgSig") != before.get("imgSig") or x.get("imgLen") != before.get("imgLen")),
