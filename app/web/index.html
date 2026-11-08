@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>DeepFaceLab-PyTorch</title>
 <link rel="stylesheet" href="/static/css/noto.css?v=3">
-  <link rel="stylesheet" href="/static/css/app.css?v=110">
+  <link rel="stylesheet" href="/static/css/app.css?v=111">
   <link rel="stylesheet" href="/static/css/shadcn.css?v=98">
 </head>
 <body>
@@ -552,6 +552,20 @@
           <button class="mini" id="runPause">暂停</button>
           <button class="mini" id="runSave">保存</button>
           <button class="mini" id="runStop" style="color:var(--bad)">停止</button>
+        </div>
+
+        <!-- 模块加载失败横幅：**常驻**，直到用户点 × / 离开训练页 / 训练结束。
+             文案与是否出现完全由后端决定（/api/train/status 的 warnings[]），
+             这样刷新页面后只要训练还在跑，它就重新出现 —— 因为它描述的是状态，
+             不是"刚才发生了一件事"。逻辑见 js/loadbanner.js。 -->
+        <div class="alert warn loadbanner hide" id="loadBanner" hidden aria-live="polite">
+          <div class="alhd">
+            <span class="lbico" aria-hidden="true">!</span>
+            <b id="loadBannerTitle">模块未能加载</b>
+            <button class="alx" id="loadBannerX" title="关闭" aria-label="关闭">×</button>
+          </div>
+          <div class="albd" id="loadBannerBody"></div>
+          <div class="lblist" id="loadBannerList"></div>
         </div>
 
         <!-- 训练失败横幅：常驻，直到用户关掉。OOM 这类"必须改配置"的错误不能用右下角 toast。 -->
@@ -1468,7 +1482,8 @@
   <script src="/static/js/i18n.js?v=99"></script>
   <!-- TF 时代 dat 的迁移提示：参数页顶部那一行。单独成文件，Node 里能直接断言 -->
   <script src="/static/js/legacy_notice.js?v=1"></script>
-  <script src="/static/js/app.js?v=114"></script>
+  <script src="/static/js/loadbanner.js?v=1"></script>
+  <script src="/static/js/app.js?v=115"></script>
   <script src="/static/js/face_db.js?v=1"></script>
 <script type="module">
   import { startWelcome3D, stopWelcome3D } from "/static/js/welcomeflow.js?v=9";

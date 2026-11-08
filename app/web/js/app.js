@@ -7920,6 +7920,9 @@
               var sv = String(v);
               el.value = sv;
               if (el.selectedIndex < 0 && _ALIAS[sv.toLowerCase()]) el.value = _ALIAS[sv.toLowerCase()];
+              /* 设备：必须在下面那句兜底之前过一遍守卫 —— 一旦 selectedIndex<0 被改成 0，
+                 「存的是 GPU 1 但本机只有 GPU 0」就变成了「用户选了自动」，看不出来了。 */
+              if (el.dataset.cfg === "device" && window.__devGuard) window.__devGuard(el, sv);
               if (el.selectedIndex < 0) el.selectedIndex = 0;
             }
             else if (el.classList.contains("sw")) el.classList.toggle("on", !!v);
@@ -10410,6 +10413,8 @@
       });
       if (sel.selectedIndex < 0) sel.selectedIndex = 0;
       cc.appendChild(sel);
+      /* 设备行：控件旁边常驻「当前可用 GPU 列表」（值由 /api/devices 提供） */
+      if (r.k === "device" && window.__devGuard) window.__devGuard(sel);
     } else if (r.t === "sw") {
       var sw = mk("div", "sw" + (r.v ? " on" : ""));
       if (r.k) sw.dataset.cfg = r.k;
@@ -11179,8 +11184,59 @@
     return out;
   }
 
+  /* 「当前可用 GPU 列表」直接写在下拉框旁边。
+     以前这些信息只藏在选项文字里：存的值一旦不在列表里（换机器、拔了显卡、
+     从别的工程拷了 dat），下拉框就静默跳到「自动选择」，用户完全看不出
+     自己的选择已经被换掉了 —— 和「选了卡却不生效」是同一类问题。 */
+  function devAvailableText(d) {
+    var parts = [];
+    ((d && d.gpus) || []).forEach(function (g) {
+      var mem = g.mem_mb ? " · " + Math.round(g.mem_mb / 1024) + " GB" : "";
+      parts.push("GPU " + g.idx + " " + (g.name || "") + mem);
+    });
+    if (d && d.cpu) parts.push(String(d.cpu));
+    if (!parts.length) return "本机没有可用 GPU";
+    return "可用：" + parts.join(" ｜ ");
+  }
+
+  /* want 给了就用它（回填 dat 时浏览器已经把无效值丢掉，sel.value 读不回来） */
+  function devGuard(sel, want) {
+    if (!sel) return;
+    var d = window.__DEVINFO || {};
+    var stale = sel.querySelector('option[data-invalid="1"]');
+    if (stale) stale.parentNode.removeChild(stale);
+    var cur = (want === undefined || want === null) ? String(sel.value || "") : String(want);
+    /* 只对 GPU 序号（"0" / "0,1"）做拦截：auto / cpu 永远合法 */
+    var numeric = /^[0-9]+(,[0-9]+)*$/.test(cur);
+    var known = false;
+    Array.prototype.forEach.call(sel.options, function (o) { if (o.value === cur) known = true; });
+    if (numeric && !known) {
+      /* 禁用它比默默忽略好：这条 disabled 选项让「本机没有这张卡」变成看得见的事实 */
+      var op = document.createElement("option");
+      op.value = cur;
+      op.textContent = "⚠ GPU " + cur + "（本机不存在）";
+      op.disabled = true;
+      op.setAttribute("data-invalid", "1");
+      sel.insertBefore(op, sel.firstChild);
+      sel.value = cur;
+    }
+    var row = sel.closest ? sel.closest(".cfgrow") : null;
+    if (!row) return;
+    var h = row.querySelector(".devhint");
+    if (!h) {
+      h = document.createElement("span");
+      h.className = "devhint";
+      (sel.parentNode || row).appendChild(h);
+    }
+    var txt = devAvailableText(d);
+    h.textContent = txt;
+    h.title = txt;
+  }
+  window.__devGuard = devGuard;
+
   var DEVOPTS = null;
   function applyDevices(d) {
+    window.__DEVINFO = d || null;
     DEVOPTS = buildDeviceOpts(d);
     window.__DEVOPTS = DEVOPTS;
     /* 已经有下拉框的话就地换选项，不用整页重画 */
@@ -11195,6 +11251,8 @@
       });
       sel.value = keep;
       if (sel.selectedIndex < 0) sel.selectedIndex = 0;
+      /* 旧值不在新列表里：留一条 disabled 的说明，别让下拉框自己换成「自动选择」 */
+      devGuard(sel, keep);
       sel.dispatchEvent(new Event("change", { bubbles: true }));
     });
   }

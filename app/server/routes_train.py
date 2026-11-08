@@ -17,10 +17,22 @@ from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import FileResponse, StreamingResponse
 
 from . import app as _app_mod
+from . import _load_events
 from ._paths import engine_python as _engine_python
-from .app import (WEBUI_PORT, _DFL_ROOT, _kill_train_tree, _last_preview_state, _model_dat, _repair_option_strings, _sweep_orphan_trainers, _train_job, _train_job_lock, _train_worker, _webui_post)
+from . import _train_device as _tdev
+from .app import (WEBUI_PORT, _DFL_ROOT, _engine_supports_cpu_only, _gpu_list, _kill_train_tree, _last_preview_state, _model_dat, _repair_option_strings, _sweep_orphan_trainers, _train_job, _train_job_lock, _train_worker, _webui_post)
 
 router = APIRouter()
+
+
+def _warn_payload(job):
+    """把加载失败事件整理成界面要的形状（每条带一句可直接显示的 text）。
+
+    训练没在跑就直接给空：横幅是"本次训练的状态"，跟着训练进程一起结束。
+    """
+    if not job.get("running"):
+        return []
+    return _load_events.warnings_payload(job.get("warnings") or [])
 
 
 def _check_target(body):
@@ -72,8 +84,26 @@ def train_start(body: dict):
     fixed = _repair_option_strings(name)
     if fixed:
         print("[trainer] 修好了参数里的说明文字: " + ", ".join(fixed), flush=True)
+
+    # ── 设备：参数已落盘，这里先按 dat 里的 device 验一遍 ──
+    # 放在起线程之前，非法值才能变成一条能读懂的 400（带上可用 GPU 列表）；
+    # 否则错误只会留在后台线程里，前端拿到的仍是 {"ok": true}，用户以为开训了。
+    dev_raw, plan, dev_err = None, None, None
+    try:
+        import pickle as _pk2
+        dev_raw = (_pk2.loads(dat.read_bytes()).get("options") or {}).get("device")
+    except Exception:
+        dev_raw = None
+    try:
+        plan = _tdev.plan(dev_raw, _gpu_list(), _engine_supports_cpu_only())
+    except _tdev.DeviceOptionError as _e:
+        dev_err = str(_e)
+    if dev_err:
+        raise HTTPException(400, dev_err)
+
     threading.Thread(target=_train_worker, args=(name, bool(body.get("cpu_only"))), daemon=True).start()
-    return {"ok": True, "name": name, "running": True}
+    return {"ok": True, "name": name, "running": True,
+            "device": plan, "device_banner": plan["banner"]}
 
 
 @router.post("/api/train/save")
@@ -280,6 +310,14 @@ def train_preview(wait: float = 0.0):
 
 @router.get("/api/train/status")
 def train_status():
+    """训练状态。
+
+    warnings[] 是**模块加载失败**的结构化事件（引擎打 [DFL-LOAD-EVENT] 行，
+    app._train_worker 收进 _train_job）。它刻意做成状态而不是一次性通知：
+    训练还在跑的时候，前端每次轮询 / 刷新页面 / 重进训练页都能再拿到一遍，
+    于是那条"某模块被重置"的常驻横幅会重新出现 —— 这正是想要的行为，
+    因为模型现在确实是从那个模块的初始状态在训练。
+    """
     with _train_job_lock:
         j = _train_job
         it = int(j.get("iter") or 0)
@@ -304,5 +342,9 @@ def train_status():
                 "loss_src": j.get("loss_src"),
                 "loss_dst": j.get("loss_dst"),
                 "history": j.get("history") or [],
+                "warnings": _warn_payload(j),
                 "has_preview": bool(_last_preview_state.get("body")),
-                "preview_iter": _last_preview_state.get("iter") or 0}
+                "preview_iter": _last_preview_state.get("iter") or 0,
+                # 设备回显：device=<值> → CUDA_VISIBLE_DEVICES=<env> 由 _train_worker
+                # 算好存在 _train_job 里。老前端不读这个字段也不受影响。
+                "device": j.get("device")}

@@ -9,6 +9,7 @@ import os
 import zipfile
 
 from core.leras.nn import nn
+from core.leras import load_events as _lev
 
 class Saveable():
     def __init__(self, name=None):
@@ -88,9 +89,35 @@ class Saveable():
     def load_weights(self, filename):
         """
         returns True if file exists
+        （失败原因/形状等明细见 load_weights_ex，也会写在 self.last_load_result 上）
         """
-        filepath = Path(filename)
+        return self.load_weights_ex(filename).ok
 
+    def load_weights_ex(self, filename, model_prefix=None):
+        """加载权重，返回带**失败原因**的 LoadResult（bool(result) == 是否成功）。
+
+        和旧的 load_weights 相比补了三件事：
+
+        1. **四种失败可分辨**（load_events.REASON_*）：
+             missing  文件不存在
+             renamed  目录里有像它的 .pth/.npy，但名字对不上
+             shape    参数个数/形状与当前网络不符（含 param_N 缺失）
+             corrupt  文件在，但内容不是可用的权重（magic/zip/pickle/npy 坏）
+        2. **原子性**：先全量校验，全部通过才写参数。
+           旧实现在循环里 copy_，第 k 个参数形状不符时前 k-1 个已经写进去了 ——
+           模块停在"一半新一半旧"的状态，上层再把它当"加载失败→随机初始化"处理，
+           于是权重和优化器（动量/二阶矩）彻底不同步。
+        3. **不吞异常**：出来的是结构化的 reason + 出问题的参数层，而不是一行 stderr。
+
+        参数 model_prefix：模型的文件名前缀（如 '384wf'），只用于把
+        "目录里有别的 .pth" 提升成 renamed 判断；取不到就退回后缀启发式。
+        """
+        p = Path(filename)
+        res = _lev.LoadResult(module=self.name or type(self).__name__,
+                              path=os.fspath(p))
+        self.last_load_result = res
+
+        filepath = p
         if not filepath.exists():
             alt = None
             if filepath.suffix == '.pth':
@@ -99,9 +126,21 @@ class Saveable():
                 alt = filepath.with_suffix('.pth')
             if alt is not None and alt.exists():
                 filepath = alt
+                res.fallback_path = os.fspath(alt)
 
         if not filepath.exists():
-            return False
+            cands = self._find_renamed_candidates(p, model_prefix)
+            if cands:
+                res.reason = _lev.REASON_RENAMED
+                res.candidates = cands
+                res.detail = ("期望 %s，目录里有 %d 个相似文件：%s"
+                              % (p.name, len(cands), ", ".join(cands[:4])))
+            else:
+                res.reason = _lev.REASON_MISSING
+                res.detail = "文件不存在：%s" % os.fspath(p)
+            return res
+
+        res.path = os.fspath(filepath)
 
         fmt = self._detect_format(filepath)
         if fmt == 'zip_npy':
@@ -114,60 +153,264 @@ class Saveable():
                             key = name[:-4]  # strip '.npy'
                             with zf.open(name) as entry:
                                 buf = io.BytesIO(entry.read())
-                                d[key] = np.load(buf)
-                return self._load_pt_weights(d)
+                                d[key] = np.load(buf, allow_pickle=False)
             except Exception as e:
-                print(
-                    f"[WARN] Failed to load zip+npy weights from '{os.fspath(filepath)}': {e}."
-                )
-                return False
+                res.reason = _lev.REASON_CORRUPT
+                res.detail = ("zip+npy 读取失败：%s: %s" % (type(e).__name__, e))
+                print("[WARN] Failed to load zip+npy weights from '%s': %s."
+                      % (os.fspath(filepath), e))
+                return res
+            return self._load_pt_weights(d, res)
 
-        # Legacy pickle format
+        # Legacy pickle format。
+        # 注意 'unknown' 也要走这里：DFL 4.0 的 TF 权重虽然叫 .npy，内容其实是
+        # pickle 出来的 dict（键里带 ':0'）。旧实现也是"非 zip 就当 pickle 试"，
+        # 这里保持不变 —— 只是失败时的原因不再是空白，而是 corrupt + 文件头。
+        del fmt
         try:
             with open(filepath, 'rb') as f:
                 d = pickle.load(f)
-        except (pickle.UnpicklingError, EOFError, ValueError, OSError) as e:
+        except Exception as e:
             try:
                 with open(filepath, 'rb') as f:
                     head = f.read(32)
             except Exception:
                 head = b''
+            res.reason = _lev.REASON_CORRUPT
+            res.detail = "pickle 读取失败：%s: %s（文件头 %r）" % (type(e).__name__, e, head[:16])
             print(
                 f"[WARN] Failed to load weights from '{os.fspath(filepath)}': {e}. "
                 f"This file does not look like a pickle weights file. "
                 f"Header bytes: {head!r}. "
                 f"You may need to delete/replace the corrupted or wrong-format weights file."
             )
-            return False
+            return res
+
+        if not isinstance(d, dict):
+            res.reason = _lev.REASON_CORRUPT
+            res.detail = "反序列化结果不是 dict，而是 %s" % type(d).__name__
+            return res
 
         # Detect original DFL (TensorFlow) format: keys contain TF scope names
         if any(isinstance(k, str) and ':0' in k for k in d.keys()):
-            return self._load_tf_weights(d)
+            if self._load_tf_weights(d):
+                res.ok = True
+                res.reason = _lev.REASON_OK
+                return res
+            res.reason = _lev.REASON_CORRUPT
+            res.detail = "TF(.npy) 权重无法唯一映射到当前网络（见上面的 [WARN]）"
+            return res
 
-        return self._load_pt_weights(d)
+        return self._load_pt_weights(d, res)
 
-    def _load_pt_weights(self, d):
-        """Load current-format weights (param_0, param_1, ...)."""
+    def _weight_owner_names(self, n):
+        """返回与 get_weights() 等长的“这个参数属于哪一层”名字列表。"""
+        cached = getattr(self, '_weight_owner_cache', None)
+        if cached is not None and len(cached) == n:
+            return cached
+        out = []
+        layers = getattr(self, 'layers', None)
+        if isinstance(layers, list):
+            for layer in layers:
+                try:
+                    cnt = len(layer.get_weights())
+                except Exception:
+                    cnt = 0
+                nm = getattr(layer, 'name', None) or type(layer).__name__
+                out.extend([nm] * cnt)
+        fallback = self.name or type(self).__name__
+        while len(out) < n:
+            out.append(fallback)
+        self._weight_owner_cache = out
+        return out
+
+    def _module_token(self, stem, model_prefix=None):
+        """把文件名糖化成“模块令牌”：384wf_decoder_src -> decoder_src。"""
+        s = str(stem)
+        if model_prefix and s.startswith(model_prefix + '_'):
+            s = s[len(model_prefix) + 1:]
+        elif '_' in s:
+            # 没有前缀时只能猜：剥掉第一段（模型名通常不带下划线）
+            s = s.split('_', 1)[1]
+        return s.lower()
+
+    def _find_renamed_candidates(self, filepath, model_prefix=None):
+        """文件不在预期位置时，找找目录里“像它”的 .pth/.npy（改名/换了模型名）。
+
+        只做**诊断**用：命中就报 renamed（比一句“文件不存在”有用得多），
+        不猜、不自动加载 —— 名字对不上时硬加载是以前踩过的坑。
+        """
+        parent = filepath.parent
+        try:
+            if not parent.is_dir():
+                return []
+        except Exception:
+            return []
+        want = self._module_token(filepath.stem, model_prefix)
+        if not want:
+            return []
+        out = []
+        try:
+            names = sorted([q.name for q in parent.iterdir()
+                            if q.is_file() and q.suffix in ('.pth', '.npy')])
+        except Exception:
+            return []
+        for name in names:
+            if name == filepath.name:
+                continue
+            tok = self._module_token(Path(name).stem, model_prefix)
+            if not tok:
+                continue
+            if tok == want or tok.startswith(want) or want.startswith(tok):
+                out.append(name)
+        return out
+
+    def _load_pt_weights(self, d, res=None):
+        """Load current-format weights (param_0, param_1, ...).
+
+        先全量校验（个数/形状），全部通过才写参数；任何一项不过就一个字节都不写。
+        """
         weights = self.get_weights()
 
         if self.name is None:
             raise Exception("name must be defined.")
 
+        if res is None:
+            res = _lev.LoadResult(module=self.name)
+        owners = self._weight_owner_names(len(weights))
+        _MISSING = object()
+
+        entries = []
+        problems = []
+        found_shapes = []
+        for i, w in enumerate(weights):
+            w_name = "param_%d" % i
+            exp_shape = tuple(int(x) for x in w.shape)
+            w_val = d.get(w_name, _MISSING)
+
+            if w_val is _MISSING:
+                problems.append((owners[i], i, exp_shape, None))
+                found_shapes.append([])
+                continue
+
+            try:
+                val = np.asarray(w_val)
+            except Exception as e:
+                problems.append((owners[i], i, exp_shape, None))
+                found_shapes.append([])
+                res.detail = "%s: ndarray 化失败 %s" % (w_name, e)
+                continue
+
+            fnd_shape = tuple(int(x) for x in val.shape)
+            found_shapes.append(list(fnd_shape))
+
+            # 元素个数必须一致。形状不同但元素数相同（(1,64) vs (64,)）允许 reshape，
+            # 这是历史存档的常态；元素数不同就是真的对不上。
+            if int(val.size) != int(w.numel()):
+                problems.append((owners[i], i, exp_shape, fnd_shape))
+                continue
+
+            try:
+                # ★ 不能用 ascontiguousarray 一把梭：它对 0 维数组会返回 (1,)，
+                #   而 iterations / lr_cur 这类标量参数就是 0 维的 —— copy_ 会报
+                #   "output with shape [] does not match the broadcast shape [1]"。
+                arr = val.reshape(exp_shape)
+                if arr.ndim > 0 and not arr.flags["C_CONTIGUOUS"]:
+                    arr = np.ascontiguousarray(arr)
+                src = torch.from_numpy(arr).to(device=w.device, dtype=w.dtype)
+            except Exception as e:
+                problems.append((owners[i], i, exp_shape, fnd_shape))
+                res.detail = "%s: 无法转成张量 %s: %s" % (w_name, type(e).__name__, e)
+                continue
+
+            entries.append((w, src))
+
+        res.expected_shapes = [list(tuple(int(x) for x in w.shape)) for w in weights]
+        res.found_shapes = found_shapes
+
+        if problems:
+            res.ok = False
+            res.reason = _lev.REASON_SHAPE
+            res.affected = problems
+            worst = problems[0]
+            res.detail = ("%d/%d 个参数对不上，第一个：%s #%d 期望 %s 实际 %s"
+                          % (len(problems), len(weights), worst[0], worst[1],
+                             list(worst[2]), list(worst[3]) if worst[3] else "缺失"))
+            return res
+
+        # ---- 全部通过，才开始写 ----
         try:
-            for i, w in enumerate(weights):
-                w_name = f"param_{i}"
-                w_val = d.get(w_name, None)
-
-                if w_val is None:
-                    pass
-                else:
-                    w_val = np.reshape(w_val, w.shape)
-                    src = torch.from_numpy(w_val).to(device=w.device, dtype=w.dtype)
+            with torch.no_grad():
+                for w, src in entries:
                     w.data.copy_(src)
-        except:
-            return False
+        except Exception as e:
+            res.ok = False
+            res.reason = _lev.REASON_CORRUPT
+            res.detail = "写入参数时失败：%s: %s" % (type(e).__name__, e)
+            return res
 
-        return True
+        res.ok = True
+        res.reason = _lev.REASON_OK
+        return res
+
+    def reset_weights(self):
+        """把权重**重新初始化**（就地，保持 Parameter 对象身份不变）。
+
+        为什么不能直接再调一次 build_weights()：那会新建 Parameter 对象，
+        而优化器（以及各处的 trainable_weights 列表）拿的是旧对象的引用 ——
+        换掉对象等于让优化器对着"已经不在网络里的张量"更新，梯度写不回模型。
+
+        做法：先记下每个 (持有者, 属性名, 旧 Parameter)，跑一遍该层自己的
+        build_weights()（于是拿到和构造时**完全同一套**初始化分布：
+        Conv2D/Dense 的 xavier_uniform_ / wscale 的 normal_(0,1) /
+        BatchNorm 的 ones-zeros / TLU 的 zeros …），再把新数值 copy 回旧对象，
+        最后把属性重新指回旧对象。
+
+        返回重新初始化的参数个数；没有可重建的东西时返回 0。
+        """
+        layers = getattr(self, 'layers', None)
+        if isinstance(layers, list):
+            # ModelBase：权重来自各子层，逐个下放
+            total = 0
+            for layer in layers:
+                try:
+                    total += layer.reset_weights()
+                except Exception:
+                    pass
+            return total
+        return self._reset_leaf_weights()
+
+    def _reset_leaf_weights(self):
+        build = getattr(self, 'build_weights', None)
+        if not callable(build):
+            return 0
+        params = [(a, p) for a, p in list(getattr(self, '_parameters', {}).items())
+                  if isinstance(p, torch.nn.Parameter)]
+        buffers = [(a, b) for a, b in list(getattr(self, '_buffers', {}).items())
+                   if isinstance(b, torch.Tensor)]
+        if not params and not buffers:
+            return 0
+        try:
+            build()
+        except Exception:
+            # 重建失败：保持旧数值不动（回归"什么都没发生"比留下半套新值安全）
+            return 0
+        n = 0
+        with torch.no_grad():
+            for attr, old in params:
+                new = self._parameters.get(attr)
+                if isinstance(new, torch.nn.Parameter) and new is not old:
+                    if tuple(new.shape) == tuple(old.shape):
+                        old.data.copy_(new.data)
+                self._parameters[attr] = old
+                n += 1
+            for attr, old in buffers:
+                new = self._buffers.get(attr)
+                if isinstance(new, torch.Tensor) and new is not old:
+                    if tuple(new.shape) == tuple(old.shape):
+                        old.data.copy_(new.data)
+                self._buffers[attr] = old
+        return n
 
     def _load_tf_weights(self, d):
         """Load original DeepFaceLab (TensorFlow) .npy weights.

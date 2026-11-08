@@ -1133,6 +1133,11 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
 /* 控件本身仍然是 30px 高，不被列高带跑 */
 .cfgrow .cc .inp { height: 30px; min-height: 30px; }
 .cfgrow .cc .mgsel { height: 30px; }
+/* 设备下拉旁边的「当前可用 GPU 列表」：一行放不下就省略号，全文在 title 里 */
+.cfgrow .cc .devhint {
+  font-size: 11px; color: var(--ink-3); max-width: 260px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .cfgrow .hotslot {
   /* 固定 24px 的槽：热标签住在这里，没有标签的行也留着这块空位，
      说明文字的左边缘才是同一条竖线。 */

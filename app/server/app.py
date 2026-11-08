@@ -1754,6 +1754,20 @@ def _gpu_list():
     return gpus
 
 
+def _engine_supports_cpu_only() -> bool:
+    """引擎的 train 子命令认不认 --cpu-only。
+
+    不是每个引擎版本都有这个开关（4.0 的 train 解析器是后来才加的）。不认的话
+    argparse 会直接 "unrecognized arguments" 退出 —— 那就得在启动时明确告警，
+    而不是让用户看着进程闪退还不知道为什么。
+    """
+    try:
+        src = (_DFL_ROOT / "main.py").read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return False
+    return "--cpu-only" in src
+
+
 # 档位表：数值不是拍的，是拿本机真实训练过的模型反推的
 #   256 / df-ud   权重约 0.49GB（DFLitetest、model_004 都是这套配置跑起来的）
 #   384 / liae-ud 权重约 2.04GB（384wf，300 万次迭代）
@@ -1917,8 +1931,19 @@ _train_proc = None        # 4.0 训练主进程（控制/清理都要它）
 _last_preview_state = {"body": None, "iter": 0, "at": 0.0}
 
 
+def _merge_warning(existing, ev):
+    """把一条新事件并进 warnings：**同一个模块只留最后一条**。
+
+    模型反复重启训练时同一个模块会反复失败，界面上不该堆成十几条横幅。
+    """
+    out = [w for w in (existing or []) if w.get("module") != ev.get("module")]
+    out.append(ev)
+    return out
+
+
 def _train_worker(name: str, cpu_only: bool):
     import re
+    import pickle as _pk
     import subprocess
     py = _engine_python()
     main_py = _DFL_ROOT / "main.py"
@@ -1929,8 +1954,47 @@ def _train_worker(name: str, cpu_only: bool):
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUNBUFFERED"] = "1"
 
+    # ── 设备选择：options["device"] → CUDA_VISIBLE_DEVICES / --force-gpu-idxs ──
+    # 以前这里**从来不读 options.device**：用户在参数页选好 0 号卡，引擎照样走
+    # nn.DeviceConfig.BestGPU()（显存最大的那张），而且不报错、不提示。
+    # 现在：解析 → 校验 → 映射全部交给 _train_device.plan()，非法值在起进程之前就拒。
+    from . import _train_device as _tdev
+    _dev_raw = None
+    try:
+        _dat_dev = _model_dat(name)
+        if _dat_dev:
+            _dev_raw = (_pk.loads(_dat_dev.read_bytes()).get("options") or {}).get("device")
+    except Exception:
+        _dev_raw = None
+    try:
+        _dev = _tdev.plan(_dev_raw, _gpu_list(), _engine_supports_cpu_only())
+    except _tdev.DeviceOptionError as _e:
+        # 启动前拒绝，绝不静默回退到"显存最大的那张卡"。任务状态也置成失败，
+        # 这样界面上是红色错误而不是"训练中 + 永远 0 迭代"。
+        _emsg = str(_e)
+        print("[train] 设备选择无效，已拒绝启动：" + _emsg, flush=True)
+        with _train_job_lock:
+            _train_job.update({
+                "running": False, "name": name, "ok": False, "error": _emsg,
+                "log": ["[train] 设备选择无效，已拒绝启动：" + _emsg],
+                "warnings": [], "history": [], "iter": 0, "iter_seen": False,
+                "it_s": 0.0, "lr": 0.0, "loss_src": None, "loss_dst": None,
+                "paused": False, "saving": False, "stopping": False, "pid": None,
+                "device": {"raw": _tdev.raw_text(_dev_raw), "mode": "invalid",
+                           "error": _emsg, "available": _gpu_list()}})
+        return
+
+    if _dev["cuda_visible"]:
+        env["CUDA_VISIBLE_DEVICES"] = _dev["cuda_visible"]
+        # 引擎 core/leras/device.py 的 initialize_main_env() 会主动 pop 掉
+        # CUDA_VISIBLE_DEVICES（它假定那是父进程留下的脏值）。这个哨兵告诉它：
+        # 这次的值是启动器算出来的，别动 —— 否则 pop 之后 CUDA 立刻看见全部卡，
+        # 我设的 env 就成了纯装饰（实测 device_count 从 0 变回 1）。
+        env["DFL_KEEP_CUDA_VISIBLE_DEVICES"] = "1"
+    if _dev["cpu_only"]:
+        cpu_only = True
+
     # src/dst 是必填：优先用模型 options 里记的路径，否则用工作区默认的 aligned 目录
-    import pickle as _pk
     src_dir = dst_dir = ""
     try:
         dat = _model_dat(name)
@@ -1975,6 +2039,10 @@ def _train_worker(name: str, cpu_only: bool):
         cmd += ["--pretraining-data-dir", pt_dir]
     if cpu_only:
         cmd.append("--cpu-only")
+    if _dev["force_gpu_idxs"]:
+        # 逻辑序号（0..n-1），不是物理序号：CUDA_VISIBLE_DEVICES 已经把可见集合
+        # 重排过了，传物理 0,2 会让引擎取不到 2 号逻辑卡，两卡退化成单卡。
+        cmd += ["--force-gpu-idxs", _dev["force_gpu_idxs"]]
 
     # 梯度累计：4.1 界面会把 target_batch 拆成 batch_size / accum_steps，
     # 但引擎目前**没有实现梯度累计**（Model_SAEHD 里只有一句注释说明它没有）。
@@ -2011,7 +2079,17 @@ def _train_worker(name: str, cpu_only: bool):
                            # 上一轮的模块加载失败事件不能留到这一轮：
                            # 否则新开的训练一开始就挂着上回那条横幅（状态是假的）。
                            "warnings": [],
-                           "last_backup_iter": 0, "pid": None})
+                           "last_backup_iter": 0, "pid": None,
+                           # 设备选择的结果本身是"状态"：/api/train/status 每次都能
+                           # 回显 device=<值> → CUDA_VISIBLE_DEVICES=<env>，用户能核对。
+                           "device": _dev})
+        # 启动日志也要有这一行（否则只有引擎的 stdout，看不出到底选了哪张卡）
+        _train_job["log"].append(_dev["banner"])
+        if _dev.get("warn"):
+            _train_job["log"].append("[train] " + _dev["warn"])
+    print(_dev["banner"], flush=True)
+    if _dev.get("warn"):
+        print("[train] " + _dev["warn"], flush=True)
     global _train_proc
     # 4.0 训练进度行的真实格式：
     #   [08:42:26][#002012][0061ms][lr:5.00e-05][1.0574][1.8756]
@@ -2039,10 +2117,8 @@ def _train_worker(name: str, cpu_only: bool):
             m = ITER_RE.match(line)
             with _train_job_lock:
                 if _lev is not None:
-                    _cur = [w for w in _train_job.get("warnings") or []
-                            if w.get("module") != _lev.get("module")]
-                    _cur.append(_lev)
-                    _train_job["warnings"] = _cur
+                    _train_job["warnings"] = _merge_warning(
+                        _train_job.get("warnings") or [], _lev)
                 _train_job["log"].append(line[:400])
                 if len(_train_job["log"]) > 300:
                     _train_job["log"] = _train_job["log"][-300:]
