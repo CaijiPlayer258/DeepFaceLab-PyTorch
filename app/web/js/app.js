@@ -3946,6 +3946,8 @@
         frame: idx, idx: idx, n: idx,
         video: mgVidPath(),
         t: t,
+        /* 自动分配要读的人脸库（空串 = 默认库） */
+        project: window.__mergeInputDir || "",
         model: mgFaceSingleModel(),
         /* 多选契约：models=[{name, faces}]；单模型时 faces=[]（= 全部脸，向后兼容） */
         models: (window.mgFaceModelsPayload ? window.mgFaceModelsPayload() : mgModelsPayload()),
@@ -3999,6 +4001,11 @@
         }
         mgHint("");
         window.mgShowOverlay(d.png);
+        /* 这张是「左栏那一个模型换全部脸」的老结果（/api/merge/preview 不认人脸库）；
+           合成视图要的是「每张脸按人脸库自动分配 dfm」。紧接着让 /api/merge/frame
+           补一张正确的 —— 它的缓存键没变就直接命中，不会重复渲染。
+           从 /frame 兜底回来那次（fromFallback）不再触发，否则两条路互相踢皮球。 */
+        if (!(opt && opt.fromFallback) && window.mgCmpSoon) window.mgCmpSoon();
         /* 「框」开着就让框跟这一帧对齐（不再依赖某个视图名） */
         if (window.mgBoxesOn && window.mgBoxesOn()) window.mvDetect(Math.round(v.currentTime * fps));
         return d;
@@ -4106,7 +4113,11 @@
                        "#7048e8", "#0c8599", "#d6336c", "#f08c00"];
   var MG_COLORS = {};          /* dfm 名 → 颜色；同一模型任何一帧都是这个色 */
   var MG_COLORS_KEY = "dfl-merge-model-colors";
-  var MG_FACE_MODEL = {};      /* 脸序号 → dfm 名；没有键 = 未分配（灰框） */
+  var MG_FACE_MODEL = {};      /* 脸序号 → dfm 名；**用户手动指定**的（会随请求发回去） */
+  /* 脸序号 → {dfm, group, groupName, similarity, matched}：**后端按 embedding 自动判定**
+     的结果（每次合成回包里的 faces）。和 MG_FACE_MODEL 分开放是有意的 ——
+     这份不能当输入发回去，否则第一次判错就会被当成"用户指定"永远错下去。 */
+  var MG_FACE_AUTO = {};
   var MG_FACE_NOSWAP = {};     /* 脸序号 → true：这张脸「不换脸」，请求里走 no_swap_faces */
   /* 脸序号 → true：这张脸被「点框」切成了原图（框线虚线 + 框角小标签）。
      和 MG_FACE_NOSWAP 走同一个契约键 no_swap_faces，区别只是它不改模型分配：
@@ -4176,10 +4187,30 @@
   }
   window.mgUnassignedColor = mgUnassignedColor;
 
+  /* 后端自动判定的模型名（没有就是空串） */
+  function mgFaceAuto(i) {
+    var a = MG_FACE_AUTO[i];
+    return (a && a.dfm) ? String(a.dfm) : "";
+  }
+  window.mgFaceAuto = mgFaceAuto;
+
+  /* 这张脸现在用哪个 dfm：手动指定 > 后端自动判定 > 空（灰框） */
   function mgFaceModel(i) {
-    return Object.prototype.hasOwnProperty.call(MG_FACE_MODEL, i) ? String(MG_FACE_MODEL[i] || "") : "";
+    if (Object.prototype.hasOwnProperty.call(MG_FACE_MODEL, i)) return String(MG_FACE_MODEL[i] || "");
+    return mgFaceAuto(i);
   }
   window.mgFaceModel = mgFaceModel;
+
+  /* chip 上的字：模型名 > 不换脸 > 没匹配上 > 选择模型。
+     「没匹配」= 后端算完了但谁的组都不像（< 阈值），这张脸会被保持原像素。 */
+  function mgFaceChipText(i) {
+    var nm = mgFaceModel(i);
+    if (nm) return nm;
+    if (mgFaceIsNoSwap(i)) return "不换脸";
+    var a = MG_FACE_AUTO[i];
+    if (a && a.matched === false) return "没匹配";
+    return "选择模型";
+  }
 
   /* 「不换脸」= 契约里的 no_swap_faces：后端会把这张脸原样留在帧里（连一个像素都
      不动），而不是"没分配 → 兜给第 0 个模型"。序号就是检测顺序，从 0 起。 */
@@ -4330,6 +4361,7 @@
   function mgClearFaceAssign() {
     MG_FACE_MODEL = {};
     MG_FACE_NOSWAP = {};
+    MG_FACE_AUTO = {};
     mgResetFaces();
     /* 换了素材 → 刚才那份「能不能拿到这一帧的图」的缓存作废 */
     if (window.mgSourceForget) window.mgSourceForget();
@@ -4409,7 +4441,7 @@
     if (color) { btn.style.borderColor = color; btn.style.color = color; }
     var txt = document.createElement("span");
     txt.className = "ddtxt";
-    txt.textContent = mname || (mgFaceIsNoSwap(i) ? "不换脸" : "选择模型");
+    txt.textContent = mgFaceChipText(i);
     btn.appendChild(txt);
 
     var menu = document.createElement("div");
@@ -4498,7 +4530,7 @@
       var color = nm ? mgModelColor(nm) : "";
       var btn = card.querySelector(".mgfb");
       var tx = card.querySelector(".ddtxt");
-      if (tx) tx.textContent = nm || (mgFaceIsNoSwap(i) ? "不换脸" : "选择模型");
+      if (tx) tx.textContent = mgFaceChipText(i);
       if (btn) {
         btn.classList.toggle("has", !!color);
         btn.style.borderColor = color || "";
@@ -4522,8 +4554,11 @@
       if (!byName[nm]) { byName[nm] = []; order.push(nm); }
       byName[nm].push(i);
     });
-    /* 一张都没分配：沿用「左栏选中 = 全部脸」的老行为，老调用不受影响 */
-    if (!order.length) return (typeof mgModelsPayload === "function") ? mgModelsPayload() : [];
+    /* 一张都没手动分配 → 发空数组：**让后端按人脸 embedding 自动决定每张脸用哪个
+       dfm**（/api/merge/frame、/api/merge/merged 的自动分配）。
+       以前这里退回「左栏选中 = 全部脸」，那等于用同一个模型换所有人 ——
+       和「组里的人脸 = 那个组的 dfm」的语义正好相反。 */
+    if (!order.length) return [];
     return order.map(function (nm) {
       return { name: nm, faces: byName[nm].sort(function (a, b) { return a - b; }) };
     });
@@ -4631,6 +4666,9 @@
     var body = {
       frame: frame, idx: frame, n: frame,
       video: mgVidPath(), t: t, w: 900,
+      /* 人脸库跟着当前项目走（空串 = 默认库 <工作区>/merge）：
+         自动分配用的是**这个库**里的组。和人脸库页面 / 「＋」落库是同一个库。 */
+      project: window.__mergeInputDir || "",
       /* 点过「不换脸」的那几张脸：后端按这个列表原样留下（no_swap_faces）。
          以前这个键一次都没发过，界面上点「不换脸」只是清掉分配，后端照样兜给
          第 0 个模型 —— 等于没生效。 */
@@ -4679,6 +4717,8 @@
       mgCmpNote(false);
       var png = d.png || d.image || d.data || d.frame_png || "";
       if (png) { window.mgShowOverlay(png); mgHint(""); }
+      /* 每张脸被判给了哪个组 → chip 上直接显示（用户手动改则覆盖） */
+      mgApplyFacePlan(d);
       return d;
     }).catch(function (e) {
       if (seq !== MG_CMP.seq) return null;
@@ -4719,7 +4759,9 @@
       if (seq !== MG_CMP.seq) return null;
       mgCmpNote(false);
       /* 逐帧接口也没有：视频模式退回老的预览接口（它自己也带 settings/models） */
-      if (mgVideoMode() && window.mgPreviewNow) return window.mgPreviewNow({ force: true });
+      if (mgVideoMode() && window.mgPreviewNow) {
+        return window.mgPreviewNow({ force: true, fromFallback: true });
+      }
       return null;
     });
   }
@@ -4763,9 +4805,51 @@
   }
   window.mgCmpSync = mgCmpSync;
 
+  /* ---------- 后端自动判定的结果 → 画面上每张脸的 chip ---------- */
+  /* 合成回包里的 faces 是「这一帧每张脸被判给了哪个组/dfm + 相似度」的**权威答案**
+     （auto=true 表示来自人脸库的 embedding 对比，false 表示用户手动指定过）。
+     整份替换而不是合并：这一帧有几张脸、各自像谁，答案就在这一次响应里；
+     上一帧的残留必须清掉，否则换人之后 chip 还挂着上一个模型。 */
+  function mgApplyFacePlan(d) {
+    var list = (d && d.faces) || [];
+    if (!list.length) {
+      /* 这一帧没有 faces = 走了单模型老路径（库里还没有组 / 老后端）。
+         上一帧自动判出来的 chip 必须清掉，否则换人之后还挂着上个模型。 */
+      if (d && d.ok && Object.keys(MG_FACE_AUTO).length) {
+        MG_FACE_AUTO = {};
+        mgSyncFaceCards();
+        if (window.mvRedrawBoxes) window.mvRedrawBoxes();
+      }
+      return;
+    }
+    var next = {};
+    list.forEach(function (f) {
+      if (!f) return;
+      var raw = (f.idx != null) ? f.idx : f.face;
+      var i = parseInt(raw, 10);
+      if (isNaN(i) || i < 0) return;
+      var sim = (f.similarity == null) ? null : Number(f.similarity);
+      next[i] = {
+        dfm: String(f.dfm || f.model || ""),
+        group: String(f.group || ""),
+        groupName: String(f.group_name || ""),
+        similarity: (sim == null || isNaN(sim)) ? null : sim,
+        matched: f.matched !== false,
+        auto: f.auto !== false
+      };
+    });
+    MG_FACE_AUTO = next;
+    mgSyncFaceCards();
+    if (window.mvRedrawBoxes) window.mvRedrawBoxes();   /* 框色跟着判出来的模型走 */
+  }
+  window.mgApplyFacePlan = mgApplyFacePlan;
+
   /* ---------- 分配模型 → 立刻重算 ---------- */
   function mgAssignFace(i, name) {
     name = String(name || "");
+    /* 手动指定 = 覆盖自动判定：把这一张从 MG_FACE_AUTO 里摘掉，
+       否则下一次回包之前 chip 还会显示自动判出来的那个名字。 */
+    delete MG_FACE_AUTO[i];
     if (name) { MG_FACE_MODEL[i] = name; delete MG_FACE_NOSWAP[i]; }
     else { delete MG_FACE_MODEL[i]; MG_FACE_NOSWAP[i] = true; }   /* 「不换脸」→ no_swap_faces */
     MG_FACE_BUSY[i] = true;
@@ -4917,6 +5001,11 @@
       mgToastErr("add-noface", "这一帧没检测到脸", detail || "换一帧再点", "warn", 5000);
     } else if (why === "detect_failed") {
       mgToastErr("add-detfail", "服务端检测失败", detail || "检测器没跑起来", "error", 5000);
+    } else if (why === "no_group_match") {
+      /* 这张脸谁的组都不像（相似度都 < 阈值）→ 后端没落库，等用户手动指定 */
+      mgToastErr("add-nogroup", "这张脸和现有分组都不像",
+                 "请手动拖到某个组：先在框上的 chip 里给它选一个模型，再点＋",
+                 "warn", 6000);
     } else {
       mgToastErr("add-" + why, "没有加到人脸库",
                  detail || why || "后端没有给出原因", "warn", 5000);
@@ -4956,81 +5045,83 @@
        绝不因为手里没有 kps68 就在这里弹错返回 —— 老后端（/api/merge/detect
        不回 kps68）时那样等于＋什么都没干，而用户看到的是「缺少 68 点」和
        「还没有素材」两条自相矛盾的提示（画面里明明有视频）。 */
-    /* 落进哪个组由人脸库说了算（下拉「提取到 <dfm>」那一个 = 当前选中的组）：
-       以前这里用「这张脸被分配到的模型」，没有就发空串 → 脸落进未分组；界面上
-       已经没有未分组了，那样等于凭空消失。所以先问到一个真实存在的组再发请求。 */
-    var targetP = (window.FaceDB && window.FaceDB.addTarget)
-      ? window.FaceDB.addTarget(window.__mergeInputDir || "")
-      : Promise.resolve(null);
+    /* 落进哪一组**不由前端决定**（「提取到 <dfm>」下拉已经删掉）：
+       后端会算这张脸的 embedding，和每个组的均值向量比余弦，像谁就归谁
+       （响应里的 group / group_name / similarity / matched）。
+       唯一带过去的偏好是「这张脸在框上的 chip 里被手动指定过模型」——
+       那只是**匹配不上时的兜底**，不是目标组。 */
+    var payload = {
+      /* 有项目用项目库；没有留空 → 后端用默认库 <工作区>/merge 自己建 */
+      project: window.__mergeInputDir || "",
+      frame: frame,
+      /* 同一帧只留一张脸：idx = 这张脸在这一帧里是第几张（多脸帧各存各的） */
+      idx: i,
+      detector: mgDetectorName() || "",
+      source: { video: video, frame: frame }
+    };
+    var chip = String(MG_FACE_MODEL[i] || "");
+    if (chip) payload.dfm = chip;
+    if (has68) payload.kps68 = kps68;
+    if (box) payload.box = box;
 
-    targetP.then(function (target) {
-      if (!target || !target.dfm) {
-        done();
-        mgToastErr("add-nodfm", "先选模型",
-                   "还没有能落的人脸组：先在合成器里选一个 SAEHD 模型，或在人脸库里点一个组",
-                   "warn", 6000);
-        return null;
-      }
-      var payload = {
-        /* 有项目用项目库；没有留空 → 后端用默认库 <工作区>/merge 自己建 */
-        project: window.__mergeInputDir || "",
-        /* dfm = 目标组：后端按 dfm 找到/建出组，脸一定落在组里，不再有未分组 */
-        dfm: target.dfm,
-        frame: frame,
-        /* 同一帧只留一张脸：idx = 这张脸在这一帧里是第几张（多脸帧各存各的） */
-        idx: i,
-        detector: mgDetectorName() || "",
-        source: { video: video, frame: frame }
-      };
-      if (has68) payload.kps68 = kps68;
-      if (box) payload.box = box;
-
-      return fetch("/api/merge/faces/add", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      }).then(function (r) {
-        return r.json().then(function (d) {
-          /* no_face / no_landmarks68 / detect_failed 这类是业务结果
-             （200 + ok:false），当成正常返回交给下面按 reason 说话，
-             别报成「失败 HTTP 200」。 */
-          if (d && d.ok === false && d.reason) return d;
-          if (r.ok && d && d.ok !== false) return d;
-          var err = new Error((d && (d.detail || d.error)) || ("HTTP " + r.status));
-          err.status = r.status;
-          throw err;
-        }, function () {
-          var err = new Error("HTTP " + r.status);
-          err.status = r.status;
-          throw err;
-        });
-      }).then(function (d) {
-        done();
-        if (d && d.ok === false) {
-          mgAddFaceFail(d);
-          return;
-        }
-        var faces = (d && d.faces) || [];
-        var hit = faces[0] || null;
-        var fid = (hit && hit.id) ? String(hit.id) : "";
-        /* landmarks_from=server 说明这 68 点是后端自己补算的（前端手里没有） */
-        var how = (d && d.landmarks_from === "server") ? " · 服务端补算 68 点" : "";
-        var where = String(target.label || target.dfm || "");
-        /* 后端按 (video, frame, idx) 去重：已有就回 replaced=true —— 那是**更新**，
-           不能再报「已加入」（否则连点 5 次会看到 5 条「已加入」却只有 1 张脸）。 */
-        if (d && d.replaced) {
-          toast("已更新该帧的人脸", fid + (where ? " · " + where : "") + how, "success");
-        } else {
-          toast("已加入人脸数据库", (where ? fid + " · " + where : fid) +
-                (d && d.created ? " · 新建了库" : "") + how,
-                "success");
-          /* 角标只数「新增」：更新没有让库变大，不该涨 */
-          mgDbBadgeBump(1);
-        }
-        mgFlyToDb(i, box);
-        /* 人脸库开着就地刷新，别让用户以为没加进去 */
-        try { if (window.FaceDB && window.FaceDB.refresh && window.FaceDB.isOpen()) window.FaceDB.refresh(); } catch (e) {}
+    fetch("/api/merge/faces/add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }).then(function (r) {
+      return r.json().then(function (d) {
+        /* no_face / no_landmarks68 / detect_failed / no_group_match 这类是业务结果
+           （200 + ok:false），当成正常返回交给下面按 reason 说话，
+           别报成「失败 HTTP 200」。 */
+        if (d && d.ok === false && d.reason) return d;
+        if (r.ok && d && d.ok !== false) return d;
+        var err = new Error((d && (d.detail || d.error)) || ("HTTP " + r.status));
+        err.status = r.status;
+        throw err;
+      }, function () {
+        var err = new Error("HTTP " + r.status);
+        err.status = r.status;
+        throw err;
       });
+    }).then(function (d) {
+      done();
+      if (d && d.ok === false) {
+        mgAddFaceFail(d);
+        return;
+      }
+      var faces = (d && d.faces) || [];
+      var hit = faces[0] || null;
+      var fid = (hit && hit.id) ? String(hit.id) : "";
+      /* landmarks_from=server 说明这 68 点是后端自己补算的（前端手里没有） */
+      var how = (d && d.landmarks_from === "server") ? " · 服务端补算 68 点" : "";
+      /* 落进哪一组是后端按 embedding 判的：group_name 组名、similarity 余弦相似度。
+         auto=true = 「和组均值比出来最像的那个」；chip 兜底时 source="chip"。 */
+      var where = String((d && d.group_name) || "");
+      var sim = (d && d.similarity != null) ? Number(d.similarity) : null;
+      var why = (sim == null || isNaN(sim)) ? "" : (" · 相似度 " + sim.toFixed(2));
+      var by = (d && d.auto) ? "（自动判定）"
+             : ((d && d.source === "chip") ? "（按 chip 的模型）" : "");
+      /* 后端按 (video, frame, idx) 去重：已有就回 replaced=true —— 那是**更新**，
+         不能再报「已加入」（否则连点 5 次会看到 5 条「已加入」却只有 1 张脸）。 */
+      if (d && d.replaced) {
+        toast("已更新该帧的人脸", fid + (where ? " · " + where : "") + by + why + how,
+              "success");
+      } else {
+        toast("已加入人脸数据库", (where ? fid + " · " + where : fid) + by + why +
+              (d && d.created ? " · 新建了库" : "") + how, "success");
+        /* 角标只数「新增」：更新没有让库变大，不该涨 */
+        mgDbBadgeBump(1);
+      }
+      /* chip 立刻显示「这张脸被判给了谁」，不等下一次整帧重算 */
+      if (where && d && d.auto) {
+        MG_FACE_AUTO[i] = { dfm: String(d.group_dfm || ""), group: String(d.group || ""),
+                            groupName: where, similarity: sim, matched: true, auto: true };
+        mgSyncFaceCards();
+        if (window.mvRedrawBoxes) window.mvRedrawBoxes();
+      }
+      mgFlyToDb(i, box);
+      /* 人脸库开着就地刷新，别让用户以为没加进去 */
+      try { if (window.FaceDB && window.FaceDB.refresh && window.FaceDB.isOpen()) window.FaceDB.refresh(); } catch (e) {}
     }).catch(function (e) {
       done();
       /* 拿不到图时后端会把「当前是视频模式/项目模式、缺的是哪一个」写进 detail */

@@ -820,7 +820,9 @@
           模式徽标、底部统计栏里的「关闭」。
           批量语义只剩「组内」：顶栏不再有跨组的「全选 / 清空选择」，
           「已选 N 张」本身就是清空按钮；全选挪到每张组卡片头部右侧的勾选框。
-          顶栏一行装完：标题 + 已选 N 张 + 提取到 + 关闭（唯一的关闭入口）。
+          顶栏一行装完：标题 + 已选 N 张 + 关闭（唯一的关闭入口）。
+          「提取到 <dfm>」下拉已经删掉：新脸落进哪一组由后端按人脸 embedding 判定
+          （像哪个组里的脸就归哪个组），不归用户在这里选。
           组卡片横向排一行（放不下就横向滚）；回收站面板本身就是拖放目标。
         -->
         <div class="mgview" data-view="facedb" id="mgFaceDb">
@@ -833,10 +835,6 @@
                 <button class="fdb-selected" id="fdbSelChip" type="button" title="清空选择（Esc）" disabled><span>已选</span><b id="fdbSelCount">0</b><span>张</span><span class="fdb-selected-x" aria-hidden="true">×</span></button>
               </div>
               <div class="fdb-topacts">
-                <div class="fdb-extract" id="fdbExtractWrap">
-                  <label class="fdb-lbl" for="fdbDfm">提取到</label>
-                  <select class="mgsel fdb-dfm" id="fdbDfm" aria-label="提取到哪个 DFM"></select>
-                </div>
                 <button class="btn ghost fdb-close" id="fdbClose" type="button">关闭</button>
               </div>
             </header>

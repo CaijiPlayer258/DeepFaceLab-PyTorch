@@ -8,8 +8,9 @@
  *   · Ctrl / Shift 多选；组头勾选框 = **组内全选**（半选时走 indeterminate）；
  *     顶栏没有「全选 / 清空选择」两颗按钮：「已选 N 张」本身就是清空按钮；
  *     键盘 T（回收站）、Esc（清空选择）；
- *   · 新脸怎么落库由「＋」走 /api/merge/faces/add，落进哪一组靠 addTarget()
- *     （= 下拉「提取到」选中的组 / 第一个组 / 第一个模型）；
+ *   · 新脸怎么落库由「＋」走 /api/merge/faces/add，**落进哪一组由后端按人脸
+ *     embedding 判定**（像哪个组里的脸就归哪个组）；这里不再提供「提取到」下拉，
+ *     也不替后端挑组；
  *   · 「继续导出」只把控制权交回 app.js，自己绝不发 /export 请求。
  *
  * 界面上没有「未分组」区、没有移动按钮、没有提取按钮：这个页面只做
@@ -28,9 +29,6 @@
     project: "",
     mode: "export",
     frame: null,
-    allowExtract: true,
-    dfm: "",
-    dfmNames: [],
     data: null,
     loaded: false,
     loading: false,
@@ -181,66 +179,6 @@
       if (!g.orphan && g.dfm && out.indexOf(g.dfm) < 0) out.push(g.dfm);
     });
     return out;
-  }
-
-  function collectDfmNames() {
-    var out = [];
-    try {
-      if (typeof window.mgModelsPayload === "function") {
-        (window.mgModelsPayload() || []).forEach(function (m) {
-          var n = String((m && m.name) || "").trim();
-          if (n && out.indexOf(n) < 0) out.push(n);
-        });
-      }
-    } catch (e) { /* ignore */ }
-    var groups = (state.data && state.data.groups) || [];
-    groups.forEach(function (g) {
-      var n = String(g.dfm || "").trim();
-      if (n && out.indexOf(n) < 0) out.push(n);
-    });
-    return out;
-  }
-
-  function refreshDfmOptions(prefer) {
-    var sel = $("fdbDfm");
-    if (!sel) return;
-    state.dfmNames = collectDfmNames();
-    var keep = prefer != null ? String(prefer) : String(sel.value || state.dfm || "");
-    var opts = state.dfmNames.slice();
-    sel.innerHTML = "";
-    opts.forEach(function (name) {
-      var o = document.createElement("option");
-      o.value = name;
-      o.textContent = name;
-      sel.appendChild(o);
-    });
-    /* 一个模型都没有：给一个禁用的占位，别让下拉空着像个坏控件。
-       这时「＋」会提示先选模型 —— 界面里不允许再出现「未分组」这个选项。 */
-    if (!opts.length) {
-      var ph = document.createElement("option");
-      ph.value = "";
-      ph.textContent = "—";
-      ph.disabled = true;
-      sel.appendChild(ph);
-    }
-    if (opts.indexOf(keep) < 0) keep = opts[0] || "";
-    sel.value = keep;
-    state.dfm = keep;
-    /* select 被 app.js 换成了 .dd 替身：替身的文字只在 change 时同步。
-       这里用原生 change 通知它，否则选项换了、按钮还显示上一轮的空白。 */
-    try { sel.dispatchEvent(new Event("change", { bubbles: true })); } catch (e) {}
-  }
-
-  function syncDfmToGroup(gid) {
-    var group = groupById(gid);
-    if (group && !group.orphan && group.dfm) {
-      state.dfm = group.dfm;
-      var sel = $("fdbDfm");
-      if (sel && Array.prototype.some.call(sel.options, function (o) { return o.value === group.dfm; })) {
-        sel.value = group.dfm;
-        try { sel.dispatchEvent(new Event("change", { bubbles: true })); } catch (e) {}
-      }
-    }
   }
 
   function groupById(gid) {
@@ -527,21 +465,6 @@
     if (rAll) rAll.disabled = dis || trashN === 0;
     var pAll = $("fdbPurgeAll");
     if (pAll) pAll.disabled = dis || trashN === 0;
-    updateAddTarget();
-  }
-
-  /* 「提取到 <dfm>」不再配一颗提取按钮：新脸由合成器框上的「＋」落库
-     （/api/merge/faces/add），这里只剩「选中哪个组」这一件事。
-     一个模型都没有时下拉禁用，「＋」那边会提示先选模型。 */
-  function updateAddTarget() {
-    var wrap = $("fdbExtractWrap");
-    if (wrap) wrap.hidden = !state.allowExtract;
-    var sel = $("fdbDfm");
-    if (!sel) return;
-    var none = !state.dfmNames.length;
-    sel.disabled = none || state.loading || state.busy;
-    sel.title = none ? "工作区里还没有模型：先在合成器里选一个 SAEHD 模型"
-                     : "新「＋」加进来的脸落进这个组";
   }
 
   /* ---------- 渲染：组 / 人脸 / 回收站 / 统计 ---------- */
@@ -551,9 +474,7 @@
     renderGroups();
     renderTrash();
     renderStats();
-    refreshDfmOptions(state.dfm);
     updateSelection();
-    updateAddTarget();
     var empty = $("fdbEmpty");
     if (empty) empty.hidden = activeFaces().length !== 0;
     var ld = $("fdbLoading");
@@ -1100,7 +1021,7 @@
     return view.offsetParent !== null;
   }
 
-  /* 顶栏只留「人脸数据库 + 已选 N 张（点它清空）+ 提取到 + 关闭」：
+  /* 顶栏只留「人脸数据库 + 已选 N 张（点它清空）+ 关闭」：
      项目名副标题、模式徽标、当前帧这些小字都删了（合成器里本来就有）；
      跨组的「全选 / 清空选择」两颗按钮也删了 —— 批量只发生在组内。 */
   function updateHeader() {
@@ -1122,7 +1043,6 @@
     /* 没有 onContinue = 只是来看库的（合成器顶部入口）：不当导出流程拦，
        关闭就是回合成视图，也不再问「返回会取消本次导出？」 */
     state.browseOnly = !state.onContinue;
-    state.allowExtract = opts.allowExtract !== false;
     state.frame = (opts.frame != null) ? opts.frame : currentFrameSnapshot();
     state.selected = {};
     state.anchor = "";
@@ -1131,7 +1051,6 @@
     state.loaded = false;
     state.loading = false;
     state.busy = false;
-    state.dfm = selectedDfms()[0] || "";
     state.seq++;
     updateHeader();
     var cont = $("fdbContinue");
@@ -1145,7 +1064,6 @@
     var er = $("fdbError"); if (er) er.hidden = true;
     var ld = $("fdbLoading"); if (ld) ld.hidden = false;
     if (window.mgStep) window.mgStep("facedb");
-    refreshDfmOptions(state.dfm);
     var firstGroup = null;
     openLoad();
     setTimeout(function () {
@@ -1231,7 +1149,7 @@
         if (face) {
           var id = face.getAttribute("data-face-id");
           var gid = face.getAttribute("data-group") || "";
-          if (gid) { state.activeGroup = gid; syncDfmToGroup(gid); }
+          if (gid) state.activeGroup = gid;
           selectOne(id, e);
           try { face.focus({ preventScroll: true }); } catch (err) {}
           return;
@@ -1239,7 +1157,6 @@
         var group = e.target.closest && e.target.closest(".fdb-group");
         if (group) {
           state.activeGroup = group.getAttribute("data-group") || "";
-          syncDfmToGroup(state.activeGroup);
         }
       });
       board.addEventListener("pointerdown", onPointerDown);
@@ -1300,71 +1217,18 @@
       if (fn) { try { fn(); } catch (e) { toast("操作失败", String(e && e.message || e), "error"); } }
     });
 
-    var dfm = $("fdbDfm");
-    if (dfm) dfm.addEventListener("change", function () { state.dfm = dfm.value; });
   }
 
-  /* ---------- 「＋」落库目标：当前选中的组 ---------- */
-  /* 界面上已经没有「未分组」，所以新脸必须落进一个真实存在的组：
-       1) 页面开着 → 用户在下拉「提取到」里选的那一组（点组卡片也会把它选上）；
-       2) 没选 / 没开 → 库里第一个非 orphan 的组；
-       3) 库里一个组都没有 → 合成器里选中的第一个模型（后端按 dfm 顺手建组）；
-       4) 连模型都没有 → null，前端提示「先选模型」。
-     每次点「＋」都现查一次 /api/merge/faces（同一个请求在飞时共用），**不做**
-     时间缓存：刚建好组、刚选好模型的两秒里给出旧答案会让「＋」白点一次。 */
-  var TGT = { at: 0, project: null, data: null, inflight: null };
-
-  function pickTarget(data) {
-    var groups = ((data && data.groups) || []).filter(function (g) { return g && g.dfm; });
-    var models = collectDfmNames();
-    var want = String(state.dfm || "");
-    var hit = null;
-    groups.forEach(function (g) { if (!hit && String(g.dfm) === want) hit = g; });
-    if (!hit && want && models.indexOf(want) >= 0) {
-      return { dfm: want, group: "", label: want };
-    }
-    if (!hit) {
-      groups.forEach(function (g) { if (!hit && !g.orphan) hit = g; });
-      if (!hit) hit = groups[0] || null;
-    }
-    if (hit) return { dfm: String(hit.dfm), group: hit.id, label: hit.name || hit.dfm };
-    var first = models[0] || "";
-    return first ? { dfm: first, group: "", label: first } : null;
-  }
-
-  /* 只为了问「库里有哪几个组」：不渲染、不改状态；同一个请求在飞时共用。 */
-  function libraryFor(project) {
-    if (TGT.inflight && TGT.project === project) return TGT.inflight;
-    TGT.project = project;
-    TGT.inflight = call(API + "?project=" + encodeURIComponent(project),
-                        { cache: "no-store" }, 15000).then(function (d) {
-      TGT.data = d; TGT.at = Date.now(); TGT.inflight = null;
-      return d;
-    }, function (e) {
-      TGT.inflight = null; TGT.data = null;
-      throw e;
-    });
-    return TGT.inflight;
-  }
-
-  function addTarget(project) {
-    project = String(project == null ? state.project : project);
-    /* 页面开着时用手里这份真数据（用户刚点过组卡片 / 换过下拉） */
-    if (state.open && state.loaded && state.data) {
-      return Promise.resolve(pickTarget(state.data));
-    }
-    return libraryFor(project).then(pickTarget, function () { return pickTarget(null); });
-  }
-
+  /* ---------- 「＋」落库目标：不再由前端挑组 ---------- */
+  /* 用户定的语义：组里的人脸 = 那个组的 dfm，新脸归哪一组由**后端按 embedding**
+     判定（POST /api/merge/faces/add 自己算、自己比、自己决定）。所以前端不再挑组 ——
+     只负责把请求发出去，落哪个组看后端返回的 group / group_name / similarity。 */
   window.FaceDB = {
     open: open,
     close: cancel,
     requestClose: askCancel,
     refresh: load,
     isOpen: function () { return state.open; },
-    /* 合成器框上的「＋」用：告诉它这张新脸该落进哪个组（null = 先选模型） */
-    addTarget: addTarget,
-    selectedDfm: function () { return String(state.dfm || ""); },
     currentProject: function () { return state.project; },
     /* 调试/验收用：不改变状态，只把内部开关读出来。 */
     debug: function () {

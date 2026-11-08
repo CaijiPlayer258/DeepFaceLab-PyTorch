@@ -9,6 +9,7 @@
         f_0001.png          统一尺寸的 PNG 人脸（512 或该 DFM 的输入尺寸）
         _trash/             回收站：文件搬进来，index 里 trashed=true
         _thumb/             128×128 JPEG 缩略图缓存（首次访问才生成）
+        emb/                每张脸的 ArcFace 特征 <id>.npy（512 维 float32，L2 归一化）
         .lock               跨进程文件锁（不参与业务）
 
 几个刻意的约定：
@@ -45,6 +46,7 @@ ROOT = Path(__file__).resolve().parents[2]
 FACES_DIRNAME = "_faces"
 TRASH_DIRNAME = "_trash"
 THUMB_DIRNAME = "_thumb"
+EMB_DIRNAME = "emb"          # 每张脸一个 <id>.npy：分组判定用的 512 维特征
 INDEX_NAME = "index.json"
 BACKUP_NAME = "index.json.bak"
 # 同帧去重只做一次：老库里堆出来的重复清完就记一笔，之后用户从回收站还原的
@@ -534,6 +536,23 @@ def thumb_path(project: Path, face_id: str) -> Path:
     return safe_join(faces_dir(project) / THUMB_DIRNAME, face_id + ".jpg", "缩略图")
 
 
+def emb_dir(project: Path) -> Path:
+    """特征向量目录（_faces/emb/）。写的时候才建，读的时候不建。"""
+    return faces_dir(project) / EMB_DIRNAME
+
+
+def emb_path(project: Path, face_id: str) -> Path:
+    """一张脸的特征文件：_faces/emb/<id>.npy（独立文件，不进 index）。
+
+    为什么不塞进 index.json：512 维 float32 = 2 KB，1000 张脸就是 2 MB 的
+    JSON 数字文本，每次 move / trash 都要重写一遍；独立 .npy 还能让
+    「还没算过」= 文件不存在，判起来零成本。
+    """
+    if not FACE_ID_RE.match(str(face_id or "")):
+        raise FacesError("非法的人脸 id：%r" % face_id, 400)
+    return safe_join(emb_dir(project), face_id + ".npy", "特征向量")
+
+
 def _imread(path: Path):
     import cv2
     import numpy as np
@@ -834,6 +853,12 @@ def delete_faces(project: Path, ids):
                 tp = thumb_path(project, f["id"])
                 if tp.is_file():
                     tp.unlink()
+            except (OSError, FacesError):
+                pass
+            try:
+                ep = emb_path(project, f["id"])
+                if ep.is_file():
+                    ep.unlink()
             except (OSError, FacesError):
                 pass
             removed.append(f["id"])

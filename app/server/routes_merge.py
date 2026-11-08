@@ -1020,14 +1020,18 @@ def _encode_frame(img, maxw: int, fmt: str, quality: int) -> bytes:
     return buf.tobytes()
 
 
+def _source_ident(snap: dict, mode: str, name: str) -> list:
+    """「这一帧属于哪份素材」的身份段（合成缓存 / 自动分配缓存共用同一份口径）。"""
+    if mode == "project":
+        return ["project", str(snap.get("srcdir")), str(name)]
+    return ["video"] + list(_grab_key(str(snap.get("path") or "")))
+
+
 def _compose_sig(snap: dict, mode: str, idx: int, name: str, cfg: dict, dfm: str,
                  models, xseg: str, detector: str, thresh: float,
                  fmt: str, quality: int, maxw: int, no_swap=None) -> str:
     """合成结果的身份：**参数一个都不能漏**，漏了就是"改了参数画面不动"的老 bug。"""
-    if mode == "project":
-        ident = ["project", str(snap.get("srcdir")), str(name)]
-    else:
-        ident = ["video"] + list(_grab_key(str(snap.get("path") or "")))
+    ident = _source_ident(snap, mode, name)
     try:
         tail = json.dumps([int(idx), cfg, str(dfm), str(xseg), str(detector),
                            round(float(thresh), 4),
@@ -1070,6 +1074,230 @@ def _merge_query_into(payload: dict, **kw):
         if k in payload and payload[k] not in (None, ""):
             continue
         payload[k] = v
+
+
+# ============================================================
+# 自动分配：人脸 → 组 → dfm（请求没给 models 时）
+# ------------------------------------------------------------
+# 产品语义（用户定的）：组里的人脸 = 那个组的 dfm。所以合成时「哪张脸用哪个 dfm」
+# 不该由左栏选中的那一个模型决定，而应该由**这张脸更像哪个组里的人脸**决定：
+#   每张检测到的脸 → ArcFace embedding → 和每个组的均值向量比余弦 → 取最大且 >= 阈值。
+# 匹配不上（< 阈值）的脸**不换**（保持原像素），绝不兜给"第 0 个模型"——
+# 那等于把别人的人脸换上去，比不换更糟。
+#
+# 只读不写：这里绝不动 index.json，也不改 .npy（补算走 _face_group 的自己那条路）。
+# ============================================================
+_AUTO_PLAN_CACHE = collections.OrderedDict()   # 帧身份 → 自动分配结果（拖滑块时不用重算）
+_AUTO_PLAN_MAX = 6
+_AUTO_EMB_LIMIT = 40          # 一次自动分配最多临时补算多少张老脸的特征
+
+
+def _auto_cache_get(key: str):
+    with _COMPOSE_CACHE_LOCK:
+        hit = _AUTO_PLAN_CACHE.get(key)
+        if hit is not None:
+            _AUTO_PLAN_CACHE.move_to_end(key)
+    return dict(hit) if hit is not None else None
+
+
+def _auto_cache_put(key: str, plan: dict):
+    if not key:
+        return
+    with _COMPOSE_CACHE_LOCK:
+        _AUTO_PLAN_CACHE[key] = dict(plan)
+        _AUTO_PLAN_CACHE.move_to_end(key)
+        while len(_AUTO_PLAN_CACHE) > _AUTO_PLAN_MAX:
+            _AUTO_PLAN_CACHE.popitem(last=False)
+
+
+def _auto_library(payload: dict):
+    """请求 → 人脸库目录（project > faces_project > 默认库）。拿不到返回 None。
+
+    自动分配是锦上添花：库路径非法/越界就当"没有库"，照旧走单模型老路径，
+    绝不因为一个可选的 project 字段把整帧打成 400。
+    """
+    from . import _faces as _store
+    raw = payload.get("project")
+    if raw in (None, ""):
+        raw = payload.get("faces_project")
+    try:
+        return _store.resolve_library(str(raw or "").strip())
+    except Exception:                                     # noqa: BLE001
+        return None
+
+
+def _dfm_by_name(name: str):
+    """模型名 → workspace/model/<name>.dfm；不存在返回 None（组可能已 orphan）。"""
+    nm = str(name or "").strip()
+    if nm.lower().endswith(".dfm"):
+        nm = nm[:-4]
+    if not nm or "/" in nm or "\\" in nm or ".." in nm:
+        return None
+    path = Path(WORKSPACE) / "model" / (nm + ".dfm")
+    return path if path.is_file() else None
+
+
+def _detect_boxes(frame, detector: str, thresh: float) -> list:
+    """整帧检测：和 _preview_job 里那一步**完全同一条**（同一把锁、同一个 thresh）。"""
+    det = _detector(detector)
+    with _det_run_lock:
+        det.thresh = float(thresh)
+        try:
+            return det.detect(frame) or []
+        except Exception as e:                            # noqa: BLE001
+            raise _BadInput("检测失败：%s" % (str(e)[:200],), 500)
+
+
+def _face_vector_from_frame(frame, det_box, box_xyxy):
+    """这一帧里那张脸的特征：68 点 → 512 仿射裁 → ArcFace。拿不到返回 None。"""
+    from . import _face_group as _fg
+    lm = _frame_landmarks(frame, det_box, box_xyxy)
+    if lm is None:
+        return None
+    try:
+        import numpy as np
+        from ._align import align_face_68
+        crop, _meta = align_face_68(frame, np.asarray(lm, dtype=np.float64),
+                                    box_xyxy, 512)
+        if crop is None:
+            return None
+        return _fg.embed_crop(crop)
+    except Exception:                                     # noqa: BLE001
+        return None
+
+
+def _auto_face_plan(payload: dict, frame, snap: dict, mode: str, name: str,
+                    idx: int, detector: str, thresh: float):
+    """按人脸库自动决定每张脸用哪个 dfm。返回 None = 这次不走自动。
+
+    None 的三种情形（都退回老的单模型路径，行为一个字都不变）：
+      · 库不存在 / 库里的组都没有 dfm；
+      · 组里一张有特征的脸都没有（模型缺失、老库还没补算成功）；
+      · 这一帧一张脸都没检测到。
+    返回体：
+      models    [{name, dfm(路径), faces:[脸序号]}]  —— 直接喂给 _preview_multi
+      faces     [{idx, group, dfm, similarity, matched, auto:true}]  —— 给前端显示
+      unmatched [脸序号]  —— 谁都不像：调用方把它并进 no_swap，保持原像素
+      boxes     这次检测的结果（_preview_job 复用它，不再检测第二遍）
+    """
+    from . import _face_group as _fg
+    from . import _faces as _store
+
+    library = _auto_library(payload)
+    if library is None:
+        return None
+    try:
+        index = _store.load_index(library)
+    except _store.FacesError:
+        return None
+    if not any(str(g.get("dfm") or "").strip() for g in index["groups"]):
+        return None
+
+    threshold = _float_val("face_threshold",
+                           payload.get("face_threshold",
+                                       payload.get("threshold")),
+                           0.0, 1.0, _fg.DEFAULT_THRESHOLD)
+    try:
+        sig = _fg.library_signature(library)
+    except Exception:                                     # noqa: BLE001
+        sig = str(library)
+    key = json.dumps([_source_ident(snap, mode, name), int(idx),
+                      round(float(threshold), 4), sig], sort_keys=True, default=str)
+    hit = _auto_cache_get(key)
+    if hit is not None:
+        return hit
+
+    profiles = _fg.group_profiles(library, index, compute_limit=_AUTO_EMB_LIMIT)
+    if not profiles:
+        return None
+
+    boxes = _detect_boxes(frame, detector, thresh)
+    if not boxes:
+        return None
+
+    faces, by_dfm, unmatched = [], {}, []
+    for i, b in enumerate(boxes[:_PREVIEW_MAX_SWAPS]):
+        try:
+            x1, y1, x2, y2 = [float(v) for v in (b.get("box") or ())]
+        except Exception:                                 # noqa: BLE001
+            unmatched.append(int(i))
+            continue
+        vec = _face_vector_from_frame(frame, b, [x1, y1, x2, y2])
+        best = _fg.match_vector(vec, profiles, threshold) if vec is not None else None
+        matched = bool(best and best.get("matched") and best.get("dfm"))
+        path = _dfm_by_name(best["dfm"]) if matched else None
+        if path is None:                     # 组还在但 .dfm 没了（orphan）→ 当没匹配
+            matched = False
+        if matched:
+            by_dfm.setdefault(best["dfm"], {"path": path, "faces": []})["faces"].append(int(i))
+        else:
+            unmatched.append(int(i))
+        faces.append({"idx": int(i), "face": int(i),
+                      "group": (best.get("group") or "") if best else "",
+                      "group_name": (best.get("name") or "") if best else "",
+                      "dfm": best["dfm"] if matched else "",
+                      "model": best["dfm"] if matched else "",
+                      "similarity": (best.get("similarity") if best else None),
+                      "matched": bool(matched), "auto": True})
+
+    models = []
+    for pos, (nm, info) in enumerate(by_dfm.items()):
+        models.append({"name": str(nm), "dfm": str(info["path"]),
+                       "faces": sorted(info["faces"]), "index": int(pos)})
+    plan = {"models": models, "faces": faces, "unmatched": sorted(set(unmatched)),
+            "boxes": boxes, "threshold": float(threshold), "library": str(library),
+            "profiles": len(profiles), "detected": len(boxes),
+            "matched": sum(1 for f in faces if f["matched"])}
+    _auto_cache_put(key, plan)
+    return plan
+
+
+def _auto_faces_merged(worker_faces, plan: dict) -> list:
+    """worker 真贴了哪几张 × 自动判定的目标 → 对外那一份 faces（顺序 = 脸序号）。"""
+    by_face = {}
+    for f in worker_faces or []:
+        try:
+            by_face[int(f.get("face"))] = f
+        except (TypeError, ValueError):
+            continue
+    out = []
+    for item in plan.get("faces") or []:
+        rec = dict(item)
+        hit = by_face.get(int(item["idx"])) or {}
+        if hit.get("box"):
+            rec["box"] = hit["box"]
+        rec["applied"] = bool(hit)
+        out.append(rec)
+    return out
+
+
+def _manual_faces(worker_faces, library=None) -> list:
+    """手动指定（models 里点名）时的 faces：auto=false，group 由 dfm 反查。"""
+    index = None
+    if library is not None:
+        try:
+            from . import _faces as _store
+            index = _store.load_index(library)
+        except Exception:                                 # noqa: BLE001
+            index = None
+    from . import _face_group as _fg
+    out = []
+    for f in worker_faces or []:
+        try:
+            i = int(f.get("face"))
+        except (TypeError, ValueError):
+            continue
+        # 和自动分配那条路对齐：dfm 记**模型名**（路径另放 dfm_path），
+        # 前端/验收拿名字直接比，不用先 basename。
+        dfm_path = str(f.get("dfm") or "")
+        dfm_name = str(f.get("model") or "") or Path(dfm_path).stem
+        out.append({"idx": i, "face": i,
+                    "group": _fg.group_id_for_dfm(index, dfm_name) if index else "",
+                    "dfm": dfm_name, "model": dfm_name, "dfm_path": dfm_path,
+                    "similarity": None, "matched": True, "auto": False,
+                    "box": f.get("box")})
+    return out
+
 
 
 def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
@@ -1115,29 +1343,55 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
     detector = _detector_val(payload.get("detector") or settings.get("detector"))
     thresh = _float_val("thresh", payload.get("thresh"), 0.0, 1.0, 0.5)
     models = _models_of(payload)
+    # ---- 2b) 没给 models = 自动分配：每张脸按 embedding 找它的组 → 那个组的 dfm ----
+    # 给了 models（前端 chip 上手动指定过）就以手动为准，这里一个字节都不参与。
+    auto_plan = None
+    if not models and _bool_val(payload.get("auto_faces", payload.get("auto")), True):
+        auto_plan = _auto_face_plan(payload, frame, snap, mode, name, int(idx),
+                                    detector, thresh)
+        if auto_plan is not None:
+            models = auto_plan["models"] or None
     asked_model = bool(str(payload.get("model") or payload.get("dfm") or "").strip()
                        or models)
     try:
         if models:
             dfm, model_name = Path(models[0]["dfm"]), models[0]["name"]
+        elif auto_plan is not None:
+            # 自动分配生效了但一张脸都没匹配上：**不能退回"默认模型全帧换"**，
+            # 那等于把不相干的人换上去。下面 except 里会带着 faces 回原帧。
+            raise _BadInput("自动分配：这一帧没有和任何人脸组匹配上的脸", 409)
         else:
             dfm, model_name = _dfm_of(payload)
     except _BadInput as e:
-        if asked_model or e.status != 409:
+        # 自动分配生效时不看 asked_model：前端一直会带一个 model（左栏选中的那个），
+        # 那是"库判不出来时"的老兜底，不能让它把「这张脸不像任何组 → 回原帧」变成 400。
+        if (asked_model and auto_plan is None) or e.status != 409:
             raise                      # 点名要了却没有 → 照实报，别装成"原帧"
         buf = _encode_frame(frame, maxw, fmt, quality)
         mime = "image/png" if fmt == "png" else "image/jpeg"
-        return _ok(idx=idx, total=total, name=name, composed=False, swapped=False,
+        resp = _ok(idx=idx, total=total, name=name, composed=False, swapped=False,
                    fmt=fmt, bytes=len(buf), settings=settings, detector=detector,
                    ms=int(round((time.time() - t_start) * 1000.0)),
                    note="没有可用的 .dfm 模型：只回原帧（%s）" % e.msg,
                    png="data:%s;base64,%s" % (mime, _b64.b64encode(buf).decode("ascii")))
+        if auto_plan is not None:
+            # 前端要照这份清单显示每张脸的相似度（auto=true = 判定来自人脸库）
+            resp.update(auto=True, faces=list(auto_plan["faces"]),
+                        face_threshold=float(auto_plan["threshold"]),
+                        face_library=str(auto_plan.get("library") or ""),
+                        auto_matched=int(auto_plan.get("matched") or 0),
+                        auto_detected=int(auto_plan.get("detected") or 0))
+        return resp
     xseg = _xseg_of(payload)
     # 点名"不换"的脸（前端「不换脸」勾选）。没给 = 老行为（未声明的脸兜给第 0 个模型）。
     no_swap = _face_ids_val("no_swap_faces",
                             payload.get("no_swap_faces",
                                         payload.get("skip_faces",
                                                     settings.get("no_swap_faces"))))
+    if auto_plan is not None:
+        # 谁都不像的脸：并进 no_swap，保持原像素（不换 > 换错）
+        no_swap = sorted(set(int(x) for x in no_swap)
+                         | set(int(x) for x in (auto_plan.get("unmatched") or [])))
 
     # ---- 3) 命中缓存就直接回（同一帧 + 同一组参数，拖滑块回退时立刻出图）----
     sig = _compose_sig(snap, mode, idx, name, cfg, str(dfm), models, xseg,
@@ -1164,6 +1418,8 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
                         "fmt": "png" if want_png else "jpg",
                         "quality": int(quality),
                         "no_swap": list(no_swap),
+                        # 自动分配时这份检测结果直接复用（同一帧不再检测第二遍）
+                        "boxes": (auto_plan or {}).get("boxes"),
                         # png 请求要的是"能逐像素对比"的结果 → 帧无损发给 worker
                         "send_lossless": bool(want_png)})
     img = res.get("img") or res.get("jpg") or b""
@@ -1196,7 +1452,18 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
         resp["models"] = [{"name": m["name"], "dfm": m["dfm"],
                            "faces": list(m["faces"])} for m in models]
         resp["models_used"] = list(res.get("models_used") or [])
-        resp["faces"] = list(res.get("faces") or [])
+        if auto_plan is not None:
+            # 自动分配：faces = 每张检测到的脸 + 它被判定给了哪个组/dfm/相似度
+            resp["faces"] = _auto_faces_merged(res.get("faces"), auto_plan)
+            resp["auto"] = True
+            resp["face_threshold"] = float(auto_plan["threshold"])
+            resp["face_library"] = str(auto_plan.get("library") or "")
+            resp["auto_matched"] = int(auto_plan.get("matched") or 0)
+            resp["auto_detected"] = int(auto_plan.get("detected") or 0)
+        else:
+            # 手动指定（chip 上有值）：auto=false，group 由 dfm 反查
+            resp["faces"] = _manual_faces(res.get("faces"), _auto_library(payload))
+            resp["auto"] = False
         resp["swaps"] = int(res.get("swaps") or 0)
     _compose_store(sig, resp)
     return resp
@@ -3496,14 +3763,15 @@ def _preview_job(job: dict) -> dict:
 
     _stage("detect")
     t0 = time.time()
-    det = _detector(job["detector"])
-    with _det_run_lock:                        # thresh 是共享检测器上的可变字段
-        det.thresh = float(job["thresh"])
-        try:
-            boxes = det.detect(frame)
-        except Exception as e:
-            raise _BadInput("检测失败：%s" % (str(e)[:200],), 500)
-    timings["detect_ms"] = round((time.time() - t0) * 1000.0, 1)
+    boxes = job.get("boxes")
+    if boxes is not None:
+        # 调用方（自动分配那条路）已经为了算 embedding 检测过一遍了，直接用
+        boxes = list(boxes)
+        timings["detect_ms"] = 0.0
+        timings["detect_reused"] = 1
+    else:
+        boxes = _detect_boxes(frame, job["detector"], job["thresh"])
+        timings["detect_ms"] = round((time.time() - t0) * 1000.0, 1)
 
     best = _pick_face(boxes)
     box_xyxy, box_wh = None, None

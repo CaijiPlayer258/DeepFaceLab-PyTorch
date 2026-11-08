@@ -1559,7 +1559,7 @@
     "人脸数据库": "Face database",
     "常规导出": "Standard export",
     "项目导出": "Project export",
-    "提取到": "Extract into",
+    "按人脸判定分组": "Group by face embedding",
     "从当前帧提取人脸": "Extract faces from current frame",
     "拖动人脸可在组间移动；点选后可批量处理": "Drag faces between groups; select them for batch actions",
     "当前帧 —": "Current frame —",

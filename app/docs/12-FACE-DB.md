@@ -225,6 +225,62 @@ runtime\server\Scripts\python.exe app\tools\test_faces_api.py
 脚本会打印 PASS/FAIL，退出码 0 = 全过。
 
 
+## 2026-11 · 组 = dfm：用 embedding 自动决定新脸归哪一组
+
+产品语义（用户定的）：**放在某个组里的人脸 = 那个组对应的 dfm 模型**。
+杨幂组放人物 A 的几张脸、张元英组放人物 B 的几张脸 → A 的换脸结果是杨幂，
+B 的就是张元英。判定方式 = **ArcFace embedding 的余弦相似度**。
+
+### 特征存哪
+
+* 每张脸一个独立文件：`<库>/_faces/emb/<id>.npy` —— 512 维 float32，L2 归一化。
+  不塞进 index.json：一张 2 KB，1000 张就是 2 MB 的 JSON 数字文本，而 move / trash
+  每次都要重写 index；独立 .npy 还让「还没算过」= 文件不存在，判起来零成本。
+* 模型：权重根下的 `arcface_mbf.onnx`（老布局 `onnx/ArcFace/w600k_mbf.onnx` 也认），
+  运行在 CPU（一张 112×112 只要 3~6 ms，和 .dfm 抢显存不值当）。
+* 老库（没有 .npy）→ GET /api/merge/faces 时**惰性补算**：有 PNG 就能算，
+  算不出来的跳过；一次最多补 120 张（`emb_pending` 会说还差多少）。
+  响应多回 `embedded`（这次算了几张）/ `emb_have` / `emb_total` / `emb_failed` / `emb_pending`。
+
+### 归组规则（add）
+
+`POST /api/merge/faces/add` 在**没有显式 group** 时自动判定：
+
+1. 算新脸的 embedding；
+2. 和每个组的**均值向量**比余弦，取最大；
+3. `similarity >= threshold`（默认 **0.35**，请求参数 `threshold` 可覆盖）→ 归该组，
+   回 `matched: true`；
+4. 不到阈值 → 若这张脸在合成器上分了 dfm（chip 有值）→ 用它建/找组，`matched: false`；
+5. 都没有 → **不落库**，回 `{ok:false, reason:"no_group_match", matched:false}`，
+   前端提示「这张脸和现有分组都不像，请手动拖到某个组」。
+
+阈值 0.35 的依据：ArcFace(mbf) 实测同一人不同帧 0.45~0.85、不同人 0.00~0.30，
+取「不同人上沿 + 一点余量」。归错组 = 换错人，比不归组贵得多。
+
+### 合成时的自动分配（frame / merged）
+
+`POST /api/merge/frame`、`POST /api/merge/merged` 在请求**没给 models** 时：
+每张检测到的脸算 embedding → 按上面的规则找组 → 用那个组的 dfm；
+匹配不上的脸**并入 no_swap_faces 保持原像素**（绝不兜给"第 0 个模型"）。
+响应多三样：
+
+* `faces: [{idx, group, group_name, dfm, similarity, matched, auto}]`
+  —— auto=false 表示这一张是用户手动指定的（chip 上有值，`models` 里点名）；
+* `auto` / `face_threshold` / `auto_matched` / `auto_detected`；
+* 检测结果在这条路上只算一遍：自动分配时已经为算 embedding 检测过，
+  `_preview_job` 直接复用（timings.detect_reused=1）。
+
+前端：chip 显示后端判出来的模型（手动指定优先），没匹配上显示「没匹配」；
+「＋」不再问 addTarget，「提取到 <dfm>」下拉已从页面删除。
+
+### 验收
+
+    runtime\server\Scripts\python.exe app\tools\face_group_accept.py
+
+真后端 + %TEMP% 的库：两个组各 3 张同一人的脸 → 抽这两个人的新帧点＋ →
+自动落对组（打印真实相似度）；第三个人 → matched:false；合成两张脸各用各的 dfm；
+手动 chip → auto:false；老库补算（emb 文件被创建、第二次 GET 不再算）。
+
 ## 2026-11 · 同帧去重 + 页面精简（这一版改了什么）
 
 ### 数据 / 接口
@@ -241,7 +297,8 @@ runtime\server\Scripts\python.exe app\tools\test_faces_api.py
 
 ### 页面（合成器 · 人脸数据库）
 
-* 顶栏一行装完：人脸数据库 + 已选 N 张 / 全选 / 清空选择 + 提取到 <dfm> + 关闭。
+* 顶栏一行装完：人脸数据库 + 已选 N 张 / 全选 / 清空选择 + 关闭
+  （「提取到 <dfm>」在下一版删掉了，见文末）。
   关闭只剩右上角一个；底部那颗在导出流程里才叫「继续导出」（browse 模式整颗隐藏）。
 * 组卡片横向一行（flex row + nowrap + overflow-x:auto），放不下就横向滚；
   组头一行：组名 + 张数 + 384x384（DFM 输入尺寸）；人脸只留缩略图 + 帧号 + id。
@@ -250,10 +307,9 @@ runtime\server\Scripts\python.exe app\tools\test_faces_api.py
   底部快捷键图例。
 * 拖放只有两种落点：组卡片 = move；回收站面板 = trash（拖动时高亮）。
   回收站里的「还原 / 彻底删除」保留（没有拖放替代）。
-* ＋ 的落库目标：window.FaceDB.addTarget(project) —— 页面开着且已加载就用下拉
-  「提取到」选中的那一组（点组卡片也会选上它）；否则用库里第一个组；库里没有组就用
-  合成器里选中的第一个模型（后端按 dfm 建组）；连模型都没有就返回 null，
-  前端提示「先选模型」。所以新脸一定落进组里。
+* ＋ 的落库目标：**后端按人脸 embedding 判定**（见下面 2026-11 那一节）。
+  这一版里的 window.FaceDB.addTarget 和「提取到 <dfm>」下拉都已经删除 ——
+  新脸像哪个组就归哪个组，前端不替后端挑。
 
 ### 验收
 

@@ -365,6 +365,7 @@ AUDIT_JS = r"""
             meta: String((f.querySelector(".fdb-meta") || {}).textContent || "").replace(/\s+/g, " ").trim()};
   });
   var trash = document.getElementById("fdbTrash");
+  /* 「提取到 <dfm>」下拉已经删掉：这里只报它**还在不在**（false = 正确） */
   var sel = document.getElementById("fdbDfm");
   return JSON.stringify({
     text: txt.replace(/\n+/g, " | "),
@@ -390,7 +391,7 @@ AUDIT_JS = r"""
     trash: {n: trash ? trash.querySelectorAll(".fdb-trash-item").length : -1,
             drop: trash ? trash.classList.contains("is-drop") : false,
             cls: trash ? trash.className : ""},
-    dfm: {value: sel ? sel.value : "", opts: sel ? sel.options.length : -1},
+    dfm: {present: !!sel, opts: sel ? sel.options.length : 0},
     state: (window.FaceDB && window.FaceDB.debug) ? window.FaceDB.debug() : null,
     toasts: (window.__T || []).slice(-14)
   });
@@ -609,11 +610,16 @@ def phase_after(b, port, video):
     project = str(s.get("project") or "")
     check(True, "准备素材", "%s 帧 · 项目 %s · %.1fs" % (s.get("frames"), project, dt))
 
-    # ---------- 1b 库里没有组、合成器也没选模型 → 「＋」该提示先选模型 ----------
-    tgt = b.eval("(async function(){var t = await window.FaceDB.addTarget(%s);"
-                 "return JSON.stringify(t);})()" % json.dumps(project))
-    check(str(tgt) in ("null", "None"), "没有组也没有模型 → addTarget=null（＋ 提示先选模型）",
-          "addTarget=%s" % tgt)
+    # ---------- 1b 「提取到 <dfm>」下拉必须已经不在页面上 ----------
+    # 新脸归哪一组由后端按人脸 embedding 判定（像哪个组里的脸就归哪个组），
+    # 所以这个下拉和 window.FaceDB.addTarget 都删了。
+    gone = b.js(r"""(function(){return JSON.stringify({
+        sel: !!document.getElementById("fdbDfm"),
+        wrap: !!document.getElementById("fdbExtractWrap"),
+        api: !!(window.FaceDB && window.FaceDB.addTarget)});})()""")
+    check(not gone.get("sel") and not gone.get("wrap") and not gone.get("api"),
+          "「提取到 <dfm>」下拉与 addTarget 都已删除", json.dumps(gone, ensure_ascii=False),
+          {"gone": gone})
 
     # ---------- 2 造 6 个组（横向滚动 + 拖放目标） ----------
     names = ["模型A", "模型B", "模型C", "模型D", "模型E", "模型F"]

@@ -30,11 +30,22 @@
 | POST | `/api/merge/export` | 启动合成：`project` + `model`（或 `dfm`）+ `settings` + `encoder/hwaccel/workers` |
 | GET | `/api/merge/export/status` | 进度：`running/ok/pct/stage/msg/out/log` |
 | POST | `/api/merge/export/cancel` | 终止合成子进程 |
+| POST | `/api/merge/frame`（不带 {i}） | 同上，帧号放 body（`frame/idx/n`）；**没给 `models` 时按人脸库自动分配每张脸的 dfm**，响应多 `faces[{idx,group,dfm,similarity,auto}]` |
+| POST | `/api/merge/merged` | 同上（有打开的素材就现算，否则回退最近一次成片里的那一帧），自动分配同 `/api/merge/frame` |
 | POST | `/api/merge/preview-frame` | 静态帧文件 → 检测/换脸/合成 → 图（项目模式预览用） |
 | POST | `/api/merge/export-project` | **DFL 项目模式**：逐帧合成到 `<项目>/merged/` 再编码；支持 `force` 重做 |
 | GET | `/api/merge/export-project/status` | 项目导出进度：`done/total/frame_fps/skipped/failed/warnings/missing/encode` |
 | POST | `/api/merge/export-project/cancel` | 取消项目导出（已写好的帧保留） |
 | POST | `/api/merge/reveal` | 在资源管理器里定位文件/目录（「打开所在目录」） |
+
+## 二之一、每张脸用哪个 dfm：按人脸库自动判定
+
+`/api/merge/frame` 与 `/api/merge/merged` 的 body 里 `models` 为空（前端 chip
+没手动指定过）时，后端对**每张检测到的脸**算 ArcFace embedding，和人脸库里每个组的
+均值向量比余弦，取最大且 >= 0.35 的那个组的 dfm；匹配不上的脸并入 `no_swap_faces`
+保持原像素（绝不兜给"第 0 个模型"）。语义是「组里的人脸 = 那个组的 dfm」，详见
+[12-FACE-DB.md](12-FACE-DB.md)。手动指定（`models: [{name, faces}]`）优先，此时
+响应里 `faces[].auto=false`。
 
 ## 三、为什么要「抽帧 + 对齐」两步
 

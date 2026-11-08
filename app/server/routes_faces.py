@@ -22,6 +22,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
+from . import _face_group as facegrp
 from . import _faces as store
 from ._align import align_face, align_face_68
 
@@ -64,6 +65,38 @@ def _as_dict(body) -> dict:
     if not isinstance(body, dict):
         raise store.FacesError("请求体要是一个 JSON 对象，收到 %s" % type(body).__name__, 400)
     return body
+
+
+def _threshold_val(raw, default=None) -> float:
+    """相似度阈值入参 → [0,1] 的浮点；缺省用 _face_group.DEFAULT_THRESHOLD。"""
+    if default is None:
+        default = facegrp.DEFAULT_THRESHOLD
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return float(default)
+    if isinstance(raw, bool):
+        raise store.FacesError("「threshold」要是 0~1 的小数，收到布尔值", 400)
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        raise store.FacesError("「threshold」要是 0~1 的小数，收到 %r" % (raw,), 400)
+    if not (0.0 <= value <= 1.0):
+        raise store.FacesError("「threshold」要在 0~1 之间，收到 %s" % value, 400)
+    return value
+
+
+def _store_embeddings(p: Path, records, crops):
+    """刚入库的脸顺手把特征写掉：GET 的老库补算就不会再碰这几张。
+
+    失败一律吞掉（模型缺失 / 图坏了）：入库是主流程，特征只是给分组判定用的，
+    不能因为算不出向量就让「＋」失败 —— 下次 GET 还会再试一次。
+    """
+    for rec, crop in zip(records or [], crops or []):
+        try:
+            vec = facegrp.embed_crop(crop)
+            if vec is not None:
+                facegrp.write_vector(p, rec["id"], vec)
+        except Exception:                                  # noqa: BLE001
+            continue
 
 
 def _int_val(raw, name: str, lo: int = 0, hi: int = 10 ** 8) -> int:
@@ -409,9 +442,15 @@ def list_faces(project: str = ""):
     # 同一帧同一张脸只留一张：老库里堆出来的重复在这里挪进回收站（可还原，不删）
     deduped = store.dedup_frames(p)
     data = store.snapshot(p)
+    # 老库的脸没有特征文件：**在这里惰性补算**（有 PNG 就能算）。
+    # 算不出来的跳过，列表照常返回；一次最多补 BACKFILL_PER_GET 张，大库不卡首屏。
+    emb = facegrp.backfill(p)
     data["groups"] = _decorate_groups(data["groups"])
     data["faces"] = _decorate(p, data["faces"])
-    return {"ok": True, "project": str(p), "deduped": int(deduped), **data}
+    return {"ok": True, "project": str(p), "deduped": int(deduped),
+            "embedded": int(emb["computed"]), "emb_have": int(emb["have"]),
+            "emb_total": int(emb["total"]), "emb_failed": int(emb["failed"]),
+            "emb_pending": int(emb["pending"]), **data}
 
 
 def _attach_extras(p: Path, records, boxes, scores, kps68):
@@ -479,6 +518,7 @@ def extract_faces(body: dict):
         store.ensure_index(p)
     records, group = store.add_faces(p, crops, source, dfm=dfm_name, align="68",
                                      idxs=idx_all)
+    _store_embeddings(p, records, crops)
     _attach_extras(p, records, boxes, scores, kps_all)
     return {"ok": True, "project": str(p), "created": bool(created),
             "frame": frame, "size": int(size), "align": "68", "detector": det_name,
@@ -668,13 +708,60 @@ def add_face(body: dict):
     p, created = store.resolve_project_for_write(proj, default=store.default_project())
     if created:
         store.ensure_index(p)
-    records, group = store.add_faces(p, [crop], source, dfm=dfm_name, align="68",
+
+    # ---- 组归属：embedding 自动判定 ----
+    # 产品语义：组里的人脸 = 那个组的 dfm，新脸该进哪一组由「它更像哪一组的脸」决定，
+    # 不再由界面上的下拉框决定。顺序（见 _face_group.decide_for_add）：
+    #   显式 group > 和组均值最像且 >= 阈值 > 合成器 chip 上的 dfm > 不归组
+    threshold = _threshold_val(
+        body.get("threshold") if body.get("threshold") not in (None, "")
+        else body.get("face_threshold"))
+    explicit_group = str(body.get("group") or "").strip()
+    vec = facegrp.embed_crop(crop)
+    decision = facegrp.decide_for_add(p, vec, explicit_group=explicit_group,
+                                      chip_dfm=dfm_name, threshold=threshold)
+    if not decision["group"] and not decision["dfm"]:
+        # 既不像任何组、合成器那边也没给它分 dfm → **不落库**（落进去也只会归错人）。
+        # 前端按 reason 提示「请手动拖到某个组」。
+        return {"ok": False, "reason": "no_group_match", "matched": False,
+                "detail": "这张脸和现有分组都不像，请手动拖到某个组",
+                "project": str(p), "created": bool(created), "frame": int(frame),
+                "threshold": float(threshold),
+                "similarity": decision.get("similarity"),
+                "best_group": decision.get("best_group") or "",
+                "best_dfm": decision.get("best_dfm") or "",
+                "best_similarity": decision.get("best_similarity"),
+                "dfm": dfm_name, "group": "", "count": 0, "faces": [],
+                "size": int(size), "align": "68",
+                "landmarks_from": landmarks_from, "detector": det_name,
+                "mode": str(probe["mode"] or ""), "box": box, "idx": int(face_idx)}
+
+    records, group = store.add_faces(p, [crop], source, dfm=decision["dfm"],
+                                     group=decision["group"], align="68",
                                      idxs=[face_idx])
+    if vec is not None:
+        facegrp.write_vector(p, records[0]["id"], vec)      # 新脸特征随 PNG 一起落盘
     _attach_extras(p, records, [box], [score], [kps.round(2).tolist()])
     rec = records[0]
+    group_name, group_dfm = "", ""
+    try:
+        for g in store.load_index(p)["groups"]:
+            if g["id"] == group:
+                group_name = str(g.get("name") or g.get("dfm") or g["id"])
+                group_dfm = str(g.get("dfm") or "")
+                break
+    except store.FacesError:
+        pass
     # replaced=true 表示这一帧这张脸本来就在库里：覆盖了它，id / group 都没变
     return {"ok": True, "project": str(p), "created": bool(created),
-            "dfm": dfm_name, "group": group, "size": int(size), "align": "68",
+            "dfm": dfm_name, "group": group, "group_name": group_name,
+            "group_dfm": group_dfm,
+            "matched": bool(decision["matched"]),
+            "similarity": decision.get("similarity"),
+            "threshold": float(threshold),
+            "auto": decision["source"] == "auto",
+            "source": decision["source"],
+            "size": int(size), "align": "68",
             "landmarks_from": landmarks_from, "detector": det_name,
             "mode": str(probe["mode"] or ""), "box": box, "idx": int(face_idx),
             "replaced": bool(rec.get("replaced")), "id": rec["id"],
