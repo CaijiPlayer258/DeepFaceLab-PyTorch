@@ -268,6 +268,9 @@
     [/^(\d+)\s*天前$/, "$1d ago"],
     [/^(\d+)\s*\/\s*(\d+)\s*帧$/, "$1 / $2 frames"],
     [/^(\d+)\s*张人脸$/, "$1 faces"],
+    /* 人脸库拖拽浮层（face_db.js 运行时拼出来的句子） */
+    [/^移动 (\d+)\s*张到 (.+)$/, "Move $1 to $2"],
+    [/^移入回收站 · (\d+)\s*张$/, "Move to trash · $1"],
     [/^已建库\s*(\d+)\s*张人脸$/, "$1 faces built"],
     [/^(\d+)\s*个模型 · 最新 (\S+) · iter ([\d,]+)$/, "$1 models · latest $2 · iter $3"],
     [/^(\d+)\s*个已导出 DFM$/, "$1 DFM exported"],
@@ -1562,8 +1565,9 @@
     "当前帧 —": "Current frame —",
     "已选": "Selected",
     "张脸": "faces",
-    "全选": "Select all",
-    "清空选择": "Clear selection",
+    /* 跨组的「全选 / 清空选择」已经删了：批量只剩组内，全选那张勾选框在组卡片头上 */
+    "全选本组": "Select this group",
+    "清空选择（Esc）": "Clear selection (Esc)",
     "移动到": "Move to",
     "移动": "Move",
     "移入回收站": "Move to trash",

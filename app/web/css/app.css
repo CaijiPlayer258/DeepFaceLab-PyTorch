@@ -4574,10 +4574,33 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
 }
 .fdb-title { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .fdb-title b { font-size: 16px; font-weight: 650; letter-spacing: -0.01em; }
-/* 全选 / 清空选择并进顶栏，不再单占一行 */
+/* 顶栏只剩「已选 N 张」：它是状态显示，本身也是一颗清空按钮（Esc 等价）。
+   跨组的「全选 / 清空选择」两颗按钮已经删了 —— 批量语义只剩组内。 */
 .fdb-sel { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.fdb-selected { display: inline-flex; align-items: baseline; gap: 3px; color: var(--ink-3); font-size: 11.5px; }
+.fdb-selected {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  margin: -3px 0;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-3);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1.5;
+  cursor: pointer;
+  transition: background .12s ease, color .12s ease;
+}
 .fdb-selected b { color: var(--ink); font-size: 13px; font-variant-numeric: tabular-nums; }
+.fdb-selected:hover:not(:disabled) { background: var(--panel-2); color: var(--ink-2); }
+.fdb-selected:disabled { cursor: default; opacity: .66; }
+.fdb-selected:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+/* 有选中时才冒出来的小 ×：让「已选 N 张」一眼看出是能点掉的按钮 */
+.fdb-selected-x { margin-left: 2px; color: var(--ink-3); font-size: 12px; line-height: 1; }
+.fdb-selected:hover:not(:disabled) .fdb-selected-x { color: var(--ink-2); }
+.fdb-selected:disabled .fdb-selected-x { display: none; }
 .fdb-topacts { display: flex; align-items: center; gap: 10px; margin-left: auto; min-width: 0; }
 .fdb-extract { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .fdb-lbl { color: var(--ink-3); font-size: 11px; white-space: nowrap; }
@@ -4680,6 +4703,32 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
   font-size: 10.5px;
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
 }
+/* 组头右侧：组内全选。用原生 checkbox —— 只有它才有真正可靠的
+   indeterminate（半选）语义，读屏也会念成 mixed。 */
+.fdb-gsel {
+  flex: none;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-right: -3px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background .12s ease;
+}
+.fdb-gsel:hover { background: var(--panel-2); }
+.fdb-gsel.is-all,
+.fdb-gsel.is-mixed { background: color-mix(in srgb, var(--brand) 12%, transparent); }
+.fdb-gsel-box {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--brand);
+  cursor: pointer;
+}
+.fdb-gsel-box:disabled { opacity: .42; cursor: default; }
 .fdb-group-grid {
   display: grid;
   flex: 1 1 auto;
@@ -4940,6 +4989,21 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
 .fdb-ghost .fdb-thumb { width: 84px; height: 84px; }
 .fdb-ghost .fdb-thumb img { width: 84px; height: 84px; }
 .fdb-ghost .fdb-meta { display: none; }
+/* 多选拖动时浮层右上角的「N 张」：一眼看出这一拖带走了几张 */
+.fdb-ghost-count {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--brand);
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 650;
+  line-height: 1.5;
+  white-space: nowrap;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .35);
+}
 .fdb-drop-tip {
   position: fixed;
   z-index: 221;

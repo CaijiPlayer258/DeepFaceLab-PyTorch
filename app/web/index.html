@@ -817,8 +817,10 @@
 
           这一版把「没用的东西」整块删掉了：未分组区、移动到下拉 + 移动按钮、
           移入回收站按钮、从当前帧提取人脸按钮、说明性小字、项目名副标题、
-          模式徽标、底部统计栏里的「关闭」。顶栏一行装完：
-          标题 + 已选/全选/清空 + 提取到 + 关闭（唯一的关闭入口）。
+          模式徽标、底部统计栏里的「关闭」。
+          批量语义只剩「组内」：顶栏不再有跨组的「全选 / 清空选择」，
+          「已选 N 张」本身就是清空按钮；全选挪到每张组卡片头部右侧的勾选框。
+          顶栏一行装完：标题 + 已选 N 张 + 提取到 + 关闭（唯一的关闭入口）。
           组卡片横向排一行（放不下就横向滚）；回收站面板本身就是拖放目标。
         -->
         <div class="mgview" data-view="facedb" id="mgFaceDb">
@@ -826,9 +828,9 @@
             <header class="fdb-top">
               <div class="fdb-title"><b>人脸数据库</b></div>
               <div class="fdb-sel">
-                <span class="fdb-selected"><span>已选</span><b id="fdbSelCount">0</b><span>张</span></span>
-                <button class="mini" id="fdbPickAll" type="button">全选</button>
-                <button class="mini" id="fdbClearSel" type="button">清空选择</button>
+                <!-- 「已选 N 张」既是状态显示，也是清空按钮（键盘 Esc 等价）。
+                     没有人选中时禁用它，Tab 也就不会停在一个按不动的按钮上。 -->
+                <button class="fdb-selected" id="fdbSelChip" type="button" title="清空选择（Esc）" disabled><span>已选</span><b id="fdbSelCount">0</b><span>张</span><span class="fdb-selected-x" aria-hidden="true">×</span></button>
               </div>
               <div class="fdb-topacts">
                 <div class="fdb-extract" id="fdbExtractWrap">

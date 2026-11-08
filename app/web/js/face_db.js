@@ -5,7 +5,9 @@
  *   · 消费 /api/merge/faces/*，渲染组卡片 / 128 缩略图 / 回收站；
  *   · 拖拽（Pointer Events，松手才发请求，拖动中实时高亮落点）：
  *       组卡片 = move，回收站面板 = trash；拖到别处什么都不做；
- *   · Ctrl / Shift 多选、全选 / 清空、键盘 T（回收站）、Esc（取消选择）；
+ *   · Ctrl / Shift 多选；组头勾选框 = **组内全选**（半选时走 indeterminate）；
+ *     顶栏没有「全选 / 清空选择」两颗按钮：「已选 N 张」本身就是清空按钮；
+ *     键盘 T（回收站）、Esc（清空选择）；
  *   · 新脸怎么落库由「＋」走 /api/merge/faces/add，落进哪一组靠 addTarget()
  *     （= 下拉「提取到」选中的组 / 第一个组 / 第一个模型）；
  *   · 「继续导出」只把控制权交回 app.js，自己绝不发 /export 请求。
@@ -418,6 +420,55 @@
     updateSelection();
   }
 
+  /* 一个组卡片里到底画了哪些脸：本组的脸 + 「没有组 / 组已经不在了」被采纳到
+     首组的那几张。renderGroups 和组头勾选框必须共用这一份口径，
+     否则勾选框的 all / mixed 和张数会对不上。 */
+  function groupFaces(g) {
+    if (!g) return [];
+    var adopt = adoptGroupId();
+    return activeFaces().filter(function (f) {
+      if (f.group === g.id) return true;
+      return g.id === adopt && (!f.group || !groupById(f.group));
+    });
+  }
+
+  function groupFaceIds(gid) {
+    return groupFaces(groupById(gid)).map(function (f) { return f.id; });
+  }
+
+  /* 组头勾选框：全选该组 → checked；一张没选 → 空；选了一部分 → indeterminate。
+     组内全选只改这一组的 id，别的组已经选中的脸原样保留。 */
+  function updateGroupChecks() {
+    var dis = state.busy || state.loading || !state.loaded;
+    all(".fdb-group").forEach(function (card) {
+      var box = one(".fdb-gsel-box", card);
+      if (!box) return;
+      var ids = groupFaceIds(card.getAttribute("data-group"));
+      var on = 0;
+      ids.forEach(function (id) { if (state.selected[id]) on++; });
+      var mixed = on > 0 && on < ids.length;
+      box.checked = ids.length > 0 && on === ids.length;
+      box.indeterminate = mixed;
+      box.disabled = dis || ids.length === 0;
+      var wrap = box.closest(".fdb-gsel");
+      if (wrap && wrap.classList) {
+        wrap.classList.toggle("is-all", box.checked);
+        wrap.classList.toggle("is-mixed", mixed);
+      }
+    });
+  }
+
+  function toggleGroup(gid) {
+    if (state.busy || state.loading || !state.loaded) return;
+    var ids = groupFaceIds(gid);
+    if (!ids.length) return;
+    var next = Object.assign({}, state.selected);
+    var allOn = ids.every(function (id) { return !!next[id]; });
+    ids.forEach(function (id) { if (allOn) delete next[id]; else next[id] = true; });
+    state.anchor = ids[0] || "";
+    setSelected(next);
+  }
+
   function selectOne(id, ev) {
     if (!id) return;
     var ctrl = !!(ev && (ev.ctrlKey || ev.metaKey));
@@ -461,10 +512,10 @@
     var dis = state.busy || state.loading || !state.loaded;
     var sc = $("fdbSelCount");
     if (sc) sc.textContent = String(n);
-    var clearBtn = $("fdbClearSel");
-    if (clearBtn) clearBtn.disabled = dis || n === 0;
-    var allBtn = $("fdbPickAll");
-    if (allBtn) allBtn.disabled = dis || state.order.length === 0;
+    /* 顶栏只剩「已选 N 张」这一条状态显示：它自己就是清空按钮（省掉一行按钮） */
+    var chip = $("fdbSelChip");
+    if (chip) chip.disabled = dis || n === 0;
+    updateGroupChecks();
     /* 底栏只剩「继续导出」这一颗，而且只在导出流程里出现：
        关闭入口只有右上角那一个（browse 模式 = 点它直接回合成视图）。 */
     var continueBtn = $("fdbContinue");
@@ -558,18 +609,13 @@
     if (!box) return;
     box.innerHTML = "";
     var groups = (state.data && state.data.groups) || [];
-    var active = activeFaces();
-    var adopt = adoptGroupId();
     groups.forEach(function (g) {
       var card = make("section", "fdb-group" + (g.orphan ? " is-orphan" : ""));
       card.setAttribute("data-group", g.id);
       card.setAttribute("data-drop-group", g.id);
       card.setAttribute("aria-label", String(g.name || g.dfm || g.id));
-      var mine = active.filter(function (f) {
-        if (f.group === g.id) return true;
-        return g.id === adopt && (!f.group || !groupById(f.group));
-      });
-      /* 组头一行装完：组名 + 张数 + 输入尺寸（384×384） */
+      var mine = groupFaces(g);
+      /* 组头一行装完：组名 + 张数 + 输入尺寸（384×384）+ 组内全选勾选框 */
       var hd = make("div", "fdb-group-hd");
       hd.appendChild(make("span", "fdb-group-name", g.name || g.dfm || g.id));
       if (g.orphan) hd.appendChild(make("span", "fdb-orphan-tag", "已取消选择"));
@@ -581,6 +627,16 @@
       var size = make("span", "fdb-size", sz + "×" + sz);
       size.title = "DFM 输入尺寸";
       hd.appendChild(size);
+      /* 组内全选：只作用于这一个组。原生的 checkbox 才有真正可靠的
+         indeterminate（半选）语义，读屏也会念成 mixed。 */
+      var gsel = make("span", "fdb-gsel");
+      gsel.title = "全选本组";
+      var chk = document.createElement("input");
+      chk.type = "checkbox";
+      chk.className = "fdb-gsel-box";
+      chk.setAttribute("aria-label", "全选本组");
+      gsel.appendChild(chk);
+      hd.appendChild(gsel);
       card.appendChild(hd);
       var grid = make("div", "fdb-group-grid");
       grid.setAttribute("role", "listbox");
@@ -801,12 +857,14 @@
     if (!zone) return;
     zone.el.classList.add("is-drop");
     var ids = state.drag ? state.drag.ids : [];
+    var n = ids.length || 1;
     var tip = $("fdbDropTip");
     if (!tip) return;
     tip.hidden = false;
+    /* 多选后拖任意一张 = 整批：浮层必须先把「几张、去哪」说清楚 */
     tip.textContent = zone.kind === "trash"
-      ? "移入回收站 · " + ids.length + " 张"
-      : "移到 " + groupLabel(zone.group) + " · " + ids.length + " 张";
+      ? "移入回收站 · " + n + " 张"
+      : "移动 " + n + " 张到 " + (groupLabel(zone.group) || "该组");
     tip.style.left = Math.min(window.innerWidth - 180, x + 16) + "px";
     tip.style.top = Math.min(window.innerHeight - 34, y + 16) + "px";
   }
@@ -829,6 +887,10 @@
     ghost.setAttribute("aria-hidden", "true");
     ghost.style.left = (e.clientX + 12) + "px";
     ghost.style.top = (e.clientY + 12) + "px";
+    ghost.classList.remove("is-selected", "is-dragging");
+    if (d.ids.length > 1) {
+      ghost.appendChild(make("span", "fdb-ghost-count", d.ids.length + " 张"));
+    }
     document.body.appendChild(ghost);
     d.ghost = ghost;
     all(".fdb-face").forEach(function (c) {
@@ -930,6 +992,16 @@
     return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t.isContentEditable;
   }
 
+  /* 真正在打字：只有这种时候 Esc 才让给输入框。勾选框 / 按钮上的 Esc 照样清空选择。 */
+  function isTextEntry(t) {
+    t = t || {};
+    var tag = String(t.tagName || "").toUpperCase();
+    if (t.isContentEditable || tag === "TEXTAREA") return true;
+    if (tag !== "INPUT") return false;
+    var type = String(t.type || "text").toLowerCase();
+    return ["checkbox", "radio", "button", "submit", "reset", "range", "file", "color"].indexOf(type) < 0;
+  }
+
   function focusedFaceId() {
     var a = document.activeElement;
     return (a && a.closest && a.closest(".fdb-face")) ? a.closest(".fdb-face").getAttribute("data-face-id") : "";
@@ -965,9 +1037,19 @@
       return;
     }
     if (!isVisible()) return;
-    if (typing(e)) return;
     var key = String(e.key || "").toLowerCase();
     var face = focusedFaceId();
+    /* Esc 清空选择：焦点停在组头勾选框上也算数，所以放在 typing() 之前 */
+    if (key === "escape") {
+      if (isTextEntry(e.target)) return;
+      if (Object.keys(state.selected).length) {
+        e.preventDefault();
+        setSelected({});
+        state.anchor = "";
+      }
+      return;
+    }
+    if (typing(e)) return;
     if (key === "t") {
       var ids2 = keyTargetIds();
       if (!ids2.length) { toast("先选中人脸", "点一张，或用 Tab 聚焦后按 T", "warn"); return; }
@@ -975,13 +1057,20 @@
       trashFaces(ids2);
       return;
     }
-    if (key === "escape") {
-      setSelected({}); state.anchor = ""; return;
-    }
     if (key === "a" && (e.ctrlKey || e.metaKey)) {
-      var allMap = {};
-      state.order.forEach(function (id) { allMap[id] = true; });
-      setSelected(allMap);
+      /* 全选也只剩「组内」这一种语义：焦点在哪一组，就选哪一组，
+         等价于点那颗组头勾选框（跨组全选没有任何用处了）。 */
+      var gid = "";
+      var host = face && document.activeElement && document.activeElement.closest
+        ? document.activeElement.closest(".fdb-group") : null;
+      if (host) gid = host.getAttribute("data-group") || "";
+      if (!gid) gid = state.activeGroup || "";
+      var gids = groupFaceIds(gid);
+      if (!gids.length) gids = groupFaceIds(adoptGroupId());
+      if (!gids.length) return;
+      var selMap = Object.assign({}, state.selected);
+      gids.forEach(function (id) { selMap[id] = true; });
+      setSelected(selMap);
       e.preventDefault();
       return;
     }
@@ -1011,8 +1100,9 @@
     return view.offsetParent !== null;
   }
 
-  /* 顶栏只留「人脸数据库 + 已选/全选/清空 + 提取到 + 关闭」：
-     项目名副标题、模式徽标、当前帧这些小字都删了（合成器里本来就有）。 */
+  /* 顶栏只留「人脸数据库 + 已选 N 张（点它清空）+ 提取到 + 关闭」：
+     项目名副标题、模式徽标、当前帧这些小字都删了（合成器里本来就有）；
+     跨组的「全选 / 清空选择」两颗按钮也删了 —— 批量只发生在组内。 */
   function updateHeader() {
     var el = $("fdbSelCount");
     if (el) el.textContent = String(selectedIds().length);
@@ -1119,6 +1209,18 @@
     var board = $("fdbBoard");
     if (board) {
       board.addEventListener("click", function (e) {
+        /* 组头勾选框：先处理。刚拖完的那一下 suppressClick 不该把这一下吞掉。 */
+        var gsel = e.target.closest && e.target.closest(".fdb-gsel");
+        if (gsel) {
+          e.stopPropagation();
+          var gcard = gsel.closest(".fdb-group");
+          if (gcard) toggleGroup(gcard.getAttribute("data-group"));
+          /* 原生 checkbox 的 checked 是「先翻、再派发 click」：浏览器在本轮事件
+             结束后还会按默认动作再改一次，所以状态要等它改完再按真相盖回去。
+             （preventDefault 也不行 —— 那会让它把 checked 回滚到点击前的值。） */
+          setTimeout(updateGroupChecks, 0);
+          return;
+        }
         if (state.suppressClick) {
           state.suppressClick = false;
           e.preventDefault();
@@ -1158,14 +1260,9 @@
     var retry = $("fdbRetry");
     if (retry) retry.addEventListener("click", load);
 
-    var pickAll = $("fdbPickAll");
-    if (pickAll) pickAll.addEventListener("click", function () {
-      var m = {};
-      state.order.forEach(function (id) { m[id] = true; });
-      setSelected(m);
-    });
-    var clearSel = $("fdbClearSel");
-    if (clearSel) clearSel.addEventListener("click", function () { setSelected({}); state.anchor = ""; });
+    /* 「已选 N 张」= 状态显示 + 清空按钮（替代原来那颗独立的「清空选择」） */
+    var chip = $("fdbSelChip");
+    if (chip) chip.addEventListener("click", function () { setSelected({}); state.anchor = ""; });
 
     var trashList = $("fdbTrashList");
     if (trashList) trashList.addEventListener("click", function (e) {
@@ -1278,6 +1375,16 @@
         lastDragError: state.lastDragError || "",
         drag: state.drag ? { id: state.drag.id, ids: state.drag.ids.slice(), moved: state.drag.moved } : null,
         selected: Object.keys(state.selected),
+        /* 组头勾选框的实时状态：checked / indeterminate 各组的真相 */
+        groupSel: all(".fdb-group").map(function (c) {
+          var b = one(".fdb-gsel-box", c);
+          return {
+            group: c.getAttribute("data-group"),
+            checked: !!(b && b.checked),
+            mixed: !!(b && b.indeterminate),
+            faces: groupFaceIds(c.getAttribute("data-group")).length
+          };
+        }),
         groups: ((state.data && state.data.groups) || []).length,
         faces: ((state.data && state.data.faces) || []).length
       };
