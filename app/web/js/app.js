@@ -4197,17 +4197,34 @@
   }
   window.mgResetFaces = mgResetFaces;
 
-  /* ---------- chip 层：每张脸一个小卡片 + 一个 ＋，全部是 DOM ---------- */
+  /* ---------- chip 层：每张脸一个小卡片 + 一个 ＋，全部是 DOM ----------
+     关键：**脸没变就不重建**。
+     以前这里无条件 layer.innerHTML = "" 再重建。而这张图每次合成回包都会重画
+     （mgShowOverlay → mgApplyView → mvRedrawBoxes，加上 p.onload 再补一发、检测回包再来一发，
+     一次换脸 = 3 次重画），重建会把**打开着的下拉菜单**连同里面的 .ddopt 一起扔掉：
+     用户的 mousedown 落在旧节点上、mouseup/click 落在新节点或外层上 —— 浏览器把 click
+     派发给两者共同的祖先，选项上的监听器一次都没跑，于是 MG_FACE_MODEL 没写、
+     chip 还是「选择模型」、重开下拉也没有高亮（用户报的就是这个）。
+     现在：脸序号列表一致 → 只原地更新位置/文字/颜色/忙碌环（下拉不受影响）；真的换了脸数才重建。 */
   function mgRenderFaces() {
     var layer = document.getElementById("mgFaceLayer");
     if (!layer) return;
-    layer.innerHTML = "";
-    if (!mgBoxesOn()) return;
-    for (var i = 0; i < MG_RECTS.length; i++) {
-      var r = MG_RECTS[i];
+    if (!mgBoxesOn()) { layer.innerHTML = ""; return; }
+    var want = [], i, r;
+    for (i = 0; i < MG_RECTS.length; i++) {
+      r = MG_RECTS[i];
       if (!r || !(r.w > 0) || !(r.h > 0)) continue;
-      layer.appendChild(mgMakeFaceCard(i, r));
+      want.push(i);
     }
+    var cards = Array.prototype.slice.call(layer.querySelectorAll(".mgfc"));
+    var same = (cards.length === want.length);
+    for (i = 0; same && i < cards.length; i++) {
+      if (parseInt(cards[i].getAttribute("data-face"), 10) !== want[i]) same = false;
+    }
+    if (same) { mgSyncFaceCards(); return; }   /* ← 原地更新，别炸掉打开着的下拉 */
+    layer.innerHTML = "";
+    for (i = 0; i < want.length; i++) layer.appendChild(mgMakeFaceCard(want[i], MG_RECTS[want[i]]));
+    mgSyncFaceCards();
   }
   window.mgRenderFaces = mgRenderFaces;
 
@@ -4315,6 +4332,14 @@
     if (!layer) return;
     Array.prototype.forEach.call(layer.querySelectorAll(".mgfc"), function (card) {
       var i = parseInt(card.getAttribute("data-face"), 10);
+      /* 卡片不再重建，位置就得在这里跟着当前帧的框走（切帧/换图后 chip 要贴回框的右上角） */
+      var rc = MG_RECTS[i];
+      if (rc && rc.w > 0 && rc.h > 0) {
+        card.style.left = (rc.x + rc.w) + "px";
+        card.style.top = rc.y + "px";
+        var pl = card.querySelector(".mgplus");
+        if (pl) pl.style.top = Math.round(rc.h + 3) + "px";
+      }
       var nm = mgFaceModel(i);
       var color = nm ? mgModelColor(nm) : "";
       var btn = card.querySelector(".mgfb");
@@ -5149,7 +5174,7 @@
       var p = (window.MergePages && window.MergePages.settings) ? window.MergePages.settings() : {};
       var body = {
         project_dir: projectDir,
-        models: mgModelsPayload(),
+        models: mgFaceModelsPayload(),
         model: (document.querySelector("#mgModels .mgitem.on .nm") || {}).textContent || "",
         detector: p.detector || "",
         thresh: 0.5,
@@ -5347,7 +5372,7 @@
         project: inputDir,
         model: (document.querySelector("#mgModels .mgitem.on .nm") || {}).textContent || "",
         /* 多选契约：每个选中模型一条 {name, faces}；faces=[] = 全部脸 */
-        models: mgModelsPayload(),
+        models: mgFaceModelsPayload(),
         workers: parseInt(payload.num_workers, 10) || 0,
         encoder: payload.encoder || "h264_nvenc",
         hwaccel: payload.hwaccel === "" ? "off" : (payload.hwaccel || "auto"),
