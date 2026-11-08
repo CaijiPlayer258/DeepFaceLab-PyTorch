@@ -902,5 +902,5 @@ def dfm_input_size(path, default: int = 512) -> int:
 def detect_faces_in_image(img) -> list:
     """整帧检测，返回 [{box, kps, score}, …]；一帧多脸会全部返回。"""
     from .app import _get_detector
-    detector = _get_detector("det_500m")
+    detector = _get_detector()          # 默认 TinyMog（det_500m 已随 RetinaFace_500m 移除）
     return detector.detect(img) or []

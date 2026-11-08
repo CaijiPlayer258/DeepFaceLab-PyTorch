@@ -443,8 +443,9 @@ def _checks(rep: Report, client) -> int:
     rep.equal(r.status_code, 200, "越界请求没把缓存搞坏：frame/2 仍 200", r)
 
     # ================= 6. /api/merge/detect/0 =================
+    # 默认检测器已改成 TinyMog，RetinaFace_500m 从 4.1 里删掉了（传它是 400）
     r = _request(client, "GET", "/api/merge/detect/0",
-                 params={"model": "det_500m", "thresh": 0.2})
+                 params={"model": "TinyMog", "thresh": 0.2})
     lo = 0
     if rep.equal(r.status_code, 200, "GET /api/merge/detect/0 → 200", r,
                  "检测器加载不了，时间轴上的人脸框、按人脸位对齐全都跟着废"):
@@ -454,7 +455,9 @@ def _checks(rep: Report, client) -> int:
         rep.equal(d.get("idx"), 0, "merge/detect/0.idx = 0", r)
         rep.equal((d.get("width"), d.get("height")), (256, 256),
                   "merge/detect/0 报的原图尺寸 = 256x256", r)
-        rep.equal(d.get("model"), "det_500m", "merge/detect/0.model 回显请求的检测器", r)
+        rep.equal(d.get("model"), "TinyMog", "merge/detect/0.model 回显请求的检测器", r)
+        rep.equal(d.get("detector"), "tinymog",
+                  "merge/detect/0.detector = 规范名 tinymog", r)
         boxes = d.get("boxes")
         rep.ok(isinstance(boxes, list), "merge/detect/0.boxes 是数组", r)
         if isinstance(boxes, list):
@@ -465,7 +468,15 @@ def _checks(rep: Report, client) -> int:
     else:
         print("     ↑ /detect/0 没通，跳过它后面的字段断言")
     r_hi = _request(client, "GET", "/api/merge/detect/0",
-                    params={"model": "det_500m", "thresh": 0.95})
+                    params={"model": "TinyMog", "thresh": 0.95})
+    # 已移除的检测器必须明确 400（不能静默回退成别的检测器）
+    r_gone = _request(client, "GET", "/api/merge/detect/0",
+                      params={"model": "retinaface_500m", "thresh": 0.5})
+    rep.equal(r_gone.status_code, 400,
+              "GET /api/merge/detect/0?model=retinaface_500m → 400", r_gone,
+              "RetinaFace_500m 这个模型不存在，静默回退会让用户以为在跑它")
+    rep.ok("500m" in str(r_gone.text or ""),
+           "400 的响应体点名说清了是 retinaface_500m", r_gone)
     hi = None
     if r_hi.status_code == 200:
         try:
