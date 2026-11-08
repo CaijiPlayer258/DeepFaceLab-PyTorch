@@ -13,10 +13,35 @@ TEMPLATE_68 是经验模板：从 4.0 现有 data_src/aligned 里随机取 1200 
 whole_face 对齐脸的 landmarks 求均值得到，坐标就是 DFL 512 对齐空间里人脸
 该在的位置，不是拍脑袋编的。UNIT_68 是同一份模板反推回「单位方形」空间的
 结果 —— 所有拟合都在单位空间里做，padding 只算一次。
+
+────────────────────────────────────────────────────────────────────────
+2026-11 起：**5 点只做几何，68 点只从模型来**
+────────────────────────────────────────────────────────────────────────
+这里原来有个「5 点插值出 68 点」的函数（lm68_from_5，2026-11 **整个删掉**）——
+它把检测到的 5 点按模板相似变换插值成 68 个点，看着像那么回事。删它的原因
+是踩过一次真实的坑 ——
+
+  提取器当时先用 5 点裁剪，再对**已裁好的图**跑 2D106 拿 68 点；106 一旦失败，
+  代码就退回那个插值函数的结果，把它**当成真值写进 DFLJPG 的 dat**。
+  那些数是"按模板摆出来的"，不是这张脸的：留出集上模板插值 10.6 px（512 空间），
+  模型直出的点小一个量级，而且**永远不会自己说"我错了"**——更糟的是 dat 里看
+  起来**一切正常**
+  —— landmarks 齐全、形状 68×2、排序工具照样能算 yaw/pitch/roll，没有任何
+  一处会报错。也就是说：假数据不会暴露自己，只会安静地训练坏、排序乱。
+
+所以现在的规矩是硬性的，别再往回改：
+
+  1) 5 点唯一的用途是**求一个粗对齐矩阵**（给 2D106 准备输入），绝不产出 68 点；
+  2) 68 点只能来自 2D106 的真实输出（landmarks68_batch：106 点按固定下标挑 68 个，
+     见 _landmarks106.landmark106to68），失败就**明确跳过**，
+     并记进 skipped + 日志，不写文件、不写估算值；
+  3) 元数据里带 landmarks_source：'model68'（来自模型）/ 'none'（没有点）。
+     看到 'none' 就说明这张图没有可信关键点，别再拿它算掩码或排序。
 """
 from __future__ import annotations
 
 import io
+import os
 import pickle
 import struct
 
@@ -271,14 +296,140 @@ def align_mat_from_5(kps5, output_size=SIZE, padding=PADDING,
     return _affine_from_unit_square(mat_unit, output_size, padding, whole_face_shift)
 
 
-def landmarks68_from_5(kps5):
-    """检测到的 5 点 → 原图坐标系的 68 点（其余点由模板相似变换带出来）。"""
-    mat_unit = umeyama(_ordered_5(kps5), template_5(), True)[0:2]
-    return transform_points(UNIT_68, mat_unit, invert=True).astype(np.float64)
+def align_mat_from_68(kps68, output_size=SIZE, padding=PADDING,
+                     whole_face_shift=WHOLE_FACE_SHIFT):
+    """68 点（原图坐标）→ 原图到对齐图的仿射矩阵。
+
+    和 :func:`align_mat_from_5` 同一套模板 / 内缩 / 中心偏移，唯一区别是拟合用的
+    对应点从 5 个变成 68 个：umeyama 拿全部 68 对点求最小二乘相似变换，眼睛/鼻尖/
+    嘴角那 5 个点的单点误差被摊到整张脸上，旋转和缩放的估计明显更稳
+    （5 点时嘴角抖 2px 就能让整张图转半度、缩一圈）。
+
+    拿不到 68 个点（数量不对 / 有 NaN / 退化）返回 None —— 调用方必须报错，
+    **不许退回 5 点**。
+    """
+    src = np.asarray(kps68, dtype=np.float64)
+    if src.ndim != 2 or src.shape != (68, 2) or not np.all(np.isfinite(src)):
+        return None
+    T = umeyama(src, UNIT_68, True)
+    if not np.all(np.isfinite(T)):
+        return None
+    mat = _affine_from_unit_square(T[0:2], output_size, padding, whole_face_shift)
+    if not np.all(np.isfinite(mat)):
+        return None
+    return mat
+
+
+def align_face_68(img_bgr, kps68, box=None, size=SIZE, interpolation=None):
+    """68 点仿射裁一张对齐脸。返回 (对齐图, 元数据 dict)；失败返回 (None, None)。
+
+    人脸库（extract / add 两条路）统一走这里：插值默认 INTER_CUBIC —— 和合成链路
+    （MergeMaskedFace 那条路）保持一致，比 5 点 + INTER_LINEAR 的边缘更干净。
+    border 仍按 DFL 的规矩填纯黑。
+    """
+    import cv2
+    size = int(size)
+    if interpolation is None:
+        interpolation = cv2.INTER_CUBIC
+    mat = align_mat_from_68(kps68, size)
+    if mat is None:
+        return None, None
+    aligned = cv2.warpAffine(img_bgr, mat, (size, size),
+                             flags=int(interpolation),
+                             borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+    if aligned is None:
+        return None, None
+
+    pts = np.asarray(kps68, dtype=np.float64).round(4)
+    lm_aligned = transform_points(pts, mat).astype(np.float64)
+
+    h, w = img_bgr.shape[:2]
+    if box is None:
+        box = [float(pts[:, 0].min()), float(pts[:, 1].min()),
+               float(pts[:, 0].max()), float(pts[:, 1].max())]
+    rect = [int(max(0, box[0])), int(max(0, box[1])),
+            int(min(w, box[2])), int(min(h, box[3]))]
+
+    meta = {
+        "face_type": "whole_face",
+        "landmarks": np.round(lm_aligned, 4).tolist(),
+        "source_landmarks": pts.tolist(),
+        "source_rect": rect,
+        "image_to_face_mat": np.asarray(mat, dtype=np.float64).tolist(),
+        "align": "68",
+        "landmarks_source": "model68",     # 这 68 个点是 2D106 的输出（按下标挑的）
+    }
+    return aligned, meta
+
+
+# ---------------- 5 点：只做几何，只用于给 2D106 准备输入 ----------------
+
+ALIGN_MODES = ("68", "5")
+
+
+def align_mode() -> str:
+    """DFL_ALIGN=68|5，默认 68。
+
+    68 = 唯一的主路径（68 点仿射，点来自 2D106）；
+     5 = 临时回退 / 对照用：只按 5 点仿射裁剪，**元数据里没有 landmarks**。
+     """
+    v = (os.environ.get("DFL_ALIGN") or "68").strip().lower()
+    return "5" if v in ("5", "5pt", "5-pt", "five") else "68"
+
+
+# 粗裁画布边长。2D106 的输入本来就是 192（InsightFace106.landmarks68_batch 会把
+# 输入 resize 到 192），所以粗裁直接出 192：三次 warp 里最便宜的一次，
+# 而且不用再让模型那层多缩一次。
+COARSE_SIZE = 192
+# 粗裁视野 = 终裁视野 × 1.3。侧脸时 5 点算出来的紧框会把额头/下巴/耳朵切掉，
+# 2D106 看到切边的脸，出的点会整体往画面中心缩；多给 30% 余量就没这问题。
+# 这不会污染最终构图：终裁是「68 点 → UNIT_68」的相似变换拟合，模板把构图钉死了，
+# 粗裁多看到多少、少看到多少，都会被那一步吸收掉（缩放/平移都在相似变换里）。
+COARSE_EXPAND = 1.30
+
+
+def _zoom_about_center(mat, out_size, factor):
+    """仿射矩阵的视野放大 factor 倍：同一个输出中心，看进去更多，输出画布不变。"""
+    c = float(out_size) / 2.0
+    s = 1.0 / float(factor)
+    Z = np.array([[s, 0.0, c * (1.0 - s)],
+                  [0.0, s, c * (1.0 - s)],
+                  [0.0, 0.0, 1.0]], dtype=np.float64)
+    M = np.vstack([np.asarray(mat, dtype=np.float64), [0.0, 0.0, 1.0]])
+    return (Z @ M)[0:2]
+
+
+def coarse_align_from_5(kps5, out_size=COARSE_SIZE, expand=COARSE_EXPAND):
+    """5 点 → 「宽松粗裁」的仿射矩阵（原图 → 粗裁图）。粗裁图**永不落盘**。
+
+    几何上就是老 5 点裁剪的同一套模板 / padding / 整脸中心偏移，只改两件事：
+      1) 画布缩到 192 —— 2D106 内部也要缩到 192，多出来的像素没人用；
+      2) 视野再放大 expand 倍 —— 让 106 看到整张脸（含被 5 点紧框切掉的边缘）。
+    """
+    base = align_mat_from_5(kps5, output_size=out_size)
+    return _zoom_about_center(base, out_size, expand)
+
+
+def landmarks68_in_source(lm68_coarse, mat_coarse):
+    """粗裁图坐标的 68 点 → 原图坐标。拿不到就抛，不做任何估算兜底。"""
+    src = transform_points(np.asarray(lm68_coarse, dtype=np.float64).reshape(-1, 2),
+                           np.asarray(mat_coarse, dtype=np.float64), invert=True)
+    if src.shape != (68, 2) or not np.all(np.isfinite(src)):
+        raise ValueError("68 点反变换失败（数量/数值不合法）")
+    return src
 
 
 def align_face(img_bgr, kps5, box=None, size=SIZE):
-    """裁一张对齐脸。返回 (对齐图, 元数据 dict)；失败返回 (None, None)。"""
+    """5 点仿射裁一张对齐脸。返回 (对齐图, 元数据 dict)；失败返回 (None, None)。
+
+    这条只给两处用：
+      * DFL_ALIGN=5 的回退/对照路径（旧行为，逐像素与 4.1 早期一致）；
+      * 给人脸库/合成链路当 2D106 的输入（先粗对一次，再让模型出点）。
+
+    **它不产出任何关键点。** 以前这里会把 5 点插值成 68 点写进 meta，结果那
+    68 个数被当成真值写进 dat —— 见文件头的说明。
+    现在 meta 里没有 landmarks，只有 landmarks_source="none"。
+    """
     import cv2
     size = int(size)
     mat = align_mat_from_5(kps5, size)
@@ -290,22 +441,20 @@ def align_face(img_bgr, kps5, box=None, size=SIZE):
                              flags=cv2.INTER_LINEAR,
                              borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
 
-    lm68_img = landmarks68_from_5(kps5)
-    lm68_aligned = transform_points(lm68_img, mat).astype(np.float64)
-
+    pts5 = _ordered_5(kps5)
     h, w = img_bgr.shape[:2]
     if box is None:
-        box = [float(lm68_img[:, 0].min()), float(lm68_img[:, 1].min()),
-               float(lm68_img[:, 0].max()), float(lm68_img[:, 1].max())]
+        box = [float(pts5[:, 0].min()), float(pts5[:, 1].min()),
+               float(pts5[:, 0].max()), float(pts5[:, 1].max())]
     rect = [int(max(0, box[0])), int(max(0, box[1])),
             int(min(w, box[2])), int(min(h, box[3]))]
 
     meta = {
         "face_type": "whole_face",
-        "landmarks": np.round(lm68_aligned, 4).tolist(),
-        "source_landmarks": np.round(lm68_img, 4).tolist(),
         "source_rect": rect,
         "image_to_face_mat": np.asarray(mat, dtype=np.float64).tolist(),
+        "align": "5",
+        "landmarks_source": "none",        # 5 点不产生 68 点，这里没有可信关键点
     }
     return aligned, meta
 

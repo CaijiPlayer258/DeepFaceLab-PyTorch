@@ -23,7 +23,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 from . import _faces as store
-from ._align import align_face
+from ._align import align_face, align_face_68
 
 router = APIRouter()
 
@@ -181,6 +181,102 @@ def _load_frame(project: Path, frame: int):
     raise store.FacesError("项目里既没有帧图也没有源视频：%s" % project, 409)
 
 
+def _box_val(raw):
+    """可选检测框 → [x1,y1,x2,y2]（只当元数据用，不参与裁剪）。"""
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple)) or len(raw) < 4:
+        raise store.FacesError("box 要是 [x1, y1, x2, y2]", 400)
+    try:
+        return [float(v) for v in raw[:4]]
+    except (TypeError, ValueError):
+        raise store.FacesError("box 里有非数字：%r" % (raw,), 400)
+
+
+def _kps68_val(raw):
+    """68 点关键点 → (68,2) float64（两位小数）；不是 68 点就 None。
+
+    只认 68：5 点对齐的旋转/缩放抖动会让同一个人的两张入库图对不齐，
+    而库里的图是后面分组/导出的输入 —— 所以这里宁可报错也不退回 5 点。
+    """
+    import numpy as np
+    if raw is None:
+        return None
+    try:
+        arr = np.asarray(raw, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    if arr.ndim != 2 or arr.shape != (68, 2) or not np.all(np.isfinite(arr)):
+        return None
+    return arr.round(2)
+
+
+def _landmarks68(img, det, box):
+    """检测结果 → 原图坐标的 68 点（2D106 真回归出来的）。
+
+    和合成链路 _frame_landmarks() 是同一条（只认模型输出，没有模板兜底）：
+    5 点先求 512 对齐 → 2D106 回归 68 点 → 用 image_to_face_mat 反变换回原图。
+    拿不到就是 None，调用方必须报 no_landmarks68。
+    """
+    from .routes_merge import _frame_landmarks
+    try:
+        lm = _frame_landmarks(img, det, box)
+    except Exception:
+        lm = None
+    if lm is None:
+        return None
+    import numpy as np
+    arr = np.asarray(lm, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape != (68, 2) or not np.all(np.isfinite(arr)):
+        return None
+    # 两位小数：/api/merge/detect 回给前端的是同一份数，add 传回来才对得上
+    return arr.round(2)
+
+
+def _face_crop68(img, det, box, size):
+    """检测结果 → 68 点 → 仿射裁剪。返回 (crop, kps68, why)；why 非空 = 失败原因。"""
+    lm = _landmarks68(img, det, box)
+    if lm is None:
+        return None, None, "no_landmarks68"
+    try:
+        crop, _meta = align_face_68(img, lm, box, size)
+    except Exception:
+        crop = None
+    if crop is None:
+        return None, lm, "align_failed"
+    return crop, lm, ""
+
+
+def _read_frame(project: Path, frame: int, created: bool = False):
+    """取整帧原图：项目帧图/项目里的源视频 > merge 缓存里打开着的素材（视频模式）。
+
+    两条路都是 cv2 解码同一份字节，所以 extract 和 add 拿到的像素完全一样。
+    """
+    if not created:
+        try:
+            return _load_frame(project, frame)
+        except store.FacesError:
+            pass
+    from .routes_merge import _frame_image
+    img, _total = _frame_image(int(frame))
+    src = _source_video(project)
+    return img, {"video": (src.name if src is not None else project.name),
+                 "frame": int(frame)}
+
+
+def _detector_name(raw) -> str:
+    """detector 入参 → 规范名；空 = 服务器默认。白名单和 /api/merge/detect 同一套。"""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return ""
+    try:
+        from .routes_merge import _detector_val
+        return _detector_val(raw)
+    except store.FacesError:
+        raise
+    except Exception:
+        raise store.FacesError("未知检测器：%r（只认 TinyMog / RetinaFace_10g）" % (raw,), 400)
+
+
 def _resolve_dfm(raw):
     """dfm 参数 → (模型名, 输入尺寸)。
 
@@ -217,53 +313,194 @@ def list_faces(project: str = ""):
     return {"ok": True, "project": str(p), **data}
 
 
+def _attach_extras(p: Path, records, boxes, scores, kps68):
+    """给新记录补前端要的三样：缩略图 URL / 内联缩略图 / 框与分数。"""
+    for rec, box, score, lm in zip(records, boxes, scores, kps68):
+        rec["thumb_url"] = _thumb_url(p, rec["id"])
+        try:
+            path, _etag = store.ensure_thumb(p, rec["id"])
+            rec["thumb"] = "data:image/jpeg;base64," + base64.b64encode(
+                path.read_bytes()).decode("ascii")
+        except Exception:
+            rec["thumb"] = ""
+        rec["box"] = box
+        rec["score"] = score
+        rec["kps68"] = lm
+    return records
+
+
 @router.post("/api/merge/faces/extract")
 @_api
 def extract_faces(body: dict):
     """从当前帧检测并裁出**所有**人脸，一张脸一条记录。
 
     一帧多脸不合并、不取最大——检测器返回几张就存几张，前端再让用户勾选。
-    无人脸是正常结果：200 + {ok:false, reason:"no_face"}，不是 500。
+    裁剪统一走 68 点仿射（align_face_68）：2D106 回归 68 点，拿不到就**跳过**
+    并报 no_landmarks68，绝不退回 5 点。
+
+    结果是 200 + {ok:false, reason:...}（no_face / no_landmarks68），不是 500。
+    project 目录不存在时自动创建（只在工作区内），响应里 created=true。
     """
     body = _as_dict(body)
-    p = store.resolve_project(body.get("project"))
     frame = _int_val(body.get("frame"), "frame", 0, 10 ** 7)
     dfm_name, size = _resolve_dfm(body.get("dfm"))
-
-    img, source = _load_frame(p, frame)
-    detections = store.detect_faces_in_image(img)
-    crops, boxes, scores = [], [], []
-    for det in detections or []:
-        try:
-            kps = det.get("kps")
-            box = det.get("box")
-            if not kps or not box:
-                continue
-            crop, _meta = align_face(img, kps, box, size)
-        except Exception:
+    det_name = _detector_name(body.get("detector"))
+    p, created = store.resolve_project_for_write(body.get("project"),
+                                                default=store.default_project())
+    img, source = _read_frame(p, frame, created=created)
+    detections = store.detect_faces_in_image(img, det_name)
+    crops, boxes, scores, kps_all, skipped = [], [], [], [], []
+    for i, det in enumerate(detections or []):
+        box = det.get("box")
+        if not box or not det.get("kps"):
+            skipped.append({"face": i, "why": "检测框少了 5 点"})
             continue
+        crop, lm, why = _face_crop68(img, det, box, size)
         if crop is None:
+            skipped.append({"face": i, "why": why})
             continue
         crops.append(crop)
         boxes.append([round(float(v), 1) for v in box])
         scores.append(round(float(det.get("score") or 0), 4))
+        kps_all.append(lm.round(2).tolist())
 
     if not crops:
-        return {"ok": False, "reason": "no_face", "project": str(p),
-                "frame": frame, "detected": len(detections or []),
+        reason = "no_face"
+        if detections and all(s["why"] == "no_landmarks68" for s in skipped):
+            reason = "no_landmarks68"
+        return {"ok": False, "reason": reason, "project": str(p),
+                "created": bool(created), "frame": frame,
+                "detected": len(detections or []), "skipped": skipped,
                 "size": int(size)}
 
-    records, group = store.add_faces(p, crops, source, dfm=dfm_name)
-    for rec, box, score in zip(records, boxes, scores):
-        rec["thumb_url"] = _thumb_url(p, rec["id"])
-        path, _etag = store.ensure_thumb(p, rec["id"])
-        rec["thumb"] = "data:image/jpeg;base64," + base64.b64encode(
-            path.read_bytes()).decode("ascii")
-        rec["box"] = box
-        rec["score"] = score
-    return {"ok": True, "project": str(p), "frame": frame, "size": int(size),
+    if created:
+        store.ensure_index(p)
+    records, group = store.add_faces(p, crops, source, dfm=dfm_name, align="68")
+    _attach_extras(p, records, boxes, scores, kps_all)
+    return {"ok": True, "project": str(p), "created": bool(created),
+            "frame": frame, "size": int(size), "align": "68", "detector": det_name,
             "dfm": dfm_name, "group": group, "count": len(records),
-            "detected": len(detections or []), "faces": records}
+            "detected": len(detections or []), "skipped": skipped,
+            "faces": records}
+
+
+# ============================================================
+# 直接入库（不再整帧重检测）
+# ============================================================
+# 一帧 4K PNG 的 base64 也就几 MB；给个上限，别让人把服务器撑爆。
+_MAX_IMAGE_BYTES = 32 * 1024 * 1024
+
+
+def _decode_b64_image(raw):
+    """dataURL / 裸 base64 → BGR 图；解不开返回 None。"""
+    import cv2
+    import numpy as np
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    if text.startswith("data:"):
+        text = text.split(",", 1)[-1]
+    if not text:
+        return None
+    try:
+        blob = base64.b64decode(text, validate=False)
+    except Exception:
+        return None
+    if not blob or len(blob) > _MAX_IMAGE_BYTES:
+        return None
+    return cv2.imdecode(np.frombuffer(blob, np.uint8), cv2.IMREAD_COLOR)
+
+
+def _read_image_path(raw):
+    """frame_path → BGR 图（必须是一个存在的文件）；读不到返回 None。"""
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        fp = Path(text)
+    except (OSError, ValueError):
+        return None
+    if not fp.is_file():
+        return None
+    from . import app as app_mod
+    try:
+        return app_mod._imread_any(fp)
+    except Exception:
+        return None
+
+
+@router.post("/api/merge/faces/add")
+@_api
+def add_face(body: dict):
+    """把已经知道是哪张脸的那一块直接入库（不重跑检测）。
+
+    请求：{ project?, kps68|kps, box?, dfm?, frame, source?:{video,frame},
+            frame_b64?, frame_path? }
+
+    * kps 必须 68x2（/api/merge/detect 的每张脸都带 kps68）。只给 5 点 →
+      200 + {ok:false, reason:"no_landmarks68"}，一个文件都不落（用户明确禁止
+      5 点对齐：5 点的旋转/缩放抖动会让同一个人的两张入库图对不齐）。
+    * 裁剪和 extract 完全同一条 68 点仿射（align_face_68），所以同一帧同一张脸
+      两条路落下来的 PNG 逐像素相同。
+    * project 可有可无：没有就用默认库 <工作区>/merge（后端自动建目录与
+      index.json，越界到工作区外面一律 400）。
+    """
+    body = _as_dict(body)
+    dfm_name, size = _resolve_dfm(body.get("dfm"))
+    src = body.get("source") if isinstance(body.get("source"), dict) else {}
+    frame = _int_val(body.get("frame", src.get("frame", 0)), "frame", 0, 10 ** 7)
+
+    raw_kps = body.get("kps68")
+    if raw_kps is None:
+        raw_kps = body.get("kps")
+    kps = _kps68_val(raw_kps)
+    if kps is None:
+        try:
+            got = len(raw_kps or [])
+        except Exception:
+            got = 0
+        return {"ok": False, "reason": "no_landmarks68",
+                "detail": "add 只认 68 点仿射：kps 要是 68x2，收到 %d 个点" % got,
+                "expect": "68x2", "size": int(size), "dfm": dfm_name}
+
+    box = _box_val(body.get("box"))
+    proj = str(body.get("project") or "").strip()
+
+    # 取整帧原图（只读）：项目帧图 > frame_path > frame_b64 > 打开着的素材
+    existing = None
+    if proj:
+        try:
+            existing = store.resolve_project(proj)
+        except store.FacesError:
+            existing = None
+    img, source = None, None
+    if existing is not None:
+        img, source = _read_frame(existing, frame)
+    if img is None and body.get("frame_path"):
+        img = _read_image_path(body.get("frame_path"))
+    if img is None and body.get("frame_b64"):
+        img = _decode_b64_image(body.get("frame_b64"))
+    if img is None:
+        img, source = _read_frame(store.default_project(), frame, created=True)
+    if img is None:
+        raise store.FacesError("取不到这一帧的图（frame=%d）：先在合成器里打开素材" % frame, 409)
+    if not source:
+        video = str(src.get("video") or body.get("video") or "").strip()
+        source = {"video": (Path(video).name if video else ""), "frame": int(frame)}
+
+    crop, _meta = align_face_68(img, kps, box, size)
+    if crop is None:
+        raise store.FacesError("68 点退化（共线/面积为 0），这张脸对齐不出来", 400)
+
+    p, created = store.resolve_project_for_write(proj, default=store.default_project())
+    if created:
+        store.ensure_index(p)
+    records, group = store.add_faces(p, [crop], source, dfm=dfm_name, align="68")
+    _attach_extras(p, records, [box], [None], [kps.round(2).tolist()])
+    rec = records[0]
+    return {"ok": True, "project": str(p), "created": bool(created),
+            "dfm": dfm_name, "group": group, "size": int(size), "align": "68",
+            "frame": int(frame), "count": 1, "face": rec, "faces": [rec]}
 
 
 @router.post("/api/merge/faces/move")

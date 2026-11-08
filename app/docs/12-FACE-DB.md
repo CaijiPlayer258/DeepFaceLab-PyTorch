@@ -98,9 +98,15 @@
 从**当前帧**检测并裁出**所有**人脸，每张一条记录：
 
 * 帧图优先读项目里的 `000000.jpg…`（`frame` 就是帧号）；
-  没有帧图就回退到项目里的源视频按帧号 seek。
-* 检测复用 `app._get_detector("det_500m")`；对齐复用
-  `_align.align_face()`（5 点 → 仿射 → 目标尺寸），没有另写一套。
+  没有帧图就回退到项目里的源视频按帧号 seek；项目目录不存在时**自动创建**
+  （只在工作区里建，越界 400），响应里带 `"created": true`。
+* 检测复用 `app._get_detector()`；对齐走 **68 点仿射**：检测器给 5 点 → 2D106
+  回归 68 点（`routes_merge._frame_landmarks(...)`，只认模型输出）→
+  `_align.align_face_68()`（68 对点最小二乘相似变换 + INTER_CUBIC）。
+  **拿不到 68 点不退回 5 点**：这张脸跳过，全帧都拿不到时回
+  `{"ok": false, "reason": "no_landmarks68"}`。
+* 新记录带 `"align": "68"`；老库里没有这个字段的按 5 点对齐看待（尺寸一样，
+  对齐略有差异，不回溯改写）。
 * 一帧多脸：检测器返回几张就存几张（各自独立对齐），不合并、不取最大。
 * 尺寸：在 `workspace/model/<dfm>.dfm` 找到就读 ONNX 输入张量的 H/W
   （384 / 416 / 512…），找不到就 512。
@@ -121,6 +127,32 @@
 ```
 
 **没有人脸不是错误**：HTTP 200 + `{"ok": false, "reason": "no_face", "detected": 0}`。
+
+### POST `/api/merge/faces/add`
+
+点「＋」走这条：**已经知道是哪张脸**，不用再整帧重检测。
+
+```json
+{"project": "D:/.../merge/xx",          // 可省略：省略就用默认库 <工作区>/merge
+ "kps68": [[x, y], ... 68 个],          // /api/merge/detect 每张脸都带 kps68
+ "box": [x1, y1, x2, y2],               // 可选，只进元数据
+ "dfm": "张元英", "frame": 1234,
+ "source": {"video": "xx.mp4", "frame": 1234}}
+```
+
+* 裁剪和 extract 是**同一条** 68 点仿射，所以同一帧同一张脸，两条路落下来的
+  PNG 逐像素相同（尺寸也一样）。
+* `kps` 只有 5 点 / 不是 68×2 → HTTP 200 + `{"ok": false, "reason":
+  "no_landmarks68", "detail": "...", "expect": "68x2"}`，**不落任何文件**。
+* 整帧原图来源：项目帧图 > `frame_path` > `frame_b64` > 合成器里打开着的素材。
+* `project` 省略 / 目录不存在 → 用默认库 `<工作区>/merge`（`_faces/` +
+  `index.json` 自动建），响应 `"created": true`；越界到工作区外一律 400。
+
+```json
+{"ok": true, "project": "...", "created": true, "dfm": "张元英", "size": 384,
+ "align": "68", "count": 1,
+ "faces": [{"id": "f_0001", ..., "kps68": [[x, y], ...]}]}
+```
 
 ### POST `/api/merge/faces/move`
 

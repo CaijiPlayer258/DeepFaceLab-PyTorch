@@ -2602,7 +2602,9 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     import threading
     import numpy as np
     import cv2
-    from ._align import align_face, write_dfljpg, pose_from_kps
+    from ._align import (COARSE_SIZE, align_face, align_face_68, align_mode,
+                         coarse_align_from_5, landmarks68_in_source,
+                         pose_from_kps, write_dfljpg)
 
     # 谁的档位谁负责：high 只用 RetinaFace，fast 只用 TinyMog。
     # 以前会"0 脸就换另一个检测器兜底"，结果是同一批帧跑两次推理，
@@ -2621,6 +2623,33 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     need_canvas = bool(getattr(primary, "needs_canvas", False))
 
     lm106 = _get_landmarks106()
+
+    # ---------------- 对齐模式 ----------------
+    # DFL_ALIGN=68（默认）：5 点只算「宽松粗裁」→ 2D106 出 106 点 → 挑 68 → 回原图 →
+    #                      align_face_68 做终裁（INTER_CUBIC）。落盘的是这一步。
+    # DFL_ALIGN=5        ：老的 5 点仿射，只留作回退 / 对照，输出**没有**关键点。
+    # 68 模式下 106 不可用时绝不退回 5 点：宁可不产出，也不写一张假的"对齐脸"。
+    def _log(msg):
+        """打印日志永不让抽取挂掉：控制台是 GBK 时，个别字符编不出来就降级。"""
+        try:
+            print(msg, flush=True)
+        except UnicodeEncodeError:
+            enc = (getattr(sys.stdout, "encoding", "") or "utf-8")
+            print(msg.encode(enc, "replace").decode(enc, "replace"), flush=True)
+
+    _amode = align_mode()
+    if _amode == "5":
+        _log("[align] 警告：DFL_ALIGN=5，走 5 点仿射（旧路径，仅供回退/对照）。"
+              "这条路上的输出没有 68 点关键点（landmarks_source=none），"
+              "4.0 引擎的 SampleLoader / Sorter 读不到 landmarks —— 要训练就别用它。")
+    elif lm106 is None:
+        _log("[align] 失败风险：DFL_ALIGN=68 但 2D106 模型不可用"
+              "（weights/insightface_2d106.onnx 不存在或加载失败）："
+              "本次每一张脸都会跳过并计入 skipped，绝不退回 5 点。")
+    else:
+        _log("[align] 对齐模式：68 点仿射（5 点粗裁 %dpx ×%.2f → 2D106 → 终裁）"
+              % (COARSE_SIZE, 1.30))
+
     face_dir.mkdir(parents=True, exist_ok=True)
 
     base_faces = len(list(face_dir.glob("*_*.jpg")))      # 目录里已有的对齐脸（续跑时不为 0）
@@ -2670,7 +2699,10 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     PROF = bool(os.environ.get("DFL_EXTRACT_PROFILE"))
     # 每级"真正干活"与"等队列/等管道"的累计秒数，用来判断是不是伪并行
     cost = {"read": 0.0, "put1": 0.0, "get1": 0.0, "det": 0.0, "put2": 0.0,
-            "get2": 0.0, "emit": 0.0}
+            "get2": 0.0, "emit": 0.0,
+            # 对齐内部再拆四段（只在 DFL_EXTRACT_PROFILE=1 时打印，但一直记账：
+            # 单次 _t() 是几十纳秒，和一次 warp 比可以忽略）
+            "coarse": 0.0, "lm106": 0.0, "final": 0.0, "jpeg": 0.0}
     qmax = {"q1": 0, "q2": 0}
 
     def _t():
@@ -2689,7 +2721,7 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     q_frames: "queue.Queue" = queue.Queue(maxsize=q_cap)
     q_detect: "queue.Queue" = queue.Queue(maxsize=q_cap)
     stop = threading.Event()
-    stats = {"seen": 0, "made": 0, "fallback": 0}
+    stats = {"seen": 0, "made": 0, "fallback": 0, "skipped": 0}
     # 帧速度（JOB.fps = 解到第几帧 / el）与 SSE 的 elapsed 共用 JOB.t0：
     # 前端算「张/秒」用的是 elapsed，两边各用各的 t0 会让两个速度一快一慢。
     t0 = JOB.t0 or time.time()
@@ -2704,10 +2736,33 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
         return cv, sc
 
     BATCH_106 = max(1, min(8, int(os.environ.get("DFL_EXTRACT_106_BATCH") or 8)))
-    _pending = []          # [(path, crop, meta), ...] 攒够一批再跑 2D106
+    # 每项：68 模式 = {path, idx, img, coarse, mat, box, size, pose}
+    #       5  模式 = {path, idx, crop, meta, pose}
+    # 68 模式必须留着**原帧**引用：终裁是从原图重采样（不是把粗裁图放大），
+    # 攒一批 = 最多攥住 BATCH_106 帧（1080p ≈ 6 MB/帧，峰值 ~50 MB），可接受。
+    _pending = []
+    _skip_dbg = {"n": 0}
+
+    def _skip(idx, why):
+        """一张脸没产出：计入 skipped + 日志留一行（前 20 条每张都打，之后每 200 条提醒）。
+
+        为什么必须有：以前 106 跑挂会被静默吞掉，或者退化成"用插值点照样写一张"，
+        两种都让「少了一张脸」在人眼里等于「这一帧没有脸」。
+        """
+        with lock:
+            stats["skipped"] += 1
+            n = stats["skipped"]
+        if _skip_dbg["n"] < 20 or n % 200 == 0:
+            _log("[align] 跳过：%s（第 %d 帧）" % (why, idx))
+        _skip_dbg["n"] += 1
 
     def _flush():
         """把攒下的脸一次性做 2D106，再统一落盘。
+
+        68 模式：一批粗裁图 → 106 批出 106 点 → 按下标挑 68 → 反变换回原图 →
+                align_face_68 终裁。
+        5  模式：直接用 _emit 里已经裁好的图（旧行为，逐像素不变）。
+        106 没结果的脸 = **不写文件**，计 skipped 并留日志；绝不拿插值点顶替。
 
         **计数就在这一层**：谁写成功一张，stats["made"] 立刻 +1，JOB.faces 跟着更新。
         以前只有调用方把 _flush/_emit 的返回值累加起来，而流水线模式里 emit 的返回值
@@ -2717,32 +2772,51 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
         """
         if not _pending:
             return 0
-        crops = [c for _, c, _ in _pending]
-        lms = [None] * len(crops)
-        if lm106 is not None:
+        items = list(_pending)
+        _pending.clear()
+        lms = [None] * len(items)
+        if _amode == "68" and lm106 is not None:
+            _t0 = _t()
             try:
-                lms = lm106.landmarks68_batch(crops)
-            except Exception:
-                lms = [None] * len(crops)
+                lms = lm106.landmarks68_batch([it["coarse"] for it in items])
+            except Exception as e:          # noqa: BLE001 —— 整批失败就整批跳过
+                _log("[align] 2D106 批量推理失败（本批 %d 张全部跳过）：%s"
+                     % (len(items), e))
+                lms = [None] * len(items)
+            cost["lm106"] += _t() - _t0
         wrote = 0
-        for (pth, crop, meta_f), lm68 in zip(_pending, lms):
-            if lm68 is not None:
+        for it, lm68 in zip(items, lms):
+            if _amode == "68":
+                if lm68 is None:
+                    _skip(it["idx"], "拿不到 68 点（2D106 没有输出，不退回 5 点）")
+                    continue
                 try:
-                    from ._align import transform_points as _tp
-                    meta_f["landmarks"] = np.round(lm68, 4).tolist()
-                    meta_f["source_landmarks"] = np.round(
-                        _tp(lm68, np.array(meta_f["image_to_face_mat"]), invert=True), 4).tolist()
-                except Exception:
-                    pass
+                    _tf = _t()
+                    pts = landmarks68_in_source(lm68, it["mat"])
+                    crop, meta_f = align_face_68(it["img"], pts, box=it["box"], size=it["size"])
+                    cost["final"] += _t() - _tf
+                except Exception as e:      # noqa: BLE001
+                    _skip(it["idx"], "68 点反变换/仿射失败：%s" % e)
+                    continue
+                it["img"] = None            # 别把整帧攥在 _pending 里
+                if crop is None:
+                    _skip(it["idx"], "68 点仿射失败（点数/数值不合法）")
+                    continue
+            else:
+                crop, meta_f = it["crop"], it["meta"]
+            meta_f["source_filename"] = "%06d" % it["idx"]
+            if it.get("pose"):
+                meta_f["yaw"], meta_f["pitch"], meta_f["roll"] = it["pose"]
             try:
-                write_dfljpg(pth, crop, meta_f)
+                _tj = _t()
+                write_dfljpg(it["path"], crop, meta_f)
+                cost["jpeg"] += _t() - _tj
                 wrote += 1
                 with lock:                  # 落盘即计数：跑的过程中就能看到数字在长
                     stats["made"] += 1
             except Exception as e:          # noqa: BLE001 —— 落盘失败也要留痕
-                print("[extract] 写 %s 失败：%s" % (Path(pth).name, e), flush=True)
+                print("[extract] 写 %s 失败：%s" % (Path(it["path"]).name, e), flush=True)
                 continue
-        _pending.clear()
         if wrote:
             # 锁序：先放掉 lock 再拿 JOB.lock（_decode 那边是 JOB.lock → 读 stats，反向嵌套会死锁）
             with JOB.lock:
@@ -2762,17 +2836,43 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
             bh = max(1.0, float(box[3]) - float(box[1]))
             side = int(round(max(bw, bh) * 2.0))   # 2 倍框宽，不设上下限
             side -= side % 2
-            crop, meta_f = align_face(img, fc["kps"], box=box, size=side)
-            if crop is None:
+            kps = fc.get("kps") or []
+            if len(kps) < 5:
+                _skip(idx, "检测器没给 5 点")
                 continue
-            meta_f["source_filename"] = "%06d" % idx
+            pose = None
             try:
-                _y, _p, _r = pose_from_kps(fc["kps"], box)
+                _y, _p, _r = pose_from_kps(kps, box)
                 if _y is not None:
-                    meta_f["yaw"], meta_f["pitch"], meta_f["roll"] = _y, _p, _r
+                    pose = (_y, _p, _r)
             except Exception:
-                pass
-            _pending.append((face_dir / ("%06d_%d.jpg" % (idx, k)), crop, meta_f))
+                pose = None
+            path = face_dir / ("%06d_%d.jpg" % (idx, k))
+            if _amode == "68":
+                # 粗裁：只为了喂 2D106，落盘的永远是下面 _flush 里的 68 点终裁图。
+                # 画布直接出 192（2D106 的输入尺寸），视野外扩 1.3 倍 —— 三次 warp 里
+                # 最便宜的一次，且不再让模型那层多 resize 一遍。
+                try:
+                    cmat = coarse_align_from_5(kps)
+                except Exception:
+                    cmat = None
+                if cmat is None or not np.all(np.isfinite(cmat)):
+                    _skip(idx, "5 点算不出粗对齐矩阵")
+                    continue
+                _tc = _t()
+                coarse = cv2.warpAffine(img, cmat, (COARSE_SIZE, COARSE_SIZE),
+                                        flags=cv2.INTER_LINEAR,
+                                        borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+                cost["coarse"] += _t() - _tc
+                _pending.append({"path": path, "idx": idx, "img": img, "coarse": coarse,
+                                 "mat": cmat, "box": box, "size": side, "pose": pose})
+            else:
+                crop, meta_f = align_face(img, kps, box=box, size=side)
+                if crop is None:
+                    _skip(idx, "5 点仿射失败")
+                    continue
+                _pending.append({"path": path, "idx": idx, "crop": crop,
+                                 "meta": meta_f, "pose": pose})
             if len(_pending) >= BATCH_106:
                 n += _flush()
         return n
@@ -3012,20 +3112,32 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     global _LAST_EXTRACT
     _LAST_EXTRACT = {
         "ok": True, "error": "",
+        "align": _amode, "lm106": lm106 is not None,
         "mode": mode, "frames": stats["seen"], "faces": stats["made"],
+        "skipped": stats["skipped"],
         "wall": wall, "fps": stats["seen"] / wall,
-        "cost": {k: cost[k] for k in ("read", "put1", "get1", "det", "put2", "get2", "emit")},
+        "cost": {k: cost[k] for k in ("read", "put1", "get1", "det", "put2", "get2", "emit",
+                                      "coarse", "lm106", "final", "jpeg")},
         "queue": q_cap, "batch": BATCH, "batch106": BATCH_106,
         "q1max": qmax["q1"], "q2max": qmax["q2"],
         "cancelled": cancelled, "alive": alive,
         "hwaccel": _hwaccel.current(),
     }
+    # 一行结论：模式 / 帧 / 脸 / 跳过 / 墙钟。自检脚本和人都直接看这行。
+    _log("[align] 完成：DFL_ALIGN=%s 帧=%d 脸=%d 跳过=%d 墙钟=%.2fs (%.1f 帧/秒)"
+         % (_amode, stats["seen"], stats["made"], stats["skipped"],
+            wall, stats["seen"] / wall))
+    if _amode == "68" and stats["made"] == 0 and stats["skipped"]:
+        _log("[align] 一张都没写出来：%d 张脸全部拿不到 68 点。"
+             "检查 weights/insightface_2d106.onnx 与 TRT/ORT 是否可用"
+             "（DFL_ALIGN=68 不会退回 5 点）。" % stats["skipped"])
     if PROF:
         try:
             print("[extract-profile] mode=%s q=%d batch=%d  wall=%.2fs  frames=%d  faces=%d  %.1f 帧/秒"
                   % (mode, q_cap, BATCH, wall, stats["seen"], stats["made"], stats["seen"] / wall))
-            for k in ("read", "put1", "get1", "det", "put2", "get2", "emit"):
-                print("  %-5s %7.3fs  %5.1f%% of wall" % (k, cost[k], cost[k] * 100.0 / wall))
+            for k in ("read", "put1", "get1", "det", "put2", "get2", "emit",
+                      "coarse", "lm106", "final", "jpeg"):
+                print("  %-6s %7.3fs  %5.1f%% of wall" % (k, cost[k], cost[k] * 100.0 / wall))
             print("  queue max depth: q1=%d q2=%d" % (qmax["q1"], qmax["q2"]))
             if cancelled:
                 print("  cancelled at frame %d（worker 残留：%s）" % (stats["seen"], alive or "无"))
@@ -3040,7 +3152,10 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
         JOB.faces = base_faces + stats["made"]
         JOB.ok = True           # 只有真的跑到底才置 True
         JOB.error = ""
-        JOB.msg = "完成：解码 %d 帧 · %d 张人脸 → %s" % (stats["seen"], stats["made"], str(face_dir))
+        JOB.msg = "完成：解码 %d 帧 · %d 张人脸%s → %s" % (
+            stats["seen"], stats["made"],
+            ("（跳过 %d 张：拿不到 68 点）" % stats["skipped"]) if stats["skipped"] else "",
+            str(face_dir))
     return stats["made"]
 
 

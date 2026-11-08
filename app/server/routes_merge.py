@@ -1656,6 +1656,34 @@ def _detector(name=None):
         raise _BadInput("检测器加载失败（%s）：%s" % (key, str(e)[:160]), 500)
 
 
+def _with_kps68(frame, boxes):
+    # 给每个检测框补一条 kps68（原图坐标，68 行 2 列，两位小数）。
+    #
+    # 为什么在这里补：人脸库要的是 68 点仿射（5 点抖动大，旋转/缩放不稳），
+    # 而前端手上只有检测框。让检测回包把 68 点直接带出去，前端点「＋」时
+    # 就是纯搬运 —— extract 和 add 拿到的是同一份数，像素差才是 0。
+    import numpy as np
+    out = []
+    for b in (boxes or []):
+        try:
+            item = dict(b)
+        except Exception:
+            out.append(b)
+            continue
+        lm = None
+        try:
+            lm = _frame_landmarks(frame, b, b.get("box"))
+        except Exception:
+            lm = None
+        if lm is not None:
+            try:
+                item["kps68"] = np.asarray(lm, dtype=np.float64).round(2).tolist()
+            except Exception:
+                pass
+        out.append(item)
+    return out
+
+
 @router.get("/api/merge/detect/{idx}")
 @_api
 def merge_detect(idx: int, model: str = _DEFAULT_DETECTOR, thresh: float = 0.5):
@@ -1674,6 +1702,10 @@ def merge_detect(idx: int, model: str = _DEFAULT_DETECTOR, thresh: float = 0.5):
         except Exception as e:
             raise _BadInput("检测失败：%s" % str(e)[:200], 500)
     h, w = frame.shape[:2]
+    # 每张脸顺手回归一次 68 点（2D106）：前端点「＋」时直接把它交给
+    # /api/merge/faces/add 落库，和人脸库 extract 的取点链路是同一条。
+    # 回归不出来就不给这个键（add 那边会明确报 no_landmarks68，绝不退回 5 点）。
+    boxes = _with_kps68(frame, boxes)
     return _ok(idx=int(idx), total=int(total or 0), width=int(w), height=int(h),
                model=model, detector=det_name, thresh=t, boxes=boxes)
 
@@ -3064,11 +3096,14 @@ def _landmarks_model():
 
 
 def _frame_landmarks(frame, det_box, box_xyxy):
-    """检测框/5 点 → 原图坐标的 68 点。
+    """检测框/5 点 → 原图坐标的 68 点。**只认 2D106 真的回归出来的点。**
 
-    跟 _align_stream（抽帧+对齐那条路）同一个套路：5 点先求 512 对齐，再让
-    2D106 回归出 68 点，最后用 image_to_face_mat 反变换回原图。2D106 不可用时
-    退回「5 点 + 模板」，只是精度差一档。
+    跟 _align_stream（抽帧+对齐那条路）同一个套路：5 点先粗对齐一次（只为了给
+    模型一个像样的输入），2D106 回归 68 点，再用 image_to_face_mat 反变换回原图。
+
+    模型缺失 / 跑挂时返回 None，由调用方报「68 点算不出来」。以前这里有个
+    "2D106 不可用就退回 5 点插值"的分支（合成链路默认走它），已经删掉：那等于
+    把插值估算当成检测结果，误差大 4 倍却完全看不出来（见 _align.py 文件头）。
     """
     import numpy as np
 
@@ -3089,12 +3124,6 @@ def _frame_landmarks(frame, det_box, box_xyxy):
                             invert=True)
         except Exception:
             lm68 = None
-        if lm68 is None:
-            try:
-                from ._align import landmarks68_from_5
-                lm68 = landmarks68_from_5(np.array(kps, dtype=np.float64))
-            except Exception:
-                lm68 = None
     if lm68 is None:
         return None
     arr = np.asarray(lm68, dtype=np.float64)
