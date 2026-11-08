@@ -116,7 +116,7 @@ BOXES = {
 }
 
 
-def fake_detect(img):
+def fake_detect(img, detector=""):
     patch = img[0:8, 0:8].reshape(-1, 3).mean(axis=0)
     b, g, r = [float(x) for x in patch]
     frame = None

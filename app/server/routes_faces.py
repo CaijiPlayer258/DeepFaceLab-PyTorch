@@ -80,18 +80,26 @@ def _int_val(raw, name: str, lo: int = 0, hi: int = 10 ** 8) -> int:
     return value
 
 
-def _thumb_url(project: Path, face_id: str) -> str:
-    return "/api/merge/faces/thumb?project=%s&id=%s" % (
+def _thumb_url(project: Path, face_id: str, version=None) -> str:
+    """缩略图 URL；version 非空时带 v=。
+
+    同一帧那张脸被「替换」时 id 不变、PNG 被覆盖、_thumb/<id>.jpg 被删掉重建，
+    浏览器不能继续吃 immutable 缓存里的旧图 —— 所以带上 added_at 当版本号。
+    """
+    url = "/api/merge/faces/thumb?project=%s&id=%s" % (
         urllib.parse.quote(str(project), safe=""),
         urllib.parse.quote(str(face_id), safe=""),
     )
+    if version:
+        url += "&v=%s" % urllib.parse.quote(str(version), safe="")
+    return url
 
 
 def _decorate(project: Path, faces: list) -> list:
     out = []
     for f in faces:
         item = dict(f)
-        item["thumb_url"] = _thumb_url(project, f["id"])
+        item["thumb_url"] = _thumb_url(project, f["id"], f.get("added_at") or None)
         out.append(item)
     return out
 
@@ -398,10 +406,12 @@ def list_faces(project: str = ""):
     第一次进来看到的是一份空库而不是「缺少 project」的 400。
     """
     p = store.resolve_library(project)
+    # 同一帧同一张脸只留一张：老库里堆出来的重复在这里挪进回收站（可还原，不删）
+    deduped = store.dedup_frames(p)
     data = store.snapshot(p)
     data["groups"] = _decorate_groups(data["groups"])
     data["faces"] = _decorate(p, data["faces"])
-    return {"ok": True, "project": str(p), **data}
+    return {"ok": True, "project": str(p), "deduped": int(deduped), **data}
 
 
 def _attach_extras(p: Path, records, boxes, scores, kps68):
@@ -440,7 +450,7 @@ def extract_faces(body: dict):
                                                 default=store.default_project())
     img, source = _read_frame(p, frame, created=created)
     detections = store.detect_faces_in_image(img, det_name)
-    crops, boxes, scores, kps_all, skipped = [], [], [], [], []
+    crops, boxes, scores, kps_all, skipped, idx_all = [], [], [], [], [], []
     for i, det in enumerate(detections or []):
         box = det.get("box")
         if not box or not det.get("kps"):
@@ -454,6 +464,7 @@ def extract_faces(body: dict):
         boxes.append([round(float(v), 1) for v in box])
         scores.append(round(float(det.get("score") or 0), 4))
         kps_all.append(lm.round(2).tolist())
+        idx_all.append(int(i))          # 同一帧里的第几张：多脸帧各存各的
 
     if not crops:
         reason = "no_face"
@@ -466,11 +477,13 @@ def extract_faces(body: dict):
 
     if created:
         store.ensure_index(p)
-    records, group = store.add_faces(p, crops, source, dfm=dfm_name, align="68")
+    records, group = store.add_faces(p, crops, source, dfm=dfm_name, align="68",
+                                     idxs=idx_all)
     _attach_extras(p, records, boxes, scores, kps_all)
     return {"ok": True, "project": str(p), "created": bool(created),
             "frame": frame, "size": int(size), "align": "68", "detector": det_name,
             "dfm": dfm_name, "group": group, "count": len(records),
+            "replaced": sum(1 for r in records if r.get("replaced")),
             "detected": len(detections or []), "skipped": skipped,
             "faces": records}
 
@@ -606,6 +619,17 @@ def add_face(body: dict):
     det_name = _detector_name(body.get("detector"))
     src = body.get("source") if isinstance(body.get("source"), dict) else {}
     frame = _int_val(body.get("frame", src.get("frame", 0)), "frame", 0, 10 ** 7)
+    # 同一帧只留一张脸：idx = 这张脸在这一帧里是第几张（多脸帧各存各的）
+    raw_idx = body.get("idx")
+    if raw_idx is None:
+        raw_idx = body.get("face_index")
+    try:
+        face_idx = int(raw_idx or 0)
+    except (TypeError, ValueError):
+        raise store.FacesError("「idx」要是整数（同一帧里的第几张脸，0 起），收到 %r"
+                               % (raw_idx,), 400)
+    if face_idx < 0:
+        raise store.FacesError("「idx」不能是负数，收到 %d" % face_idx, 400)
     proj = str(body.get("project") or "").strip()
     box = _box_val(body.get("box"))
 
@@ -644,13 +668,16 @@ def add_face(body: dict):
     p, created = store.resolve_project_for_write(proj, default=store.default_project())
     if created:
         store.ensure_index(p)
-    records, group = store.add_faces(p, [crop], source, dfm=dfm_name, align="68")
+    records, group = store.add_faces(p, [crop], source, dfm=dfm_name, align="68",
+                                     idxs=[face_idx])
     _attach_extras(p, records, [box], [score], [kps.round(2).tolist()])
     rec = records[0]
+    # replaced=true 表示这一帧这张脸本来就在库里：覆盖了它，id / group 都没变
     return {"ok": True, "project": str(p), "created": bool(created),
             "dfm": dfm_name, "group": group, "size": int(size), "align": "68",
             "landmarks_from": landmarks_from, "detector": det_name,
-            "mode": str(probe["mode"] or ""), "box": box,
+            "mode": str(probe["mode"] or ""), "box": box, "idx": int(face_idx),
+            "replaced": bool(rec.get("replaced")), "id": rec["id"],
             "frame": int(frame), "count": 1, "face": rec, "faces": [rec]}
 
 

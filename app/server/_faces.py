@@ -16,7 +16,10 @@
 * `face["file"]` 只存**基名**（`f_0001.png`）。`trashed=false` 时文件在
   `_faces/`，`trashed=true` 时在 `_faces/_trash/` —— 回收站/还原只翻转
   trashed 并搬文件，id 和 file 都不变，前端不用重新对 id。
-* `face["group"]` 可以是空串：刚提取、还没投放的脸就是「未分组」。
+* `face["group"]` 可以是空串（只为了兼容老数据）：界面上已经没有「未分组」区，
+  新脸一定落进某个组；空串的老脸在页面上算进第一个组。
+* `face["idx"]` = 这张脸在同一帧里是第几张（0 起）。同一帧同一张脸只留一条：
+  再点一次「＋」是**替换**（覆盖 PNG、刷新 added_at、id 与 group 都不动）。
 * 组 id（g1 / g2 …）一旦分配永不回收；同步组时按 dfm 名字复用，名字大小写变了
   也只更新显示名，id 不动。
 * 所有从请求或 index 里拿到的相对路径都过 :func:`safe_join`：绝对路径、盘符、
@@ -44,6 +47,9 @@ TRASH_DIRNAME = "_trash"
 THUMB_DIRNAME = "_thumb"
 INDEX_NAME = "index.json"
 BACKUP_NAME = "index.json.bak"
+# 同帧去重只做一次：老库里堆出来的重复清完就记一笔，之后用户从回收站还原的
+# 那张不会再被「latest 优先」重新塞回回收站（还原要能站得住）。
+DEDUPE_VERSION = 1
 LOCK_NAME = ".lock"
 
 FACE_ID_RE = re.compile(r"^f_(\d{4,})$")
@@ -307,7 +313,7 @@ def project_lock(project: Path, timeout: float = LOCK_TIMEOUT):
 # ============================================================
 def empty_index() -> dict:
     return {"version": 1, "next_face": 1, "next_group": 1,
-            "groups": [], "faces": []}
+            "dedupe_version": 0, "groups": [], "faces": []}
 
 
 def _face_num(fid: str) -> int:
@@ -383,6 +389,12 @@ def normalize_index(raw) -> dict:
             added = float(f.get("added_at") or 0)
         except (TypeError, ValueError):
             added = 0.0
+        try:
+            idx = int(f.get("idx") or 0)
+        except (TypeError, ValueError):
+            idx = 0
+        if idx < 0:
+            idx = 0
         faces.append({
             "id": fid,
             "file": file_name,
@@ -393,6 +405,8 @@ def normalize_index(raw) -> dict:
             # 这张脸是用几个点对齐的："68" = 68 点仿射；老库没这个键 = 早期的
             # 5 点对齐（尺寸一样、对齐略有差异），原样留着不改写。
             "align": (_text(f.get("align")) or ""),
+            # 同一帧里的第几张脸（老库没这个键 = 0）：同帧去重键的一部分
+            "idx": idx,
         })
         fids.add(fid)
 
@@ -410,7 +424,13 @@ def normalize_index(raw) -> dict:
         next_group = 1
     next_group = max(1, next_group, max([_group_num(x) for x in gids] or [0]) + 1)
 
+    try:
+        dedupe_version = int(raw.get("dedupe_version") or 0)
+    except (TypeError, ValueError):
+        dedupe_version = 0
+
     return {"version": version, "next_face": next_face, "next_group": next_group,
+            "dedupe_version": max(0, dedupe_version),
             "groups": groups, "faces": faces}
 
 
@@ -541,9 +561,43 @@ def _new_face_id(index: dict) -> str:
     return "f_%04d" % n
 
 
+def _idx_val(raw) -> int:
+    """「同一帧里的第几张脸」→ 0 起的整数；坏值一律当 0。"""
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return n if n >= 0 else 0
+
+
+def _frame_key(face: dict):
+    """同帧去重键：(视频名, 帧号, 同一帧里的第几张)。"""
+    src = face.get("source") or {}
+    try:
+        frame = int(src.get("frame") or 0)
+    except (TypeError, ValueError):
+        frame = 0
+    return (_text(src.get("video")), frame, _idx_val(face.get("idx")))
+
+
+def _drop_thumb(project: Path, face_id: str):
+    """丢掉缩略图缓存：同一个 id 的 PNG 被覆盖后必须重新生成。"""
+    try:
+        tp = thumb_path(project, face_id)
+        if tp.is_file():
+            tp.unlink()
+    except (OSError, FacesError):
+        pass
+
+
 def add_faces(project: Path, crops: list, source: dict,
-              dfm: str = "", group: str = "", align: str = "68"):
-    """把已经对齐好的人脸图写进库，返回 (新记录列表, 实际 group id)。
+              dfm: str = "", group: str = "", align: str = "68", idxs=None):
+    """把已经对齐好的人脸图写进库，返回 (记录列表, 实际 group id)。
+
+    同一帧同一张脸只留一条：库里已有 (video, frame, idx) 相同、没进回收站的记录，
+    就**覆盖**它 —— PNG 重写、added_at 刷新、id 与 group 都不动，记录带
+    replaced=True；不再新增。旧版每点一次「＋」就多一条，一帧能堆 9 张。
+    idxs 是每张脸在同一帧里的序号（0 起），缺省全 0（单脸帧 / 老调用方）。
 
     先落 PNG 再写 index：index 写失败会把这次新写的图删掉，不留孤儿文件。
     align 记的是「这张脸用几个点对齐的」：extract / add 现在都是 68 点仿射，
@@ -555,6 +609,7 @@ def add_faces(project: Path, crops: list, source: dict,
         "video": _text((source or {}).get("video")),
         "frame": int((source or {}).get("frame") or 0),
     }
+    seq = list(idxs or [])
     d = ensure_layout(project)
     written = []
     with project_lock(project):
@@ -564,13 +619,38 @@ def add_faces(project: Path, crops: list, source: dict,
         elif group and not any(g["id"] == group for g in index["groups"]):
             raise FacesError("组不存在：%s" % group, 400)
 
+        # 已有脸按同帧键建索引（历史重复留 added_at 最大的那条当「这一张」）
+        by_key = {}
+        for f in index["faces"]:
+            if f.get("trashed"):
+                continue
+            k = _frame_key(f)
+            cur = by_key.get(k)
+            if cur is None or float(f.get("added_at") or 0) >= float(cur.get("added_at") or 0):
+                by_key[k] = f
+
         records = []
         try:
-            for crop in crops:
+            for n, crop in enumerate(crops):
+                idx = _idx_val(seq[n] if n < len(seq) else 0)
+                blob = _encode_png(crop)
+                key = (src["video"], src["frame"], idx)
+                old = by_key.get(key)
+                if old is not None:
+                    path = safe_join(d, old.get("file") or (old["id"] + ".png"), "人脸文件")
+                    atomic_write(path, blob)
+                    old["added_at"] = round(time.time(), 3)
+                    old["align"] = _text(align)
+                    old["idx"] = idx
+                    _drop_thumb(project, old["id"])
+                    rec = dict(old)
+                    rec["replaced"] = True
+                    records.append(rec)
+                    continue
                 fid = _new_face_id(index)
                 file_name = fid + ".png"
                 path = safe_join(d, file_name, "人脸文件")
-                atomic_write(path, _encode_png(crop))
+                atomic_write(path, blob)
                 written.append(path)
                 rec = {
                     "id": fid,
@@ -580,8 +660,10 @@ def add_faces(project: Path, crops: list, source: dict,
                     "added_at": round(time.time(), 3),
                     "trashed": False,
                     "align": _text(align),
+                    "idx": idx,
                 }
                 index["faces"].append(rec)
+                by_key[key] = rec
                 records.append(dict(rec))
             save_index(project, index)
         except Exception:
@@ -592,6 +674,53 @@ def add_faces(project: Path, crops: list, source: dict,
                     pass
             raise
     return records, (group or "")
+
+
+def dedup_frames(project: Path) -> int:
+    """同一帧同一张脸只留最新的一张，其余的搬进回收站（可还原）。
+
+    旧版前端把「＋」当成「再加一张」，同一帧堆 9 条很常见。GET 列表时收敛**一次**
+    就够（index 里 dedupe_version 记一笔，之后不再动）—— 否则用户从回收站还原的
+    那张会在下一次 GET 又被「latest 优先」塞回去，还原等于没用。
+    只改 trashed 标记 + 搬文件，绝不 unlink（数据安全铁律：删除权永远在用户手里）。
+    """
+    d = ensure_layout(project)
+    moved = 0
+    with project_lock(project):
+        index = load_index(project)
+        # 一次性清理：标记已经写过就再不动 index（否则用户还原的那张会被再塞回去）
+        if int(index.get("dedupe_version") or 0) >= DEDUPE_VERSION:
+            return 0
+        buckets = {}
+        for f in index["faces"]:
+            if f.get("trashed"):
+                continue
+            buckets.setdefault(_frame_key(f), []).append(f)
+        victims = []
+        for lst in buckets.values():
+            if len(lst) < 2:
+                continue
+            lst.sort(key=lambda f: (float(f.get("added_at") or 0), _face_num(f["id"])))
+            victims.extend(lst[:-1])
+        if not victims:
+            index["dedupe_version"] = DEDUPE_VERSION
+            save_index(project, index)
+            return 0
+        tdir = d / TRASH_DIRNAME
+        tdir.mkdir(parents=True, exist_ok=True)
+        for f in victims:
+            src = _face_path(project, f)
+            dst = safe_join(tdir, Path(f["file"]).name, "回收站文件")
+            try:
+                if src.is_file():
+                    os.replace(str(src), str(dst))
+            except OSError as e:
+                raise FacesError("去重时移进回收站失败：%s（%s）" % (f["id"], e), 500)
+            f["trashed"] = True
+            moved += 1
+        index["dedupe_version"] = DEDUPE_VERSION
+        save_index(project, index)
+    return moved
 
 
 def _require_faces(index: dict, ids) -> list:
@@ -759,6 +888,7 @@ def _public_face(face: dict) -> dict:
         "added_at": face.get("added_at", 0),
         "trashed": bool(face.get("trashed")),
         "align": str(face.get("align") or ""),
+        "idx": int(face.get("idx") or 0),
     }
 
 

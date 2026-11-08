@@ -4543,8 +4543,13 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
    合成器 · 人脸数据库（导出前分组 / 回收站）
    ----------------------------------------------------------------------------
    只复用现有的 --panel / --line / --ink / .btn / .mini / .mgsel 语义，不另起
-   一套色板。尺寸约定：缩略图 128×128；组卡片 320px；回收站 264px；页面本身
-   不滚动，只有组内网格 / 未分组横条 / 回收站列表各自滚动。
+   一套色板。尺寸约定：缩略图 128×128；组卡片 320px；回收站 264px。
+   版式（用户要求的信息密度）：
+     · 顶栏一行：标题 + 已选/全选/清空 + 提取到 <dfm> + 关闭（唯一关闭入口）；
+     · 组卡片横向排一行，放不下就横向滚，绝不换行堆叠；
+     · 组头一行：组名 + 张数 + 输入尺寸；
+     · 回收站面板本身就是「拖进来 = 移入回收站」的落点（拖动时高亮）；
+     · 未分组区 / 说明性小字 / 语言标签 / 模式徽标 全部不存在。
    ============================================================================ */
 
 .fdb {
@@ -4558,58 +4563,37 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
 }
 .fdb [hidden] { display: none !important; }
 
-/* ---------- ① 顶部：标题 / 项目名 / 提取 / 关闭 ---------- */
+/* ---------- ① 顶栏：一行装完 ---------- */
 .fdb-top {
   display: flex;
   flex: none;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
   min-width: 0;
   padding: 2px 0 0;
 }
-.fdb-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.fdb-tt { display: flex; align-items: center; gap: 9px; min-width: 0; }
-.fdb-tt b { font-size: 16px; font-weight: 650; letter-spacing: -0.01em; }
-.fdb-mode {
-  padding: 2px 8px;
-  border: 1px solid var(--line-strong);
-  border-radius: 999px;
-  color: var(--ink-3);
-  font-size: 10.5px;
-  line-height: 1.5;
-  white-space: nowrap;
-}
-.fdb-project {
-  max-width: 460px;
-  overflow: hidden;
-  color: var(--ink-3);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+.fdb-title { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.fdb-title b { font-size: 16px; font-weight: 650; letter-spacing: -0.01em; }
+/* 全选 / 清空选择并进顶栏，不再单占一行 */
+.fdb-sel { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.fdb-selected { display: inline-flex; align-items: baseline; gap: 3px; color: var(--ink-3); font-size: 11.5px; }
+.fdb-selected b { color: var(--ink); font-size: 13px; font-variant-numeric: tabular-nums; }
 .fdb-topacts { display: flex; align-items: center; gap: 10px; margin-left: auto; min-width: 0; }
 .fdb-extract { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .fdb-lbl { color: var(--ink-3); font-size: 11px; white-space: nowrap; }
-.fdb-extract .btn { height: 30px; padding: 0 13px; border-radius: 8px; font-size: 12px; white-space: nowrap; }
 .fdb-dfm { width: 150px; min-width: 110px; height: 28px; font-size: 11.5px; }
 /* 合成器的 select 会被 app.js 换成 .dd 下拉替身，原生 select 宽度变成 0；
    这里必须把替身的宽高也钉住，否则「提取到」只剩一个空壳。 */
 .fdb-extract .dd { flex: 0 0 150px; width: 150px; }
 .fdb-extract .dd .ddbtn { height: 28px; padding: 0 9px; font-size: 11.5px; border-radius: 7px; }
 .fdb-close { height: 30px !important; padding: 0 13px !important; border-radius: 8px !important; font-size: 12px !important; }
+.fdb-spacer { flex: 1 1 auto; }
+.fdb .mini { padding: 5px 10px; font-size: 11px; }
+.fdb .mini:disabled { opacity: .42; cursor: not-allowed; }
+.fdb-danger { border-color: color-mix(in srgb, var(--bad) 42%, var(--line-strong)); color: var(--bad); }
+.fdb-danger:hover:not(:disabled) { border-color: var(--bad); background: color-mix(in srgb, var(--bad) 10%, transparent); }
 
-/* ---------- ② 副行：操作提示 + 当前帧 ---------- */
-.fdb-subline {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: 12px;
-  color: var(--ink-3);
-  font-size: 11px;
-}
-.fdb-frame { margin-left: auto; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
-
-/* ---------- ③ 主体：分组区 + 回收站 ---------- */
+/* ---------- ② 主体：组区 + 回收站 ---------- */
 .fdb-body {
   display: grid;
   flex: 1 1 auto;
@@ -4627,31 +4611,6 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
   border-radius: 12px;
   background: var(--panel);
 }
-
-/* 批量操作条：常驻，不因没选中而跳高 */
-.fdb-selectbar {
-  display: flex;
-  flex: none;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 7px;
-  min-height: 42px;
-  padding: 7px 10px;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel-2);
-}
-.fdb-selected { display: inline-flex; align-items: baseline; gap: 3px; color: var(--ink-3); font-size: 11.5px; }
-.fdb-selected b { color: var(--ink); font-size: 13px; font-variant-numeric: tabular-nums; }
-.fdb-spacer { flex: 1 1 auto; }
-.fdb-move { width: 128px; height: 27px; font-size: 11.5px; }
-.fdb-selectbar .dd { flex: 0 0 128px; width: 128px; }
-.fdb-selectbar .dd .ddbtn { height: 27px; padding: 0 8px; font-size: 11.5px; border-radius: 7px; }
-.fdb .mini { padding: 5px 10px; font-size: 11px; }
-.fdb .mini:disabled { opacity: .42; cursor: not-allowed; }
-.fdb-danger { border-color: color-mix(in srgb, var(--bad) 42%, var(--line-strong)); color: var(--bad); }
-.fdb-danger:hover:not(:disabled) { border-color: var(--bad); background: color-mix(in srgb, var(--bad) 10%, transparent); }
-
-/* 分组画布：横向滚组卡片，纵向由组内网格自己滚 */
 .fdb-board {
   position: relative;
   display: flex;
@@ -4660,70 +4619,33 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
   gap: 9px;
   min-height: 0;
   padding: 10px;
-  overflow: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--line-strong) transparent;
+  overflow: hidden;
 }
-.fdb-board::-webkit-scrollbar { width: 7px; height: 7px; }
-.fdb-board::-webkit-scrollbar-track { background: transparent; }
-.fdb-board::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 999px; }
 
-/* 未分组：固定在顶部，整条横向排列 */
-.fdb-lane {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  flex: none;
-  min-width: 0;
-  padding: 9px 10px 10px;
-  border: 1px solid var(--line);
-  border-radius: 11px;
-  background: var(--panel-2);
-  transition: border-color .13s ease, background .13s ease, box-shadow .13s ease;
-}
-.fdb-lane-hd { display: flex; align-items: center; gap: 8px; min-height: 24px; }
-.fdb-lane-name { font-size: 12.5px; font-weight: 650; }
-.fdb-count { display: inline-flex; align-items: baseline; gap: 2px; color: var(--ink-3); font-size: 10.5px; }
-.fdb-count b { color: var(--ink-2); font-size: 12px; font-variant-numeric: tabular-nums; }
-.fdb-drop-note { margin-left: auto; color: var(--ink-3); font-size: 10.5px; white-space: nowrap; }
-.fdb-grid--lane {
-  display: flex;
-  gap: 8px;
-  min-height: 0;
-  margin-top: 8px;
-  padding-bottom: 1px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: thin;
-}
-.fdb-lane-empty {
-  display: inline-flex;
-  align-items: center;
-  flex: none;
-  min-height: 52px;
-  padding: 0 12px;
-  border: 1px dashed var(--line-strong);
-  border-radius: 8px;
-  color: var(--ink-3);
-  font-size: 11px;
-}
-.fdb-grid--lane::-webkit-scrollbar { height: 5px; }
-.fdb-grid--lane::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 999px; }
-
-/* 组卡片横向排列 */
+/* 组卡片横向一行：放不下就横向滚，不换行、不堆叠 */
 .fdb-groups {
   display: flex;
   flex: 1 1 auto;
+  flex-direction: row;
+  flex-wrap: nowrap;
   align-items: stretch;
   gap: 9px;
-  min-height: 0;
   min-width: 0;
+  min-height: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
 }
+.fdb-groups::-webkit-scrollbar { height: 7px; }
+.fdb-groups::-webkit-scrollbar-track { background: transparent; }
+.fdb-groups::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 999px; }
+
 .fdb-group {
   display: flex;
   flex: 0 0 320px;
   flex-direction: column;
-  min-height: 260px;
+  min-height: 0;
   max-height: 100%;
   overflow: hidden;
   border: 1px solid var(--line);
@@ -4731,15 +4653,16 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
   background: var(--panel);
   transition: border-color .13s ease, box-shadow .13s ease, background .13s ease;
 }
+/* 组头一行：组名 + 张数 + 输入尺寸 */
 .fdb-group-hd {
   display: flex;
   flex: none;
-  flex-direction: column;
-  gap: 1px;
-  padding: 9px 10px 7px;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 10px 7px;
   border-bottom: 1px solid var(--line);
 }
-.fdb-group-line { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .fdb-group-name {
   min-width: 0;
   overflow: hidden;
@@ -4748,8 +4671,15 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.fdb-group-meta { display: flex; align-items: center; gap: 7px; color: var(--ink-3); font-size: 10.5px; }
-.fdb-size { margin-left: auto; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
+.fdb-count { display: inline-flex; flex: none; align-items: baseline; gap: 2px; color: var(--ink-3); font-size: 10.5px; }
+.fdb-count b { color: var(--ink-2); font-size: 12px; font-variant-numeric: tabular-nums; }
+.fdb-size {
+  flex: none;
+  margin-left: auto;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
 .fdb-group-grid {
   display: grid;
   flex: 1 1 auto;
@@ -4764,20 +4694,6 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
 }
 .fdb-group-grid::-webkit-scrollbar { width: 6px; }
 .fdb-group-grid::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 999px; }
-.fdb-group-empty {
-  display: flex;
-  flex: 1 1 auto;
-  align-items: center;
-  justify-content: center;
-  min-height: 90px;
-  margin: 9px;
-  padding: 12px;
-  border: 1px dashed var(--line-strong);
-  border-radius: 9px;
-  color: var(--ink-3);
-  font-size: 11px;
-  text-align: center;
-}
 
 /* orphan（dfm 已取消勾选但还有脸）：虚线 + 琥珀色，和正常组一眼分开 */
 .fdb-group.is-orphan {
@@ -4796,22 +4712,16 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
   white-space: nowrap;
 }
 
-/* 拖拽实时落点：组 / 未分组统一高亮 */
-.fdb-lane.is-drop,
-.fdb-group.is-drop {
+/* 拖动时的落点：组卡片 = 移动，回收站面板 = 移入回收站 */
+.fdb-group.is-drop,
+.fdb-trash.is-drop {
   border-color: var(--brand);
   background: color-mix(in srgb, var(--brand) 9%, var(--panel));
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand) 24%, transparent) inset;
 }
-.fdb-lane.is-drop .fdb-lane-empty,
-.fdb-group.is-drop .fdb-group-empty {
-  border-color: var(--brand);
-  color: var(--ink-1);
-  background: color-mix(in srgb, var(--brand) 8%, transparent);
-}
-.fdb-drop-note.is-live { color: var(--brand); font-weight: 600; }
+.fdb-trash.is-drop { border-style: dashed; }
 
-/* ---------- ④ 人脸卡片：128×128 缩略图 ---------- */
+/* ---------- ③ 人脸卡片：128×128 缩略图 + 帧号 + id ---------- */
 .fdb-face {
   position: relative;
   width: 136px;
@@ -4888,7 +4798,7 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
 .fdb-meta .fdb-frame { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fdb-meta .fdb-id { margin-left: auto; font-family: ui-monospace, Consolas, monospace; font-size: 9px; }
 
-/* ---------- ⑤ 回收站 ---------- */
+/* ---------- ④ 回收站（自身即为「移入回收站」的拖放目标） ---------- */
 .fdb-trash {
   display: flex;
   flex-direction: column;
@@ -4897,6 +4807,7 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--panel);
+  transition: border-color .13s ease, background .13s ease, box-shadow .13s ease;
 }
 .fdb-trash-hd {
   display: flex;
@@ -4957,7 +4868,7 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
 .fdb-trash-acts { display: flex; flex-direction: column; gap: 3px; flex: none; }
 .fdb-trash-acts .mini { padding: 2px 6px; font-size: 9.5px; line-height: 1.4; }
 
-/* ---------- ⑥ 加载 / 错误 / 空态：盖住画布，不挤走布局 ---------- */
+/* ---------- ⑤ 加载 / 错误 / 空态：盖住画布，不挤走布局 ---------- */
 .fdb-loading,
 .fdb-error,
 .fdb-empty {
@@ -4993,7 +4904,7 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
 .fdb-loading span { animation: fdbPulse 1.2s ease-in-out infinite; }
 @keyframes fdbPulse { 0%, 100% { opacity: .38; } 50% { opacity: 1; } }
 
-/* ---------- ⑦ 底部：统计 / 快捷键 / 继续导出 ---------- */
+/* ---------- ⑥ 底栏：两个数字 + 继续导出（browse 模式整颗隐藏） ---------- */
 .fdb-foot {
   display: flex;
   flex: none;
@@ -5006,16 +4917,13 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
   background: var(--panel);
 }
 .fdb-stats { display: flex; align-items: baseline; flex-wrap: wrap; gap: 11px; color: var(--ink-3); font-size: 10.5px; }
-.fdb-continue { margin-left: 2px; }
 .fdb-stats > span { display: inline-flex; align-items: baseline; gap: 3px; }
 .fdb-stats b { color: var(--ink-1); font-size: 12px; font-variant-numeric: tabular-nums; }
-.fdb-keys { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-left: auto; color: var(--ink-3); font-size: 10px; }
-.fdb-keys span { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
-.fdb-keys kbd { background: var(--line); border: 1px solid var(--line-strong); border-radius: 4px; padding: 0 4px; font-size: 9.5px; }
+.fdb-continue { margin-left: auto; }
 .fdb-continue { height: 32px !important; padding: 0 18px !important; border-radius: 8px !important; font-size: 12.5px !important; white-space: nowrap; }
 .fdb-continue:disabled { opacity: .45; cursor: not-allowed; }
 
-/* ---------- ⑧ 拖拽浮层 ---------- */
+/* ---------- ⑦ 拖拽浮层 ---------- */
 .fdb-ghost {
   position: fixed;
   z-index: 220;
@@ -5048,7 +4956,7 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
 }
 body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 
-/* ---------- ⑨ 二次确认 / 选择框 ---------- */
+/* ---------- ⑧ 二次确认弹层 ---------- */
 .fdb-modal {
   position: fixed;
   inset: 0;
@@ -5084,61 +4992,21 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 }
 .fdb-modal-foot .btn { height: 32px; padding: 0 15px; border-radius: 8px; font-size: 12px; }
 .fdb-modal-foot .btn.fdb-danger { background: var(--bad) !important; color: #fff !important; }
-.fdb-modal-list { display: flex; flex-direction: column; gap: 6px; padding-bottom: 8px; }
-.fdb-pick {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel-2);
-  color: var(--ink-2);
-  font: inherit;
-  font-size: 12px;
-  text-align: left;
-  cursor: pointer;
-}
-.fdb-pick:hover, .fdb-pick:focus-visible { border-color: var(--brand); color: var(--ink-1); background: color-mix(in srgb, var(--brand) 7%, var(--panel-2)); }
-.fdb-pick small { margin-left: auto; color: var(--ink-3); font-size: 10px; }
-.fdb-pick.is-current { border-style: dashed; }
-.fdb-pick-target { display: flex; align-items: center; gap: 8px; margin: 4px 0 9px; color: var(--ink-3); font-size: 11.5px; }
-.fdb-pick-target .mgsel { width: 180px; height: 28px; font-size: 11.5px; }
-.fdb-check-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; padding: 2px 0 10px; }
-.fdb-check {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 4px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel-2);
-  cursor: pointer;
-}
-.fdb-check input { position: absolute; opacity: 0; pointer-events: none; }
-.fdb-check img, .fdb-check .fdb-check-ph { display: block; width: 100%; aspect-ratio: 1; border-radius: 5px; object-fit: cover; background: var(--line); }
-.fdb-check .fdb-check-ph { display: grid; place-items: center; color: var(--ink-3); }
-.fdb-check span { color: var(--ink-3); font-size: 9.5px; text-align: center; }
-.fdb-check:has(input:checked) { border-color: var(--ink-1); box-shadow: 0 0 0 1px var(--ink-1) inset; }
 
-/* ---------- ⑩ 窄屏：回收站落到底部 ---------- */
+/* ---------- ⑨ 窄屏：回收站落到底部 ---------- */
 @media (max-width: 1080px) {
   .fdb-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 210px; }
   .fdb-trash { min-height: 0; }
   .fdb-trash-list { flex-direction: row; flex-wrap: wrap; align-content: flex-start; }
   .fdb-trash-item { flex: 1 1 210px; }
-  .fdb-keys { display: none; }
-  .fdb-project { max-width: 300px; }
 }
 @media (max-width: 760px) {
   .fdb-top { align-items: flex-start; flex-direction: column; gap: 8px; }
   .fdb-topacts { width: 100%; margin-left: 0; flex-wrap: wrap; }
   .fdb-extract { flex: 1 1 280px; flex-wrap: wrap; }
   .fdb-dfm { flex: 1 1 120px; width: auto; }
-  .fdb-selectbar { gap: 5px; }
+  .fdb-sel { gap: 5px; }
   .fdb-stats { gap: 7px; }
-  .fdb-keys { display: none; }
 }
 
 /* ============================================================================

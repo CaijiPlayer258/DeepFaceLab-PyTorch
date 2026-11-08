@@ -4940,7 +4940,6 @@
     var kps68 = rec && rec.kps68 ? rec.kps68 : null;
     var has68 = !!(kps68 && kps68.length === 68);
     var frame = mgCmpFrameIdx();
-    var dfm = mgFaceModel(i) || (mgSelNames()[0] || "");
     var video = mgVidPath() || "";
 
     function done() {
@@ -4957,54 +4956,81 @@
        绝不因为手里没有 kps68 就在这里弹错返回 —— 老后端（/api/merge/detect
        不回 kps68）时那样等于＋什么都没干，而用户看到的是「缺少 68 点」和
        「还没有素材」两条自相矛盾的提示（画面里明明有视频）。 */
-    var payload = {
-      /* 有项目用项目库；没有留空 → 后端用默认库 <工作区>/merge 自己建 */
-      project: window.__mergeInputDir || "",
-      dfm: dfm,
-      frame: frame,
-      detector: mgDetectorName() || "",
-      source: { video: video, frame: frame }
-    };
-    if (has68) payload.kps68 = kps68;
-    if (box) payload.box = box;
+    /* 落进哪个组由人脸库说了算（下拉「提取到 <dfm>」那一个 = 当前选中的组）：
+       以前这里用「这张脸被分配到的模型」，没有就发空串 → 脸落进未分组；界面上
+       已经没有未分组了，那样等于凭空消失。所以先问到一个真实存在的组再发请求。 */
+    var targetP = (window.FaceDB && window.FaceDB.addTarget)
+      ? window.FaceDB.addTarget(window.__mergeInputDir || "")
+      : Promise.resolve(null);
 
-    fetch("/api/merge/faces/add", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    }).then(function (r) {
-      return r.json().then(function (d) {
-        /* no_face / no_landmarks68 / detect_failed 这类是业务结果
-           （200 + ok:false），当成正常返回交给下面按 reason 说话，
-           别报成「失败 HTTP 200」。 */
-        if (d && d.ok === false && d.reason) return d;
-        if (r.ok && d && d.ok !== false) return d;
-        var err = new Error((d && (d.detail || d.error)) || ("HTTP " + r.status));
-        err.status = r.status;
-        throw err;
-      }, function () {
-        var err = new Error("HTTP " + r.status);
-        err.status = r.status;
-        throw err;
-      });
-    }).then(function (d) {
-      done();
-      if (d && d.ok === false) {
-        mgAddFaceFail(d);
-        return;
+    targetP.then(function (target) {
+      if (!target || !target.dfm) {
+        done();
+        mgToastErr("add-nodfm", "先选模型",
+                   "还没有能落的人脸组：先在合成器里选一个 SAEHD 模型，或在人脸库里点一个组",
+                   "warn", 6000);
+        return null;
       }
-      var faces = (d && d.faces) || [];
-      var hit = faces[0] || null;
-      /* landmarks_from=server 说明这 68 点是后端自己补算的（前端手里没有） */
-      var how = (d && d.landmarks_from === "server") ? " · 服务端补算 68 点" : "";
-      toast("已加入人脸数据库", (dfm || "未指定模型") +
-            (hit && hit.id ? " · " + hit.id : "") + (d && d.created ? " · 新建了库" : "") + how,
-            "success");
-      mgFlyToDb(i, box);
-      /* 角标 = 这一次点了几个「＋」：一个框加一张脸，就 +1 */
-      mgDbBadgeBump(1);
-      /* 人脸库开着就地刷新，别让用户以为没加进去 */
-      try { if (window.FaceDB && window.FaceDB.refresh && window.FaceDB.isOpen()) window.FaceDB.refresh(); } catch (e) {}
+      var payload = {
+        /* 有项目用项目库；没有留空 → 后端用默认库 <工作区>/merge 自己建 */
+        project: window.__mergeInputDir || "",
+        /* dfm = 目标组：后端按 dfm 找到/建出组，脸一定落在组里，不再有未分组 */
+        dfm: target.dfm,
+        frame: frame,
+        /* 同一帧只留一张脸：idx = 这张脸在这一帧里是第几张（多脸帧各存各的） */
+        idx: i,
+        detector: mgDetectorName() || "",
+        source: { video: video, frame: frame }
+      };
+      if (has68) payload.kps68 = kps68;
+      if (box) payload.box = box;
+
+      return fetch("/api/merge/faces/add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      }).then(function (r) {
+        return r.json().then(function (d) {
+          /* no_face / no_landmarks68 / detect_failed 这类是业务结果
+             （200 + ok:false），当成正常返回交给下面按 reason 说话，
+             别报成「失败 HTTP 200」。 */
+          if (d && d.ok === false && d.reason) return d;
+          if (r.ok && d && d.ok !== false) return d;
+          var err = new Error((d && (d.detail || d.error)) || ("HTTP " + r.status));
+          err.status = r.status;
+          throw err;
+        }, function () {
+          var err = new Error("HTTP " + r.status);
+          err.status = r.status;
+          throw err;
+        });
+      }).then(function (d) {
+        done();
+        if (d && d.ok === false) {
+          mgAddFaceFail(d);
+          return;
+        }
+        var faces = (d && d.faces) || [];
+        var hit = faces[0] || null;
+        var fid = (hit && hit.id) ? String(hit.id) : "";
+        /* landmarks_from=server 说明这 68 点是后端自己补算的（前端手里没有） */
+        var how = (d && d.landmarks_from === "server") ? " · 服务端补算 68 点" : "";
+        var where = String(target.label || target.dfm || "");
+        /* 后端按 (video, frame, idx) 去重：已有就回 replaced=true —— 那是**更新**，
+           不能再报「已加入」（否则连点 5 次会看到 5 条「已加入」却只有 1 张脸）。 */
+        if (d && d.replaced) {
+          toast("已更新该帧的人脸", fid + (where ? " · " + where : "") + how, "success");
+        } else {
+          toast("已加入人脸数据库", (where ? fid + " · " + where : fid) +
+                (d && d.created ? " · 新建了库" : "") + how,
+                "success");
+          /* 角标只数「新增」：更新没有让库变大，不该涨 */
+          mgDbBadgeBump(1);
+        }
+        mgFlyToDb(i, box);
+        /* 人脸库开着就地刷新，别让用户以为没加进去 */
+        try { if (window.FaceDB && window.FaceDB.refresh && window.FaceDB.isOpen()) window.FaceDB.refresh(); } catch (e) {}
+      });
     }).catch(function (e) {
       done();
       /* 拿不到图时后端会把「当前是视频模式/项目模式、缺的是哪一个」写进 detail */

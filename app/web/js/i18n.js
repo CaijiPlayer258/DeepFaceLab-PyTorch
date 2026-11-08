@@ -1573,6 +1573,8 @@
     "拖动到此处可取消分组": "Drop here to ungroup",
     "人脸库还是空的": "The face library is empty",
     "点「从当前帧提取人脸」开始": "Start with “Extract faces from current frame”",
+    "在合成器的画面上点「＋」把这张脸加进来": "Click ＋ on the composer stage to add this face",
+    "已把 N 张同帧重复的脸移入回收站": "Moved N duplicate faces of the same frame to trash",
     "正在读取人脸库…": "Loading face library…",
     "人脸库读取失败": "Could not load the face library",
     "重试": "Retry",

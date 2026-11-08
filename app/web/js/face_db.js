@@ -2,11 +2,16 @@
  *
  * 位置：app/web/js/face_db.js，由 index.html 在 app.js 之后单独引入。
  * 职责：
- *   · 消费 /api/merge/faces/* 的 8 个接口，渲染组卡片 / 128 缩略图 / 回收站；
- *   · 组间拖拽（Pointer Events，松手才发 move，拖动中实时高亮落点）；
- *   · Ctrl / Shift 多选、批量 move / trash、键盘 M / T；
- *   · 从当前帧提取（extract）并在多脸时让用户勾选；
+ *   · 消费 /api/merge/faces/*，渲染组卡片 / 128 缩略图 / 回收站；
+ *   · 拖拽（Pointer Events，松手才发请求，拖动中实时高亮落点）：
+ *       组卡片 = move，回收站面板 = trash；拖到别处什么都不做；
+ *   · Ctrl / Shift 多选、全选 / 清空、键盘 T（回收站）、Esc（取消选择）；
+ *   · 新脸怎么落库由「＋」走 /api/merge/faces/add，落进哪一组靠 addTarget()
+ *     （= 下拉「提取到」选中的组 / 第一个组 / 第一个模型）；
  *   · 「继续导出」只把控制权交回 app.js，自己绝不发 /export 请求。
+ *
+ * 界面上没有「未分组」区、没有移动按钮、没有提取按钮：这个页面只做
+ * 「看 + 选 + 拖」。
  *
  * 不依赖任何框架；所有文案走 index.html 或 i18n.js 词典，错误一律 toast。
  */
@@ -28,7 +33,6 @@
     loaded: false,
     loading: false,
     busy: false,
-    extracting: false,
     selected: {},
     anchor: "",
     activeGroup: "",
@@ -65,13 +69,6 @@
   function toast(title, sub, type) {
     if (typeof window.toast === "function") window.toast(title, sub || "", type || "info");
     else if (window.console) console.warn("[face-db]", title, sub || "");
-  }
-
-  function projectName(p) {
-    var base = String(p || "").split(/[\\/]/).filter(Boolean).pop() || "";
-    if (base) return base;
-    /* 空串 = 视频模式：库是默认库 <工作区>/merge，后端自己建/自己认 */
-    return "默认库 merge";
   }
 
   function frameLabel(n) {
@@ -166,20 +163,7 @@
       "&id=" + encodeURIComponent(face.id));
   }
 
-  /* ---------- 当前帧 / DFM ---------- */
-  function currentFrame() {
-    if (state.frame != null && state.frame !== "") return Number(state.frame) || 0;
-    /* 不再因为 project 是空串就返回 null：视频模式的库是默认库，当前帧只取决于
-       合成器有没有打开素材（没打开就是 null，提取按钮自己会说「还没有当前帧」）。 */
-    var mv = window.__mv || {};
-    if (!(Number(mv.frames) > 0)) return null;
-    if (window.MergeTimeline && window.MergeTimeline.getFrame) {
-      var n = window.MergeTimeline.getFrame();
-      if (typeof n === "number" && isFinite(n)) return Math.max(0, Math.round(n));
-    }
-    return 0;
-  }
-
+  /* ---------- DFM ---------- */
   function selectedDfms() {
     var out = [];
     try {
@@ -220,15 +204,24 @@
     if (!sel) return;
     state.dfmNames = collectDfmNames();
     var keep = prefer != null ? String(prefer) : String(sel.value || state.dfm || "");
-    var opts = [""].concat(state.dfmNames);
+    var opts = state.dfmNames.slice();
     sel.innerHTML = "";
     opts.forEach(function (name) {
       var o = document.createElement("option");
       o.value = name;
-      o.textContent = name || "不指定（未分组）";
+      o.textContent = name;
       sel.appendChild(o);
     });
-    if (opts.indexOf(keep) < 0) keep = opts[1] || "";
+    /* 一个模型都没有：给一个禁用的占位，别让下拉空着像个坏控件。
+       这时「＋」会提示先选模型 —— 界面里不允许再出现「未分组」这个选项。 */
+    if (!opts.length) {
+      var ph = document.createElement("option");
+      ph.value = "";
+      ph.textContent = "—";
+      ph.disabled = true;
+      sel.appendChild(ph);
+    }
+    if (opts.indexOf(keep) < 0) keep = opts[0] || "";
     sel.value = keep;
     state.dfm = keep;
     /* select 被 app.js 换成了 .dd 替身：替身的文字只在 change 时同步。
@@ -254,10 +247,12 @@
     return null;
   }
 
+  /* 组名。空组 id（group=""，老数据）在界面上不再出现「未分组」这个词：
+     返回空串，调用方拼 aria/title 时自然少一段。 */
   function groupLabel(gid) {
-    if (!gid) return "未分组";
+    if (!gid) return "";
     var g = groupById(gid);
-    return g ? (g.name || g.dfm || gid) : "未分组";
+    return g ? (g.name || g.dfm || gid) : "";
   }
 
   function groupSize(g) {
@@ -312,12 +307,11 @@
   /* 首屏就失败时把上一份库的卡片清掉：错误态底下压着别人家 6 张脸，
      用户会以为「库还在、只是报了个错」。刷新失败（已经有数据）则保留。 */
   function clearBoard() {
-    ["fdbUngroupedGrid", "fdbGroups", "fdbTrashList"].forEach(function (id) {
+    ["fdbGroups", "fdbTrashList"].forEach(function (id) {
       var n = $(id);
       if (n) n.innerHTML = "";
     });
-    ["fdbUngroupedCount", "fdbTrashCount", "fdbStatTotal", "fdbStatGrouped",
-     "fdbStatUngrouped", "fdbStatTrash"].forEach(function (id) {
+    ["fdbTrashCount", "fdbStatTotal", "fdbStatTrash"].forEach(function (id) {
       var n = $(id);
       if (n) n.textContent = "0";
     });
@@ -353,6 +347,14 @@
     if (er) er.hidden = true;
     updateActions();
     return call(apiUrl(), { cache: "no-store" }, 30000).then(function (d) {
+      /* 同一帧同一张脸只留一张：这次 GET 把多出来的挪进了回收站（可还原）。
+         提示挂在**响应**上而不是 applyData 上 —— 两个 GET 并发时第一份数据会被
+         state.seq 丢掉，丢掉的那份才是带 deduped 的。 */
+      var ded = Number(d && d.deduped) || 0;
+      if (ded > 0) {
+        toast("已把 " + ded + " 张同帧重复的脸移入回收站",
+              "同一帧同一张脸只留最新的一张 · 回收站里能还原", "info");
+      }
       if (seq !== state.seq) return;
       applyData(must(d, "读取失败"));
     }).catch(function (e) {
@@ -459,50 +461,48 @@
     var dis = state.busy || state.loading || !state.loaded;
     var sc = $("fdbSelCount");
     if (sc) sc.textContent = String(n);
-    ["fdbMoveBtn", "fdbTrashBtn", "fdbClearSel"].forEach(function (id) {
-      var b = $(id); if (b) b.disabled = dis || n === 0;
-    });
+    var clearBtn = $("fdbClearSel");
+    if (clearBtn) clearBtn.disabled = dis || n === 0;
     var allBtn = $("fdbPickAll");
     if (allBtn) allBtn.disabled = dis || state.order.length === 0;
+    /* 底栏只剩「继续导出」这一颗，而且只在导出流程里出现：
+       关闭入口只有右上角那一个（browse 模式 = 点它直接回合成视图）。 */
     var continueBtn = $("fdbContinue");
-    /* browse 模式下这个按钮是「关闭」：读库失败/加载中也必须能按 */
-    if (continueBtn) continueBtn.disabled = state.browseOnly ? false : dis;
+    if (continueBtn) {
+      continueBtn.hidden = !!state.browseOnly;
+      continueBtn.disabled = dis;
+    }
     var rAll = $("fdbRestoreAll");
     if (rAll) rAll.disabled = dis || trashN === 0;
     var pAll = $("fdbPurgeAll");
     if (pAll) pAll.disabled = dis || trashN === 0;
-    updateExtract();
+    updateAddTarget();
   }
 
-  function updateExtract() {
+  /* 「提取到 <dfm>」不再配一颗提取按钮：新脸由合成器框上的「＋」落库
+     （/api/merge/faces/add），这里只剩「选中哪个组」这一件事。
+     一个模型都没有时下拉禁用，「＋」那边会提示先选模型。 */
+  function updateAddTarget() {
     var wrap = $("fdbExtractWrap");
-    var btn = $("fdbExtract");
     if (wrap) wrap.hidden = !state.allowExtract;
-    if (!btn) return;
-    if (!state.allowExtract) { btn.disabled = true; return; }
-    var reason = "";
-    /* 默认库（视频模式）也能提取：后端用它自己的默认库目录落盘 */
-    if (currentFrame() == null) reason = "还没有当前帧";
-    else if (state.loading) reason = "人脸库还在读取";
-    else if (state.extracting) reason = "正在提取";
-    else if (state.busy) reason = "还有操作在进行";
-    btn.disabled = !!reason;
-    btn.title = reason;
-    btn.textContent = state.extracting ? "提取中…" : "从当前帧提取人脸";
+    var sel = $("fdbDfm");
+    if (!sel) return;
+    var none = !state.dfmNames.length;
+    sel.disabled = none || state.loading || state.busy;
+    sel.title = none ? "工作区里还没有模型：先在合成器里选一个 SAEHD 模型"
+                     : "新「＋」加进来的脸落进这个组";
   }
 
   /* ---------- 渲染：组 / 人脸 / 回收站 / 统计 ---------- */
   function render() {
     var focusBefore = document.activeElement && document.activeElement.getAttribute
       ? document.activeElement.getAttribute("data-face-id") : "";
-    renderUngrouped();
     renderGroups();
     renderTrash();
     renderStats();
-    renderMoveOptions();
     refreshDfmOptions(state.dfm);
     updateSelection();
-    updateExtract();
+    updateAddTarget();
     var empty = $("fdbEmpty");
     if (empty) empty.hidden = activeFaces().length !== 0;
     var ld = $("fdbLoading");
@@ -528,9 +528,9 @@
     if (state.selected[face.id]) card.classList.add("is-selected");
     var srcFrame = face.source && face.source.frame;
     var label = frameLabel(srcFrame);
-    var aria = [label, face.id, groupLabel(gid)].join(" · ");
+    var aria = [label, face.id, groupLabel(gid)].filter(Boolean).join(" · ");
     card.setAttribute("aria-label", aria);
-    card.title = face.id + " · " + label + " · " + groupLabel(gid);
+    card.title = aria;
     var thumb = makeThumb(faceThumb(face));
     if (thumb.classList.contains("is-broken")) card.classList.add("is-broken");
     card.appendChild(thumb);
@@ -545,20 +545,12 @@
     return card;
   }
 
-  function renderUngrouped() {
-    var grid = $("fdbUngroupedGrid");
-    var count = $("fdbUngroupedCount");
-    if (!grid) return;
-    var faces = activeFaces().filter(function (f) {
-      return !f.group || !groupById(f.group);
-    });
-    grid.innerHTML = "";
-    faces.forEach(function (f) { grid.appendChild(makeFace(f, "")); });
-    if (count) count.textContent = String(faces.length);
-    if (!faces.length) {
-      var hint = make("span", "fdb-lane-empty", "拖动到此处可取消分组");
-      grid.appendChild(hint);
-    }
+  /* 老库里 group="" 的脸不再单占一块（「未分组」这个概念已经从界面上消失）：
+     顺手画进第一个非 orphan 的组卡片里，拖一下就能真正落进那个组。 */
+  function adoptGroupId() {
+    var groups = (state.data && state.data.groups) || [];
+    for (var i = 0; i < groups.length; i++) if (!groups[i].orphan) return groups[i].id;
+    return groups[0] ? groups[0].id : "";
   }
 
   function renderGroups() {
@@ -567,40 +559,34 @@
     box.innerHTML = "";
     var groups = (state.data && state.data.groups) || [];
     var active = activeFaces();
+    var adopt = adoptGroupId();
     groups.forEach(function (g) {
       var card = make("section", "fdb-group" + (g.orphan ? " is-orphan" : ""));
       card.setAttribute("data-group", g.id);
       card.setAttribute("data-drop-group", g.id);
       card.setAttribute("aria-label", String(g.name || g.dfm || g.id));
+      var mine = active.filter(function (f) {
+        if (f.group === g.id) return true;
+        return g.id === adopt && (!f.group || !groupById(f.group));
+      });
+      /* 组头一行装完：组名 + 张数 + 输入尺寸（384×384） */
       var hd = make("div", "fdb-group-hd");
-      var line = make("div", "fdb-group-line");
-      line.appendChild(make("span", "fdb-group-name", g.name || g.dfm || g.id));
-      if (g.orphan) line.appendChild(make("span", "fdb-orphan-tag", "已取消选择"));
-      hd.appendChild(line);
-      var meta = make("div", "fdb-group-meta");
-      var n = active.filter(function (f) { return f.group === g.id; }).length;
+      hd.appendChild(make("span", "fdb-group-name", g.name || g.dfm || g.id));
+      if (g.orphan) hd.appendChild(make("span", "fdb-orphan-tag", "已取消选择"));
       var cnt = make("span", "fdb-count");
-      cnt.appendChild(make("b", null, n));
+      cnt.appendChild(make("b", null, mine.length));
       cnt.appendChild(make("span", null, "张脸"));
-      meta.appendChild(cnt);
+      hd.appendChild(cnt);
       var sz = groupSize(g);
       var size = make("span", "fdb-size", sz + "×" + sz);
       size.title = "DFM 输入尺寸";
-      meta.appendChild(size);
-      hd.appendChild(meta);
+      hd.appendChild(size);
       card.appendChild(hd);
       var grid = make("div", "fdb-group-grid");
       grid.setAttribute("role", "listbox");
       grid.setAttribute("aria-multiselectable", "true");
       grid.setAttribute("aria-label", String(g.name || g.dfm || g.id) + " 人脸");
-      active.filter(function (f) { return f.group === g.id; }).forEach(function (f) {
-        grid.appendChild(makeFace(f, g.id));
-      });
-      if (!grid.children.length) {
-        var empty = make("div", "fdb-group-empty", "拖到这里，或从当前帧提取");
-        empty.setAttribute("data-drop-group", g.id);
-        grid.appendChild(empty);
-      }
+      mine.forEach(function (f) { grid.appendChild(makeFace(f, g.id)); });
       card.appendChild(grid);
       box.appendChild(card);
     });
@@ -645,41 +631,12 @@
 
   function renderStats() {
     var faces = (state.data && state.data.faces) || [];
-    var groups = (state.data && state.data.groups) || [];
-    var gids = {};
-    groups.forEach(function (g) { gids[g.id] = true; });
-    var active = faces.filter(function (f) { return !f.trashed; });
-    var grouped = active.filter(function (f) { return f.group && gids[f.group]; });
-    var un = active.length - grouped.length;
-    var tr = faces.length - active.length;
+    var tr = 0;
+    faces.forEach(function (f) { if (f.trashed) tr++; });
     function put(id, n) { var e = $(id); if (e) e.textContent = String(n); }
     put("fdbStatTotal", faces.length);
-    put("fdbStatGrouped", grouped.length);
-    put("fdbStatUngrouped", un);
     put("fdbStatTrash", tr);
     put("fdbTrashCount", tr);
-    put("fdbUngroupedCount", active.filter(function (f) { return !f.group || !gids[f.group]; }).length);
-  }
-
-  function renderMoveOptions() {
-    var sel = $("fdbMoveTarget");
-    if (!sel) return;
-    var keep = sel.value;
-    var groups = (state.data && state.data.groups) || [];
-    sel.innerHTML = "";
-    var o0 = document.createElement("option");
-    o0.value = ""; o0.textContent = "未分组";
-    sel.appendChild(o0);
-    groups.forEach(function (g) {
-      var o = document.createElement("option");
-      o.value = g.id;
-      o.textContent = (g.name || g.dfm || g.id) + (g.orphan ? "（已取消选择）" : "");
-      sel.appendChild(o);
-    });
-    var ok = false;
-    Array.prototype.forEach.call(sel.options, function (o) { if (o.value === keep) ok = true; });
-    sel.value = ok ? keep : (groups[0] ? groups[0].id : "");
-    try { sel.dispatchEvent(new Event("change", { bubbles: true })); } catch (e) {}
   }
 
   /* ---------- 组间投放 ---------- */
@@ -776,128 +733,7 @@
     );
   }
 
-  /* ---------- 提取 ---------- */
-  function rememberSize(dfm, size) {
-    var n = Number(size);
-    if (dfm && isFinite(n) && n > 0) state.sizes[dfm] = n;
-  }
-
-  function extractFaces() {
-    var btn = $("fdbExtract");
-    if (!btn || btn.disabled || state.extracting) return;
-    var frame = currentFrame();
-    if (frame == null) { toast("没有当前帧", "先在合成器里打开项目或视频", "warn"); return; }
-    var dfm = String(($("fdbDfm") || {}).value || "");
-    state.extracting = true;
-    updateActions();
-    var old = btn.textContent;
-    btn.textContent = "提取中…";
-    call(API + "/extract", {
-      method: "POST",
-      body: JSON.stringify({ project: state.project, frame: frame, dfm: dfm })
-    }, 120000).then(function (d) {
-      if (d && d.ok === false) {
-        if (d.reason === "no_face") {
-          toast("没有检测到人脸", "换一帧再试，或确认这一帧真的有脸", "warn");
-          return null;
-        }
-        throw new Error(d.detail || d.error || "提取失败");
-      }
-      must(d, "提取失败");
-      rememberSize(d.dfm || dfm, d.size);
-      var faces = d.faces || [];
-      if (faces.length <= 1) {
-        toast("已提取 " + faces.length + " 张人脸",
-          "加入：" + groupLabel(d.group || ""), "success");
-        return load();
-      }
-      return openExtractPicker(d, dfm);
-    }).catch(function (e) {
-      toast("提取失败", String((e && e.message) || e).slice(0, 160), "error");
-    }).then(function () {
-      state.extracting = false;
-      btn.textContent = old || "从当前帧提取人脸";
-      updateActions();
-    }, function () {
-      state.extracting = false;
-      btn.textContent = old || "从当前帧提取人脸";
-      updateActions();
-    });
-  }
-
-  function openExtractPicker(d, dfm) {
-    var body = make("div", "fdb-extract-picker");
-    var targetRow = make("label", "fdb-pick-target");
-    targetRow.appendChild(make("span", null, "加入"));
-    var sel = document.createElement("select");
-    sel.className = "mgsel";
-    sel.id = "fdbExtractTarget";
-    var groups = (state.data && state.data.groups) || [];
-    var o0 = document.createElement("option");
-    o0.value = ""; o0.textContent = "未分组";
-    sel.appendChild(o0);
-    groups.forEach(function (g) {
-      if (g.orphan) return;
-      var o = document.createElement("option");
-      o.value = g.id; o.textContent = g.name || g.dfm || g.id;
-      sel.appendChild(o);
-    });
-    sel.value = d.group || "";
-    targetRow.appendChild(sel);
-    body.appendChild(targetRow);
-    var grid = make("div", "fdb-check-grid");
-    (d.faces || []).forEach(function (f, i) {
-      var lab = make("label", "fdb-check");
-      var cb = document.createElement("input");
-      cb.type = "checkbox"; cb.checked = true; cb.value = f.id;
-      lab.appendChild(cb);
-      if (f.thumb || f.thumb_url) {
-        var img = document.createElement("img");
-        img.alt = ""; img.src = f.thumb || faceThumb(f);
-        img.addEventListener("error", function () { img.style.visibility = "hidden"; });
-        lab.appendChild(img);
-      } else {
-        lab.appendChild(make("span", "fdb-check-ph", "?"));
-      }
-      lab.appendChild(make("span", null, (i + 1) + " · " + f.id));
-      grid.appendChild(lab);
-    });
-    body.appendChild(grid);
-    openModal({
-      title: "选择提取结果",
-      desc: "取消勾选的脸会放进回收站（可还原），不会留在组里。",
-      body: body,
-      okText: "加入人脸库",
-      focus: grid.querySelector("input") || sel,
-      onOk: function () {
-        var checked = [];
-        all('input[type="checkbox"]', body).forEach(function (cb) { if (cb.checked) checked.push(cb.value); });
-        var unchecked = (d.faces || []).map(function (f) { return f.id; })
-          .filter(function (id) { return checked.indexOf(id) < 0; });
-        var target = sel.value || "";
-        var cur = d.group || "";
-        state.busy = true;
-        updateActions();
-        var chain = Promise.resolve();
-        if (target !== cur && checked.length) {
-          chain = chain.then(function () { return apiMove(checked, target); });
-        }
-        if (unchecked.length) {
-          chain = chain.then(function () { return apiTrash(unchecked); });
-        }
-        chain.then(function () {
-          toast("已加入 " + checked.length + " 张人脸", "目标：" + groupLabel(target), "success");
-          return load();
-        }).catch(function (e) {
-          toast("提取结果处理失败", String((e && e.message) || e).slice(0, 160), "error");
-          return load();
-        }).then(function () { state.busy = false; updateActions(); },
-                function () { state.busy = false; updateActions(); });
-      }
-    });
-  }
-
-  /* ---------- 二次确认 / 组选择 / 提取选择共用弹层 ---------- */
+  /* ---------- 二次确认弹层（彻底删除前问一句） ---------- */
   function openModal(opts) {
     opts = opts || {};
     var modal = $("fdbModal");
@@ -940,71 +776,39 @@
     openModal({ title: title, desc: desc, okText: okText, onOk: onOk, danger: danger, focus: $("fdbModalCancel") });
   }
 
-  function openGroupPicker(ids) {
-    var body = make("div", "fdb-modal-list");
-    var curGroups = {};
-    ids.forEach(function (id) {
-      var f = faceById(id);
-      if (f) curGroups[f.group || ""] = true;
-    });
-    var rows = [{ id: "", name: "未分组", orphan: false }].concat((state.data && state.data.groups) || []);
-    rows.forEach(function (g) {
-      var b = make("button", "fdb-pick" + (curGroups[g.id] ? " is-current" : ""));
-      b.type = "button";
-      b.setAttribute("data-group", g.id || "");
-      b.appendChild(make("span", null, g.name || g.dfm || "未分组"));
-      b.appendChild(make("small", null, g.id ? g.id : "group=\"\""));
-      b.addEventListener("click", function () {
-        closeModal(false);
-        moveFaces(ids, g.id || "");
-      });
-      body.appendChild(b);
-    });
-    openModal({
-      title: "移动 " + ids.length + " 张人脸",
-      desc: "选择目标分组；未分组 = 从当前组移出。",
-      body: body,
-      okText: "取消",
-      focus: body.querySelector("button"),
-      onOk: function () { closeModal(false); }
-    });
-    var ok = $("fdbModalOk");
-    if (ok) ok.hidden = true;
-  }
-
   /* ---------- 拖拽：Pointer Events，落点实时高亮 ---------- */
-  function boardPoint(x, y) {
+  /* 落点只有两种：组卡片（move）和回收站面板（trash）。
+     未分组区已经删掉，拖到别处一律没有行为。 */
+  function dropZoneAt(x, y) {
     var el = document.elementFromPoint(x, y);
-    return el && el.closest ? el.closest("[data-drop-group]") : null;
+    if (!el || !el.closest) return null;
+    var trash = el.closest("[data-drop-trash]");
+    if (trash) return { kind: "trash", el: trash, group: null };
+    var group = el.closest("[data-drop-group]");
+    if (group) return { kind: "group", el: group, group: group.getAttribute("data-drop-group") || "" };
+    return null;
   }
 
   function clearDrop() {
-    all(".fdb-lane.is-drop, .fdb-group.is-drop").forEach(function (z) { z.classList.remove("is-drop"); });
+    all(".fdb-group.is-drop, .fdb-trash.is-drop").forEach(function (z) { z.classList.remove("is-drop"); });
     var tip = $("fdbDropTip");
     if (tip) tip.hidden = true;
-    var note = one(".fdb-drop-note.is-live");
-    if (note) note.classList.remove("is-live");
   }
 
   function updateDrop(x, y) {
-    var zone = boardPoint(x, y);
+    var zone = dropZoneAt(x, y);
     clearDrop();
     if (!zone) return;
-    zone.classList.add("is-drop");
-    var gid = zone.getAttribute("data-drop-group") || "";
-    var label = groupLabel(gid);
+    zone.el.classList.add("is-drop");
     var ids = state.drag ? state.drag.ids : [];
     var tip = $("fdbDropTip");
-    if (tip) {
-      tip.hidden = false;
-      tip.textContent = "移到 " + label + " · " + ids.length + " 张";
-      tip.style.left = Math.min(window.innerWidth - 180, x + 16) + "px";
-      tip.style.top = Math.min(window.innerHeight - 34, y + 16) + "px";
-    }
-    if (zone.classList.contains("fdb-lane")) {
-      var note = zone.querySelector(".fdb-drop-note");
-      if (note) note.classList.add("is-live");
-    }
+    if (!tip) return;
+    tip.hidden = false;
+    tip.textContent = zone.kind === "trash"
+      ? "移入回收站 · " + ids.length + " 张"
+      : "移到 " + groupLabel(zone.group) + " · " + ids.length + " 张";
+    tip.style.left = Math.min(window.innerWidth - 180, x + 16) + "px";
+    tip.style.top = Math.min(window.innerHeight - 34, y + 16) + "px";
   }
 
   function startDrag(e) {
@@ -1086,8 +890,7 @@
     if (!d) return;
     var moved = d.moved;
     var ids = d.ids.slice();
-    var zone = moved ? boardPoint(e.clientX, e.clientY) : null;
-    var target = zone ? (zone.getAttribute("data-drop-group") || "") : null;
+    var zone = moved ? dropZoneAt(e.clientX, e.clientY) : null;
     if (d.ghost) d.ghost.remove();
     document.body.classList.remove("fdb-dragging");
     all(".fdb-face.is-dragging").forEach(function (c) { c.classList.remove("is-dragging"); });
@@ -1096,16 +899,16 @@
     state.drag = null;
     if (moved) {
       setTimeout(function () { state.suppressClick = false; }, 250);
-      if (target !== null) {
-        var allSame = ids.every(function (id) {
-          var f = faceById(id);
-          return f && (f.group || "") === target;
-        });
-        if (allSame) toast("已经在目标分组", groupLabel(target), "info");
-        else moveFaces(ids, target);
-      } else {
-        toast("没有放到分组上", "拖到组卡片或顶部「未分组」才会移动", "info");
-      }
+      /* 拖到空白处：什么都不做（未分组区没了，不再有「取消分组」这个落点） */
+      if (!zone) return;
+      if (zone.kind === "trash") { trashFaces(ids); return; }
+      var target = zone.group;
+      var allSame = ids.every(function (id) {
+        var f = faceById(id);
+        return f && (f.group || "") === target;
+      });
+      if (allSame) toast("已经在目标分组", groupLabel(target), "info");
+      else moveFaces(ids, target);
     }
   }
 
@@ -1165,13 +968,6 @@
     if (typing(e)) return;
     var key = String(e.key || "").toLowerCase();
     var face = focusedFaceId();
-    if (key === "m") {
-      var ids = keyTargetIds();
-      if (!ids.length) { toast("先选中人脸", "点一张，或用 Tab 聚焦后按 M", "warn"); return; }
-      e.preventDefault();
-      openGroupPicker(ids);
-      return;
-    }
     if (key === "t") {
       var ids2 = keyTargetIds();
       if (!ids2.length) { toast("先选中人脸", "点一张，或用 Tab 聚焦后按 T", "warn"); return; }
@@ -1215,20 +1011,11 @@
     return view.offsetParent !== null;
   }
 
+  /* 顶栏只留「人脸数据库 + 已选/全选/清空 + 提取到 + 关闭」：
+     项目名副标题、模式徽标、当前帧这些小字都删了（合成器里本来就有）。 */
   function updateHeader() {
-    var project = $("fdbProject");
-    if (project) {
-      project.textContent = projectName(state.project);
-      /* 空串（视频模式、还没拿到后端解析结果）→ 明确写默认库，别只给个「—」 */
-      project.title = state.project || "默认库：<工作区>/merge";
-    }
-    var mode = $("fdbMode");
-    if (mode) mode.textContent = state.mode === "export-project" ? "项目导出" : "常规导出";
-    var frame = $("fdbFrame");
-    var f = currentFrame();
-    var en = !!(window.I18N && window.I18N.get && window.I18N.get() === "en");
-    if (frame) frame.textContent = f == null ? (en ? "Current frame —" : "当前帧 —")
-                                             : ((en ? "Current frame " : "当前帧 ") + f);
+    var el = $("fdbSelCount");
+    if (el) el.textContent = String(selectedIds().length);
   }
 
   function open(opts) {
@@ -1254,14 +1041,15 @@
     state.loaded = false;
     state.loading = false;
     state.busy = false;
-    state.extracting = false;
     state.dfm = selectedDfms()[0] || "";
     state.seq++;
     updateHeader();
     var cont = $("fdbContinue");
     if (cont) {
-      cont.textContent = state.browseOnly ? "关闭" : "继续导出";
-      cont.title = state.browseOnly ? "回合成视图（只看人脸库，不导出）" : "";
+      /* 关闭只有一个入口：右上角。底部这颗只在导出流程里叫「继续导出」。 */
+      cont.textContent = "继续导出";
+      cont.hidden = !!state.browseOnly;
+      cont.title = "";
     }
     var empty = $("fdbEmpty"); if (empty) empty.hidden = true;
     var er = $("fdbError"); if (er) er.hidden = true;
@@ -1367,8 +1155,6 @@
     if (close) close.addEventListener("click", askCancel);
     var cont = $("fdbContinue");
     if (cont) cont.addEventListener("click", proceed);
-    var ext = $("fdbExtract");
-    if (ext) ext.addEventListener("click", extractFaces);
     var retry = $("fdbRetry");
     if (retry) retry.addEventListener("click", load);
 
@@ -1380,12 +1166,6 @@
     });
     var clearSel = $("fdbClearSel");
     if (clearSel) clearSel.addEventListener("click", function () { setSelected({}); state.anchor = ""; });
-    var move = $("fdbMoveBtn");
-    if (move) move.addEventListener("click", function () {
-      moveFaces(selectedIds(), ($("fdbMoveTarget") || {}).value || "");
-    });
-    var trash = $("fdbTrashBtn");
-    if (trash) trash.addEventListener("click", function () { trashFaces(selectedIds()); });
 
     var trashList = $("fdbTrashList");
     if (trashList) trashList.addEventListener("click", function (e) {
@@ -1427,12 +1207,67 @@
     if (dfm) dfm.addEventListener("change", function () { state.dfm = dfm.value; });
   }
 
+  /* ---------- 「＋」落库目标：当前选中的组 ---------- */
+  /* 界面上已经没有「未分组」，所以新脸必须落进一个真实存在的组：
+       1) 页面开着 → 用户在下拉「提取到」里选的那一组（点组卡片也会把它选上）；
+       2) 没选 / 没开 → 库里第一个非 orphan 的组；
+       3) 库里一个组都没有 → 合成器里选中的第一个模型（后端按 dfm 顺手建组）；
+       4) 连模型都没有 → null，前端提示「先选模型」。
+     每次点「＋」都现查一次 /api/merge/faces（同一个请求在飞时共用），**不做**
+     时间缓存：刚建好组、刚选好模型的两秒里给出旧答案会让「＋」白点一次。 */
+  var TGT = { at: 0, project: null, data: null, inflight: null };
+
+  function pickTarget(data) {
+    var groups = ((data && data.groups) || []).filter(function (g) { return g && g.dfm; });
+    var models = collectDfmNames();
+    var want = String(state.dfm || "");
+    var hit = null;
+    groups.forEach(function (g) { if (!hit && String(g.dfm) === want) hit = g; });
+    if (!hit && want && models.indexOf(want) >= 0) {
+      return { dfm: want, group: "", label: want };
+    }
+    if (!hit) {
+      groups.forEach(function (g) { if (!hit && !g.orphan) hit = g; });
+      if (!hit) hit = groups[0] || null;
+    }
+    if (hit) return { dfm: String(hit.dfm), group: hit.id, label: hit.name || hit.dfm };
+    var first = models[0] || "";
+    return first ? { dfm: first, group: "", label: first } : null;
+  }
+
+  /* 只为了问「库里有哪几个组」：不渲染、不改状态；同一个请求在飞时共用。 */
+  function libraryFor(project) {
+    if (TGT.inflight && TGT.project === project) return TGT.inflight;
+    TGT.project = project;
+    TGT.inflight = call(API + "?project=" + encodeURIComponent(project),
+                        { cache: "no-store" }, 15000).then(function (d) {
+      TGT.data = d; TGT.at = Date.now(); TGT.inflight = null;
+      return d;
+    }, function (e) {
+      TGT.inflight = null; TGT.data = null;
+      throw e;
+    });
+    return TGT.inflight;
+  }
+
+  function addTarget(project) {
+    project = String(project == null ? state.project : project);
+    /* 页面开着时用手里这份真数据（用户刚点过组卡片 / 换过下拉） */
+    if (state.open && state.loaded && state.data) {
+      return Promise.resolve(pickTarget(state.data));
+    }
+    return libraryFor(project).then(pickTarget, function () { return pickTarget(null); });
+  }
+
   window.FaceDB = {
     open: open,
     close: cancel,
     requestClose: askCancel,
     refresh: load,
     isOpen: function () { return state.open; },
+    /* 合成器框上的「＋」用：告诉它这张新脸该落进哪个组（null = 先选模型） */
+    addTarget: addTarget,
+    selectedDfm: function () { return String(state.dfm || ""); },
     currentProject: function () { return state.project; },
     /* 调试/验收用：不改变状态，只把内部开关读出来。 */
     debug: function () {
