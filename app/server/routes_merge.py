@@ -3167,7 +3167,10 @@ def _face_ids_val(name: str, raw) -> list:
             except Exception:
                 raise _BadInput("「%s」不是合法 JSON 数组：%s" % (name, text[:60]))
         else:
-            raw = [x for x in re.split(r"[,，s]+", text) if x]
+            # 分隔符是「逗号 / 全角逗号 / 空白」：原来写的是 r"[,，s]+"，
+            # 那个 s 是**字母 s**，不是 \s —— "1 3" 这种空格分隔的写法会被当成
+            # 一整串塞进 _int_val，直接 400。（docstring 一直说认 " 1 3 "。）
+            raw = [x for x in re.split(r"[,，\s]+", text) if x]
     if not isinstance(raw, (list, tuple)):
         raise _BadInput("「%s」要是一个数组（人脸序号），收到 %s"
                         % (name, type(raw).__name__))

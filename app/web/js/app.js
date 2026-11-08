@@ -2864,6 +2864,9 @@
     var seq = ++MV_SEQ.swap;
     var body = {
       frame: n, idx: n, n: n, w: 900,
+      /* 和合成请求同一个口径：有「不换脸」的脸才要无损，否则 jpg（快 3 倍） */
+      no_swap_faces: (window.mgFaceNoSwapIds ? window.mgFaceNoSwapIds() : []),
+      fmt: ((window.mgFaceNoSwapIds && window.mgFaceNoSwapIds().length) ? "png" : "jpg"),
       model: (window.mgFaceSingleModel ? window.mgFaceSingleModel() : ""),
       models: (window.mgFaceModelsPayload ? window.mgFaceModelsPayload() : []),
       settings: (window.mgCmpSettings ? window.mgCmpSettings() : {})
@@ -2903,7 +2906,10 @@
     if (mgVidPath() && !(window.__mgVideo || {}).streamDown) return Promise.resolve();
     if (!st.path) { st.log.push("no-path " + n); return Promise.resolve(); }
     var seq = ++MV_SEQ.orig;
-    return fetch("/api/merge/frame/" + n + "?w=900").then(function (r) { return r.json(); })
+    /* 这一层是「底图」：合成结果走 #mgPreview 那层 overlay，底图永远是原帧。
+       以前这里不带 raw=1，拿回来的是**合成图**，于是「原图」一态下面垫着的
+       其实是换过脸的图 —— 原图视图会露出换脸结果。 */
+    return fetch("/api/merge/frame/" + n + "?w=900&raw=1&fmt=png").then(function (r) { return r.json(); })
       .then(function (d) {
         st.log.push("req " + n + " -> " + (d.png ? d.png.length : "none") + " (idx " + d.idx + ")");
         if (seq !== MV_SEQ.orig) return;    /* 过期响应，丢掉 */
@@ -2930,11 +2936,13 @@
       if (nextVideo !== (window.__mgVideo || {}).src) st.t = 0;
       st.video = nextVideo;
       mgTimelineSync(d.frames, d.fps || 30);
+      if (window.mgClearFaceAssign) window.mgClearFaceAssign();   /* 先清脸分配，再取帧 */
       if (st.video) {
         window.mgAttachVideo(st.video);
       } else {
         window.mgDetachVideo();
         window.mvFrame(0);
+        if (window.mgCmpNow) window.mgCmpNow({ frame: 0 });
       }
       window.mvAnalyze(24);
       var tot = document.getElementById("mtlTotal");
@@ -3093,7 +3101,13 @@
       var tot = document.getElementById("mtlTotal");
       if (tot) tot.textContent = st.frames;
       mgShowPrepared(project, st.frames);
+      /* 脸分配属于「上一份素材」：先清掉再取帧/合成，否则第一发请求还带着旧分配 */
+      if (window.mgClearFaceAssign) window.mgClearFaceAssign();
+      /* 底图 = 原帧（mvFrame 走 raw=1），合成结果另走 overlay 那一层。
+         以前只画底图，底图又是合成图，所以「原图」看起来像合成；现在两层分开，
+         打开项目后必须主动合成一次，合成态才有换脸结果。 */
       window.mvFrame(0);
+      if (window.mgCmpNow) window.mgCmpNow({ frame: 0 });
       if (window.mvAnalyze) window.mvAnalyze(24);
       toast("素材已就绪",
             st.frames + " 帧 · " + (aligned || d.with_landmarks || 0) + " 张对齐脸",
@@ -3696,6 +3710,7 @@
      没点过就按「选中顺序」现算默认值 —— 这样列表轮询重绘也不会把分配弄丢。 */
   var MG_FACES = {};        /* 模型名 → [脸序号]；[] = 全部脸 */
   var MG_ANCHOR = null;     /* Shift+点击的上一次落点，范围选择从它开始 */
+  var MG_SEL_AUTO = true;   /* true = 当前选中是列表自动挑的（用户还没点过） */
   var MG_FACE_N = 3;        /* 徽章循环档位：all → face 0 → face 1 → face 2 → all */
 
   function mgRows() {
@@ -3748,6 +3763,7 @@
   }
   /* 选中判定：Ctrl/Cmd 切换单条、Shift 从锚点到本条整段、普通点击仍是单选 */
   function mgPickRow(box, idx, ev) {
+    MG_SEL_AUTO = false;                  /* 用户自己点了：以后不许再自动改选中 */
     var rows = Array.prototype.filter.call(box.children, function (x) {
       return x.classList && x.classList.contains("mgitem");
     });
@@ -3772,6 +3788,9 @@
     }
     mgSyncFaces();
     mgWarmSelected();
+    /* 左栏换模型 = 换「整帧用哪个 dfm」：右边参数一动就会重算，这里以前不动，
+       于是"选了模型画面没反应"，得再去点一下别的东西才刷新。 */
+    if (window.mgCmpSoon) window.mgCmpSoon();
   }
   /* 多选时每个选中的模型都预热一遍（__mgWarm 自带 10 秒去重，重复调用不要钱） */
   function mgWarmSelected() {
@@ -4060,6 +4079,7 @@
   var MG_COLORS = {};          /* dfm 名 → 颜色；同一模型任何一帧都是这个色 */
   var MG_COLORS_KEY = "dfl-merge-model-colors";
   var MG_FACE_MODEL = {};      /* 脸序号 → dfm 名；没有键 = 未分配（灰框） */
+  var MG_FACE_NOSWAP = {};     /* 脸序号 → true：这张脸「不换脸」，请求里走 no_swap_faces */
   var MG_FACE_BUSY = {};       /* 脸序号 → true：这一张正在重算（画细进度环） */
   var MG_RECTS = [];           /* 脸序号 → 画布内矩形（chip / ＋ 的定位依据） */
   var MG_FACE_RAW = [];        /* 脸序号 → 原图坐标里的 box（提取人脸时回传） */
@@ -4109,6 +4129,20 @@
   }
   window.mgFaceModel = mgFaceModel;
 
+  /* 「不换脸」= 契约里的 no_swap_faces：后端会把这张脸原样留在帧里（连一个像素都
+     不动），而不是"没分配 → 兜给第 0 个模型"。序号就是检测顺序，从 0 起。 */
+  function mgFaceIsNoSwap(i) { return !!MG_FACE_NOSWAP[i]; }
+  window.mgFaceIsNoSwap = mgFaceIsNoSwap;
+  function mgFaceNoSwapIds() {
+    return Object.keys(MG_FACE_NOSWAP).filter(function (k) {
+      return !!MG_FACE_NOSWAP[k];
+    }).map(function (k) { return parseInt(k, 10); })
+      .filter(function (i) { return !isNaN(i); })
+      .sort(function (x, y) { return x - y; });
+  }
+  window.mgFaceNoSwapIds = mgFaceNoSwapIds;
+  /* 换素材/换帧不影响这里（和 MG_FACE_MODEL 一样是"这一轮合成"的设置） */
+
   /* 「框」开关：data-v="boxes" 那颗 b 的 .on 就是开关本身 */
   function mgBoxesOn() {
     var t = document.getElementById("mgBoxTog");
@@ -4121,6 +4155,15 @@
     MG_FACE_RAW = raw || [];
     mgRenderFaces();
   }
+
+  /* 换素材了：脸序号是「这一帧的检测顺序」，把上一份素材的分配带过去毫无意义
+     （3 张脸的项目点了 face 2 不换脸，再开一个 1 张脸的视频，那张脸就永远不换）。 */
+  function mgClearFaceAssign() {
+    MG_FACE_MODEL = {};
+    MG_FACE_NOSWAP = {};
+    mgResetFaces();
+  }
+  window.mgClearFaceAssign = mgClearFaceAssign;
 
   function mgResetFaces() {
     MG_RECTS = [];
@@ -4172,7 +4215,7 @@
     if (color) { btn.style.borderColor = color; btn.style.color = color; }
     var txt = document.createElement("span");
     txt.className = "ddtxt";
-    txt.textContent = mname || "选择模型";
+    txt.textContent = mname || (mgFaceIsNoSwap(i) ? "不换脸" : "选择模型");
     btn.appendChild(txt);
 
     var menu = document.createElement("div");
@@ -4194,7 +4237,8 @@
       }
       opts.forEach(function (nm) {
         var it = document.createElement("div");
-        it.className = "ddopt" + ((mgFaceModel(i) || "") === nm ? " on" : "");
+        /* 「不换脸」那一项的高亮看的是 MG_FACE_NOSWAP，不是"有没有分配" */
+        it.className = "ddopt" + ((nm ? ((mgFaceModel(i) || "") === nm) : mgFaceIsNoSwap(i)) ? " on" : "");
         it.textContent = nm || "不换脸";
         if (nm) it.style.color = mgModelColor(nm);
         it.addEventListener("click", function (ev) {
@@ -4251,7 +4295,7 @@
       var color = nm ? mgModelColor(nm) : "";
       var btn = card.querySelector(".mgfb");
       var tx = card.querySelector(".ddtxt");
-      if (tx) tx.textContent = nm || "选择模型";
+      if (tx) tx.textContent = nm || (mgFaceIsNoSwap(i) ? "不换脸" : "选择模型");
       if (btn) {
         btn.classList.toggle("has", !!color);
         btn.style.borderColor = color || "";
@@ -4382,6 +4426,15 @@
     var body = {
       frame: frame, idx: frame, n: frame,
       video: mgVidPath(), t: t, w: 900,
+      /* 点过「不换脸」的那几张脸：后端按这个列表原样留下（no_swap_faces）。
+         以前这个键一次都没发过，界面上点「不换脸」只是清掉分配，后端照样兜给
+         第 0 个模型 —— 等于没生效。 */
+      no_swap_faces: mgFaceNoSwapIds(),
+      /* 格式：有「不换脸」的脸就要**无损**（fmt=png）—— 契约要求那几张脸和原帧
+         逐像素相同，走 jpg 的量化噪声会让它变成 2~3 的假差异。没有这种脸时用 jpg：
+         900px 一帧 png 要 1.16 MB（base64 1.55 MB），实测比 jpg 多花 300~700ms，
+         拖滑块/选模型会明显发滞。 */
+      fmt: (mgFaceNoSwapIds().length ? "png" : "jpg"),
       model: mgFaceSingleModel(),
       models: mgFaceModelsPayload(),
       settings: mgCmpSettings()
@@ -4401,12 +4454,16 @@
         if (!r.ok || !d) {
           var err = new Error((d && d.detail) || ("HTTP " + r.status));
           err.status = r.status;
+          /* 结构化错误（后端自己的 {ok:false,error}）和「路由不存在」要分得开：
+             前者是参数/模型真错了，必须说出来；后者才轮到老接口兜底。 */
+          err.api = !!(d && typeof d.ok === "boolean");
           throw err;
         }
         return d;
       }, function () {
         var err = new Error("HTTP " + r.status);
         err.status = r.status;
+        err.api = false;                 /* 响应体不是 JSON：多半是老后端/没这个路由 */
         throw err;
       });
     }).then(function (d) {
@@ -4426,9 +4483,17 @@
       mgCmpNote(false);
       var stt = e && e.status;
       if (stt === 404 || stt === 405 || stt === 501 || stt === 400 || stt === 422) {
-        /* 新接口还没上线：老 GET 先兜住，画面不能停在上一帧 */
-        return mgCmpLegacy(frame);
+        /* 后端自己给的 4xx（{ok:false,error}）= 参数/模型/检测器真错了。
+           以前这里一并退回老 GET，老 GET 不吃 settings/model —— 结果是"点了个
+           没导出 .dfm 的模型 / 传了个不存在的检测器"，画面悄悄换成**默认参数**那一张，
+           错误被吞掉。现在只有「路由不存在」（响应体不是我们的结构化 JSON）才兜底。 */
+        if (!(e && e.api)) return mgCmpLegacy(frame);
+        mgCmpNote(false);
+        mgHint(String(e.message || "合成失败").slice(0, 80));
+        return null;
       }
+      mgCmpNote(false);
+      mgHint(String((e && e.message) || "合成失败").slice(0, 80));
       return null;
     });
   }
@@ -4470,7 +4535,7 @@
   window.mgRawFrame = function (n) {
     n = Math.max(0, parseInt(n, 10) || 0);
     var seq = ++MV_SEQ.orig;
-    return fetch("/api/merge/frame/" + n + "?w=900&raw=1").then(function (r) {
+    return fetch("/api/merge/frame/" + n + "?w=900&raw=1&fmt=png").then(function (r) {
       if (!r.ok) throw new Error("HTTP " + r.status);
       return r.json();
     }).then(function (d) {
@@ -4496,8 +4561,8 @@
   /* ---------- 分配模型 → 立刻重算 ---------- */
   function mgAssignFace(i, name) {
     name = String(name || "");
-    if (name) MG_FACE_MODEL[i] = name;
-    else delete MG_FACE_MODEL[i];
+    if (name) { MG_FACE_MODEL[i] = name; delete MG_FACE_NOSWAP[i]; }
+    else { delete MG_FACE_MODEL[i]; MG_FACE_NOSWAP[i] = true; }   /* 「不换脸」→ no_swap_faces */
     MG_FACE_BUSY[i] = true;
     /* 先用 canvas 换色 + 卡片换字（不等网络），再发重算 */
     window.mvRedrawBoxes();
@@ -5576,7 +5641,29 @@
       var nm = String(((x.querySelector(".nm") || {}).textContent) || "").trim();
       if (nm && keepSel.indexOf(nm) >= 0) x.classList.add("on");
     });
-    if (!keepRow) { keepRow = box.children[0] || null; if (keepRow) keepRow.classList.add("on"); }
+    if (!keepRow) {
+      /* 一个都没命中：优先选「已经导出过 .dfm」的那一行。后端合成只认 .dfm，
+         默认停在一条没有 .dfm 的模型上 → 每次合成 404 → 开箱就是一屏空白。 */
+      keepRow = Array.prototype.filter.call(box.children, function (x) {
+        return !!x.querySelector(".tag.ok");
+      })[0] || box.children[0] || null;
+      if (keepRow) keepRow.classList.add("on");
+    } else if (MG_SEL_AUTO) {
+      /* 选中是「自动挑的」（用户没点过）：模型列表会分两拨到（/api/models 先，
+         /api/state 后），第一拨里可能只有没导出的条目，名字一保住就再也换不掉，
+         于是永远停在一条没有 .dfm 的模型上。这里允许自动选中升到有 .dfm 的那条。 */
+      var onRows = Array.prototype.filter.call(box.children, function (x) {
+        return x.classList.contains("on");
+      });
+      var hasDfm = onRows.some(function (x) { return !!x.querySelector(".tag.ok"); });
+      var pref = Array.prototype.filter.call(box.children, function (x) {
+        return !!x.querySelector(".tag.ok");
+      })[0];
+      if (!hasDfm && pref) {
+        onRows.forEach(function (x) { x.classList.remove("on"); });
+        pref.classList.add("on");
+      }
+    }
     mgSyncFaces();        /* 徽章跟着恢复后的选中项走 */
     mgWarmSelected();     /* 渲染完预热：多选时每个选中模型各打一枪（__mgWarm 自带 10 秒去重） */
   }
