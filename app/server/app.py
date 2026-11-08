@@ -629,6 +629,7 @@ def _get_detector(name=None):
 # ============================================================
 _export_job = {"running": False, "name": "", "log": [], "ok": None, "error": None}
 from ._paths import engine_python as _engine_python, engine_root as _engine_root
+from . import _load_events
 
 _DFL_ROOT = _engine_root()
 _DFL_PY = _engine_python()
@@ -740,9 +741,13 @@ _export_job_lock = _threading.Lock()
 # 模型训练参数：读写 *_data.dat 里的 options
 # 结构性字段（分辨率/维度/架构）创建后不可改，白名单挡掉
 # ============================================================
+# 只有这 7 个是「创建后不可改」的结构参数：必须和 routes_models._STRUCTURAL_KEYS、
+# 前端 collectCfgPatch 的 STRUCT 三处一致，否则就是「界面能改、发上去存不进去」。
+# gan_power / true_face_power / face_style_power / models_opt_on_gpu 以前被误列在这里：
+# 它们是每次训练都能改的损失权重 / 放置开关（前三个还在 _HOT_OPTIONS 里），
+# 结果界面上能改、发上来却被 400 整单拒绝，同一次保存里的其它参数也跟着全失败。
 _CFG_STRUCTURAL = {"resolution", "archi", "e_dims", "ae_dims", "d_dims",
-                   "d_mask_dims", "face_type", "models_opt_on_gpu",
-                   "gan_power", "true_face_power", "face_style_power"}
+                   "d_mask_dims", "face_type"}
 
 
 def _model_dat(name: str):
@@ -1902,6 +1907,10 @@ _train_job = {"running": False, "name": "", "log": [], "ok": None, "error": None
               "iter": 0, "it_s": 0.0, "iter_at": 0.0, "started_at": 0.0, "target": 0,
               "paused": False, "saving": False, "lr": 0.0,
               "loss_src": None, "loss_dst": None,
+              # 模块加载失败的**结构化事件**（训练进程 stdout 里的 [DFL-LOAD-EVENT] 行）。
+              # 它是状态不是一次性通知：只要训练还在跑，刷新页面 / 重进训练页
+              # 都能再从 /api/train/status 拿到，于是横幅重新出现。
+              "warnings": [],
               "history": [], "webui_ready": False, "stopping": False}
 _train_proc = None        # 4.0 训练主进程（控制/清理都要它）
 # 最后一次拿到的实时预览（4.0 的 /preview 是破坏性 pop，得自己留一份给前端反复读）
@@ -1999,6 +2008,9 @@ def _train_worker(name: str, cpu_only: bool):
                            "iter": 0, "iter_seen": False, "lr": 0.0,
                            "loss_src": None, "loss_dst": None, "history": [],
                            "paused": False, "saving": False, "stopping": False,
+                           # 上一轮的模块加载失败事件不能留到这一轮：
+                           # 否则新开的训练一开始就挂着上回那条横幅（状态是假的）。
+                           "warnings": [],
                            "last_backup_iter": 0, "pid": None})
     global _train_proc
     # 4.0 训练进度行的真实格式：
@@ -2020,8 +2032,17 @@ def _train_worker(name: str, cpu_only: bool):
             line = line.rstrip()
             if not line:
                 continue
+            # 模块加载失败的结构化事件（引擎 core/leras/load_events.py 打的 JSON 行）。
+            # 它同时是"状态"，所以要进 _train_job，由 /api/train/status 的 warnings[]
+            # 交给界面 —— 刷新页面后横幅还能重新出现，靠的就是这里存住了。
+            _lev = _load_events.parse_line(line)
             m = ITER_RE.match(line)
             with _train_job_lock:
+                if _lev is not None:
+                    _cur = [w for w in _train_job.get("warnings") or []
+                            if w.get("module") != _lev.get("module")]
+                    _cur.append(_lev)
+                    _train_job["warnings"] = _cur
                 _train_job["log"].append(line[:400])
                 if len(_train_job["log"]) > 300:
                     _train_job["log"] = _train_job["log"][-300:]

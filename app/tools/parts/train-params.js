@@ -148,15 +148,18 @@
 
     if (r.t === "num") {
       var inp = mk("input", "inp");
+      if (r.k) inp.dataset.cfg = r.k;
       inp.value = r.v == null ? "" : String(r.v);
       inp.setAttribute("inputmode", "decimal");
       inp.spellcheck = false;
       cc.appendChild(inp);
     } else if (r.t === "seg") {
       var seg = mk("div", "seg");
+      if (r.k) seg.dataset.cfg = r.k;
       (r.o || []).forEach(function (o, i) {
         var b = mk("b");
         b.textContent = o;
+        b.dataset.v = String(o);
         if (String(o) === String(r.v) || (i === 0 && r.v == null)) b.className = "on";
         seg.appendChild(b);
       });
@@ -172,6 +175,7 @@
       cc.appendChild(sel);
     } else if (r.t === "sw") {
       var sw = mk("div", "sw" + (r.v ? " on" : ""));
+      if (r.k) sw.dataset.cfg = r.k;
       sw.setAttribute("role", "switch");
       sw.tabIndex = 0;
       cc.appendChild(sw);

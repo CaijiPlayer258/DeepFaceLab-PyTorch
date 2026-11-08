@@ -205,6 +205,12 @@
       n.classList.toggle("on", n.getAttribute("data-go") === active);
     });
     renderCrumbs(key);
+    /* 「模块加载失败」横幅是**训练页的状态**：离开就收起，重新进来按最新状态再画一次
+       （所以点 × 只是本次挂载内关掉，不是永久记住 —— 见 js/loadbanner.js）。 */
+    if (window.LCSLoadBanner) {
+      if (key === "run") window.LCSLoadBanner.enter();
+      else window.LCSLoadBanner.leave();
+    }
     if (key === "debug") { edInit(); edBind(); edDraw(); }
     if (key === "dataset") { renderSteps(); syncDatasetBadge(); erLoad(); }
     if (key === "train") bindTrainerTop();
@@ -4325,6 +4331,8 @@
     MG_FACE_MODEL = {};
     MG_FACE_NOSWAP = {};
     mgResetFaces();
+    /* 换了素材 → 刚才那份「能不能拿到这一帧的图」的缓存作废 */
+    if (window.mgSourceForget) window.mgSourceForget();
   }
   window.mgClearFaceAssign = mgClearFaceAssign;
 
@@ -4788,6 +4796,96 @@
   }
   window.mgToastOnce = mgToastOnce;
 
+  /* 同一次操作里只允许出现**一条**错误：2 秒内的第二、第三条直接丢掉。
+     以前「缺少 68 点」和「还没有素材」各用各的 key，两条会一起弹，还互相矛盾
+     （画面里明明有视频）。现在「点＋」和「导出」的前置失败都走这里。 */
+  var MG_ERR_AT = 0;
+  function mgToastErr(key, title, sub, type, ms) {
+    var now = Date.now();
+    if (now - MG_ERR_AT < 2000) return null;
+    if (now - (MG_TOAST_SEEN[key] || 0) < 2000) return null;
+    MG_ERR_AT = now;
+    MG_TOAST_SEEN[key] = now;
+    /* toast() 是拼 innerHTML 的：服务端消息里带路径，尖括号别让它变成标签 */
+    return toast(title, String(sub || "").replace(/[<>]/g, ""), type || "warn", ms || 5000);
+  }
+  window.mgToastErr = mgToastErr;
+
+  /* 「现在到底能不能拿到这一帧的图」—— 问后端，不问变量。
+     判定权在 /api/merge/faces/source：项目模式看项目帧、视频模式看合成器打开着
+     的素材，两样都没有才算「没有素材」。以前只看 window.__mergeInputDir ——
+     视频模式下它永远是空串。导出前的前置检查（mgNeedProjectDir）只认这个口径。
+     结果缓存 1.2 秒（连点、重试不重复发请求）；
+     老后端没这个接口就退回本地判断，绝不因为问不到就把用户拦下来。 */
+  var MG_SRC = { at: 0, data: null, inflight: null };
+  function mgSourceForget() {
+    MG_SRC.at = 0; MG_SRC.data = null; MG_SRC.inflight = null;
+  }
+  window.mgSourceForget = mgSourceForget;
+
+  function mgSrcHint(info) {
+    info = info || {};
+    var why = String(info.why || "");
+    if (why) return why;                 /* 后端已经说了「当前是哪种模式、缺哪一个」 */
+    if (info.mode === "project") return "当前是项目模式：项目里这一帧取不到图";
+    if (info.mode === "video") return "当前是视频模式：还没打开素材 —— 先在左栏导入一段视频";
+    return "当前既没有打开视频、也没有项目目录 —— 先导入一段视频或打开 DFL 项目";
+  }
+
+  function mgSourceInfo() {
+    var now = Date.now();
+    if (MG_SRC.data && now - MG_SRC.at < 1200) return Promise.resolve(MG_SRC.data);
+    if (MG_SRC.inflight) return MG_SRC.inflight;
+    var project = window.__mergeInputDir || "";
+    var frame = mgCmpFrameIdx();
+    MG_SRC.inflight = fetch("/api/merge/faces/source?project=" + encodeURIComponent(project) +
+                            "&frame=" + frame)
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        return {
+          ok: !!(d && d.ok !== false),
+          available: !!(d && d.available),
+          mode: String((d && d.mode) || ""),
+          project: String((d && d.project) || ""),
+          default_project: String((d && d.default_project) || ""),
+          material: String((d && d.material) || ""),
+          why: String((d && d.why) || ""),
+          frame: frame
+        };
+      })
+      .catch(function () {
+        var video = mgVidPath();
+        return { ok: false, available: !!(video || project),
+                 mode: video ? "video" : (project ? "project" : "none"),
+                 project: project, default_project: "", material: video,
+                 why: "", frame: frame };
+      })
+      .then(function (info) {
+        MG_SRC.data = info; MG_SRC.at = Date.now(); MG_SRC.inflight = null;
+        return info;
+      });
+    return MG_SRC.inflight;
+  }
+  window.mgSourceInfo = mgSourceInfo;
+
+  /* 导出（整片 / 标准项目）还要一个真正的项目目录：视频模式得先抽帧 + 对齐。 */
+  function mgNeedProjectDir() {
+    return mgSourceInfo().then(function (info) {
+      var dir = String(info.project || window.__mergeInputDir || "");
+      if (dir) return { info: info, dir: dir };
+      if (!info.available) {
+        mgToastErr("need-source", "还没有素材", mgSrcHint(info), "warn", 5000);
+        return null;
+      }
+      mgToastErr("need-project", "当前是视频模式：还没有能导出的项目",
+                 "视频还没抽帧 + 对齐成项目（先在左栏导入并等它准备完），导出要项目目录",
+                 "warn", 6000);
+      return null;
+    });
+  }
+  window.mgNeedProjectDir = mgNeedProjectDir;
+
+
   function mgPlusBtn(i) {
     var layer = document.getElementById("mgFaceLayer");
     if (!layer) return null;
@@ -4808,6 +4906,23 @@
   }
   window.mgAddFaceToDb = mgAddFaceToDb;
 
+  /* 后端给的业务失败（200 + ok:false）：一条提示、说清原因，绝不叠加第二条。 */
+  function mgAddFaceFail(d) {
+    var why = String((d && d.reason) || "");
+    var detail = String((d && d.detail) || "").slice(0, 140);
+    if (why === "no_landmarks68") {
+      mgToastErr("add-no68", "这张脸没算出 68 点",
+                 detail || "后端跑不出 2D106 的 68 点 —— 换一帧或重新检测再点", "warn", 5000);
+    } else if (why === "no_face") {
+      mgToastErr("add-noface", "这一帧没检测到脸", detail || "换一帧再点", "warn", 5000);
+    } else if (why === "detect_failed") {
+      mgToastErr("add-detfail", "服务端检测失败", detail || "检测器没跑起来", "error", 5000);
+    } else {
+      mgToastErr("add-" + why, "没有加到人脸库",
+                 detail || why || "后端没有给出原因", "warn", 5000);
+    }
+  }
+
   function mgAddFaceNext(i) {
     var q = MG_ADD[i];
     if (!q) return;
@@ -4823,6 +4938,7 @@
     var rec = MG_FACE_RAW[i] || null;
     var box = rec && rec.box ? rec.box.slice() : null;
     var kps68 = rec && rec.kps68 ? rec.kps68 : null;
+    var has68 = !!(kps68 && kps68.length === 68);
     var frame = mgCmpFrameIdx();
     var dfm = mgFaceModel(i) || (mgSelNames()[0] || "");
     var video = mgVidPath() || "";
@@ -4834,22 +4950,22 @@
       if (q.queue > 0) mgAddFaceNext(i);
     }
 
-    if (!kps68 || kps68.length !== 68) {
-      mgToastOnce("add-no68", "缺少 68 点",
-                  "这张脸还没拿到 68 点关键点（检测没回来 / 2D106 没跑通）—— 换一帧或重新检测再点",
-                  "warn", 5000);
-      done();
-      return;
-    }
-
+    /* 只把我们**真的知道**的东西发出去：
+         有 kps68 → 直接带（快路径，前端算好的 68 点原样落库）；
+         没有 / 不是 68 个 → 就不带，让后端从这一帧的图上自己跑
+         「检测 → 2D106 → 68 点仿射裁剪」。
+       绝不因为手里没有 kps68 就在这里弹错返回 —— 老后端（/api/merge/detect
+       不回 kps68）时那样等于＋什么都没干，而用户看到的是「缺少 68 点」和
+       「还没有素材」两条自相矛盾的提示（画面里明明有视频）。 */
     var payload = {
-      /* 有项目用项目；没有留空 → 后端用默认库 <工作区>/merge/_faces 自己建 */
+      /* 有项目用项目库；没有留空 → 后端用默认库 <工作区>/merge 自己建 */
       project: window.__mergeInputDir || "",
-      kps68: kps68,
       dfm: dfm,
       frame: frame,
+      detector: mgDetectorName() || "",
       source: { video: video, frame: frame }
     };
+    if (has68) payload.kps68 = kps68;
     if (box) payload.box = box;
 
     fetch("/api/merge/faces/add", {
@@ -4858,8 +4974,9 @@
       body: JSON.stringify(payload)
     }).then(function (r) {
       return r.json().then(function (d) {
-        /* no_landmarks68 / no_face 这类是业务结果（200 + ok:false），
-           当成正常返回交给下面按 reason 说话，别报「失败 HTTP 200」。 */
+        /* no_face / no_landmarks68 / detect_failed 这类是业务结果
+           （200 + ok:false），当成正常返回交给下面按 reason 说话，
+           别报成「失败 HTTP 200」。 */
         if (d && d.ok === false && d.reason) return d;
         if (r.ok && d && d.ok !== false) return d;
         var err = new Error((d && (d.detail || d.error)) || ("HTTP " + r.status));
@@ -4873,21 +4990,15 @@
     }).then(function (d) {
       done();
       if (d && d.ok === false) {
-        var why = String(d.reason || "");
-        if (why === "no_landmarks68") {
-          mgToastOnce("add-no68", "缺少 68 点",
-                      String(d.detail || "后端没拿到 68 点关键点，这张脸不入库").slice(0, 120),
-                      "warn", 5000);
-        } else {
-          mgToastOnce("add-" + why, "没有加到人脸库",
-                      String(d.detail || why || "后端没有给出原因").slice(0, 120), "warn");
-        }
+        mgAddFaceFail(d);
         return;
       }
       var faces = (d && d.faces) || [];
       var hit = faces[0] || null;
+      /* landmarks_from=server 说明这 68 点是后端自己补算的（前端手里没有） */
+      var how = (d && d.landmarks_from === "server") ? " · 服务端补算 68 点" : "";
       toast("已加入人脸数据库", (dfm || "未指定模型") +
-            (hit && hit.id ? " · " + hit.id : "") + (d && d.created ? " · 新建了库" : ""),
+            (hit && hit.id ? " · " + hit.id : "") + (d && d.created ? " · 新建了库" : "") + how,
             "success");
       mgFlyToDb(i, box);
       /* 角标 = 这一次点了几个「＋」：一个框加一张脸，就 +1 */
@@ -4896,8 +5007,8 @@
       try { if (window.FaceDB && window.FaceDB.refresh && window.FaceDB.isOpen()) window.FaceDB.refresh(); } catch (e) {}
     }).catch(function (e) {
       done();
-      var msg = String((e && e.message) || e).slice(0, 120);
-      mgToastOnce("add-err-" + msg, "添加失败", msg, "error");
+      /* 拿不到图时后端会把「当前是视频模式/项目模式、缺的是哪一个」写进 detail */
+      mgToastErr("add-err", "添加失败", String((e && e.message) || e).slice(0, 140), "error");
     });
   }
   window.mgAddFaceNext = mgAddFaceNext;
@@ -5023,21 +5134,28 @@
       });
     }
 
-    /* 顶部「人脸数据库」入口 */
+    /* 顶部「人脸数据库」入口：**不再**在这里判「有没有素材」。
+       project 空着是合法的（视频模式）—— 后端把空串解析成默认库 <工作区>/merge，
+       真打不开时由 face_db.js 把后端的 msg 弹出来。以前这里只判 window.__mergeInputDir：
+       视频模式下它永远是空串，于是画面里明明有视频，点「人脸数据库」也弹
+       「还没有素材」（「＋」那边再弹一条就自相矛盾了）。 */
     var entry = document.getElementById("mgDbEntry");
     if (entry && !entry.dataset.bound) {
       entry.dataset.bound = "1";
       entry.addEventListener("click", function () {
-        var project = window.__mergeInputDir || "";
-        if (!project) { toast("还没有素材", "先导入视频或打开 DFL 项目", "warn"); return; }
-        if (window.FaceDB && window.FaceDB.open) {
-          window.FaceDB.open({ project: project, mode: "export", allowExtract: true,
-                               onCancel: function () { if (window.mgStep) window.mgStep("main"); } });
-        } else {
+        if (!window.FaceDB || !window.FaceDB.open) {
           toast("人脸数据库没有加载", "face_db.js 版本不匹配，刷新页面再试", "error");
+          return;
         }
+        window.FaceDB.open({
+          project: window.__mergeInputDir || "",   /* 空 = 后端落到默认库 */
+          mode: "export",
+          allowExtract: true,
+          onCancel: function () { if (window.mgStep) window.mgStep("main"); }
+        });
       });
     }
+
 
     /* 色域迁移存着老值（lut / idt / sot-m …）时回落到 mt，别让下拉空着 */
     var color = document.getElementById("mgColor");
@@ -5172,7 +5290,9 @@
       renderCrumbs("merge");
       window.__mergeStep = name;
       if (window.SUB_MEMORY) window.SUB_MEMORY["merge"] = null;   /* 合成器用 mgStep，不走 go */
-      if (name !== "main" && window.MergePages) window.MergePages.show(name);
+      /* 一律交给 MergePages.show：name==="main" 时它会清 .mgp-on，
+      否则回主视图后主容器还被 .mgp-on 的 CSS 藏着 */
+      if (window.MergePages) window.MergePages.show(name);
       document.querySelector("#p-merge .mgbody") &&
         (document.querySelector("#p-merge .mgbody").style.display = (name === "main") ? "" : "none");
     }
@@ -5184,6 +5304,13 @@
       backBtn2.addEventListener("click", function () {
         var cur = (page.querySelector(".mgview.in") || {}).dataset;
         var at = cur ? cur.view : "main";
+        /* 人脸库这一页归 face_db.js 管：必须走它的 requestClose()（=「返回会取消
+           本次导出？」那条确认），直接 mgStep 会把 state.open 留在 true ——
+           导出流程里等于绕过确认，浏览模式又说不上「已经关掉」。 */
+        if (at === "facedb" && window.FaceDB && window.FaceDB.requestClose) {
+          window.FaceDB.requestClose();
+          return;
+        }
         var idx = MG_STEPS.indexOf(at);
         mgStep(idx <= 1 ? "main" : "facedb");
       });
@@ -5192,10 +5319,12 @@
     /* 两条导出都先经过人脸库：整理完点「继续导出」才回调真正发请求。
        face_db.js 自己不发 /export；它只把控制权交回这里，参数组装仍然只有下面
        mgRunExport / mgpjStart 这一份，避免两套导出契约。 */
-    function mgOpenFaceDb(mode, proceed) {
-      var project = window.__mergeInputDir || "";
+    function mgOpenFaceDb(mode, proceed, project) {
+      project = String(project || window.__mergeInputDir || "");
       if (!project) {
-        toast("还没有素材", "先导入一段视频（会自动抽帧 + 对齐）或打开 DFL 项目", "warn");
+        mgToastErr("open-db-noproj", "还没有项目目录",
+                   "当前是视频模式：后端没给能放人脸库的目录（先导入一段视频或打开 DFL 项目）",
+                   "warn", 5000);
         return;
       }
       if (!window.FaceDB || !window.FaceDB.open) {
@@ -5215,12 +5344,12 @@
     if (exBtn && !exBtn.dataset.bound) {
       exBtn.dataset.bound = "1";
       exBtn.addEventListener("click", function () {
-        if (!window.__mergeInputDir) {
-          toast("还没有素材", "先导入一段视频（会自动抽帧 + 对齐）", "warn");
-          return;
-        }
-        mgOpenFaceDb("export", function () {
-          mgRunExport((window.MergePages && window.MergePages.settings) ? window.MergePages.settings() : {});
+        mgNeedProjectDir().then(function (hit) {
+          if (!hit) return;                 /* 已经弹过一条说明模式与缺件的提示 */
+          window.__mergeInputDir = hit.dir;
+          mgOpenFaceDb("export", function () {
+            mgRunExport((window.MergePages && window.MergePages.settings) ? window.MergePages.settings() : {});
+          }, hit.dir);
         });
       });
     }
@@ -5334,11 +5463,12 @@
       }, 1000);
     }
 
-    function mgpjStart() {
+    function mgpjStart(projectDir) {
       if (window.__mgpjExporting) { toast("正在导出项目", "上一次还没结束", "info"); return; }
-      var projectDir = window.__mergeInputDir || "";
+      projectDir = String(projectDir || window.__mergeInputDir || "");
       if (!projectDir) {
-        toast("还没有素材", "先导入一段视频（会自动抽帧 + 对齐）或打开一个 DFL 项目", "warn");
+        mgToastErr("pj-nosrc", "还没有项目目录",
+                   "当前是视频模式：视频还没抽帧 + 对齐成项目，导出项目要项目目录", "warn", 6000);
         return;
       }
       var p = (window.MergePages && window.MergePages.settings) ? window.MergePages.settings() : {};
@@ -5393,11 +5523,11 @@
     if (pjBtn && !pjBtn.dataset.bound) {
       pjBtn.dataset.bound = "1";
       pjBtn.addEventListener("click", function () {
-        if (!window.__mergeInputDir) {
-          toast("还没有素材", "先导入一段视频（会自动抽帧 + 对齐）或打开 DFL 项目", "warn");
-          return;
-        }
-        mgOpenFaceDb("export-project", function () { mgpjStart(); });
+        mgNeedProjectDir().then(function (hit) {
+          if (!hit) return;                 /* 已经弹过一条说明模式与缺件的提示 */
+          window.__mergeInputDir = hit.dir;
+          mgOpenFaceDb("export-project", function () { mgpjStart(hit.dir); }, hit.dir);
+        });
       });
     }
 
@@ -7438,7 +7568,7 @@
     { t: "数据集参数", rows: [
       { k: "src", l: "src 人脸集", t: "path", v: "workspace\\data_src\\" },
       { k: "dst", l: "dst 人脸集", t: "path", v: "workspace\\data_dst\\" },
-      { k: "face_type", l: "人脸类型", t: "sel", o: ["whole_face", "full_face", "half_face", "midfull_face", "head"], v: "whole_face",
+      { k: "face_type", l: "人脸类型", t: "sel", ro: true, o: ["whole_face", "full_face", "half_face", "midfull_face", "head"], v: "whole_face",
         d: "新建模型时按这一项确定，建完就固定在模型里" }
     ]},
     { t: "训练参数", rows: [
@@ -7446,7 +7576,6 @@
       { k: "target_batch", l: "目标批次", t: "num", v: "0",
         d: "想要的等效批次；= 批次大小 × 累积次数。0 = 关闭累积" },
       { k: "target_iter", l: "目标迭代数", t: "num", v: "0", d: "0 表示无限训练" },
-      { k: "autobackup_hour", l: "自动保存间隔", t: "num", v: "1", d: "4.0 无此项，仅为 UI 占位" },
       { k: "use_bf16", l: "训练精度", t: "seg", o: ["bf16", "fp32"], v: "bf16" },
       { k: "gradient_checkpointing", l: "梯度检查点", t: "sw", v: 0, d: "省显存，略慢" },
       { k: "clipgrad", l: "梯度裁剪", t: "sw", v: 1, d: "防止梯度爆炸" },
@@ -7634,7 +7763,7 @@
 
       (g.rows || []).forEach(function (r) {
         var row = document.createElement("div");
-        row.className = "cfgrow" + (g.ro ? " ro" : "");
+        row.className = "cfgrow" + ((g.ro || (!Array.isArray(r) && r.ro)) ? " ro" : "");
 
         /* 每行都带上 data-k：既给搜索/定位用，也让补齐块能按锚点插入
            （之前行上没有 data-k，after:"dst" 找不到锚点，只能落到卡片末尾）。 */
@@ -7713,6 +7842,13 @@
           sel.value = String(r.v);
           if (sel.selectedIndex < 0) sel.selectedIndex = 0;
           sel.dataset.v0 = String(sel.value);
+          if (r.ro) {
+            /* 结构性参数（face_type）：值照样从 dat 回显，但不许改 ——
+               以前这里是可点的下拉框，点了保存却永远存不进去（假象）。 */
+            sel.disabled = true;
+            sel.dataset.ro = "1";
+            sel.title = "创建后不可改：要换人脸类型只能新建模型";
+          }
         } else if (r.t === "sw") {
           var sw = document.createElement("div");
           sw.className = "sw" + (r.v ? " on" : "");
@@ -7775,12 +7911,12 @@
             filled++;
             if (el.tagName === "INPUT") el.value = v;
             else if (el.tagName === "SELECT") {
-              /* 4.0 的 *_data.dat 里 face_type 存的是短码（wf/hf/ff），
-                 而下拉选项是全名（whole_face/…）。直接 el.value = "wf" 匹配不上，
-                 浏览器把 selectedIndex 置成 -1 —— 下拉框变成空白，提交时传空串。
-                 这里补一层短码→全名的映射，再兜底选第一项。 */
-              var _ALIAS = { wf: "whole_face", ff: "full_face", hf: "half_face",
-                             mf: "midfull_face", head: "head" };
+              /* 短码必须照 4.0 引擎的原表（Model_SAEHD:195 就是 ["h","mf","f","wf","head"]）。
+                 以前这里写的是 wf/ff/hf：face_type="f" 的模型在框里显示成第一项
+                 whole_face —— 只读行显示错的值比空白更误导。ff/hf 留着容忍早期写过的值。 */
+              var _ALIAS = { h: "half_face", mf: "midfull_face", f: "full_face",
+                             wf: "whole_face", head: "head",
+                             ff: "full_face", hf: "half_face" };
               var sv = String(v);
               el.value = sv;
               if (el.selectedIndex < 0 && _ALIAS[sv.toLowerCase()]) el.value = _ALIAS[sv.toLowerCase()];
@@ -7791,7 +7927,12 @@
               /* 按 data-v 比，不看 textContent —— 切到英文后文案变了，比文本永远不匹配 */
               var hit = false;
               Array.prototype.forEach.call(el.children, function (b) {
-                var same = String(b.dataset.v !== undefined ? b.dataset.v : b.textContent) === String(v);
+                var bv = String(b.dataset.v !== undefined ? b.dataset.v : b.textContent);
+                /* 数字要按数值比：dat 里存的是 float 1.0，分段控件的 token 是字符串 "1.0"，
+                   直接比字符串会一个都不亮（表现是这一行看着"没选中"）。 */
+                var same = bv === String(v) ||
+                  (bv !== "" && String(v).trim() !== "" &&
+                   isFinite(Number(bv)) && isFinite(Number(v)) && Number(bv) === Number(v));
                 if (same) hit = true;
                 b.classList.toggle("on", same);
               });
@@ -8095,6 +8236,9 @@
     function tick() {
       fetch("/api/train/status").then(function (r) { return r.json(); }).then(function (d) {
         window.__lastTrain = d;
+        /* 模块加载失败的常驻横幅：内容是后端给的 warnings[]（状态，不是一次性事件），
+           显隐由 js/loadbanner.js 决定 —— 训练没在跑就不显示。 */
+        if (window.LCSLoadBanner) window.LCSLoadBanner.update(d);
         var iterEl = document.getElementById("runIter");
         if (iterEl && d.iter) iterEl.textContent = Number(d.iter).toLocaleString();
         /* 「点训练 → 等进程起来」这段窗口里，后端还会说 running:false。
@@ -8567,12 +8711,16 @@
     var box = $("cfgBox");
     var patch = {};
     if (!box) return patch;
-    var STRUCT = ["resolution","archi","e_dims","ae_dims","d_dims","d_mask_dims",
-                  "face_type","models_opt_on_gpu","gan_power","true_face_power",
-                  "face_style_power","src","dst","name"];
+    /* 只有这 7 个是「创建后不可改」的结构参数（和 app.py 的 _CFG_STRUCTURAL、
+       routes_models._STRUCTURAL_KEYS 三处必须一致）。
+       src / dst 是可改的数据集路径（引擎读 options.src/dst）；
+       gan_power / true_face_power / face_style_power / models_opt_on_gpu 是每次训练
+       都能改的损失权重与放置开关 —— 以前被错列在这里，改了静默丢弃、刷新回默认。 */
+    var STRUCT = ["resolution", "archi", "e_dims", "ae_dims", "d_dims", "d_mask_dims",
+                  "face_type", "name"];
     box.querySelectorAll("[data-cfg]").forEach(function (el) {
       var k = el.dataset.cfg;
-      if (!k || STRUCT.indexOf(k) >= 0) return;
+      if (!k || STRUCT.indexOf(k) >= 0 || el.dataset.ro === "1") return;
       if (el.tagName === "INPUT") {
         var v = el.value.trim();
         if (v === "") return;
@@ -9785,9 +9933,14 @@
     /* 切换页面：name ∈ 'facedb' | 'settings' | 'main'
        'main' 表示收起所有二级页，回到合成主视图 */
     show: function (name) {
+      name = String(name || 'main');
       var target = null;
       all('.mgview').forEach(function (el) {
-        var on = el.getAttribute('data-page') === name;
+        /* 页容器在 index.html 里是 .mgview[data-view]（main / facedb / settings /
+           progress / project），这里以前只认 data-page —— 于是 .on 和 .mgp-on
+           从来没挂上过、current 恒为 'main'，全靠 mgStep 的 .in 兜着。两种都认。 */
+        var view = el.getAttribute('data-view') || el.getAttribute('data-page') || '';
+        var on = (view === name) && (name !== 'main');
         el.classList.toggle('on', on);
         if (on) {
           target = el;
@@ -9797,11 +9950,13 @@
         }
       });
 
-      // 主视图让位（CSS：#p-merge.mgp-on > .mgbody / .mgtl 隐藏）
+      /* 主视图让位（CSS：#p-merge.mgp-on > .mgbody / .mgtl 隐藏）。
+         name==='main' 一律清掉：主视图自己也带 data-view='main'，留着 .mgp-on
+         就会命中 [data-view='main']{display:none}，回主视图直接一片空白。 */
       var merge = document.getElementById('p-merge');
-      if (merge) merge.classList.toggle('mgp-on', !!target);
+      if (merge) merge.classList.toggle('mgp-on', name !== 'main' && !!target);
 
-      this.current = target ? name : 'main';
+      this.current = (name === 'main' || !target) ? 'main' : name;
       return this.current;
     },
 
@@ -10222,15 +10377,20 @@
 
     if (r.t === "num") {
       var inp = mk("input", "inp");
+      /* data-cfg 必须打上：没有它 openCfg 回填扫不到、collectCfgPatch 也不报，
+         表现就是"这个值改了刷新就回默认"（补齐块的 num/seg/sw 以前全都漏了）。 */
+      if (r.k) inp.dataset.cfg = r.k;
       inp.value = r.v == null ? "" : String(r.v);
       inp.setAttribute("inputmode", "decimal");
       inp.spellcheck = false;
       cc.appendChild(inp);
     } else if (r.t === "seg") {
       var seg = mk("div", "seg");
+      if (r.k) seg.dataset.cfg = r.k;
       (r.o || []).forEach(function (o, i) {
         var b = mk("b");
         b.textContent = o;
+        b.dataset.v = String(o);            /* 业务值取这个，别取 textContent（会被翻译） */
         if (String(o) === String(r.v) || (i === 0 && r.v == null)) b.className = "on";
         seg.appendChild(b);
       });
@@ -10252,6 +10412,8 @@
       cc.appendChild(sel);
     } else if (r.t === "sw") {
       var sw = mk("div", "sw" + (r.v ? " on" : ""));
+      if (r.k) sw.dataset.cfg = r.k;
+      sw.dataset.v0 = sw.classList.contains("on") ? "1" : "0";
       sw.setAttribute("role", "switch");
       sw.tabIndex = 0;
       cc.appendChild(sw);
@@ -10396,17 +10558,28 @@
       bind(card);
     }
 
+    /* 同名组先归并 rows 再并卡：EXTRA_GROUPS 和 EXTRA_SELECT_GROUPS 里各有一个
+       "数据增强 · 补充"，以前第二组被整组跳过 —— preview_grade_alg 因此从没出现在页面上。
+       归并后顺序不变（先出现的组在前），同一张卡仍然只并一次。 */
+    var byBase = [], order = {};
     groups.forEach(function (g) {
-      /* "训练参数 · 补充" → "训练参数" */
       var base = String(g.t || "").split(" · ")[0].trim();
       base = MERGE_INTO[base] || base;
-      /* 同一张卡只并一次：EXTRA_GROUPS 里"数据增强 · 补充"出现了两次，
-         以前会并进去两遍，数据增强参数从 8 行涨到 17 行 */
+      if (order[base] === undefined) {
+        order[base] = byBase.length;
+        /* pin / noheader 要跟着走：丢了它们设备卡就不置顶、还会多出一个标题 */
+        byBase.push({ base: base, g: { t: g.t, note: g.note, pin: g.pin, noheader: g.noheader, rows: [] } });
+      }
+      var slot = byBase[order[base]];
+      (g.rows || []).forEach(function (r) { slot.g.rows.push(r); });
+    });
+    byBase.forEach(function (it) {
+      var base = it.base;
       if (seen[base]) return;
       seen[base] = 1;
       var card = findCardByTitle(box, base);
-      if (card) mergeInto(card, g);
-      else leftover.push({ base: base, g: g });
+      if (card) mergeInto(card, it.g);
+      else leftover.push({ base: base, g: it.g });
     });
 
     if (!leftover.length) {

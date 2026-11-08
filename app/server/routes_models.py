@@ -116,7 +116,7 @@ def model_config_set(name: str, body: dict):
     changed = {}
     for k, v in patch.items():
         if opts.get(k) != v:
-            changed[k] = {"from": opts.get(k), "to": v}
+            changed[k] = {"from": _jsonable(opts.get(k)), "to": _jsonable(v)}
         opts[k] = v
     data["options"] = opts
     # 非原子写会把 _data.dat 写坏：先落临时文件再换名，中途崩也只是丢弃临时文件
@@ -246,6 +246,29 @@ def gpu_info():
 _STRUCTURAL_KEYS = {
     "resolution", "archi", "e_dims", "ae_dims", "d_dims", "d_mask_dims", "face_type",
 }
+
+
+def _jsonable(v):
+    """把 dat 里的值收敛成能进 JSON 的类型。
+
+    老 dat 里 gan_patch_size 是 numpy.int64（resolution 也是），直接塞进返回体，
+    FastAPI 序列化会抛 ValueError -> 500。用户看到「保存失败」，可值其实已经写进
+    dat 了；更糟的是同一次保存里的其它参数也一起被判失败。
+    只影响返回体，写回 dat 的仍是原值。
+    """
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return v
+    try:
+        import numpy as _np
+        if isinstance(v, _np.bool_):
+            return bool(v)
+        if isinstance(v, _np.integer):
+            return int(v)
+        if isinstance(v, _np.floating):
+            return float(v)
+    except Exception:
+        pass
+    return v
 
 
 def _clean_options(raw, base):
