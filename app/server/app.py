@@ -1754,18 +1754,23 @@ def _gpu_list():
     return gpus
 
 
-def _engine_supports_cpu_only() -> bool:
-    """引擎的 train 子命令认不认 --cpu-only。
+def _engine_has_flag(flag: str) -> bool:
+    """引擎的 main.py 认不认某个命令行开关。
 
-    不是每个引擎版本都有这个开关（4.0 的 train 解析器是后来才加的）。不认的话
-    argparse 会直接 "unrecognized arguments" 退出 —— 那就得在启动时明确告警，
-    而不是让用户看着进程闪退还不知道为什么。
+    不是每个引擎版本都有 --cpu-only / --force-gpu-idxs（4.0 的 train 解析器是后来
+    才加的）。不认的话 argparse 直接 "unrecognized arguments" 退出 —— 那就得在
+    启动时明确告警，而不是让用户看着进程闪退还不知道为什么。
     """
     try:
         src = (_DFL_ROOT / "main.py").read_text(encoding="utf-8", errors="replace")
     except Exception:
         return False
-    return "--cpu-only" in src
+    return flag in src
+
+
+def _engine_supports_cpu_only() -> bool:
+    """引擎的 train 子命令认不认 --cpu-only。"""
+    return _engine_has_flag("--cpu-only")
 
 
 # 档位表：数值不是拍的，是拿本机真实训练过的模型反推的
@@ -2042,7 +2047,15 @@ def _train_worker(name: str, cpu_only: bool):
     if _dev["force_gpu_idxs"]:
         # 逻辑序号（0..n-1），不是物理序号：CUDA_VISIBLE_DEVICES 已经把可见集合
         # 重排过了，传物理 0,2 会让引擎取不到 2 号逻辑卡，两卡退化成单卡。
-        cmd += ["--force-gpu-idxs", _dev["force_gpu_idxs"]]
+        if _engine_has_flag("--force-gpu-idxs"):
+            cmd += ["--force-gpu-idxs", _dev["force_gpu_idxs"]]
+        elif len(_dev["physical"]) > 1:
+            # env 已经把可见集合限住了，但引擎会自己挑一张 → 多卡会退化成单卡。
+            # 与其让用户以为在双卡训练，不如直接说出来。
+            _w = ("这个引擎的 train 子命令没有 --force-gpu-idxs，device=%s 的多卡选择"
+                  "只会用其中一张（CUDA_VISIBLE_DEVICES=%s 已生效）"
+                  % (_dev["raw"], _dev["cuda_visible"]))
+            _dev = dict(_dev, warn=((_dev.get("warn") + "；") if _dev.get("warn") else "") + _w)
 
     # 梯度累计：4.1 界面会把 target_batch 拆成 batch_size / accum_steps，
     # 但引擎目前**没有实现梯度累计**（Model_SAEHD 里只有一句注释说明它没有）。

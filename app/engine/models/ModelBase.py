@@ -273,8 +273,21 @@ class ModelBase(object):
             io.log_info("\n模型首次运行。")
 
         if silent_start:
-            self.device_config = nn.DeviceConfig.CPU() if cpu_only else nn.DeviceConfig.BestGPU()
-            io.log_info(f"静默启动：已选择设备 {'CPU' if self.device_config.cpu_only else self.device_config.devices[0].name}")
+            # 静默启动以前**完全忽略 force_gpu_idxs**：训练页选了「0,1」两卡，这里
+            # 还是 BestGPU() 只取显存最大的那一张 —— 多卡选择等于没传，而且不提示。
+            if cpu_only:
+                self.device_config = nn.DeviceConfig.CPU()
+            elif force_gpu_idxs:
+                # 注意：这里的序号是**逻辑**序号（CUDA_VISIBLE_DEVICES 映射之后），
+                # 由 4.1 的 _train_worker 算好再传下来。
+                self.device_config = nn.DeviceConfig.GPUIndexes(force_gpu_idxs)
+            else:
+                self.device_config = nn.DeviceConfig.BestGPU()
+            if self.device_config.cpu_only:
+                io.log_info("静默启动：已选择设备 CPU")
+            else:
+                io.log_info("静默启动：已选择设备 " + ", ".join(
+                    str(d.name) for d in self.device_config.devices))
         else:
             self.device_config = nn.DeviceConfig.GPUIndexes(force_gpu_idxs or nn.ask_choose_device_idxs(suggest_best_multi_gpu=True)) \
                                 if not cpu_only else nn.DeviceConfig.CPU()
