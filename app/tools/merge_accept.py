@@ -71,7 +71,7 @@ T_EXPORT_START = 180     # 导出真的在干活（子进程报了 stage/pct）
 T_CANCEL = 300           # 取消到终态
 T_KEEP = 3600            # --keep：整片跑完
 
-DET_NAMES = ("RetinaFace_10g", "RetinaFace_500m", "TinyMog")
+DET_NAMES = ("RetinaFace_10g", "TinyMog", "TinyMog")
 ENCODERS = ("h264_nvenc", "hevc_nvenc", "h264_qsv", "hevc_qsv",
             "h264_amf", "hevc_amf", "libx264", "libx265")
 
