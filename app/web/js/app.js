@@ -3108,6 +3108,9 @@
          打开项目后必须主动合成一次，合成态才有换脸结果。 */
       window.mvFrame(0);
       if (window.mgCmpNow) window.mgCmpNow({ frame: 0 });
+      /* 「框」默认是开的：换完素材直接在这一帧上检一次，合成视图一进来就能看见框。
+         否则要等下一次换帧（mvCmpSync）才有框 —— 看起来就像框又没了。 */
+      if ((!window.mgBoxesOn || window.mgBoxesOn()) && window.mvDetect) window.mvDetect(0);
       if (window.mvAnalyze) window.mvAnalyze(24);
       toast("素材已就绪",
             st.frames + " 帧 · " + (aligned || d.with_landmarks || 0) + " 张对齐脸",
@@ -3246,6 +3249,10 @@
      以前框里压一层 rgba(128,128,140,.14)，脸被盖住看不见换没换成功；现在画布上
      除了 2px 描边一个像素都不落（验收里按像素读：框内 = 全透明）。
      颜色 = 这张脸分到的 dfm 的专属色；没分配 = 灰色。 */
+  /* 框外侧那 2px 深色对比线：浅色描边压在亮画面上时靠它立住（实测把「近白帧」上的
+     可辨识对比从 1.0:1 拉到 4~6:1），暗画面上它和底色一样深，等于没画。 */
+  var MG_BOX_HALO = "rgba(0,0,0,.55)";
+
   window.mvDrawBoxes = function (boxes, ow, oh) {
     var cv = window.mvOverlay();
     if (!cv || !ow || !oh) return;
@@ -3277,6 +3284,10 @@
       var rx = Math.round(ox + x1 * s) + 0.5, ry = Math.round(oy + y1 * s) + 0.5;
       var rw = Math.round((x2 - x1) * s), rh = Math.round((y2 - y1) * s);
       var name = mgFaceModel(i);
+      /* 深色对比线画在**框外侧**（rect 外扩 2px、2px 线宽，整条落在框线外面），
+         框内依旧一个像素都不占 —— 验收按像素读：框内不透明像素 = 0。 */
+      ctx.strokeStyle = MG_BOX_HALO;
+      ctx.strokeRect(rx - 2, ry - 2, rw + 4, rh + 4);
       ctx.strokeStyle = name ? mgModelColor(name) : mgUnassignedColor();
       ctx.strokeRect(rx, ry, rw, rh);
       rects[i] = { x: rx - 0.5, y: ry - 0.5, w: rw, h: rh };
@@ -3416,6 +3427,12 @@
     if (cv) cv.style.display = boxes ? "" : "none";
     var layer = document.getElementById("mgFaceLayer");
     if (layer) layer.style.display = boxes ? "" : "none";
+    if (!boxes) {
+      /* 关「框」要**真的清干净**：光 display:none 的话 canvas 位图里还留着上一帧的
+         描边（按像素读得出来 4776 个非透明像素）、chip 也还挂在 DOM 里。 */
+      if (cv) { try { cv.getContext("2d").clearRect(0, 0, cv.width, cv.height); } catch (e) {} }
+      if (layer) layer.innerHTML = "";
+    }
     if (p) {
       var show = (view === "swap") && !!st.png && !st.playing;
       p.style.display = show ? "block" : "none";
@@ -3433,7 +3450,14 @@
   window.mgShowOverlay = function (src) {
     var st = window.__mgVideo, p = mgPrevImg();
     st.png = src || "";
-    if (p && src) p.src = src;
+    if (p && src) {
+      p.src = src;
+      /* 合成图是异步解码的：解完再补画一次框。mgApplyView 已经画过一遍，但那次
+         量到的是「旧图还没换掉」的版面（切页/首帧时会差几像素），补这一发才对齐。 */
+      p.onload = function () {
+        if (window.mgBoxesOn && window.mgBoxesOn() && window.mvRedrawBoxes) window.mvRedrawBoxes();
+      };
+    }
     mgApplyView(mgCurView());
     if (src) mgHint("");
   };
@@ -4115,12 +4139,12 @@
   }
   window.mgModelColor = mgModelColor;
 
+  /* 未分配的脸 = 灰色描边。以前取 --ink-3（深色主题 #6d6d78）：压在近黑的帧上
+     实测对比只有 1.0~1.3:1 —— 框其实画了，肉眼和截图都看不出来。
+     改成半透明白：叠到任意底色上都是「比底色亮两档」的浅灰（#1a1a1a 上 ≈ #9a9a9a，
+     6.1:1），亮背景那一头由 mvDrawBoxes 里的 2px 深色外描边兜底（近白帧实测 4.4~5.0:1）。 */
   function mgUnassignedColor() {
-    var v = "";
-    try {
-      v = (getComputedStyle(document.documentElement).getPropertyValue("--ink-3") || "").trim();
-    } catch (e) { v = ""; }
-    return v || "#8b8f98";
+    return "rgba(255,255,255,.55)";
   }
   window.mgUnassignedColor = mgUnassignedColor;
 

@@ -1875,7 +1875,8 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
 .mgviews {
   position: absolute;
   top: 8px; right: 8px;
-  z-index: 3;
+  /* 比描边层(3)和 chip 层(4)都高：脸框正好在右上角时也不会把这三颗按钮压住 */
+  z-index: 5;
   display: flex;
   gap: 2px;
   padding: 2px;
@@ -1927,21 +1928,25 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
   background: transparent;
   pointer-events: none;
   display: none;
-  z-index: 3;
+  /* 必须比 canvas.mgovl（下面那条，z-index:3）**低**：合成图是不透明的一整张，
+     压在描边上面时 canvas 里的 2px 框一个像素都露不出来（框算出来了、chip 也在，
+     就是看不见框）。层次：video/mgfrm 1 < 合成图 2 < 描边 3 < chip 4 < 控件 5。 */
+  z-index: 2;
 }
 /* 老路径（逐帧 JPEG / DFL 项目模式）的帧图：压在 video 之上、检测框之下 */
 .mgstage img.mgfrm {
   pointer-events: none;
   z-index: 1;
 }
-/* 检测框叠加层：和 img 用同一个 6px 内缩盒子，画的时候才和画面严丝合缝 */
+/* 检测框叠加层：和 img 用同一个 6px 内缩盒子，画的时候才和画面严丝合缝。
+   要压在不透明的合成图（#mgPreview，z-index:2）之上，否则描边被整张图盖住。 */
 .mgstage canvas.mgovl {
   position: absolute;
   inset: 6px;
   width: calc(100% - 12px);
   height: calc(100% - 12px);
   pointer-events: none;
-  z-index: 2;
+  z-index: 3;
 }
 
 /* 右栏参数 */
