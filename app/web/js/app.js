@@ -5090,6 +5090,7 @@ function mgStageEmpty(on) {
     var v = String(val || "");
     if (MG_MERGE_BLENDS.indexOf(v) < 0) return;
     var seg = document.querySelector('#p-merge .seg[data-k="blend"]');
+    /* 融合方式分段已按用户要求删掉（与「模式」下拉重复），有元素才同步，没有就什么都不做。 */
     if (!seg) return;
     var want = (v === "overlay") ? "overlay" : "seamless";
     Array.prototype.forEach.call(seg.querySelectorAll("b"), function (b) {
