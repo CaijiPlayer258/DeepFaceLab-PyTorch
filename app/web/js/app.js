@@ -2618,7 +2618,7 @@
     if (m.bf16) kv.push('<span class="tag n">bf16</span>');
     if (m.optimizer) kv.push('<span class="tag n">' + m.optimizer + "</span>");
     if (m.weights === "npy") kv.push('<span class="tag warn">npy · 需转换</span>');
-    if (m.has_dfm) kv.push('<span class="tag ok">DFM</span>');
+    /* DFM 徽标已按要求去掉 */
 
     var chart = m.spark && m.spark.src && m.spark.src.length
       ? '<div class="lchart">' + sparkSVG(m.spark) +
@@ -2641,7 +2641,7 @@
         '<div class="kv">' + kv.join("") + "</div>" +
         (m.dfm_only
           /* 只有 .dfm、没有训练目录：训练/参数/导出/删除全都无从下手，别摆假按钮 */
-          ? '<div class="acts"><span class="tag ok">DFM</span>' +
+          ? '<div class="acts">' +
             '<span class="hint" style="margin-left:8px">只有 .dfm，没有训练目录</span></div>'
           : '<div class="acts"><button class="mini pri" data-act="run">训练</button>' +
             '<button class="mini" data-act="cfg">参数</button>' +
@@ -3207,7 +3207,7 @@
         var row = document.createElement("div");
         row.className = "mgitem";
         row.dataset.path = v.path;
-        row.innerHTML = '<span class="nm">' + v.name + '</span><span class="tag">' + v.mb + " MB</span>";
+        row.innerHTML = '<span class="nm">' + v.name + '</span>';
         row.addEventListener("click", function () { window.window.mvOpen(v.path, v.name); });
         box.appendChild(row);
       });
@@ -3773,17 +3773,16 @@
     MG_FACES[name] = st[(at + 1) % st.length];       /* at = -1（档位外）也回到 all */
     mgSyncFaces();
   }
-  /* 按列表顺序重算徽章：只有选中项显示 */
+  /* 按列表顺序维护「谁管哪张脸」：徽标（face all / face N）按要求不再显示，
+     这里只更新 dataset.faces —— 点击切换的绑定与 MG_FACES 状态都保留 */
   function mgSyncFaces() {
     mgRows().forEach(function (r) {
       var bd = r.querySelector(".mgface");
       var name = String(((r.querySelector(".nm") || {}).textContent) || "").trim();
-      if (!r.classList.contains("on")) { if (bd) bd.hidden = true; return; }
       if (!bd) return;
       var faces = mgFacesCur(name);
-      bd.hidden = false;
-      bd.textContent = (!faces || !faces.length) ? "face all" : ("face " + faces[0]);
-      bd.title = "负责哪张脸：点击切换 all → face 0 → face 1 → face 2";
+      bd.hidden = true;                       /* 不再显示：hidden 恒为真（绑定/状态照旧） */
+      bd.title = "";                          /* 徽标不显示了，tooltip 一并去掉 */
       bd.dataset.faces = mgFaceKey(faces);
     });
   }
@@ -4464,8 +4463,7 @@
       cell.setAttribute("data-k", pair[0]);
       cell.setAttribute("data-no", String(k + 1));
       cell.innerHTML =
-        '<figcaption><b class="mgfg-no">' + (k + 1) + '</b>' +
-        '<span class="mgfg-nm">' + pair[1] + '</span></figcaption>' +
+        '<figcaption><span class="mgfg-nm">' + pair[1] + '</span></figcaption>' +
         '<div class="mgfg-im"><img alt="' + pair[1] + '"></div>';
       body.appendChild(cell);
     });
@@ -6258,7 +6256,7 @@
               var row = document.createElement("div");
               row.className = "mgitem";
               row.dataset.path = v.path;
-              row.innerHTML = '<span class="nm">' + v.name + '</span><span class="tag">' + v.mb + " MB</span>";
+              row.innerHTML = '<span class="nm">' + v.name + '</span>';
               row.addEventListener("click", function () {
                 /* 点视频 = 准备这个素材（抽帧 + 对齐），不是只看看首帧 */
                 window.mgPrepare(v.path);
@@ -6422,8 +6420,6 @@
       box.innerHTML = '<div class="empty-note">还没有可导出的模型</div>';
       return;
     }
-    var cnt = el("mgModelCount");
-    if (cnt) cnt.textContent = list.length;
     list.forEach(function (m) {
       var r = document.createElement("div");
       r.className = "mgitem";
@@ -6432,13 +6428,14 @@
          点了也只会 404。只有 .dfm、没有训练目录的条目本来就没有权重可导出。 */
       var exported = !!(m.has_export || m.has_dfm);
       if (m.dfm) r.title = m.dfm;
+      /* 「已导出」标记：以前靠那个 DFM 徽标（.tag.ok）判定，徽标按要求删了，
+         判定改挂到行类名上 —— 自动选中仍然优先停在已导出的模型，行为不变。 */
+      if (exported) r.classList.add("has-dfm");
       r.innerHTML = '<span class="nm">' + m.name + '</span>' +
         
-        /* 多选徽章：平时 hidden，选中时由 mgSyncFaces 填「face all / face N」，沿用 .tag 风格 */
-        '<span class="tag n mgface" hidden>face all</span>' +
-        (exported
-          ? '<span class="tag ok">DFM</span>'
-          : '<button class="mini mgexp" title="导出为 .dfm">导出</button>');
+        /* 徽标（face all / face N）不再显示：元素留着但恒 hidden，下面 bdEl 的点击切换绑定不删 */
+        '<span class="tag n mgface" hidden></span>' +
+        (exported ? '' : '<button class="mini mgexp" title="导出为 .dfm">导出</button>');
       if (!exported) {
         var expBtn = r.querySelector(".mgexp");
         if (expBtn) expBtn.addEventListener("click", function (e) {
@@ -6468,7 +6465,7 @@
       /* 一个都没命中：优先选「已经导出过 .dfm」的那一行。后端合成只认 .dfm，
          默认停在一条没有 .dfm 的模型上 → 每次合成 404 → 开箱就是一屏空白。 */
       keepRow = Array.prototype.filter.call(box.children, function (x) {
-        return !!x.querySelector(".tag.ok");
+        return x.classList.contains("has-dfm");
       })[0] || box.children[0] || null;
       if (keepRow) keepRow.classList.add("on");
     } else if (MG_SEL_AUTO) {
@@ -6478,9 +6475,9 @@
       var onRows = Array.prototype.filter.call(box.children, function (x) {
         return x.classList.contains("on");
       });
-      var hasDfm = onRows.some(function (x) { return !!x.querySelector(".tag.ok"); });
+      var hasDfm = onRows.some(function (x) { return x.classList.contains("has-dfm"); });
       var pref = Array.prototype.filter.call(box.children, function (x) {
-        return !!x.querySelector(".tag.ok");
+        return x.classList.contains("has-dfm");
       })[0];
       if (!hasDfm && pref) {
         onRows.forEach(function (x) { x.classList.remove("on"); });
