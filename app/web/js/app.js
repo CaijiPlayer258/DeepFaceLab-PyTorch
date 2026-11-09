@@ -2941,6 +2941,7 @@
       /* 换了素材就不要再续上一个视频的播放位置；同一个文件重开才用 window.__mv.t */
       if (nextVideo !== (window.__mgVideo || {}).src) st.t = 0;
       st.video = nextVideo;
+      if (window.mgStageEmpty) window.mgStageEmpty(false);
       mgTimelineSync(d.frames, d.fps || 30);
       if (window.mgClearFaceAssign) window.mgClearFaceAssign();   /* 先清脸分配，再取帧 */
       if (st.video) {
@@ -3069,6 +3070,8 @@
       x.classList.toggle("on", x === row);
     });
     if (empty) empty.style.display = "none";
+    /* 素材就绪 = 舞台上马上会有画面：舞台空态收起 */
+    if (window.mgStageEmpty) window.mgStageEmpty(false);
   }
   window.mgShowPrepared = mgShowPrepared;
 
@@ -3514,15 +3517,37 @@
   function mgVideoMode() { return !!mgVidPath(); }
   window.mgVideoMode = mgVideoMode;
 
-  /* 舞台中间的小字提示（传空 = 收起来，不占位） */
+  /* 舞台中间的小字提示（传空 = 收起来，不占位）。
+     标记位是 hidden 属性（HTML 里默认就是 hidden）：空态那句话由 #mgStageEmpty 负责，
+     这里只放**临时状态**（无可用人脸 / 合成失败 / 视频流不可用…）。 */
   function mgHint(text) {
     var h = document.getElementById("mgStageHint");
     if (!h) return;
-    if (!text) { h.style.display = "none"; return; }
+    if (!text) { h.style.display = "none"; h.hidden = true; return; }
     h.textContent = text;
+    h.hidden = false;
     h.style.display = "";
   }
   window.mgHint = mgHint;
+
+  /* 舞台上现在到底有没有素材：视频（__mv.video）、帧目录（__mv.path）、
+     或已经准备完的项目（__mergeInputDir）。三者皆空 = 干净工作区。 */
+  function mgHasSource() {
+    var mv = window.__mv || {};
+    return !!(mv.video || mv.path || window.__mergeInputDir);
+  }
+  window.mgHasSource = mgHasSource;
+
+  /* 空态开合。不传参 = 按「有没有素材」自己判。
+     显示时把 #mgStageHint 收掉 —— 空态**只有一句**话，不再多一条胶囊。 */
+  function mgStageEmpty(on) {
+    var box = document.getElementById("mgStageEmpty");
+    if (!box) return;
+    var show = (typeof on === "boolean") ? on : !mgHasSource();
+    box.hidden = !show;
+    if (show) mgHint("");
+  }
+  window.mgStageEmpty = mgStageEmpty;
 
   /* 底图只有一种：合成结果（#mgPreview）压在原片上。
      「合成 / 原图」不再是一个整帧视图 —— 它变成**每张脸**的事：点某张脸的框，
@@ -5973,6 +5998,8 @@
       if (window.mgBindCmp) window.mgBindCmp();
       if (window.mgApplyView) window.mgApplyView();
       if (window.mgCmpSync) window.mgCmpSync();
+      /* 舞台空态：干净工作区进来 = 中央一句话 + 两个入口；已有素材 = 收起 */
+      if (window.mgStageEmpty) window.mgStageEmpty();
     }, 60);
 
     if (page.dataset.bound) return;
@@ -6487,6 +6514,25 @@
         }
         /* 暂停：这一帧定住了，清干净重来一发（检测 + 合成），框和换脸结果都补齐 */
         if (window.mgFrameChange) window.mgFrameChange(n, { why: "pause" });
+      });
+    }
+
+    /* 舞台空态的两个入口：不带自己的逻辑，直接点左栏那两个已有按钮 ——
+       导入流程（桌面 pickFile → mgPrepare / 网页 pickDir → mvList）只有一份。 */
+    var emV = $("mgStageEmptyVideo");
+    if (emV && !emV.dataset.bound) {
+      emV.dataset.bound = "1";
+      emV.addEventListener("click", function () {
+        var b = $("mgAddVideo");
+        if (b) b.click();
+      });
+    }
+    var emP = $("mgStageEmptyProject");
+    if (emP && !emP.dataset.bound) {
+      emP.dataset.bound = "1";
+      emP.addEventListener("click", function () {
+        var b = $("mgAddProject");
+        if (b) b.click();
       });
     }
 
@@ -10714,7 +10760,6 @@
 (function () {
   'use strict';
 
-  var PLACEHOLDER_COUNT = 24;          // 人脸网格占位数
   var WORKERS_MIN = 0;                 // num_workers 下限（0 = 自动）
   var WORKERS_MAX = 16;                // num_workers 上限
 
@@ -10756,32 +10801,16 @@
       return this.current;
     },
 
-    /* 生成 n 个棋盘格占位缩略图（默认 24） */
-    buildFaceGrid: function (n) {
-      var grid = document.getElementById('mgFaceGrid');
-      if (!grid) return 0;
-      var count = (typeof n === 'number' && n >= 0) ? n : PLACEHOLDER_COUNT;
-      var html = '';
-      for (var i = 1; i <= count; i++) {
-        html += '<div class="mgp-face" data-idx="' + i + '" title="人脸 ' + i + '（占位）">' +
-                '<i>' + i + '</i></div>';
-      }
-      grid.innerHTML = html;
-      this.setFaceCount(count);
-      return count;
-    },
-
-    /* 更新计数 + 空态（n = 0 时显示「还没有建立人脸库」） */
-    setFaceCount: function (n) {
-      var count = Math.max(0, parseInt(n, 10) || 0);
-      var label = document.getElementById('mgFaceCount');
-      var grid = document.getElementById('mgFaceGrid');
-      var empty = document.getElementById('mgFaceEmpty');
-      if (label) label.innerHTML = '已建库 <b>' + count + '</b> 张人脸';
-      if (grid) grid.hidden = count === 0;
-      if (empty) empty.hidden = count !== 0;
-      return count;
-    },
+    /* 这里以前有 buildFaceGrid(n) / setFaceCount(n)：往 #mgFaceGrid 里塞 n 个
+       「序号 + 棋盘格」占位缩略图，再 grid.hidden = (n === 0) 把它显示出来。
+       那是 4.0 人脸库的**旧占位网格**的渲染器，页面重做成 .fdb（face_db.js 画真数据）之后
+       只剩它自己还在跑 —— 而 #mgFaceGrid 这个 id 现在属于**舞台里的单脸六宫格**
+       （index.html 里 .mgfgrid#mgFaceGrid），于是 getElementById 抓到的正是舞台那一块：
+       初始化时 24 个 .mgp-face 被写进舞台，hidden 又被抹成 false，
+       .mgfgrid 是 position:absolute/inset:0 的 flex column —— 合成器一打开，
+       舞台正中就顶上来一列 1..24 的编号空方块，把画面和空态全盖住。
+       人脸库现在只有一侧真源（face_db.js + /api/faces），占位网格连同渲染器一起删掉：
+       不生成，不是隐藏。别再往 #mgFaceGrid 里写任何人脸库的东西。 */
 
     /* 读取某个 seg 当前选中项的 data-v（没有 data-v 时退化成文字） */
     readSeg: function (key) {
@@ -10990,7 +11019,6 @@
 
   function init() {
     MergePages.show('main');          // 默认全部隐藏，停在主视图
-    MergePages.buildFaceGrid(PLACEHOLDER_COUNT);
     MergePages.syncStatus();
     bindSeg();
     bindActions();

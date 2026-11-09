@@ -1899,6 +1899,46 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
   text-align: center;
   pointer-events: none;
 }
+/* 舞台空态（还没有任何素材）：正中一句话 + 两个入口。
+   z-index 5 = 压在画面（1~4）之上、临时提示（6）与单脸六宫格（9）之下。
+   整块 pointer-events:none，只有按钮吃点击 —— 舞台上不再有能挡住拖动的方块。
+   那句提示原来是 #mgStageHint 的一枚胶囊（「选择视频后显示」），没有入口；
+   现在它只在空态里出现，有素材就整个收起（mgStageEmpty）。 */
+#p-merge .mgempty {
+  position: relative;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  max-width: 78%;
+  box-sizing: border-box;
+  padding: 18px 22px;
+  border-radius: 10px;
+  /* 浅色主题：浅底深字；深色主题在下面那条覆盖。
+     舞台底色两套主题差得远，蒙层只写死一种颜色总有一边看不清。 */
+  background: rgba(255, 255, 255, .78);
+  text-align: center;
+  pointer-events: none;
+}
+html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
+#p-merge .mgempty[hidden] { display: none !important; }
+/* 比 .mgstage span 的 11.5px/--ink-3 更具体：#p-merge .mgempty-tx = (1,1,0) */
+#p-merge .mgempty-tx {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+#p-merge .mgempty-acts {
+  display: flex;
+  gap: 8px;
+  pointer-events: auto;
+}
+#p-merge .mgempty-acts .btn {
+  height: 30px;
+  padding: 0 14px;
+  font-size: 12px;
+}
 /* 真实视频播放器：和 img 用同一个 6px 内缩盒子，压在旧帧图之上（有源视频时 JS 才 display:block） */
 #p-merge .mgstage video {
   position: absolute;

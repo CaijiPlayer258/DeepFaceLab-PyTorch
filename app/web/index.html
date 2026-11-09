@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>DeepFaceLab-PyTorch</title>
 <link rel="stylesheet" href="/static/css/noto.css?v=3">
-  <link rel="stylesheet" href="/static/css/app.css?v=111">
+  <link rel="stylesheet" href="/static/css/app.css?v=112">
   <link rel="stylesheet" href="/static/css/shadcn.css?v=98">
 </head>
 <body>
@@ -671,7 +671,19 @@
             </button>
             <!-- 合成视图就是唯一视图（不再有「合成 / 调试」切换）：框始终显示，
                  点框内部 = 只把那一张脸切「合成 ↔ 原图」 -->
-            <div class="mgstage" id="mgStage"><span id="mgStageHint">选择视频后显示</span><video id="mgVideo" playsinline muted preload="metadata"></video><img id="mgPreview" alt="">
+            <div class="mgstage" id="mgStage">
+              <!-- 空态（舞台上还没有任何素材）：舞台中央一句话 + 两个入口。
+                   按钮不带自己的逻辑 —— 点下去就是点左栏那两个已有按钮，导入流程只有一份。
+                   一有素材（__mv.video / __mv.path / __mergeInputDir）就收起，见 mgStageEmpty()。
+                   以前这里是 #mgStageHint 一个胶囊「选择视频后显示」，空态没有入口。 -->
+              <div class="mgempty" id="mgStageEmpty">
+                <span class="mgempty-tx">还没有素材 —— 导入一段视频，或打开一个 DFL 项目</span>
+                <div class="mgempty-acts">
+                  <button class="btn pri" id="mgStageEmptyVideo" type="button">导入视频</button>
+                  <button class="btn" id="mgStageEmptyProject" type="button">打开 DFL 项目</button>
+                </div>
+              </div>
+              <span id="mgStageHint" hidden>选择视频后显示</span><video id="mgVideo" playsinline muted preload="metadata"></video><img id="mgPreview" alt="">
               <!-- 每张脸的模型 chip / 调试 / ＋ 按钮挂在这一层（canvas 只负责 2px 描边）。
                    .mgfc 是 0×0 透明锚点：框内一个像素都不许落（验收按像素断言）。 -->
               <div class="mgflayer" id="mgFaceLayer"></div>
@@ -1460,7 +1472,7 @@
   <!-- TF 时代 dat 的迁移提示：参数页顶部那一行。单独成文件，Node 里能直接断言 -->
   <script src="/static/js/legacy_notice.js?v=1"></script>
   <script src="/static/js/loadbanner.js?v=1"></script>
-  <script src="/static/js/app.js?v=115"></script>
+  <script src="/static/js/app.js?v=116"></script>
   <script src="/static/js/face_db.js?v=1"></script>
 <script type="module">
   import { startWelcome3D, stopWelcome3D } from "/static/js/welcomeflow.js?v=9";
