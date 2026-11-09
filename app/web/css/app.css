@@ -1884,6 +1884,21 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
   place-items: center;
 }
 .mgstage span { font-size: 11.5px; color: var(--ink-3); }
+/* 舞台中间的状态行（「选择视频后显示」「这一帧没有检测到人脸」「本帧无人脸」）：
+   它以前是 .mgstage 的 grid 子元素、又没有 z-index —— 被绝对定位的画面
+   （video/mgfrm z1、合成图 z2、描边 z3、chip z4）整块盖住，写了也看不见。
+   抬到画面之上，并给一块半透明底，亮画面上也读得出来。 */
+#p-merge #mgStageHint {
+  position: relative;
+  z-index: 6;                 /* 画面 1~4 之上、六宫格 9 与弹层之下 */
+  max-width: 78%;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(12, 16, 24, .55);
+  color: #fff;
+  text-align: center;
+  pointer-events: none;
+}
 /* 真实视频播放器：和 img 用同一个 6px 内缩盒子，压在旧帧图之上（有源视频时 JS 才 display:block） */
 #p-merge .mgstage video {
   position: absolute;
@@ -2362,27 +2377,46 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
   border-radius: 4px;
 }
 
-/* 播放头：1px 竖线 + 8px 三角标 */
+/* 播放头（剪映那种）：2px 竖线贯穿轨道区 + 顶部 8px 方块把手
+   · 位置只由 JS 写 transform: translate3d(帧 × ppf, 0, 0) —— 播放时每帧更新，
+     浏览器只重合成、不重排（改 left 会一直触发布局）；
+   · margin-left:-1px：2px 线的**中心**正好落在 帧 × ppf 上（刻度/轨道块同一套坐标）；
+   · top 从刻度尺下沿开始：刻度上的帧号文本一个像素都不压；
+   · z-index 5 —— 在轨道块（无 z-index）之上，在弹层（.ddmenu 60 / .mgview 220+ /
+     toast 9999）之下。 */
 .mtl-head {
   position: absolute;
-  top: 0;
+  top: var(--mtl-ruler-h);
   bottom: 0;
   left: 0;
-  width: 1px;
+  width: 2px;
+  margin-left: -1px;
   background: var(--accent);
   z-index: 5;
   pointer-events: none;
-  will-change: left;
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
 }
+/* 把手：8px 方块，骑在竖线顶端 */
 .mtl-head i {
   position: absolute;
   top: 0;
-  left: -4px;
+  left: 50%;
   width: 8px;
-  height: 7px;
+  height: 8px;
+  margin-left: -4px;
+  border-radius: 2px;
   background: var(--accent);
-  clip-path: polygon(0 0, 100% 0, 50% 100%);
+  pointer-events: auto;            /* 只有把手可抓（拖动 = seek），竖线本身不吃事件 */
+  cursor: ew-resize;
 }
+/* 把手命中区放大到 24×22：8px 的方块手指不好抓 */
+.mtl-head i::after {
+  content: "";
+  position: absolute;
+  inset: -7px -8px -7px -8px;
+}
+.mtl.is-dragging .mtl-head i { cursor: ew-resize; }
 
 /* 拖动播放头时禁用选中 */
 .mtl.is-dragging .mtl-trk { cursor: ew-resize; }
@@ -3359,8 +3393,9 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
     color-mix(in srgb, var(--ink-1) 62%, transparent)) !important;
   opacity: .55;
 }
+/* 播放头是全页唯一保留强调色的元素（其它轨道块都退成灰阶）—— 用户明确要 accent */
 #p-merge .mtl-head,
-#p-merge .mtl-head i { background: var(--ink-1) !important; }
+#p-merge .mtl-head i { background: var(--accent) !important; }
 #p-merge .mtl-nb--play { color: var(--ink-1) !important; }
 #p-merge .mtl-nb--play:hover { background: var(--sel) !important; border-color: var(--line-strong) !important; }
 #p-merge .mtl-nb:active { background: var(--sel) !important; color: var(--ink-1) !important; }

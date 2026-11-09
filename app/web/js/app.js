@@ -3113,10 +3113,10 @@
          以前只画底图，底图又是合成图，所以「原图」看起来像合成；现在两层分开，
          打开项目后必须主动合成一次，合成态才有换脸结果。 */
       window.mvFrame(0);
-      if (window.mgCmpNow) window.mgCmpNow({ frame: 0 });
-      /* 「框」默认是开的：换完素材直接在这一帧上检一次，合成视图一进来就能看见框。
-         否则要等下一次换帧（mvCmpSync）才有框 —— 看起来就像框又没了。 */
-      if ((!window.mgBoxesOn || window.mgBoxesOn()) && window.mvDetect) window.mvDetect(0);
+      /* 换素材 = 帧要变了：清框 / 检测 / 合成全走同一条链路（见 mgFrameChange）。
+         「框」默认是开的，所以换完素材这一发里就带着检测 —— 一进来就能看见框；
+         没人脸的那一帧则连合成都不发，直接回原图。 */
+      window.mgFrameChange(0, { why: "open" });
       if (window.mvAnalyze) window.mvAnalyze(24);
       toast("素材已就绪",
             st.frames + " 帧 · " + (aligned || d.with_landmarks || 0) + " 张对齐脸",
@@ -3228,11 +3228,65 @@
     return cv;
   };
 
+  /* ---------- 帧时序：t0（帧要变）/ t_detect / t_draw / t_frame ----------
+     只给验收和排查读（window.mgTiming()）。全部取 performance.now()，同页可直接相减。 */
+  var MG_FRAME_T = { frame: -1, why: "", t0: 0, tDetect: 0, tDraw: 0, tFrame: 0,
+                     boxes: 0, chips: 0, noFace: false };
+
+  function mgNowT() {
+    return (window.performance && window.performance.now) ? window.performance.now() : Date.now();
+  }
+
+  /* 检测请求的两把保险：
+       seq —— 谁后发谁说了算（老回包一律丢掉，绝不把上一帧的框画到新画面上）
+       gen —— 「清过框」的代数：同一帧清框之后要重新检测，gen 也用来做同帧去重 */
+  var MG_DET = { seq: 0, gen: 0, lastFrame: -1, lastGen: -1, last: null,
+                 inflightFrame: -1, inflightGen: -1, inflight: null };
+
+  window.mgTiming = function () {
+    var t = MG_FRAME_T;
+    return { frame: t.frame, why: t.why, t0: t.t0, t_detect: t.tDetect, t_draw: t.tDraw,
+             t_frame: t.tFrame, boxes: t.boxes, chips: t.chips, no_face: !!t.noFace,
+             detect_ms: t.tDetect ? Math.round((t.tDetect - t.t0) * 10) / 10 : null,
+             draw_ms: (t.tDetect && t.tDraw) ? Math.round((t.tDraw - t.tDetect) * 10) / 10 : null,
+             frame_after_draw_ms: (t.tDraw && t.tFrame) ? Math.round((t.tFrame - t.tDraw) * 10) / 10 : null };
+  };
+  window.mgTimingMark = function (key) {
+    if (key === "t_frame") MG_FRAME_T.tFrame = mgNowT();
+    return MG_FRAME_T[key];
+  };
+
+  /* 「帧要变了」的唯一入口：同步清掉 canvas 描边 + chip 层，并记下 t0。
+     播放开始 / seek / 换帧 / 换素材都必须先走这里 —— 宁可暂时没有框，
+     也不许把一个上一帧的框留在新画面上。 */
+  window.mgInvalidateBoxes = function (why, frame) {
+    if (frame != null) MG_FRAME_T.frame = Math.max(0, parseInt(frame, 10) || 0);
+    MG_FRAME_T.why = String(why || "");
+    MG_FRAME_T.t0 = mgNowT();
+    MG_FRAME_T.tDetect = 0;
+    MG_FRAME_T.tDraw = 0;
+    MG_FRAME_T.tFrame = 0;
+    MG_FRAME_T.boxes = 0;
+    MG_FRAME_T.chips = 0;
+    MG_FRAME_T.noFace = false;
+    window.mvClearBoxes();
+    return MG_FRAME_T;
+  };
+
   window.mvClearBoxes = function () {
     window.__mvBoxes = null;
+    /* 清框 = 这一代作废：在飞的检测回来也不许画，下一次检测重新发 */
+    MG_DET.seq++;
+    MG_DET.gen++;
+    MG_DET.lastFrame = -1;
+    MG_DET.last = null;
+    MG_DET.inflightFrame = -1;
+    MG_DET.inflightGen = -1;
+    MG_DET.inflight = null;
     /* 框、chip、＋ 三样是同一份数据的三种画法：清框必须连 DOM 层一起清，
        否则会留下一排指向上一个素材的 chip。 */
     mgResetFaces();
+    MG_FRAME_T.chips = 0;
     var cv = document.querySelector("#mgStage canvas.mgovl");
     if (!cv) return;
     var ctx = cv.getContext("2d");
@@ -3356,18 +3410,75 @@
   }
   window.mgDetectorName = mgDetectorName;
 
-  window.mvDetect = function (n) {
+  /* 检测：**一回来就画框 + chip**，绝不和合成串在一起。
+     返回 Promise<{ok, boxes, width, height, frame}>
+        · 调用方（mgFrameChange）用它决定「有人脸才发合成」；
+        · 没人脸时也 resolve（ok:true, boxes:[]），不是失败。
+     同一帧 + 同一代只发一发：进页面、合成回包、暂停都会重复问同一帧，
+     多打几发只会让后端白跑检测；清过框（gen 变了）才会重新问。 */
+  window.mvDetect = function (n, opt) {
     var mv = window.__mv || {};
-    if (!mv.path) return;
-    var seq = ++MV_SEQ.det;               /* 拖时间轴时检测请求会连发，回来晚的直接丢 */
-    fetch("/api/merge/detect/" + n + "?model=" + encodeURIComponent(mgDetectorName()) + "&thresh=0.5")
+    n = Math.max(0, parseInt(n, 10) || 0);
+    if (!mv.path) return Promise.resolve({ ok: false, boxes: [], why: "no-source", frame: n });
+    opt = opt || {};
+    var gen = MG_DET.gen;
+    if (!opt.force) {
+      if (MG_DET.inflight && MG_DET.inflightFrame === n && MG_DET.inflightGen === gen) {
+        return MG_DET.inflight;                       /* 同一帧正在飞：复用那一发 */
+      }
+      if (MG_DET.last && MG_DET.lastFrame === n && MG_DET.lastGen === gen) {
+        return Promise.resolve(MG_DET.last);          /* 这一代已经检测过：直接给结果 */
+      }
+    }
+    var seq = ++MG_DET.seq;             /* 拖时间轴时检测请求会连发，回来晚的直接丢 */
+    var t0 = mgNowT();
+    var p = fetch("/api/merge/detect/" + n + "?model=" + encodeURIComponent(mgDetectorName()) + "&thresh=0.5")
       .then(function (r) { return r.json(); })
       .then(function (d) {
-        if (seq !== MV_SEQ.det) return;     /* 过期响应，丢掉 */
-        if (d.boxes) window.mvDrawBoxes(d.boxes, d.width, d.height);
-        else if (d.detail) toast("检测失败", String(d.detail).slice(0, 90), "error");
+        if (seq !== MG_DET.seq) return { ok: false, boxes: [], why: "stale", frame: n };
+        MG_DET.inflight = null;
+        MG_DET.inflightFrame = -1;
+        /* 回来得太晚（播放中一帧 33ms，检测 180ms）→ 这一帧已经不是当前帧了。
+           绝不把它的框画到新画面上：宁可这一拍没有框。 */
+        var cur = -1;
+        try { cur = mgCmpFrameIdx(); } catch (e) { cur = -1; }
+        if (cur >= 0 && cur !== n) {
+          return { ok: false, boxes: [], why: "outdated", frame: n, cur: cur };
+        }
+        var boxes = (d && d.boxes) || [];
+        var res = { ok: !!(d && d.boxes), frame: n, gen: gen, boxes: boxes,
+                    width: (d && d.width) || 0, height: (d && d.height) || 0,
+                    t_request: t0, t_detect: mgNowT() };
+        MG_DET.last = res;
+        MG_DET.lastFrame = n;
+        MG_DET.lastGen = gen;
+        MG_FRAME_T.frame = n;
+        MG_FRAME_T.tDetect = res.t_detect;
+        MG_FRAME_T.boxes = boxes.length;
+        if (!boxes.length) {
+          if (d && d.detail) toast("检测失败", String(d.detail).slice(0, 90), "error");
+          return res;
+        }
+        /* 就是这里画框：回包到 → 描边落画布 → chip 层同一份数据重建。
+           合成（dfm 推理 + 遮罩 + 编码，几百毫秒）此刻可能还在飞，
+           画面先有框 + 上一张底图，合成回来只替换底图。 */
+        window.mvDrawBoxes(boxes, res.width, res.height);
+        if (window.__mvBoxes) window.__mvBoxes.frame = n;   /* 屏幕上的框属于哪一帧 */
+        MG_FRAME_T.tDraw = mgNowT();
+        var layer = document.getElementById("mgFaceLayer");
+        MG_FRAME_T.chips = layer ? layer.children.length : 0;
+        return res;
       })
-      .catch(function () {});
+      .catch(function (e) {
+        if (seq !== MG_DET.seq) return { ok: false, boxes: [], why: "stale", frame: n };
+        MG_DET.inflight = null;
+        MG_DET.inflightFrame = -1;
+        return { ok: false, boxes: [], why: "error", detail: String((e && e.message) || e), frame: n };
+      });
+    MG_DET.inflight = p;
+    MG_DET.inflightFrame = n;
+    MG_DET.inflightGen = gen;
+    return p;
   };
 
 
@@ -3469,6 +3580,8 @@
     var st = window.__mgVideo, v = mgVid();
     if (!v || !path) return null;
     st.src = path;
+    /* 换素材：上一份素材的框 / chip 立刻清掉（不等新素材的检测回来） */
+    if (window.mgInvalidateBoxes) window.mgInvalidateBoxes("attach", mgCmpFrameIdx());
     st.streamDown = false;
     v.style.display = "block";
     /* 老路径插的帧图要让位：底是 video 画面 */
@@ -3490,6 +3603,7 @@
   window.mgDetachVideo = function () {
     var st = window.__mgVideo, v = mgVid();
     st.src = "";
+    if (window.mgInvalidateBoxes) window.mgInvalidateBoxes("detach", mgCmpFrameIdx());
     st.png = "";
     st.playing = false;
     st.streamDown = false;
@@ -3554,6 +3668,9 @@
     });
 
     v.addEventListener("play", function () {
+      /* 播放开始 = 帧马上要变：先同步清框（canvas + chip 层），
+         新检测没回来之前宁可没有框，也不留一个停在上一帧位置的框 */
+      if (window.mgInvalidateBoxes) window.mgInvalidateBoxes("play", mgCmpFrameIdx());
       /* 播放中不请求预览（省性能）：overlay 收起，直接看原片帧 */
       window.__mgVideo.playing = true;
       mgHideOverlay();
@@ -3568,7 +3685,8 @@
       window.__mv.t = v.currentTime;
       mgHeadLoopStop();
       mgSetPlayIcon(false);
-      if (!window.__mgVideo.streamDown) window.mgPreviewSoon();
+      /* 停下来 = 这一帧定住了：框 + 合成一起补齐（mgFrameChange 里有这道门） */
+      if (!window.__mgVideo.streamDown) window.mgFrameChange(mgCmpFrameIdx(), { why: "pause" });
     });
 
     v.addEventListener("seeked", function () {
@@ -3584,7 +3702,7 @@
       window.__mv.t = v.currentTime;
       mgHeadLoopStop();
       mgSetPlayIcon(false);
-      if (!st.streamDown) window.mgPreviewSoon();
+      if (!st.streamDown) window.mgFrameChange(mgCmpFrameIdx(), { why: "ended" });
     });
 
     v.addEventListener("error", function () {
@@ -3927,6 +4045,9 @@
     if (!v || !mgVideoMode()) return Promise.resolve(null);
     if (st.streamDown) return Promise.resolve(null);
     if (!v.paused) return Promise.resolve(null);                   /* 播放中不要预览 */
+    /* 帧刚变、检测还没结论时先别合成：没人脸的那一帧根本不该跑 dfm
+       （mgFrameChange 拿到 detect 结果后会把这道门打开） */
+    if (!MG_CHAIN.gateOpen) return Promise.resolve(null);
     /* 只有一条合成路：/api/merge/frame（带 settings / models）。这条老预览接口
        只在「后端连 POST /frame 都不认」时才会走到（见 mgCmpLegacy）。 */
     /* 3 秒冷却只挡「用户主动连拖」：自动重试（retry）和手动重试（force）都不受影响 */
@@ -4003,13 +4124,14 @@
         }
         mgHint("");
         window.mgShowOverlay(d.png);
+        if (window.mgTimingMark) window.mgTimingMark("t_frame");
         /* 这张是「左栏那一个模型换全部脸」的老结果（/api/merge/preview 不认人脸库）；
            合成视图要的是「每张脸按人脸库自动分配 dfm」。紧接着让 /api/merge/frame
            补一张正确的 —— 它的缓存键没变就直接命中，不会重复渲染。
            从 /frame 兜底回来那次（fromFallback）不再触发，否则两条路互相踢皮球。 */
         if (!(opt && opt.fromFallback) && window.mgCmpSoon) window.mgCmpSoon();
-        /* 「框」开着就让框跟这一帧对齐（不再依赖某个视图名） */
-        if (window.mgBoxesOn && window.mgBoxesOn()) window.mvDetect(Math.round(v.currentTime * fps));
+        /* 框不在这里画：检测是「帧变了」那一刻单独并发发的（见 mgFrameChange）。
+           这一发只负责把合成图贴上去 —— 谁先回来谁先渲染，谁也不等谁。 */
         return d;
       }).catch(function (e) {
         if (timer) clearTimeout(timer);
@@ -5036,6 +5158,8 @@
       var png = d.png || d.image || d.data || d.frame_png || "";
       /* 过期响应上面已经丢了：到这儿就一定是当前这一帧，直接贴 */
       if (png) { window.mgShowOverlay(png); mgHint(""); }
+      /* 合成图到了：它只换底图，框一个都不动（框是 detect 那条线画的） */
+      if (window.mgTimingMark) window.mgTimingMark("t_frame");
       /* 每张脸被判给了哪个组 → chip 上直接显示（用户手动改则覆盖） */
       mgApplyFacePlan(d);
       return d;
@@ -5111,18 +5235,158 @@
     }).catch(function () { return window.mvFrame(n); });
   };
 
-  /* 帧变了：框先出来（快），重算随后（慢，单独一个请求） */
+  /* ---------- 帧变化编排：清框 → 检测（画框）→ 合成（只换底图） ----------
+     一条帧变化只从这里走。三件事，不是两次等待：
+       ① 同步清框（canvas 描边 + chip 层），这一代检测一并作废；
+       ② 立刻发 /api/merge/detect —— 回来就画框 + chip，t_draw 紧跟 t_detect；
+       ③ 检测结论「有人脸」才发合成（项目模式 /api/merge/frame，视频模式走预览），
+          合成回包只替换底图，框一个都不碰。
+     为什么合成要等检测这一拍：本帧没人脸时合成毫无意义（后端也只是回原图），
+     而且先发 frame 会把它（内部含检测 + dfm + 遮罩 + 编码，~400ms）排在
+     自己那一发检测前面 —— 看起来就像「检测很慢」，其实是被合成堵住了。
+     检测本身是 3~20ms 的活，等它一拍不亏。
+     兜底：检测冷启动（首次加载 onnx 要几秒）时不能让画面钉住 —— MG_DET_GATE
+     到点就照发合成；那次检测晚回来照样把框画上（帧没换的话）。 */
+  /* 等检测结论的兜底：第一档 800ms，如果那一发检测**还在飞**就再等一档，
+     最多等到 3000ms。只在检测彻底挂住（或冷启动加载 onnx 要好几秒）时才放行合成 ——
+     后端一忙，检测 700ms 才回来是常事，那种情况必须等它，不然又白跑一轮 dfm。 */
+  var MG_DET_GATE = 800;
+  var MG_DET_GATE_MAX = 3000;
+  var MG_CHAIN = { seq: 0, frame: -1, gate: null, gateOpen: true, gateFrom: 0 };
+
+  function mgComposeFrame(n) {
+    var videoMode = !!(window.mgVideoMode && window.mgVideoMode() &&
+                       !(window.__mgVideo || {}).streamDown);
+    if (videoMode) {
+      /* 视频模式：底图是 <video> 自己，合成结果只是贴上去的那一张 overlay */
+      if (window.mgPreviewSoon) window.mgPreviewSoon();
+      return null;
+    }
+    return window.mgCmpNow ? window.mgCmpNow({ frame: n }) : null;
+  }
+
+  /* 本帧无人脸：不发合成，底图换成原图，框 / chip 都不画 */
+  function mgNoFaceFrame(n) {
+    MG_FRAME_T.noFace = true;
+    if (window.mgShowOverlay) window.mgShowOverlay("");     /* 撤掉上一帧留下的合成层 */
+    if (window.mgCmpNote) window.mgCmpNote(false);
+    if (window.mgHint) window.mgHint("本帧无人脸");
+    var videoMode = !!(window.mgVideoMode && window.mgVideoMode());
+    if (!videoMode && window.mgRawFrame) {
+      /* 轻量取帧：GET /api/merge/frame/<n>?raw=1 —— 只解码 + 编码，不检测不换脸。
+         它是「原图」，不是合成请求（raw=1 那条分支在 _frame_payload 最前面就返回了）。 */
+      var p = null;
+      try { p = window.mgRawFrame(n); } catch (e) { p = null; }
+      /* 原图落地会把舞台中间的小字收起来（mvStage 里 hint.display=none），
+         所以状态行等它回来再补一次 —— 帧/无人脸结论没变才补。 */
+      if (p && p.then) {
+        p.then(function () {
+          if (MG_CHAIN.frame === n && MG_FRAME_T.noFace && window.mgHint) window.mgHint("本帧无人脸");
+        }, function () {});
+      }
+    }
+    return true;
+  }
+  window.mgNoFaceFrame = mgNoFaceFrame;
+
+  function mgFrameChange(n, opt) {
+    opt = opt || {};
+    var mv = window.__mv || {};
+    n = Math.max(0, parseInt(n, 10) || 0);
+    if (!mv.path && !mgVidPath()) return null;
+    /* 换帧了：开着的那张脸的六宫格是上一帧的，直接收掉（别让人对着旧证据调参） */
+    if (window.mgFaceDebugClose) window.mgFaceDebugClose();
+    /* 同一帧的连环召唤（进页面 init 归零 + open 补帧会连着叫三次）并成一发：
+       上一发还在飞（gate 关着）就不用再清一次框、再打一发检测 */
+    if (!opt.force && MG_CHAIN.frame === n && !MG_CHAIN.gateOpen) return null;
+    var seq = ++MG_CHAIN.seq;
+    MG_CHAIN.frame = n;
+    MG_CHAIN.gateOpen = false;               /* 合成这道门先关上，等检测结论 */
+    if (MG_CHAIN.gate) { clearTimeout(MG_CHAIN.gate); MG_CHAIN.gate = null; }
+
+    /* ① 帧要变了：先把框清干净（同步，不等任何回包） */
+    window.mgInvalidateBoxes(opt.why || "frame", n);
+
+    /* 播放中：只清框 + 一发「在飞就跳过」的检测，绝不发合成。
+       一帧一发 4 秒的合成会把 worker 队列塞死（原来项目模式播放就是这样），
+       画面反而更卡；而检测结果几乎必然过期（见 mvDetect 的 outdated 分支），
+       所以这一拍宁可没有框 —— 停下来那一发才是准的。 */
+    var playing = !!((window.MergeTimeline && window.MergeTimeline.isPlaying &&
+                      window.MergeTimeline.isPlaying()) ||
+                     (window.__mgVideo && window.__mgVideo.playing));
+    if (playing) {
+      MG_CHAIN.gateOpen = true;              /* 没有待发的合成，门开着 */
+      if (!MG_DET.inflight) {
+        try { window.mvDetect(n); } catch (e) {}
+      }
+      return null;
+    }
+
+    /* 视频模式：先让 <video> 走到这一帧（画面本体）；seeked 里的预览被上面的门挡住 */
+    if (window.mgVideoMode && window.mgVideoMode() && !(window.__mgVideo || {}).streamDown) {
+      try { window.mgVideoSeek(n); } catch (e) {}
+    }
+
+    var fired = false;
+    function openGate() {
+      MG_CHAIN.gateOpen = true;
+      if (MG_CHAIN.gate) { clearTimeout(MG_CHAIN.gate); MG_CHAIN.gate = null; }
+    }
+    function composeOnce() {
+      if (fired || seq !== MG_CHAIN.seq) return;
+      fired = true;
+      openGate();
+      mgComposeFrame(n);
+    }
+
+    /* ② 检测先发（3~20ms 的活）：回来就画框，然后才轮到合成 */
+    var det = null;
+    if (!opt.skipDetect) {
+      try { det = window.mvDetect(n); } catch (e) { det = null; }
+    }
+    function afterDetect(res) {
+      if (seq !== MG_CHAIN.seq) return;               /* 已经换到别的帧了：这一发作废 */
+      if (res && res.ok && !(res.boxes || []).length) {
+        fired = true;
+        openGate();
+        mgNoFaceFrame(n);                             /* ③-a 没人脸：不合成，回原图 */
+        return;
+      }
+      composeOnce();                                  /* ③-b 有人脸：发合成 */
+    }
+    if (det && det.then) det.then(afterDetect, function () { afterDetect(null); });
+    else afterDetect(null);
+    MG_CHAIN.gateFrom = mgNowT();
+    armGate();
+    return det;
+
+    function armGate() {
+      MG_CHAIN.gate = setTimeout(function () {
+        MG_CHAIN.gate = null;
+        if (seq !== MG_CHAIN.seq) return;
+        var waiting = !!(MG_DET.inflight && MG_DET.inflight === det);
+        if (waiting && (mgNowT() - MG_CHAIN.gateFrom) < MG_DET_GATE_MAX) {
+          armGate();                      /* 检测还在飞：再等一档 */
+          return;
+        }
+        composeOnce();                    /* 检测挂了/太慢：照发，画面不能一直钉着 */
+      }, MG_DET_GATE);
+    }
+  }
+  window.mgFrameChange = mgFrameChange;
+
+  /* 进页面 / 切回合成页：把当前帧补齐。同一帧已经画过框就不清（重进页面不该闪一下） */
   function mgCmpSync(opt) {
     opt = opt || {};
     var mv = window.__mv || {};
     if (!mv.path && !mgVidPath()) return;
-    /* 换帧了：开着的那张脸的六宫格是上一帧的，直接收掉（别让人对着旧证据调参） */
-    if (window.mgFaceDebugClose) window.mgFaceDebugClose();
     var n = mgCmpFrameIdx();
-    if (!opt.skipDetect) {
-      try { window.mvDetect(n); } catch (e) {}
+    if (MG_CHAIN.frame === n && MG_FRAME_T.tDraw) {
+      MG_CHAIN.gateOpen = true;
+      mgComposeFrame(n);
+      return;
     }
-    mgCmpNow({ frame: n });
+    mgFrameChange(n, { why: "sync", skipDetect: !!opt.skipDetect });
   }
   window.mgCmpSync = mgCmpSync;
 
@@ -6197,20 +6461,32 @@
     var tlBox = $("mergeTracks");
     if (tlBox && !tlBox.dataset.frameBound) {
       tlBox.dataset.frameBound = "1";
+      /* 时间轴说帧变了 → 统一走 mgFrameChange：先清框，检测一回来就画框，
+         合成随后只换底图。以前这里是「先 mgCmpNow（含检测 + dfm + 合成，~400ms）
+         再 mvDetect」，于是框跟着合成那一发一起到；视频模式那条分支更彻底 ——
+         连清框都没有，播放/拖动时旧框一直挂在画面上（「播放后旧人脸框不清除」）。 */
       tlBox.addEventListener("mtl:frame", function (e) {
         var n = (e.detail && e.detail.frame) || 0;
-        /* 视频模式：播放头只写 video.currentTime；要不要取预览由 video 自己的事件说了算 */
-        if (window.mgVideoMode && window.mgVideoMode() && !(window.__mgVideo || {}).streamDown) {
-          window.mgVideoSeek(n);
-          if (window.mgBoxesOn && window.mgBoxesOn()) window.mvDetect(n);
-          return;
-        }
-        /* 帧目录：这一帧现算（带 settings + models 分配）；被点成「原图」的脸
-           走 no_swap_faces，后端按脸保留原像素 —— 不需要再单独取 raw 整帧了 */
+        if (window.mgFrameChange) { window.mgFrameChange(n, { why: "timeline" }); return; }
         if (window.mvClearBoxes) window.mvClearBoxes();
         if (window.mgCmpNow) window.mgCmpNow({ frame: n });
         else window.mvFrame(n);
         if (window.mgBoxesOn && window.mgBoxesOn()) window.mvDetect(n);
+      });
+      /* 时间轴自己按 setInterval 播放（帧目录模式）：按播放的那一下也要立刻清框，
+         别等第一拍（33ms 后）才清 —— 那一拍之前画面上还是上一帧的框。 */
+      tlBox.addEventListener("mtl:play", function (e) {
+        var on = !!(e.detail && e.detail.playing);
+        var n = (window.MergeTimeline && window.MergeTimeline.getFrame)
+          ? window.MergeTimeline.getFrame() : 0;
+        if (on) {
+          /* 播放开始：只清框，不补发检测 —— 下一拍（33ms 后）就是新帧，
+             那一发会在 180ms 后回来，而那时画面已经走远了。 */
+          if (window.mgInvalidateBoxes) window.mgInvalidateBoxes("play", n);
+          return;
+        }
+        /* 暂停：这一帧定住了，清干净重来一发（检测 + 合成），框和换脸结果都补齐 */
+        if (window.mgFrameChange) window.mgFrameChange(n, { why: "pause" });
       });
     }
 
@@ -10066,9 +10342,16 @@
     if (tot) tot.textContent = String(S.total);
   }
 
+  /* 播放头定位：只写 transform，不动 left。
+     播放时一秒钟 30 帧，改 left 会让浏览器每帧重排整条栈；translateX 只重合成。
+     x = 帧 × 每帧像素（ppf），和刻度、轨道块、缩放共用同一个 S.ppf。
+     CSS 里 .mtl-head 有 margin-left:-1px：2px 线的**中心**正好落在 x 上。 */
   function placeHead() {
     var head = $('mtlHead');
-    if (head) head.style.left = (S.frame * S.ppf) + 'px';
+    if (!head) return;
+    var x = S.frame * S.ppf;
+    head.style.transform = 'translate3d(' + x + 'px,0,0)';
+    head.setAttribute('data-x', String(x));
   }
 
   /* 时间码：算法与 4.0 app.js updateTimecode 一致 → mm:ss.cs */
@@ -10168,19 +10451,35 @@
     if (btn) btn.innerHTML = on ? PAUSE_SVG : PLAY_SVG;
   }
 
-  function stopPlay() {
+  /* 播放状态变化也往外说一声：宿主拿它来「播放瞬间清框」——
+     帧目录模式由时间轴自己 setInterval 步进，第一拍要 33ms 之后才到，
+     光等 mtl:frame 会让旧框多挂一帧。 */
+  function firePlay(on) {
+    var root = $('mergeTracks');
+    if (!root || typeof window.CustomEvent !== 'function') return;
+    try {
+      root.dispatchEvent(new CustomEvent('mtl:play', { bubbles: true, detail: { playing: !!on, frame: S.frame } }));
+    } catch (err) { /* 忽略：宿主未监听 */ }
+  }
+
+  /* announce=1 才通知宿主「停了」：拖动/逐帧/换素材这些调用点后面紧跟一次
+     setFrame（自己会开一条新链路），再补一发「暂停」只会白跑一趟检测 + 合成。 */
+  function stopPlay(announce) {
+    var was = S.playing;
     if (S.timer) {
       clearInterval(S.timer);
       S.timer = null;
     }
     S.playing = false;
     setPlayIcon(false);
+    if (was && announce) firePlay(false);
   }
 
   function startPlay() {
     if (S.total <= 0) return;
+    firePlay(true);                 /* 先通知：播放开始 = 帧马上要变 */
+    S.playing = true;               /* 先立状态：下面 setFrame(0) 也要按「播放中」处理 */
     if (S.frame >= S.total - 1) setFrame(0);
-    S.playing = true;
     setPlayIcon(true);
     var step = Math.max(30, Math.round(1000 / Math.max(1, S.fps)));
     S.timer = setInterval(function () {
@@ -10193,22 +10492,38 @@
   }
 
   function togglePlay() {
-    if (S.playing) stopPlay();
+    if (S.playing) stopPlay(true);
     else startPlay();
   }
 
   /* ---------- 交互 ---------- */
+  /* 抓住播放头拖动时，指针和播放头之间会差几个像素；不补偿的话，
+     1/4 缩放下（ppf=0.5）一按下就跳 8 帧。 */
+  var HEAD_GRAB = 0;
+
+  function headHit(t) {
+    var h = $('mtlHead');
+    return !!(h && t && (t === h || (h.contains && h.contains(t))));
+  }
+
   function frameAt(clientX) {
     var stack = $('mtlStack');
     if (!stack) return -1;
     var rect = stack.getBoundingClientRect();
-    return clampFrame((clientX - rect.left) / S.ppf);
+    return clampFrame((clientX - HEAD_GRAB - rect.left) / S.ppf);
   }
 
   function onDown(e) {
     var sc = $('mtlScroll');
     if (!sc || e.button !== 0) return;
     if (e.target === sc) return;          /* 点在滚动条本体上：交给原生滚动 */
+    HEAD_GRAB = 0;
+    if (headHit(e.target)) {
+      /* 抓住把手：记下指针相对播放头的偏移，拖动时保持这个相对位置 */
+      var stack0 = $('mtlStack');
+      var hx = stack0 ? (stack0.getBoundingClientRect().left + S.frame * S.ppf) : e.clientX;
+      HEAD_GRAB = e.clientX - hx;
+    }
     S.dragging = true;
     stopPlay();
     var root = $('mergeTracks');
@@ -10226,6 +10541,7 @@
   function onUp() {
     if (!S.dragging) return;
     S.dragging = false;
+    HEAD_GRAB = 0;
     var root = $('mergeTracks');
     if (root) root.className = root.className.replace(/\s*is-dragging/g, '');
   }
@@ -10356,6 +10672,12 @@
   }
 
   window.MergeTimeline = {
+    /* 验收/排查用：当前每帧像素、播放头的逻辑 x（= 帧 × ppf）、缩放档位 */
+    getPpf: function () { return S.ppf; },
+    getZoom: function () { return S.zoom; },
+    getHeadX: function () { return S.frame * S.ppf; },
+    isPlaying: function () { return !!S.playing; },
+    seek: function (n) { stopPlay(); return setFrame(n); },
     /* 用真实数据覆盖演示数据（人脸轨、剪切段、角度带） */
     setData: function (partial) {
       if (!S.data || !partial) return;
