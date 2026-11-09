@@ -1187,8 +1187,12 @@ def _face_vector_from_frame(frame, det_box, box_xyxy):
 
 
 def _auto_face_plan(payload: dict, frame, snap: dict, mode: str, name: str,
-                    idx: int, detector: str, thresh: float):
+                    idx: int, detector: str, thresh: float, boxes=None):
     """按人脸库自动决定每张脸用哪个 dfm。返回 None = 这次不走自动。
+
+    boxes 可选：调用方**已经为这一帧检测过一次**时把结果递进来，这里就不再检测
+    第二遍（那一份检测同时还要用来判「这一帧到底有没有脸」，重检一遍纯属浪费）。
+    boxes=None 仍然自己检测，老调用方（/api/merge/face-debug）行为一个字都不变。
 
     None 的三种情形（都退回老的单模型路径，行为一个字都不变）：
       · 库不存在 / 库里的组都没有 dfm；
@@ -1231,7 +1235,9 @@ def _auto_face_plan(payload: dict, frame, snap: dict, mode: str, name: str,
     if not profiles:
         return None
 
-    boxes = _detect_boxes(frame, detector, thresh)
+    if boxes is None:
+        boxes = _detect_boxes(frame, detector, thresh)
+    boxes = list(boxes or [])
     if not boxes:
         return None
 
@@ -1435,6 +1441,16 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
     raw=1（或 compose=0）= 原图视图，不合成；debug=1 = 调试视图（合成 + 调试叠加）。
     settings.blend 只认 4 个融合方式（overlay / hist-match / seamless /
     seamless-hist-match），其它值一律 400 —— 视图不进 settings。
+
+    **两个短路（都是原帧，不碰 worker）**：
+      · 没点名模型（models / model / dfm 一个都没有）→ no_model=true，不做
+        「挑第一个 .dfm」那种代用户决定的事，响应 note="没有选择模型，返回原帧"；
+      · 这一帧一张脸都没检出 → no_faces=true，跳过自动分配（它还要再检测一次）。
+    三个布尔字段的语义固定为：
+        有人脸 + 有模型 → has_face=true,  swapped=true,  no_faces=false, no_model=false
+        有人脸 + 无模型 → has_face=true,  swapped=false, no_faces=false, no_model=true
+        无人脸         → has_face=false, swapped=false, no_faces=true
+    检测整条链路只做一次（调用方这份 boxes 直接交给 worker 和自动分配复用）。
     """
     t_start = time.time()
     payload = _as_dict(payload)
@@ -1456,7 +1472,9 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
     # 一个调试像素都不该有。
     debug_view = (not raw_only) and _bool_val(payload.get("debug"), False)
 
+    t_grab = time.time()
     frame, name = _source_frame(snap, mode, idx)
+    grab_ms = round((time.time() - t_grab) * 1000.0, 1)
 
     # ---- 1) raw：老行为，一个字节都不动（原图视图要它）----
     if raw_only:
@@ -1473,80 +1491,149 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
     detector = _detector_val(payload.get("detector") or settings.get("detector"))
     thresh = _float_val("thresh", payload.get("thresh"), 0.0, 1.0, 0.5)
     models = _models_of(payload)
-    # ---- 2b) 没给 models = 自动分配：每张脸按 embedding 找它的组 → 那个组的 dfm ----
-    # 给了 models（前端 chip 上手动指定过）就以手动为准，这里一个字节都不参与。
-    auto_plan = None
-    if not models and _bool_val(payload.get("auto_faces", payload.get("auto")), True):
-        auto_plan = _auto_face_plan(payload, frame, snap, mode, name, int(idx),
-                                    detector, thresh)
-        if auto_plan is not None:
-            models = auto_plan["models"] or None
-    asked_model = bool(str(payload.get("model") or payload.get("dfm") or "").strip()
-                       or models)
-    try:
-        if models:
-            dfm, model_name = Path(models[0]["dfm"]), models[0]["name"]
-        elif auto_plan is not None:
-            # 自动分配生效了但一张脸都没匹配上：**不能退回"默认模型全帧换"**，
-            # 那等于把不相干的人换上去。下面 except 里会带着 faces 回原帧。
-            raise _BadInput("自动分配：这一帧没有和任何人脸组匹配上的脸", 409)
-        else:
-            dfm, model_name = _dfm_of(payload)
-    except _BadInput as e:
-        # 自动分配生效时不看 asked_model：前端一直会带一个 model（左栏选中的那个），
-        # 那是"库判不出来时"的老兜底，不能让它把「这张脸不像任何组 → 回原帧」变成 400。
-        if (asked_model and auto_plan is None) or e.status != 409:
-            raise                      # 点名要了却没有 → 照实报，别装成"原帧"
-        out_img, dbg_faces = frame, 0
-        if debug_view:
-            # 没有模型也能看调试视图：框 / 遮罩区域 / HUD 全都在，只是没有换脸结果。
-            dbg_boxes = list((auto_plan or {}).get("boxes") or [])
-            if not dbg_boxes:
-                try:
-                    dbg_boxes = list(_detect_boxes(frame, detector, thresh))
-                except Exception:                       # noqa: BLE001
-                    dbg_boxes = []
-            out_img, dbg_faces = _debug_view_image(out_img, frame, dbg_boxes, [],
-                                                   settings, idx, total)
-        buf = _encode_frame(out_img, maxw, fmt, quality)
-        mime = "image/png" if fmt == "png" else "image/jpeg"
-        resp = _ok(idx=idx, total=total, name=name, composed=False, swapped=False,
-                   fmt=fmt, bytes=len(buf), settings=settings, detector=detector,
-                   ms=int(round((time.time() - t_start) * 1000.0)),
-                   debug=bool(debug_view), debug_faces=int(dbg_faces),
-                   note="没有可用的 .dfm 模型：只回原帧（%s）" % e.msg,
-                   png="data:%s;base64,%s" % (mime, _b64.b64encode(buf).decode("ascii")))
-        if auto_plan is not None:
-            # 前端要照这份清单显示每张脸的相似度（auto=true = 判定来自人脸库）
-            resp.update(auto=True, faces=list(auto_plan["faces"]),
-                        face_threshold=float(auto_plan["threshold"]),
-                        face_library=str(auto_plan.get("library") or ""),
-                        auto_matched=int(auto_plan.get("matched") or 0),
-                        auto_detected=int(auto_plan.get("detected") or 0))
-        return resp
-    xseg = _xseg_of(payload)
+    # ---- 2a) 请求里到底有没有点名模型？三种写法都算：models 数组 / model 名 / dfm 路径 ----
+    # 一个都没有 = **用户没选模型**。以前这里会掉进 _dfm_of 的老兜底：悄悄拿
+    # workspace/model 里的第一个 .dfm 就合成，用户没选模型却看到一张换过的脸，
+    # 而且谁也不知道用的是哪个模型。现在这种情况直接回原帧（见下面 2d / 2e）。
+    asked_model = bool(models) or bool(str(payload.get("model") or "").strip()) \
+        or bool(str(payload.get("dfm") or "").strip())
+    # 自动分配只对「没点名模型」的请求有意义：点名了就以手动为准，一个字节都不参与。
+    auto_on = (not models) and _bool_val(payload.get("auto_faces",
+                                                     payload.get("auto")), True)
+
     # 点名"不换"的脸（前端「不换脸」勾选）。没给 = 老行为（未声明的脸兜给第 0 个模型）。
     no_swap = _face_ids_val("no_swap_faces",
                             payload.get("no_swap_faces",
                                         payload.get("skip_faces",
                                                     settings.get("no_swap_faces"))))
-    if auto_plan is not None:
-        # 谁都不像的脸：并进 no_swap，保持原像素（不换 > 换错）
-        no_swap = sorted(set(int(x) for x in no_swap)
-                         | set(int(x) for x in (auto_plan.get("unmatched") or [])))
+    dfm, model_name = None, ""
 
-    # ---- 3) 命中缓存就直接回（同一帧 + 同一组参数，拖滑块回退时立刻出图）----
-    sig = _compose_sig(snap, mode, idx, name, cfg, str(dfm), models, xseg,
-                       detector, float(thresh), fmt, int(quality), int(maxw),
-                       no_swap, debug=debug_view)
-    hit = _compose_cached(sig)
-    if hit is not None:
+    def _short_circuit(img, note, *, has_face, no_model, no_faces, detect_ms=0.0,
+                       dbg_boxes=None, extra=None):
+        """不合成的那两条路（no_model / no_faces）→ **还是原帧**，只是换个编码。
+
+        不碰 worker、不跑 dfm、不重检测：这里只剩「画调试信息（可选）+ 编码」，
+        所以耗时和 raw=1 那一条是同一量级。三个字段按语义写死：
+        has_face / no_model / no_faces，前端不用再靠 note 猜。
+        """
+        t_enc = time.time()
+        out_img, dbg_n = img, 0
+        if debug_view and dbg_boxes:
+            # 没有模型也能看调试视图：框 / 遮罩区域 / HUD 全都在，只是没有换脸结果。
+            out_img, dbg_n = _debug_view_image(out_img, frame, list(dbg_boxes), [],
+                                               settings, idx, total)
+        buf = _encode_frame(out_img, maxw, fmt, quality)
+        enc_ms = round((time.time() - t_enc) * 1000.0, 1)
+        mime = "image/png" if fmt == "png" else "image/jpeg"
+        resp = _ok(idx=int(idx), total=int(total), name=name, raw=True,
+                   composed=False, swapped=False, has_face=bool(has_face),
+                   no_model=bool(no_model), no_faces=bool(no_faces), faces=[],
+                   fmt=fmt, bytes=len(buf),
+                   ms=int(round((time.time() - t_start) * 1000.0)),
+                   timings={"grab_ms": grab_ms,
+                            "detect_ms": round(float(detect_ms), 1),
+                            "encode_ms": enc_ms, "swap_ms": None, "worker": 0},
+                   detector=detector, thresh=float(thresh), settings=settings,
+                   debug=bool(debug_view), debug_faces=int(dbg_n), note=note,
+                   png="data:%s;base64,%s" % (mime, _b64.b64encode(buf).decode("ascii")))
+        if model_name:
+            resp["model"] = model_name
+            resp["dfm"] = str(dfm)
+        if extra:
+            resp.update(extra)
+        return resp
+
+    def _cache_hit(hit):
+        # 缓存里放的是共享 dict：拷一份再改 ms / cached，别把缓存本身写脏
+        hit = dict(hit)
         hit["cached"] = True
         hit["ms"] = int(round((time.time() - t_start) * 1000.0))
         tm = dict(hit.get("timings") or {})
         tm["cache_hit"] = 1
         hit["timings"] = tm
         return hit
+
+    # ---- 2b) 给了 models 数组：先解析 dfm（不存在就照实 404），先试一次缓存 ----
+    # 只有显式 models 能在检测**之前**查缓存：别的写法下自动分配还要参与，
+    # 结果和"单模型全帧换"不是同一张图（sig 分不开），必须先跑完自动分配。
+    if models:
+        dfm, model_name = Path(models[0]["dfm"]), models[0]["name"]
+        xseg = _xseg_of(payload)
+        sig = _compose_sig(snap, mode, idx, name, cfg, str(dfm), models, xseg,
+                           detector, float(thresh), fmt, int(quality), int(maxw),
+                           no_swap, debug=debug_view)
+        hit = _compose_cached(sig)
+        if hit is not None:
+            return _cache_hit(hit)
+    else:
+        xseg, sig = "", ""
+
+    # ---- 2c) 检测**一次**：自动分配 / 「这一帧有没有脸」/ worker 换脸 共用这一份 ----
+    t_det = time.time()
+    boxes = list(_detect_boxes(frame, detector, thresh))
+    detect_ms = round((time.time() - t_det) * 1000.0, 1)
+
+    # ---- 2d) 一张脸都没检出 → 原帧（no_faces）：不自动分配、不进 worker ----
+    # 以前这里照样往下走：_auto_face_plan 内部再检测一遍，然后整帧编码回一张
+    # 和原图一模一样的图。现在最贵的一步只剩「检测 + 编码」。
+    if not boxes:
+        return _short_circuit(frame, "这一帧没检出人脸：返回原帧",
+                              has_face=False, no_model=not asked_model,
+                              no_faces=True, detect_ms=detect_ms)
+
+    # ---- 2e) 没给 models 数组 → 按人脸库自动分配（复用上面那一份检测结果）----
+    # 和以前一样：**只有 models 数组为空才走自动**（左栏那个 model 只是"库判不出来
+    # 时"的老兜底，不参与自动判定）。
+    auto_plan = None
+    if not models and auto_on:
+        auto_plan = _auto_face_plan(payload, frame, snap, mode, name, int(idx),
+                                    detector, thresh, boxes=boxes)
+        if auto_plan is not None:
+            models = auto_plan["models"] or None
+
+    auto_extra = None
+    if auto_plan is not None:
+        # 前端要照这份清单显示每张脸的相似度（auto=true = 判定来自人脸库）
+        auto_extra = {"auto": True, "faces": list(auto_plan["faces"]),
+                      "face_threshold": float(auto_plan["threshold"]),
+                      "face_library": str(auto_plan.get("library") or ""),
+                      "auto_matched": int(auto_plan.get("matched") or 0),
+                      "auto_detected": int(auto_plan.get("detected") or 0)}
+
+    if not models:
+        if auto_plan is not None:
+            # 自动分配判定过、但一张脸都没匹配上：**不能退回"默认模型全帧换"**，
+            # 那等于把不相干的人换上去。整帧保持原像素，判定结果照样带出去。
+            return _short_circuit(
+                frame, "没有可用的 .dfm 模型：只回原帧（自动分配：这一帧没有和任何人脸组"
+                       "匹配上的脸）", has_face=True, no_model=not asked_model,
+                no_faces=False, detect_ms=detect_ms, dbg_boxes=boxes, extra=auto_extra)
+        if not asked_model:
+            # 请求里没有任何模型信息 = 用户没选模型：**绝不替用户挑一个 .dfm** ——
+            # 那等于用了一个他不知道的模型，还把别人的脸换上去。
+            return _short_circuit(frame, "没有选择模型，返回原帧",
+                                  has_face=True, no_model=True, no_faces=False,
+                                  detect_ms=detect_ms, dbg_boxes=boxes)
+        # 点名了 model / dfm：按老规矩解析（不存在就 404），然后正常合成。
+        dfm, model_name = _dfm_of(payload)
+        xseg = _xseg_of(payload)
+    else:
+        dfm, model_name = Path(models[0]["dfm"]), models[0]["name"]
+        xseg = _xseg_of(payload)
+
+    if auto_plan is not None:
+        # 谁都不像的脸：并进 no_swap，保持原像素（不换 > 换错）
+        no_swap = sorted(set(int(x) for x in no_swap)
+                         | set(int(x) for x in (auto_plan.get("unmatched") or [])))
+
+    # ---- 3) 命中缓存就直接回（同一帧 + 同一组参数，拖滑块回退时立刻出图）----
+    if not sig:
+        sig = _compose_sig(snap, mode, idx, name, cfg, str(dfm), models, xseg,
+                           detector, float(thresh), fmt, int(quality), int(maxw),
+                           no_swap, debug=debug_view)
+        hit = _compose_cached(sig)
+        if hit is not None:
+            return _cache_hit(hit)
 
     # ---- 4) 真合成：和 /preview、/preview-frame 共用 _preview_job ----
     stop = threading.Event()
@@ -1560,8 +1647,9 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
                         "fmt": "png" if want_png else "jpg",
                         "quality": int(quality),
                         "no_swap": list(no_swap),
-                        # 自动分配时这份检测结果直接复用（同一帧不再检测第二遍）
-                        "boxes": (auto_plan or {}).get("boxes"),
+                        # 这一帧唯一的那次检测（2c）直接交给 worker：它不再检测第二遍，
+                        # 自动分配也是拿这份 boxes 算的 embedding —— 全链路只检测一次。
+                        "boxes": list(boxes),
                         # png 请求要的是"能逐像素对比"的结果 → 帧无损发给 worker
                         "send_lossless": bool(want_png)})
     img = res.get("img") or res.get("jpg") or b""
@@ -1580,13 +1668,7 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
         resized = True
     dbg_faces = 0
     if debug_view:
-        dbg_boxes = list((auto_plan or {}).get("boxes") or [])
-        if not dbg_boxes:
-            try:
-                dbg_boxes = list(_detect_boxes(frame, detector, thresh))
-            except Exception:                           # noqa: BLE001
-                dbg_boxes = []
-        out, dbg_faces = _debug_view_image(out, frame, dbg_boxes, no_swap,
+        out, dbg_faces = _debug_view_image(out, frame, boxes, no_swap,
                                            settings, idx, total)
     # 什么时候要重编：png（无损）· 刚缩过图 · 画了调试信息（不重编等于白画）。
     # 老逻辑是「jpg 且没超出 maxw 就复用 worker 编好的那一份」—— 现在 out 可能
@@ -1595,8 +1677,14 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
         img = _encode_frame(out, maxw, fmt, quality)
     mime = "image/png" if fmt == "png" else "image/jpeg"
 
+    # timings 只记一次检测：worker 那份是 reuse（它没再检测），detect_ms 换成 2c 实测的数字
+    timings = dict(res.get("timings") or {})
+    timings["grab_ms"] = grab_ms
+    timings["detect_ms"] = detect_ms
+    timings["detect_reused"] = 1             # worker 用的是 2c 那一份，不是它自己检的
     resp = _ok(idx=int(idx), total=int(total), name=name, composed=True,
                swapped=bool(res.get("swapped")), has_face=bool(res.get("has_face")),
+               no_model=False, no_faces=bool(res.get("no_faces")),
                box=res.get("box"), fmt=fmt, bytes=len(img),
                ms=int(round((time.time() - t_start) * 1000.0)),
                model=model_name, dfm=str(dfm), detector=detector,
@@ -1605,7 +1693,7 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
                mode=cfg.get("mode"), ct_mode=cfg.get("color_transfer_mode"),
                erode_mask=cfg.get("erode_mask_modifier"),
                blur_mask=cfg.get("blur_mask_modifier"),
-               xseg=xseg, timings=res.get("timings") or {},
+               xseg=xseg, timings=timings,
                no_swap_faces=list(no_swap), skipped=list(res.get("skipped") or []),
                cached=False, note=res.get("note") or "",
                debug=bool(debug_view), debug_faces=int(dbg_faces),
@@ -4023,22 +4111,27 @@ def _send_frame_b64(frame, job: dict) -> str:
     return _b64.b64encode(_jpeg_bytes(frame, _PREVIEW_SEND_QUALITY)).decode("ascii")
 
 
-def _plain_frame(job: dict, frame, box_wh, timings, note="", has_face=True) -> dict:
+def _plain_frame(job: dict, frame, box_wh, timings, note="", has_face=True,
+                 no_faces=False) -> dict:
     """这一帧没换脸时的返回。
 
     默认还是「整帧编一张图回给预览」（质量 88，和以前完全一样）。项目模式导出
     会带 job["no_face_copy"]：没脸 = 原帧原样进 merged，重编码一遍只会白掉一档
     画质 —— 所以这里不编码，交一张 copy=True 的凭据，让调用方直接搬源文件。
+
+    no_faces=True 只给「整帧一张脸都没检出」那一条用（和「检出了但没换」区分开：
+    后者 has_face=True + no_faces=False + swapped=False）。
     """
     if job.get("no_face_copy"):
         return {"copy": True, "jpg": None, "img": None, "box": box_wh,
-                "has_face": bool(has_face), "swapped": False, "timings": timings,
+                "has_face": bool(has_face), "no_faces": bool(no_faces),
+                "swapped": False, "timings": timings,
                 "note": note, "faces": [], "models_used": [], "swaps": 0}
     fmt = str(job.get("fmt") or "jpg").strip().lower()
     img = _img_bytes(frame, fmt, 88)
     return {"jpg": img, "img": img, "box": box_wh, "has_face": bool(has_face),
-            "swapped": False, "timings": timings, "note": note,
-            "faces": [], "models_used": [], "swaps": 0}
+            "no_faces": bool(no_faces), "swapped": False, "timings": timings,
+            "note": note, "faces": [], "models_used": [], "swaps": 0}
 
 
 def _preview_multi(job: dict, frame, boxes, box_wh, timings, stage_fn, state) -> dict:
@@ -4136,7 +4229,8 @@ def _preview_multi(job: dict, frame, boxes, box_wh, timings, stage_fn, state) ->
     if len(boxes or []) > _PREVIEW_MAX_SWAPS:
         note = (note + "；" if note else "") + ("只换前 %d 张脸（这一帧检出 %d 张）"
                                                 % (_PREVIEW_MAX_SWAPS, len(boxes)))
-    return {"jpg": jpg, "img": jpg, "box": box_wh, "has_face": True, "swapped": True,
+    return {"jpg": jpg, "img": jpg, "box": box_wh, "has_face": True, "no_faces": False,
+            "swapped": True,
             "timings": timings, "model_size": resp.get("size"), "note": note,
             "faces": [{"face": p["face"], "model": p["name"], "dfm": p["dfm"],
                        "box": p["box"]} for p in plan],
@@ -4203,8 +4297,10 @@ def _preview_job(job: dict) -> dict:
             box_xyxy, box_wh = None, None
 
     if box_wh is None:
+        # 一张脸都没检出：原帧原样回去（导出那条路会 copy=True 直接搬源文件），
+        # 后面「自动分配 / 68 点 / 换脸」一步都不该再跑。
         return _plain_frame(job, frame, None, timings, note="这一帧没检出人脸",
-                            has_face=False)
+                            has_face=False, no_faces=True)
 
     if job.get("models"):                      # 多模型：每张脸各用各的模型
         return _preview_multi(job, frame, boxes, box_wh, timings, _stage, state)
@@ -4250,7 +4346,8 @@ def _preview_job(job: dict) -> dict:
         raise _BadInput("换脸结果为空", 500)
     timings["swap_ms"] = resp.get("swap_ms")
     timings["swap_wall_ms"] = round((time.time() - t0) * 1000.0, 1)
-    return {"jpg": jpg, "img": jpg, "box": box_wh, "has_face": True, "swapped": True,
+    return {"jpg": jpg, "img": jpg, "box": box_wh, "has_face": True, "no_faces": False,
+            "swapped": True,
             "timings": timings, "model_size": resp.get("size"), "note": ""}
 
 
@@ -4384,6 +4481,7 @@ def merge_preview(body: dict):
     resp = _ok(png="data:image/jpeg;base64," + _b64.b64encode(jpg).decode("ascii"),
                 ms=int(round((time.time() - t_start) * 1000.0)),
                 box=res.get("box"), has_face=bool(res.get("has_face")),
+                no_faces=bool(res.get("no_faces")),
                 swapped=bool(res.get("swapped")),
                 video=str(video), t=round(float(t), 3),
                 duration=round(float(dur), 3) if dur else None,

@@ -30,8 +30,8 @@
 | POST | `/api/merge/export` | 启动合成：`project` + `model`（或 `dfm`）+ `settings` + `encoder/hwaccel/workers` |
 | GET | `/api/merge/export/status` | 进度：`running/ok/pct/stage/msg/out/log` |
 | POST | `/api/merge/export/cancel` | 终止合成子进程 |
-| POST | `/api/merge/frame`（不带 {i}） | 同上，帧号放 body（`frame/idx/n`）；**没给 `models` 时按人脸库自动分配每张脸的 dfm**，响应多 `faces[{idx,group,dfm,similarity,auto}]` |
-| POST | `/api/merge/merged` | 同上（有打开的素材就现算，否则回退最近一次成片里的那一帧），自动分配同 `/api/merge/frame` |
+| POST | `/api/merge/frame`（不带 {i}） | 同上，帧号放 body（`frame/idx/n`）；**没给 `models` 时按人脸库自动分配每张脸的 dfm**，响应多 `faces[{idx,group,dfm,similarity,auto}]`；`models/model/dfm` 一个都没给 → `no_model: true` 回原帧，无人脸帧 → `no_faces: true` 回原帧（见二之三） |
+| POST | `/api/merge/merged` | 同上（有打开的素材就现算，否则回退最近一次成片里的那一帧），自动分配 / `no_model` / `no_faces` 同 `/api/merge/frame` |
 | POST | `/api/merge/preview-frame` | 静态帧文件 → 检测/换脸/合成 → 图（项目模式预览用） |
 | POST | `/api/merge/export-project` | **DFL 项目模式**：逐帧合成到 `<项目>/merged/` 再编码；支持 `force` 重做 |
 | GET | `/api/merge/export-project/status` | 项目导出进度：`done/total/frame_fps/skipped/failed/warnings/missing/encode` |
@@ -78,6 +78,40 @@ POST /api/merge/face-debug  {"frame":0,"face":0,"settings":{…},"models":[…]}
 * 结果是六张 data URL，前端自己排版，所以点任意一格能放大（再点一次 / `Esc` 缩回去）。
 * 前端把它当**盖在舞台上的一层**：底图、描边 canvas、chip 一个都不动，点「返回」
   收起来以后画面与进入前逐像素一致（验收：`app/tools/merge_face_debug_accept.py`）。
+
+## 二之三、没有模型 / 没有人脸：直接回原帧（不合成）
+
+`/api/merge/frame` 与 `/api/merge/merged` 只在**请求确实点名了模型**时才合成：
+`models: [{name|dfm}]` / `model: "<dfm 名>"` / `dfm: "<路径>"` 三者之一。一个都没有
+（`models: []`、`model: ""` 也算没有）= 用户没选模型 → 直接返回原帧，
+`no_model: true`、`note: "没有选择模型，返回原帧"`，**不起预览 worker、不跑 dfm**。
+以前这里会掉进 `_dfm_of()` 的老兜底：悄悄拿 `workspace/model/` 里第一个 `.dfm` 合成 ——
+用户没选模型却看到一张换过的脸，而且谁也不知道用的是哪个模型。
+
+检测整条链路**只做一次**：这一份 boxes 同时喂给「这一帧有没有脸」的判断、自动分配
+（`_auto_face_plan(..., boxes=…)`，以前它内部还要再检测一遍）和预览 worker
+（响应 `timings.detect_reused = 1`，worker 不再自己检）。一张脸都没检出 → 原帧 +
+`no_faces: true`，跳过自动分配与 68 点。
+
+| 情形 | has_face | swapped | no_faces | no_model | 走哪条路 |
+|---|---|---|---|---|---|
+| 有人脸 + 有模型 | `true` | `true` | `false` | `false` | 真合成（检测一次 → 68 点 → worker） |
+| 有人脸 + 无模型 | `true` | `false` | `false` | `true` | 原帧（检测一次后短路） |
+| 无人脸（有模型 / 无模型） | `false` | `false` | `true` | 无模型时 `true` | 原帧（检测一次，不自动分配、不进 worker） |
+
+* 还有一条边界（表里没列）：人脸库判过、但一张脸都没匹配上（自动分配生效、`models`
+  数组为空）→ 整帧保持原像素（**不兜给"第 0 个模型"**），`swapped: false`，`auto` /
+  `faces` / `auto_matched` 照旧带出去；请求里如果带了 `model`，`no_model` 仍是
+  `false`（模型给了，只是自动分配判定"这张脸不像任何人"），`note` 会写明原因。
+* 两个短路返回的都是**原帧**：`raw: true`、`composed: false`、`faces: []`；
+  `timings` 把 `grab_ms / detect_ms / encode_ms` 分开记，`worker: 0` 表示这条路上
+  压根没起 worker（`/api/merge/preview/status` 里 `spawns` 不变）。
+* 实测（1080×1920 帧、`w=900`、TinyMog、CUDA，temp 工作区 + 真 `.dfm`）：
+  `raw=1` 基线 12~13ms；无人脸帧 17~23ms；有脸无模型 23~25ms；真合成热跑
+  353~400ms（`swap_ms` 约 320~360）。也就是说两个短路和 `raw=1` 同一量级。
+* 导出链路不受影响：`/api/merge/export-project` 走 `_preview_job(no_face_copy=True)`，
+  无人脸帧仍是 `copy: true`（源文件原样搬进 `merged/`，不重编码），只是多带
+  `no_faces: true`。
 
 ## 三、为什么要「抽帧 + 对齐」两步
 
