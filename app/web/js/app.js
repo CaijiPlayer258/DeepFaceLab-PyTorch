@@ -3538,14 +3538,10 @@
   }
   window.mgHasSource = mgHasSource;
 
-  /* 空态开合。不传参 = 按「有没有素材」自己判。
-     显示时把 #mgStageHint 收掉 —— 空态**只有一句**话，不再多一条胶囊。 */
-  function mgStageEmpty(on) {
-    var box = document.getElementById("mgStageEmpty");
-    if (!box) return;
-    var show = (typeof on === "boolean") ? on : !mgHasSource();
-    box.hidden = !show;
-    if (show) mgHint("");
+function mgStageEmpty(on) {
+    /* 空态文案与按钮已按用户要求全部去掉：没有素材时舞台就只留棋盘底，不盖任何文字。
+       函数保留成空壳，是因为 mvOpen / mgShowPrepared / bindMergeUI 三处仍在调它。 */
+    return null;
   }
   window.mgStageEmpty = mgStageEmpty;
 
