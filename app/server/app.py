@@ -154,6 +154,18 @@ def _sweep_orphan_trainers(why: str = "") -> int:
 def _startup_sweep():
     """上一次 4.1 没正常退出时，训练进程会留在这儿。开服先收掉。"""
     _sweep_orphan_trainers("(启动清扫)")
+    # 进程内的人脸 embedding / 组均值缓存：**进程重启就清空**（不落盘复用）。
+    # 这里就是"重启"那一次调用点；另一次在每次导出 job 结束（routes_merge 的
+    # _vid_worker 的 finally）。启动时本来就该是空的，这次调用是口径上的保证，
+    # 顺便把清理结果打进日志，验收可以直接断言「profiles=0 · files=0」。
+    try:
+        from ._face_group import clear_face_group_cache
+        st = clear_face_group_cache("serve 启动")
+        print("[face-cache] 启动清理：组均值 %s 条 · 其它 %s · 磁盘缓存文件 %s 个"
+              % (st.get("profiles"), st.get("extra") or "无", len(st.get("files") or [])),
+              flush=True)
+    except Exception as e:                              # noqa: BLE001 - 缓存清理不该挡住开服
+        print("[face-cache] 启动清理失败（不影响使用）：%s" % str(e)[:160], flush=True)
 
 
 @app.on_event("shutdown")

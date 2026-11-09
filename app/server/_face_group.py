@@ -44,6 +44,108 @@ _PROFILES = {}
 _PROFILES_LOCK = threading.Lock()
 _PROFILES_MAX = 8
 
+# 「组均值」之外也会攒 embedding 派生的结果（帧级自动分配方案、一次导出里逐帧算过的
+# 相似度）。它们不属于这个模块，但**清理时机和 _PROFILES 完全一样**，所以这里开一个
+# 极小的登记口：别的模块 import 时把自己那一份 (clear, size) 挂上来 —— _face_group
+# 不用反过来 import 它们，也就没有循环 import。
+_EXTRA_CLEARERS = []            # [(名字, clear(), size() 或 None)]
+_EXTRA_LOCK = threading.Lock()
+
+
+def register_cache_clearer(fn, size=None, name: str = "") -> bool:
+    """登记一份「embedding 派生」的进程内缓存（幂等）。
+
+    fn    不带参数，清空自己那张表；
+    size  可选，不带参数回当前条数（cache_state() 用它断言"确实是 0"）；
+    name  只用于展示。
+    """
+    if not callable(fn):
+        return False
+    key = str(name or getattr(fn, "__name__", "extra"))
+    with _EXTRA_LOCK:
+        if any(n == key for n, _f, _s in _EXTRA_CLEARERS):
+            return True
+        _EXTRA_CLEARERS.append((key, fn, size if callable(size) else None))
+    return True
+
+
+def _cache_files(project=None) -> list:
+    """磁盘上有没有「缓存文件」—— 按设计必须**一个都没有**。
+
+    进程内的表（_PROFILES / 帧级方案）重启就空；落盘的只有两样东西，都**不是缓存**，
+    这里也刻意不删、不算进来：
+      · <库>/_faces/index.json    —— 人脸库清单（用户数据）
+      · <库>/_faces/emb/<id>.npy  —— 库里每张脸的特征（用户数据；删了要重算）
+    这里只扫"名字里带 cache"的 json：以前没有、以后也不该多出
+    <库>/_faces/profiles_cache.json 这种跨进程复用的快照。
+    """
+    import glob as _glob
+    out = []
+    pats = []
+    try:
+        # 人脸库都在 <项目>/_faces/ 下面，所以只扫这一层 —— 工作区里别的
+        # *cache*.json（比如训练用的 data.meta_cache.json）跟人脸库无关。
+        pats.append(str(store.workspace_root() / "**" / FACES_DIRNAME / "**" / "*cache*.json"))
+    except Exception:                                       # noqa: BLE001
+        pass
+    if project is not None:
+        pats.append(str(Path(project) / "**" / "*cache*.json"))
+    for pat in pats:
+        try:
+            for p in _glob.glob(pat, recursive=True):
+                out.append(str(p))
+        except Exception:                                   # noqa: BLE001
+            continue
+    return sorted(set(out))
+
+
+def cache_state() -> dict:
+    """当前进程内缓存的规模（给断言 / 内部接口用）。全 0 才算干净。"""
+    with _PROFILES_LOCK:
+        profiles = len(_PROFILES)
+    extra = {}
+    with _EXTRA_LOCK:
+        entries = list(_EXTRA_CLEARERS)
+    for name, _fn, size_fn in entries:
+        try:
+            extra[name] = int(size_fn()) if size_fn is not None else None
+        except Exception:                                   # noqa: BLE001
+            extra[name] = -1
+    return {"profiles": int(profiles), "extra": extra, "files": _cache_files(),
+            "threshold": float(DEFAULT_THRESHOLD)}
+
+
+def clear_face_group_cache(reason: str = "") -> dict:
+    """清空**进程内**的人脸 embedding / 组均值缓存，返回清理后的状态。
+
+    只用两个时机（用户定的语义，别加别减）：
+      1) serve 启动时一次（app.py 的 startup 钩子）—— 进程重启缓存本来就该是空的；
+      2) 每一次导出 job 结束时一次（视频模式导出线程的 finally，成功/失败/取消
+         都走这一条）—— 下一次导出重新算，不拿上一轮的结果。
+    只清进程内的表，**绝不删** <库>/_faces 下的 index.json / emb/*.npy（那是库本身）。
+    """
+    with _PROFILES_LOCK:
+        n_profiles = len(_PROFILES)
+        _PROFILES.clear()
+    with _EXTRA_LOCK:
+        entries = list(_EXTRA_CLEARERS)
+    cleared = {}
+    for name, fn, _size in entries:
+        try:
+            fn()
+            cleared[name] = 0
+        except Exception as e:                              # noqa: BLE001
+            cleared[name] = -1
+            print("[face-cache] 清理 %s 失败：%s" % (name, str(e)[:160]), flush=True)
+    state = cache_state()
+    state["cleared_profiles"] = int(n_profiles)
+    state["cleared_extra"] = cleared
+    state["reason"] = str(reason or "")
+    print("[face-cache] 清空（%s）：组均值 %d 条 · 其它 %s · 磁盘缓存文件 %d 个"
+          % (state["reason"] or "手动", n_profiles,
+             cleared or "无", len(state.get("files") or [])), flush=True)
+    return state
+
 
 # ============================================================
 # 特征文件

@@ -874,3 +874,25 @@ def face_thumb(request: Request, project: str = "", id: str = ""):
     except OSError as e:
         return _err(404, "缩略图读不出来：%s" % e)
     return Response(content=blob, media_type="image/jpeg", headers=headers)
+
+
+@router.get("/api/merge/faces/cache")
+@_api
+def faces_cache_state(fresh: str = ""):
+    """进程内人脸缓存的真实规模（embedding / 组均值 / 逐帧自动分配方案）。
+
+    给验收和排障断言用 —— 全 0 且 files 为空才叫「干净」：
+
+        {"ok":true,"profiles":0,"extra":{"auto_plan":0},"files":[],"threshold":0.35}
+
+    fresh=1：**先清一次再报**（等价于「导出结束 / 进程重启」之后该看到的样子）。
+    两个正式调用点在别处：serve 启动（app.py 的 startup 钩子）和每一次导出 job
+    结束（routes_merge._vid_worker 的 finally）。这里只报数，不落盘、不动库文件。
+    """
+    if str(fresh or "").strip().lower() in ("1", "true", "yes", "on"):
+        data = facegrp.clear_face_group_cache("接口 fresh=1")
+    else:
+        data = facegrp.cache_state()
+    data["ok"] = True
+    return data
+

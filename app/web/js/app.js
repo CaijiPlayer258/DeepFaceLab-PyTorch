@@ -6104,6 +6104,17 @@ function mgStageEmpty(on) {
     if (exBtn && !exBtn.dataset.bound) {
       exBtn.dataset.bound = "1";
       exBtn.addEventListener("click", function () {
+        /* 视频模式（有源视频、没有 DFL 项目目录）**直接导出**：
+           不要求先建项目，也不经过人脸库那一页（那一页本身就要项目目录，
+           以前就是在这一步被拦下、弹「还没有能导出的项目」，一张都没导出）。
+           后端 /api/merge/export 认 video：逐帧解码 → 检测 → 68 点 → 判定模型
+           → dfm → 遮罩 → 合成 → 写帧 → ffmpeg（音轨 copy）。 */
+        var s = (window.MergePages && window.MergePages.settings)
+          ? window.MergePages.settings() : {};
+        if (!(window.__mergeInputDir || "") && mgVidPath()) {
+          mgRunExport(s);
+          return;
+        }
         mgNeedProjectDir().then(function (hit) {
           if (!hit) return;                 /* 已经弹过一条说明模式与缺件的提示 */
           window.__mergeInputDir = hit.dir;
@@ -6417,8 +6428,12 @@ function mgStageEmpty(on) {
       document.dispatchEvent(new CustomEvent("merge:export-start", { detail: payload }));
 
       var inputDir = window.__mergeInputDir || "";
-      if (!inputDir) {
-        toast("没有素材", "先在工作台导入一段视频 —— 会自动抽帧 + 对齐", "warn");
+      /* 视频模式：只要打开了源视频就能导出，不需要先抽帧 + 对齐成项目。
+         两种输入互斥 —— 有项目目录就走老路（帧目录），否则带 video 走后端
+         的视频分支（见 routes_merge._start_video_export）。 */
+      var video = mgVidPath();
+      if (!inputDir && !video) {
+        toast("没有素材", "先在工作台导入一段视频（或打开一个 DFL 项目）", "warn");
         return;
       }
       if (window.__mergeExporting) {
@@ -6430,6 +6445,10 @@ function mgStageEmpty(on) {
       var body = {
         input_dir: inputDir,
         project: inputDir,
+        video: video,                       /* 视频模式：后端从源视频逐帧导出 */
+        /* 人脸库目录：空 = 默认库（<工作区>/merge）。视频模式下没有项目，
+           库有组就按 embedding 判、没组就全部用左栏选中的 dfm（后端判定）。 */
+        faces_project: String(window.__mergeFaceLib || ""),
         model: (document.querySelector("#mgModels .mgitem.on .nm") || {}).textContent || "",
         /* 多选契约：每个选中模型一条 {name, faces}；faces=[] = 全部脸 */
         models: mgFaceModelsPayload(),

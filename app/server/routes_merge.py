@@ -86,6 +86,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import app as _app_mod
+from ._face_group import clear_face_group_cache, register_cache_clearer
 from ._paths import ROOT as _REPO_ROOT
 from ._paths import engine_python as _engine_python, engine_root as _engine_root
 from .app import (WORKSPACE, _dfl_project_scan, _dfljpg_dict, _get_detector,
@@ -1109,6 +1110,13 @@ def _merge_query_into(payload: dict, **kw):
 # ============================================================
 _AUTO_PLAN_CACHE = collections.OrderedDict()   # 帧身份 → 自动分配结果（拖滑块时不用重算）
 _AUTO_PLAN_MAX = 6
+# 这份方案里存着「每张脸和各组均值的相似度」= embedding 派生的结果，所以它和组均值
+# 属于同一类缓存：进程启动清一次、每次导出结束清一次（见 _face_group.clear_face_group_cache）。
+try:
+    register_cache_clearer(_AUTO_PLAN_CACHE.clear, size=_AUTO_PLAN_CACHE.__len__,
+                           name="auto_plan")
+except Exception:                                   # noqa: BLE001 - 登记失败不影响合成
+    pass
 _AUTO_EMB_LIMIT = 40          # 一次自动分配最多临时补算多少张老脸的特征
 
 
@@ -1978,8 +1986,19 @@ def merge_face_debug(body: dict = None, frame: int = None, face: int = None,
 @router.post("/api/merge/export")
 @_api
 def merge_export(body: dict):
-    """把一段帧目录合成成换脸结果。真要跑，不是占位。"""
+    """合成导出。两种输入，走两条链路：
+
+      · 给了 video、又没有帧目录 -> **视频模式**：不要求先建 DFL 项目，
+        从源视频逐帧解 -> 检测 -> 68 点 -> 判定模型 -> dfm -> 遮罩 -> 合成 ->
+        写帧 -> ffmpeg（音轨 copy）出 mp4（见 _start_video_export）；
+      · 给了帧目录 -> 老路：4.0 MergeStudio 子进程一口气出 mp4（下面的代码）。
+    """
     body = _as_dict(body)
+
+    # ---- 0) 视频模式：video 有值 + 没有帧目录 -> 不需要项目 ----
+    if (str(body.get("video") or body.get("source_video") or "").strip()
+            and not str(body.get("input_dir") or body.get("project") or "").strip()):
+        return _start_video_export(body)
 
     # ---- 1) 输入帧目录：project 和 input_dir 是同一样东西 ----
     ip = _norm_path(body.get("input_dir") or body.get("project"))
@@ -2101,7 +2120,12 @@ def merge_export(body: dict):
                            "pct_at_failure": None, "started_at": time.time(),
                            "finished_at": None, "fps": fps, "workers": workers,
                            "encoder": encoder, "hwaccel": hwaccel,
-                           "dfm": str(dfm)})
+                           "dfm": str(dfm),
+                           # 上一轮可能是视频模式：视频专有的明细一起清掉，
+                           # 否则 /export/status 会把上一轮的逐帧记录当成这一轮的
+                           "mode": "project", "video": "", "total": 0,
+                           "frames_done": 0, "frames": [], "stats": {},
+                           "cache": {}, "encode": {}})
     threading.Thread(target=_run_export,
                      args=(str(ip), str(out_mp4), str(aligned), str(dfm), settings,
                            mask_onnx, fps, workers, encoder, hwaccel),
@@ -2155,7 +2179,8 @@ def merge_export_status():
     except Exception:
         elapsed = None
 
-    return {"ok": ok, "success": ok, "phase": phase, "running": running,
+    mode = str(snap.get("mode") or "")
+    resp = {"ok": ok, "success": ok, "phase": phase, "running": running,
             "cancelled": cancelled, "stage": stage, "pct": pct,
             "pct_at_failure": snap.get("pct_at_failure"),
             "msg": str(snap.get("msg") or ""),
@@ -2165,7 +2190,19 @@ def merge_export_status():
             "started_at": started, "finished_at": finished, "elapsed": elapsed,
             "fps": snap.get("fps"), "workers": snap.get("workers"),
             "encoder": snap.get("encoder"), "hwaccel": snap.get("hwaccel"),
-            "dfm": snap.get("dfm")}
+            "dfm": snap.get("dfm"),
+            "mode": mode or "project"}
+    if mode == "video":
+        # 视频模式多给一段明细：逐帧记录（每张脸用了谁）+ 计数 + 结束时的缓存状态。
+        # 老前端不认识这些字段，多给不会影响它（缺字段才是坑）。
+        resp["vid"] = {"video": str(snap.get("video") or ""),
+                       "total": int(snap.get("total") or 0),
+                       "done": int(snap.get("frames_done") or 0),
+                       "stats": dict(snap.get("stats") or {}),
+                       "cache": dict(snap.get("cache") or {}),
+                       "encode": dict(snap.get("encode") or {}),
+                       "frames": list(snap.get("frames") or [])[-600:]}
+    return resp
 
 
 def _merged_from_export(idx: int, maxw: int, payload: dict = None) -> dict:
@@ -5714,6 +5751,545 @@ def merge_export_project_cancel():
         return _ok(cancelled=False, running=False, already=True,
                    reason="没有正在进行的项目导出")
     return _ok(cancelled=True, running=True, already=False, reason="已请求取消")
+
+
+# ============================================================
+# 视频模式导出（不需要先建 DFL 项目）
+# ------------------------------------------------------------
+# 用户定的链路，一步一步照它实现（别加前置条件）：
+#   读源视频 -> 逐帧解码 -> 检测 -> 68 点 -> 决定模型 -> dfm 推理 -> 遮罩推理
+#   -> 合成 -> 写出帧 -> ffmpeg 合成视频（音轨 copy）
+#
+# 「哪张脸用哪个 dfm」只有一处判定，见 _vid_models_for_frame()：
+#   * 没有人脸库（库不存在 / 库里没有任何组 / 组里一张有特征的脸都没有）
+#     -> 不做 embedding 判定，**所有脸都用左栏当前选中的那个 dfm**
+#        （models=[{faces: []}]，空 faces 就是「我管全部脸」）；
+#   * 有人脸库 -> _auto_face_plan()：每张脸算 ArcFace embedding，和每个组的均值
+#     比余弦，最大且 >= 0.35 归该组、用该组的 dfm；**不匹配的脸进 no_swap
+#     （保持原像素）**，绝不兜给任何一个模型。
+# 无人脸的帧：检测之后一步都不跑（不算 68 点、不跑 dfm），原帧直出。
+#
+# 进度 / 取消沿用 /api/merge/export 那一套（_merge_job + /export/status +
+# /export/cancel），前端拿到的进度字段一个都没变，只是多了 vid 那一段明细。
+# ============================================================
+_VID_PCT_SWAP = 92                 # 逐帧合成占 0~92%，剩下 8% 给编码
+_VID_MAX_LOG = 4000                # 逐帧日志保留上限（超了丢最老的）
+_VID_MAX_RECORDS = 20000           # 逐帧记录（给验收 / 排障看）
+
+
+class _VidCancel(Exception):
+    """用户取消（和失败分开记：取消不是错误）。"""
+
+
+def _vid_set(**kw):
+    with _merge_job_lock:
+        _merge_job.update(kw)
+
+
+# 逐帧日志同时落一份到 <成片>.log：状态接口只回最后 50 行，整片每帧都走了 dfm
+# 这件事得有个能 grep 的地方（用户要的是「日志显示每帧都走了 dfm」）。
+_VID_LOG_LOCK = threading.Lock()
+_VID_LOG_FH = {"fh": None, "path": ""}
+
+
+def _vid_open_log(path: Path) -> str:
+    """开一份逐帧日志（写不进去就算了，不影响导出）。"""
+    try:
+        fh = open(str(path), "w", encoding="utf-8")
+    except OSError:
+        return ""
+    with _VID_LOG_LOCK:
+        _VID_LOG_FH["fh"] = fh
+        _VID_LOG_FH["path"] = str(path)
+    return str(path)
+
+
+def _vid_close_log() -> str:
+    with _VID_LOG_LOCK:
+        fh = _VID_LOG_FH.get("fh")
+        _VID_LOG_FH["fh"] = None
+        path = str(_VID_LOG_FH.get("path") or "")
+        _VID_LOG_FH["path"] = ""
+    if fh is not None:
+        try:
+            fh.close()
+        except OSError:
+            pass
+    return path
+
+
+def _vid_log(msg):
+    line = str(msg)[:300]
+    with _VID_LOG_LOCK:
+        fh = _VID_LOG_FH.get("fh")
+        if fh is not None:
+            try:
+                fh.write(line + "\n")
+                fh.flush()
+            except OSError:
+                pass
+    with _merge_job_lock:
+        log = _merge_job.get("log")
+        if not isinstance(log, list):
+            log = []
+            _merge_job["log"] = log
+        log.append(line)
+        if len(log) > _VID_MAX_LOG:
+            del log[:-_VID_MAX_LOG]
+
+
+def _vid_stats(**kw):
+    with _merge_job_lock:
+        st = dict(_merge_job.get("stats") or {})
+        st.update(kw)
+        _merge_job["stats"] = st
+
+
+def _vid_record(rec: dict):
+    with _merge_job_lock:
+        rows = _merge_job.get("frames")
+        if not isinstance(rows, list):
+            rows = []
+            _merge_job["frames"] = rows
+        rows.append(dict(rec))
+        if len(rows) > _VID_MAX_RECORDS:
+            del rows[:-_VID_MAX_RECORDS]
+
+
+def _vid_cancelled() -> bool:
+    with _merge_job_lock:
+        return bool(_merge_job.get("cancelled"))
+
+
+def _vid_probe(video: Path) -> dict:
+    """源视频的 帧数 / fps / 宽高（导出只认源视频，不猜）。"""
+    try:
+        frames, fps, w, h = _app_mod._video_probe(video)
+    except Exception as e:                                  # noqa: BLE001
+        raise _BadInput("读不出视频信息（%s）：%s" % (video.name, str(e)[:160]), 422)
+    if not int(w or 0) or not int(h or 0):
+        raise _BadInput("视频尺寸读不出来（%s）—— 换一个能解的片子" % video.name, 422)
+    return {"frames": int(frames or 0), "fps": float(fps or 30.0),
+            "w": int(w), "h": int(h)}
+
+
+def _vid_models_for_frame(cfg: dict, frame, boxes, idx: int):
+    """（判定点）这一帧每张脸用哪个 dfm。**只有这一处**决定换不换、用谁换。
+
+    返回 (models, no_swap, plan)：
+      plan is None —— 没有人脸库：models = [左栏选中的那个 dfm，faces=[] 管全部脸]，
+                     no_swap 空，所有脸都用它换；
+      plan 有值    —— 有库：models = 命中的那些组（每条的 faces 是按检测顺序的脸序号），
+                     no_swap = 谁都不像的脸（保持原像素，不兜给任何模型）；
+                     plan["models"] 为空 = 这一帧没一张脸匹配上 -> 整帧不换。
+    """
+    plan = _auto_face_plan(cfg["plan_payload"], frame, cfg["snap"], "video", "",
+                           int(idx), cfg["detector"], cfg["thresh"], boxes=boxes)
+    if plan is None:
+        return list(cfg["single_models"]), [], None
+    return list(plan.get("models") or []), list(plan.get("unmatched") or []), plan
+
+
+def _vid_box_wh(boxes, i):
+    """第 i 个检测框 -> [x, y, w, h]（原帧坐标）；算不出来回 None。"""
+    try:
+        x1, y1, x2, y2 = [float(v) for v in (boxes[int(i)].get("box") or ())]
+    except Exception:                                       # noqa: BLE001
+        return None
+    return [int(round(x1)), int(round(y1)),
+            int(round(max(0.0, x2 - x1))), int(round(max(0.0, y2 - y1)))]
+
+
+def _vid_face_rows(cfg: dict, plan, res: dict, boxes) -> list:
+    """这一帧每张脸最终用了谁 —— 给验收/排障看的按脸明细（下标 = 检测顺序）。
+
+    每行：idx 脸序号 / dfm 用的模型名（空 = 这张脸没换）/ matched / similarity /
+    box 原帧坐标的 w-h 框 / applied 这张脸真的贴上去了吗。
+    """
+    applied = {}
+    for f in (res.get("faces") or []):
+        try:
+            applied[int(f.get("face"))] = f
+        except (TypeError, ValueError):
+            continue
+    rows = []
+    if plan is not None:
+        by_idx = {}
+        for f in (plan.get("faces") or []):
+            try:
+                by_idx[int(f.get("idx"))] = f
+            except (TypeError, ValueError):
+                continue
+        for i in range(len(boxes or [])):
+            src = by_idx.get(i) or {}
+            dfm = str(src.get("dfm") or "")
+            rows.append({"idx": int(i), "dfm": dfm,
+                         "matched": bool(src.get("matched")) and bool(dfm),
+                         "similarity": src.get("similarity"),
+                         "group": str(src.get("group") or ""),
+                         "auto": True, "box": _vid_box_wh(boxes, i),
+                         "applied": int(i) in applied})
+        return rows
+    name = str(cfg["model"])
+    for i in range(len(boxes or [])):
+        rows.append({"idx": int(i), "dfm": name, "matched": True, "similarity": None,
+                     "group": "", "auto": False, "box": _vid_box_wh(boxes, i),
+                     "applied": int(i) in applied})
+    return rows
+
+
+def _vid_one(cfg: dict, frame, idx: int, scratch: Path, stop, state):
+    """一帧的活：检测 ->（无人脸：原帧直出）-> 68 点 -> dfm -> 遮罩 -> 合成 -> PNG。
+
+    返回 (逐帧记录, PNG 字节)。整帧只有一次检测（检测结果同时喂给自动分配），
+    和 /api/merge/preview 那条路是同一份 _preview_job —— 同一帧走预览和走导出，
+    输出是同一份像素。
+    """
+    t0 = time.time()
+    boxes = _detect_boxes(frame, cfg["detector"], cfg["thresh"])
+    rec = {"frame": int(idx), "detected": len(boxes or []), "faces": [],
+           "dfm": "", "branch": "", "no_face": False, "swapped": 0, "ms": 0.0}
+    if not boxes:
+        # 无人脸的帧：不跑 dfm，原帧直出（PNG 无损，免得白掉一档画质）
+        data = _img_bytes(frame, "png")
+        rec.update(no_face=True, branch="copy",
+                   ms=round((time.time() - t0) * 1000.0, 1))
+        return rec, data
+
+    models, no_swap, plan = _vid_models_for_frame(cfg, frame, boxes, idx)
+    rec["branch"] = "library" if plan is not None else "single"
+    if plan is not None and not models:
+        # 有库，但这一帧一张脸都不像任何组 —— 整帧保持原像素（没有兜底模型）
+        data = _img_bytes(frame, "png")
+        rec.update(faces=_vid_face_rows(cfg, plan, {}, boxes), branch="library-none",
+                   ms=round((time.time() - t0) * 1000.0, 1))
+        return rec, data
+
+    res = _preview_job({"frame": frame, "models": models or None, "dfm": cfg["dfm"],
+                        "xseg": cfg["xseg"], "config": cfg["config"],
+                        "detector": cfg["detector"], "thresh": float(cfg["thresh"]),
+                        "stop": stop, "state": state, "fmt": "png",
+                        "quality": _PREVIEW_QUALITY, "boxes": boxes,
+                        "no_swap": list(no_swap or ()), "send_lossless": True})
+    data = res.get("img") or res.get("jpg") or b""
+    if not data:
+        raise _BadInput("第 %d 帧没合成出图" % int(idx), 500)
+    rows = _vid_face_rows(cfg, plan, res, boxes)
+    rec.update(faces=rows, swapped=int(res.get("swaps") or 0),
+               dfm=str((models[0] or {}).get("name") if models else cfg["model"]),
+               ms=round((time.time() - t0) * 1000.0, 1))
+    return rec, data
+
+
+def _vid_encode(pattern, start, fps, audio_src, out_video, total) -> dict:
+    """帧序列 + 源视频音轨 -> 成片（-map 1:a? + -c:a copy，音轨原样搬）。
+
+    和 _proj_encode 是同一条命令（同一个 crf16 / 同一个 out_range=tv / 同样刻意
+    不带 -shortest）；差别只在进度/取消接到了 _merge_job 上。
+    """
+    ffmpeg = str(_app_mod._ffmpeg_exe())
+    ext = Path(str(out_video)).suffix.lower()
+    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-nostats", "-nostdin",
+           "-framerate", "%.6g" % float(fps),
+           "-start_number", str(int(start)), "-i", str(pattern),
+           "-i", str(audio_src),
+           "-map", "0:v:0", "-map", "1:a?",
+           # 1) 奇数宽高在 yuv420p 下会被 libx264 直接拒绝，垫一像素最省事；
+           # 2) PNG 帧是 full range，不显式转 limited 的话成片会被标成 yuvj420p。
+           "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2,scale=out_range=tv",
+           "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p",
+           "-c:a", "copy"]
+    if ext in (".mp4", ".mov", ".m4v"):
+        cmd += ["-movflags", "+faststart"]
+    cmd += ["-progress", "pipe:1", str(out_video)]
+
+    err_path = None
+    code = -1
+    fh = tempfile.NamedTemporaryFile(delete=False, suffix=".ffmpeg.log")
+    err_path = fh.name
+    fh.close()
+    try:
+        with open(str(err_path), "wb") as errfp:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errfp,
+                                    text=True, encoding="utf-8", errors="replace",
+                                    creationflags=getattr(_app_mod, "_NO_WINDOW", 0))
+            try:
+                for line in proc.stdout:
+                    if _vid_cancelled():
+                        _kill_proc_tree(proc)
+                        raise _VidCancel()
+                    line = line.strip()
+                    if not line or "=" not in line:
+                        continue
+                    k, _eq, v = line.partition("=")
+                    if k != "frame":
+                        continue
+                    try:
+                        done = int(v)
+                    except ValueError:
+                        continue
+                    pct = _VID_PCT_SWAP
+                    if total > 0:
+                        pct = _VID_PCT_SWAP + int((100 - _VID_PCT_SWAP) * done / total)
+                    _vid_set(pct=min(99, pct), stage=6,
+                             msg="编码 %d/%d 帧" % (done, total))
+            finally:
+                code = proc.wait()
+    finally:
+        tail = ""
+        try:
+            with open(str(err_path), "rb") as rf:
+                tail = rf.read()[-4000:].decode("utf-8", "ignore").strip()
+        except OSError:
+            tail = ""
+        try:
+            os.unlink(str(err_path))
+        except OSError:
+            pass
+    return {"code": int(code), "tail": tail[-1200:],
+            "cmd": " ".join('"%s"' % a if " " in str(a) else str(a) for a in cmd)}
+
+
+def _vid_run(cfg: dict):
+    """视频导出的主体：解码 -> 逐帧合成落盘 -> 编码。"""
+    import numpy as np
+
+    video = Path(cfg["video"])
+    out_mp4 = Path(cfg["out"])
+    probe = _vid_probe(video)
+    fps = float(cfg.get("fps") or probe["fps"])
+    total = int(probe["frames"] or 0)
+    _vid_set(fps=fps, total=total, stage=0, pct=0, msg="解码源视频…")
+    _vid_log("源视频 %s：%d 帧 · %.3f fps · %dx%d"
+             % (video.name, total, fps, probe["w"], probe["h"]))
+    _vid_log("模型：%s（%s）· 人脸库判定：%s"
+             % (cfg["model"], Path(str(cfg["dfm"])).name,
+                "有人脸库" if cfg.get("use_library") else "没有人脸库（全部用左栏选中的 dfm）"))
+
+    scratch = Path(tempfile.mkdtemp(prefix="dfl_videxport_"))
+    _vid_log("临时帧目录：%s" % scratch)
+    stop = threading.Event()
+    state = {"stage": ""}
+    t0 = time.time()
+    idx = 0
+    swapped = copied = no_face = 0
+    try:
+        try:
+            gen, meta = _app_mod._open_video(str(video), [], first=False)
+        except Exception as e:                              # noqa: BLE001
+            raise _BadInput("这个视频解不开：%s（%s）" % (video.name, str(e)[:160]), 422)
+        try:
+            size = (meta or {}).get("size") or (probe["w"], probe["h"])
+            w, h = int(size[0]), int(size[1])
+            if not total:
+                total = 0                                   # 未知总帧数：进度只报已处理
+            while True:
+                if _vid_cancelled():
+                    raise _VidCancel()
+                try:
+                    raw = next(gen)
+                except StopIteration:
+                    break
+                except Exception as e:                      # noqa: BLE001
+                    raise _BadInput("解码到第 %d 帧失败：%s"
+                                    % (idx, str(e)[:160]), 500)
+                frame = np.frombuffer(raw, np.uint8).reshape((h, w, 3)).copy()
+                rec, data = _vid_one(cfg, frame, idx, scratch, stop, state)
+                (Path(scratch) / ("%06d.png" % int(idx))).write_bytes(data)
+                _vid_record(rec)
+                if rec.get("no_face"):
+                    no_face += 1
+                    copied += 1
+                    _vid_log("[帧 %d] 无人脸 -> 原帧直出（%d 字节 · %.1f ms · 没跑 dfm）"
+                             % (idx, len(data), rec.get("ms") or 0.0))
+                elif rec.get("swapped"):
+                    swapped += 1
+                    _vid_log("[帧 %d] %d 张脸 · dfm=%s · %d 张换了 · %.1f ms"
+                             % (idx, int(rec.get("detected") or 0), rec.get("dfm") or "",
+                                int(rec.get("swapped") or 0), rec.get("ms") or 0.0))
+                else:
+                    copied += 1
+                    _vid_log("[帧 %d] %d 张脸 · 谁都不像（%s）-> 保持原像素 · %.1f ms"
+                             % (idx, int(rec.get("detected") or 0),
+                                rec.get("branch") or "", rec.get("ms") or 0.0))
+                idx += 1
+                el = max(0.001, time.time() - t0)
+                rate = idx / el
+                pct = (min(_VID_PCT_SWAP, int(_VID_PCT_SWAP * idx / float(total)))
+                       if total > 0 else 0)
+                _vid_set(pct=pct, stage=3, frames_done=idx,
+                         msg=("合成 %d/%d 帧 · %.1f 帧/秒" % (idx, total, rate))
+                             if total > 0 else ("合成第 %d 帧 · %.1f 帧/秒" % (idx, rate)))
+                _vid_stats(done=idx, swapped=swapped, copied=copied, no_face=no_face,
+                           frame_fps=round(rate, 2))
+        finally:
+            try:
+                gen.close()
+            except Exception:                               # noqa: BLE001
+                pass
+
+        if idx == 0:
+            raise _BadInput("一帧都没解出来：%s" % video.name, 422)
+        _vid_log("逐帧合成完成：%d 帧（换脸 %d · 原样 %d，其中无人脸 %d）· 用时 %.1f s"
+                 % (idx, swapped, copied, no_face, time.time() - t0))
+
+        _vid_set(stage=5, pct=_VID_PCT_SWAP,
+                 msg="编码 %d 帧 -> %s" % (idx, out_mp4.name))
+        t_enc = time.time()
+        enc = _vid_encode(str(Path(scratch) / "%06d.png"), 0, fps, str(video),
+                          str(out_mp4), idx)
+        enc["seconds"] = round(time.time() - t_enc, 2)
+        _vid_set(encode=enc)
+        _vid_log("编码：%s" % enc.get("cmd"))
+        if enc.get("code") != 0:
+            raise _BadInput("编码失败（ffmpeg 退出码 %s）：%s"
+                            % (enc.get("code"), (enc.get("tail") or "")[-400:]), 500)
+        if not out_mp4.is_file() or out_mp4.stat().st_size <= 0:
+            raise _BadInput("编码跑完了却没有产物：%s" % out_mp4, 500)
+        el = time.time() - t0
+        _vid_stats(frames=idx, elapsed=round(el, 1),
+                   out_fps=round(idx / el, 2) if el > 0 else 0.0,
+                   encode_s=enc.get("seconds"), mb=round(out_mp4.stat().st_size / 1048576.0, 2))
+        _vid_log("完成：%d 帧 -> %s（%.2f MB · %.2f 帧/秒 · 编码 %.2f s）"
+                 % (idx, out_mp4.name, out_mp4.stat().st_size / 1048576.0,
+                    (idx / el if el > 0 else 0.0), enc.get("seconds") or 0.0))
+    finally:
+        if not cfg.get("keep_frames"):
+            shutil.rmtree(str(scratch), ignore_errors=True)
+
+
+def _vid_worker(cfg: dict):
+    """线程入口：所有异常在这里落成终态，缓存无条件清一次（成功/失败/取消都清）。"""
+    ok, err, cancelled = True, "", False
+    try:
+        _vid_run(cfg)
+    except _VidCancel:
+        ok, cancelled = False, True
+        err = "已取消合成（用户手动停止）"
+    except _BadInput as e:
+        ok, err = False, str(e.msg)[:1200]
+    except Exception as e:                                  # noqa: BLE001
+        traceback.print_exc()
+        ok, err = False, "%s: %s" % (e.__class__.__name__, str(e)[:600])
+    finally:
+        # ---- 缓存语义（用户定的）：一次导出结束就清空 ----
+        # 组均值 / 逐帧自动分配方案都是进程内的表，进程重启会空（app.py 的
+        # startup 钩子再兜一次），这里负责「同一次进程里下一次导出重新算」。
+        cache = clear_face_group_cache("视频导出结束" if not cancelled else "视频导出取消")
+        # 先落日志、**再**发布终态：状态里 ok 一出现，就说明缓存已经清完、日志已经
+        # 写进去了（取消时状态接口会先一步变成 cancelled，见 merge_export_status
+        # 里 running 的算法 —— 那一步不代表线程收工）。
+        _vid_log("缓存已清空：组均值 %s 条 · 其它 %s · 磁盘缓存文件 %s 个"
+                 % ((cache or {}).get("profiles"),
+                    (cache or {}).get("extra") or "无",
+                    len((cache or {}).get("files") or [])))
+        with _merge_job_lock:
+            pct = int(_merge_job.get("pct") or 0)
+            _merge_job.update({
+                "running": False, "ok": bool(ok), "cancelled": bool(cancelled),
+                "finished_at": time.time(), "cache": cache,
+                "pct_at_failure": (None if ok else pct),
+                "pct": (100 if ok else 0), "stage": (6 if ok else -1),
+                "msg": ("合成完成" if ok else ("已取消" if cancelled else "合成失败")),
+                "error": ("" if ok else err),
+                "error_detail": ("" if ok else "\n".join(
+                    _log_tail(list(_merge_job.get("log") or []), 30))[:4000]),
+            })
+        _vid_close_log()
+
+
+def _start_video_export(body: dict):
+    """POST /api/merge/export 的视频分支：校验参数 -> 起线程 -> 立刻回。"""
+    video = _norm_path(body.get("video") or body.get("source_video"))
+    if video is None:
+        raise _BadInput("缺少 video：要一个视频文件路径")
+    if not video.is_file():
+        raise _BadInput("视频不存在：%s" % video, 404)
+    if video.suffix.lower() not in _VIDEO_EXT:
+        raise _BadInput("不是视频文件：%s（只认 %s）"
+                        % (video.suffix or "无扩展名", " ".join(sorted(_VIDEO_EXT))))
+
+    # 模型：显式 dfm > 模型名 > workspace 里第一个 .dfm（和 /api/merge/export 同规矩）
+    dfm, model_name = _dfm_of(body)
+
+    out_raw = str(body.get("output_dir") or body.get("output") or "").strip()
+    if out_raw:
+        op = _norm_path(out_raw)
+        if op is None:
+            raise _BadInput("output_dir 不合法：%s" % out_raw)
+        if op.suffix.lower() == ".mp4":
+            out_mp4 = op
+        else:
+            if op.exists() and op.is_file():
+                raise _BadInput("输出路径是一个已存在的文件：%s（要目录或 .mp4）" % op)
+            out_mp4 = op / (video.stem + "_merged.mp4")
+    else:
+        out_mp4 = video.parent / (video.stem + "_merged.mp4")
+    if _same_path(out_mp4, video):
+        raise _BadInput("输出路径不能是源视频本身：%s" % out_mp4)
+    if out_mp4.is_dir():
+        raise _BadInput("输出路径是个目录：%s（要 .mp4 文件）" % out_mp4)
+    try:
+        out_mp4.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise _BadInput("输出目录建不出来：%s（%s）" % (out_mp4.parent, e))
+
+    settings = _settings_val(body.get("settings"))
+    config = _merge_settings_to_config(settings)
+    detector = _detector_val(body.get("detector"))
+    thresh = _float_val("thresh", body.get("thresh"), 0.0, 1.0, 0.5)
+    xseg = _xseg_of(body)
+    face_thr = _float_val("face_threshold", body.get("face_threshold"), 0.0, 1.0, None)
+    fps = _float_val("fps", body.get("fps"), 1.0, 240.0, None)
+
+    # 人脸库：显式给的 > 默认库（<工作区>/merge）。空串 = 默认库
+    library_raw = str(body.get("faces_project") or body.get("face_library")
+                      or body.get("library") or "").strip()
+    # 自动分配缓存的身份段（_source_ident）用的是「当前打开的素材」——视频模式导出
+    # 用的是请求里的 video，不是界面里打开的那个。这里把它指正到本次要导出的片子，
+    # 缓存键才是这一份视频的（反正每次导出结束都会清空）。
+    snap = dict(_cache_snap())
+    snap.update({"mode": "video", "path": str(video), "dir": "", "names": [],
+                 "srcdir": ""})
+    plan_payload = {"project": library_raw, "faces_project": library_raw}
+    if face_thr is not None:
+        plan_payload["face_threshold"] = float(face_thr)
+
+    cfg = {"video": str(video), "out": str(out_mp4), "dfm": str(dfm),
+           "model": str(model_name), "xseg": str(xseg), "config": dict(config),
+           "detector": str(detector), "thresh": float(thresh), "fps": fps,
+           "snap": snap, "plan_payload": plan_payload,
+           "single_models": [{"name": str(model_name), "dfm": str(dfm),
+                              "faces": [], "index": 0}],
+           "use_library": True, "keep_frames": bool(body.get("keep_frames"))}
+
+    with _merge_job_lock:
+        if _merge_job.get("running"):
+            raise _BadInput("已经在导出（%s）—— 等它结束或点取消"
+                            % (_merge_job.get("out") or "上一个任务"), 409)
+        _merge_job.update({
+            "running": True, "log": [], "ok": None, "error": None, "error_detail": "",
+            "out": str(out_mp4), "pct": 0, "msg": "启动导出…", "stage": 0,
+            "cancelled": False, "pct_at_failure": None,
+            "started_at": time.time(), "finished_at": None,
+            "fps": float(fps or 0.0), "workers": 1, "encoder": "libx264",
+            "hwaccel": "", "dfm": str(dfm),
+            # 视频模式专有：mode / video / 逐帧明细 / 结束时的缓存状态
+            "mode": "video", "video": str(video), "total": 0, "frames_done": 0,
+            "frames": [], "stats": {}, "cache": {}, "encode": {},
+        })
+    cfg["log_file"] = _vid_open_log(out_mp4.with_suffix(".log"))
+    threading.Thread(target=_vid_worker, args=(cfg,), daemon=True,
+                     name="merge-export-video").start()
+    _vid_log("导出链路：%s -> 解码 -> 检测 -> 68 点 -> 判定模型 -> dfm -> 遮罩 -> 合成"
+             " -> %s -> %s" % (video.name, out_mp4.name, video.name))
+    return _ok(mode="video", video=str(video), output=str(out_mp4),
+               output_dir=str(out_mp4), dfm=str(dfm), model=str(model_name),
+               settings=settings, detector=str(detector), thresh=float(thresh),
+               xseg=str(xseg), fps=float(fps or 0.0), face_threshold=face_thr,
+               library=library_raw or "",
+               models=[{"name": m["name"], "dfm": m["dfm"], "faces": list(m["faces"])}
+                       for m in cfg["single_models"]])
 
 
 @router.post("/api/merge/reveal")
