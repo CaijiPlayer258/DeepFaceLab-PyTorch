@@ -6345,7 +6345,7 @@ function mgStageEmpty(on) {
        「模型转换页（Stepper）」那一段 .cvsteps .cvst / .cvic / .cvline）。
        这里只把同一份结构放进 #mgpSteps，文案换成 切帧 → 切脸 → 合成 → 导出。
        ============================================================ */
-    var MGP_STAGES = ["frames", "faces", "merge", "encode"];
+    var MGP_STAGES = ["frames", "faces", "pred", "mask", "merge", "encode"];
     var MGP_TIMER = null;
 
     function mgpNodes() {
@@ -6391,8 +6391,8 @@ function mgStageEmpty(on) {
     function mgpStatusPaint(d, idx) {
       d = d || {};
       var p = Math.max(0, Math.min(100, Number(d.stage_pct) || 0));
-      var overall = Math.round((idx * 100 + p) / 4);
-      if (d.phase === "done") overall = Math.round(((idx + 1) * 100) / 4);
+      var overall = Math.round((idx * 100 + p) / MGP_STAGES.length);
+      if (d.phase === "done") overall = Math.round(((idx + 1) * 100) / MGP_STAGES.length);
       var fill = $("mgpFill"); if (fill) fill.style.width = overall + "%";
       var pct = $("mgpPct"); if (pct) pct.textContent = overall + "%";
       var total = Number(d.frames_total) || 0, done = Number(d.frames_done) || 0;
@@ -6414,6 +6414,8 @@ function mgStageEmpty(on) {
       var tip = "";
       if (st === "frames") tip = (Number(counts.frames) || 0) + " 帧";
       else if (st === "faces") tip = (Number(counts.faces) || 0) + " 张脸";
+      else if (st === "pred") tip = (Number(counts.pred) || 0) + " 张换脸";
+      else if (st === "mask") tip = ((d.mask_source === "DFM") ? "用模型遮罩" : (d.mask_source || "")) + " · " + (Number(counts.masks) || 0) + " 张";
       else if (st === "merge") tip = total ? (done + "/" + total) : (d.msg || "");
       else if (st === "encode") tip = "crf16 · yuv420p";
       var fileEl = $("mgpFile");
@@ -6449,7 +6451,7 @@ function mgStageEmpty(on) {
         var fill = $("mgpFill"); if (fill) fill.style.width = "100%";
         var pct = $("mgpPct"); if (pct) pct.textContent = "100%";
         var eta = $("mgpEta"); if (eta) eta.textContent = "完成";
-        toast("导出完成", String(d2.out_video || "").slice(-60) || "四个阶段全部完成", "success");
+        toast("导出完成", String(d2.out_video || "").slice(-60) || "六个阶段全部完成", "success");
       } else if (d2.phase === "cancelled") {
         toast("已取消导出", "已完成的阶段留着，下次从这里接着跑", "info");
       } else {
@@ -6484,7 +6486,7 @@ function mgStageEmpty(on) {
       mgpPaint(idx, { state: "on", tip: "" });
       /* 换阶段时把上一段的帧数/速度清掉，别让人以为新阶段已经「完成」 */
       var fr0 = $("mgpFrames"); if (fr0) fr0.textContent = "—";
-      var eta0 = $("mgpEta"); if (eta0) eta0.textContent = "启动 " + (idx + 1) + "/4…";
+      var eta0 = $("mgpEta"); if (eta0) eta0.textContent = "启动 " + (idx + 1) + "/" + MGP_STAGES.length + "…";
       fetch("/api/merge/stage/" + st, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
@@ -6497,7 +6499,10 @@ function mgStageEmpty(on) {
         mgpTrace({ stage: st, ev: "ok", skipped: !!d.skipped });
         if (d.skipped) {
           var tip = (MGP_STAGES[idx] === "faces") ? (((d.counts || {}).faces || 0) + " 张脸")
-                                                  : (((d.counts || {}).frames || 0) + " 帧");
+                  : (MGP_STAGES[idx] === "pred") ? (((d.counts || {}).pred || 0) + " 张换脸")
+                  : (MGP_STAGES[idx] === "mask") ? (((d.counts || {}).masks || 0) + " 张遮罩")
+                  : (((d.counts || {}).frames || 0) + " 帧");
+          if (MGP_STAGES[idx] === "mask" && d.mask_source) tip = (d.mask_source === "DFM" ? "用模型遮罩" : d.mask_source) + " · " + tip;
           mgpPaint(idx, { state: "done", tip: tip || "已有产物" });
           next();
           return;
@@ -6508,7 +6513,7 @@ function mgStageEmpty(on) {
         var msg = String((e && e.message) || e);
         /* 长任务跑完那一拍偶尔掉一次连接（网络层抖动）：重试一次。
            后端明确报的错（HTTP 4xx/5xx 带 error 文本）不重试，免得把真错误刷掉。 */
-        if (!/^HTTP /.test(msg) && !/^(合成|切帧|切脸|导出)/.test(msg) && !MGP_RETRY[st]) {
+        if (!/^HTTP /.test(msg) && !/^(合成|切帧|切脸|换脸|遮罩|导出)/.test(msg) && !MGP_RETRY[st]) {
           MGP_RETRY[st] = 1;
           mgpTrace({ stage: st, ev: "retry", msg: msg.slice(0, 120) });
           mgpPaint(idx, { state: "on", tip: "重试…" });
@@ -6587,11 +6592,13 @@ function mgStageEmpty(on) {
       var fill = $("mgpFill"), pct = $("mgpPct");
       MGP_TIMER = setInterval(function () {
         k += 1;
-        if (k > 4) { clearInterval(MGP_TIMER); MGP_TIMER = null; return; }
-        mgpPaint(k - 1, { state: "done", tip: ["486 帧", "512 张脸", "486/486", "crf16"][k - 1] || "" });
-        if (k < 4) mgpPaint(k, { state: "on" });
-        if (fill) fill.style.width = Math.round(k * 25) + "%";
-        if (pct) pct.textContent = Math.round(k * 25) + "%";
+        if (k > MGP_STAGES.length) { clearInterval(MGP_TIMER); MGP_TIMER = null; return; }
+        var demoTips = ["486 帧", "512 张脸", "512 张换脸", "512 张遮罩", "486/486", "crf16"];
+        mgpPaint(k - 1, { state: "done", tip: demoTips[k - 1] || "" });
+        if (k < MGP_STAGES.length) mgpPaint(k, { state: "on" });
+        var stepPct = Math.round(k * 100 / MGP_STAGES.length);
+        if (fill) fill.style.width = stepPct + "%";
+        if (pct) pct.textContent = stepPct + "%";
       }, 700);
     }
     window.mgDemoProgress = mgDemoProgress;
@@ -8611,7 +8618,15 @@ function mgStageEmpty(on) {
       { k: "pretrain_single_decoder", l: "预训练单解码器", t: "sw", v: 0, d: "预训练时只用一个解码器" },
       { k: "crash_threshold", l: "崩溃阈值", t: "num", v: "0.0", d: "loss 超过它视为崩溃，不覆盖备份" },
       { k: "log_code_stats", l: "Inter code 分布日志", t: "num", v: "0", d: "0 = 关闭，每 N 迭代输出一次" },
-      { k: "max_backups", l: "最大备份数", t: "num", v: "3" }
+      { k: "max_backups", l: "最大备份数", t: "num", v: "3" },
+      /* 下面三项引擎一直在读、也一直写在 dat 里，但参数页以前没有对应控件 ——
+         用户只能直接改 dat 才能动它们，改前的摘要也不显示，等于隐形参数。 */
+      { k: "nan_guard", l: "NaN 梯度保护", t: "sw", v: 0,
+        d: "每步扫一遍梯度，出现 NaN 就跳过这一步（约慢 4%）" },
+      { k: "write_train_log", l: "训练日志 CSV", t: "sw", v: 0,
+        d: "在模型目录写 <模型名>_train_log.csv" },
+      { k: "eager_mode", l: "即时模式(XLA)", t: "sw", v: 0,
+        d: "仅 SAEHD；需要 torch_xla，普通训练保持关闭" }
     ]},
     { t: "优化器参数", rows: [
       { k: "optimizer", l: "优化器", t: "seg", o: ["adam", "adabelief", "lion"], v: "adam" },
@@ -8622,6 +8637,7 @@ function mgStageEmpty(on) {
       { k: "lr_plateau_factor", l: "平台衰减系数", t: "seg", o: ["1.0", "0.5", "0.7", "0.3"], v: "1.0", d: "1.0 = 关闭" },
       { k: "lr_plateau_patience", l: "平台耐心", t: "num", v: "0", d: "连续 N 轮不降才衰减" },
       { k: "lr_plateau_min_ratio", l: "平台最小比例", t: "num", v: "0.1" },
+      { k: "lr_warmup_steps", l: "LR 预热步数", t: "num", v: "0", d: "0 = 关闭；前 N 步线性升温" },
       { k: "lr_dropout", l: "LR Dropout", t: "seg", o: ["n", "y", "cpu"], v: "n" },
       { k: "pia_cycle_power", l: "PIA 周期", t: "num", v: "1.0" }
     ]},
@@ -8911,6 +8927,90 @@ function mgStageEmpty(on) {
     if (window.I18N) window.I18N.refresh();
     go("train-cfg");
 
+    /* 回填一批控件：opts = /config 返回的 dat options。
+       onlyNew=true 时只填「还没有基线」的行 —— TrainExtra 的「设备」卡是
+       openCfg 之后 80ms 才挂上来的（见 mount 里的 setTimeout），这批行在第一次
+       回填时还不存在，不补一次的话它们永远停在写死的默认值上：
+       dat 里 device="auto"，下拉框却一直显示 "0"，用户以为改完没生效。 */
+    function fillCfgRows(opts, onlyNew) {
+      if (!opts) return 0;
+      var filled = 0;
+      box.querySelectorAll("[data-cfg]").forEach(function (el) {
+        if (onlyNew && el.dataset.v0 !== undefined) return;
+        var k = el.dataset.cfg, v = opts[k];
+        if (k === "target_batch" && (v === undefined || v === null || Number(v) === 0)) {
+          var _b0 = Number(opts.batch_size) || 1, _a0 = Number(opts.accum_steps) || 1;
+          v = _a0 > 1 ? _b0 * _a0 : 0;
+        }
+        if (v === undefined) {
+          /* dat 里没有这个键（老模型没存过 / 新建时没写）：
+             标记一下，别给它记基线 —— 否则用户改成界面默认值会被判成"没改"，
+             这个值永远存不进模型（"最大备份数填 3 不生效"就是这么来的）。 */
+          el.dataset.missing = "1";
+          return;
+        }
+        delete el.dataset.missing;
+        filled++;
+        if (el.tagName === "INPUT") el.value = v;
+        else if (el.tagName === "SELECT") {
+          /* 短码必须照 4.0 引擎的原表（Model_SAEHD:195 就是 ["h","mf","f","wf","head"]）。
+             以前这里写的是 wf/ff/hf：face_type="f" 的模型在框里显示成第一项
+             whole_face —— 只读行显示错的值比空白更误导。ff/hf 留着容忍早期写过的值。 */
+          var _ALIAS = { h: "half_face", mf: "midfull_face", f: "full_face",
+                         wf: "whole_face", head: "head",
+                         ff: "full_face", hf: "half_face" };
+          var sv = String(v);
+          el.value = sv;
+          if (el.selectedIndex < 0 && _ALIAS[sv.toLowerCase()]) el.value = _ALIAS[sv.toLowerCase()];
+          /* 设备：必须在下面那句兜底之前过一遍守卫 —— 一旦 selectedIndex<0 被改成 0，
+             「存的是 GPU 1 但本机只有 GPU 0」就变成了「用户选了自动」，看不出来了。 */
+          if (el.dataset.cfg === "device" && window.__devGuard) window.__devGuard(el, sv);
+          if (el.selectedIndex < 0) el.selectedIndex = 0;
+        }
+        else if (el.classList.contains("sw")) el.classList.toggle("on", !!v);
+        else if (el.classList.contains("seg")) {
+          /* 按 data-v 比，不看 textContent —— 切到英文后文案变了，比文本永远不匹配 */
+          var hit = false;
+          Array.prototype.forEach.call(el.children, function (b) {
+            var bv = String(b.dataset.v !== undefined ? b.dataset.v : b.textContent);
+            /* 数字要按数值比：dat 里存的是 float 1.0，分段控件的 token 是字符串 "1.0"，
+               直接比字符串会一个都不亮（表现是这一行看着"没选中"）。 */
+            var same = bv === String(v) ||
+              (bv !== "" && String(v).trim() !== "" &&
+               isFinite(Number(bv)) && isFinite(Number(v)) && Number(bv) === Number(v));
+            if (same) hit = true;
+            b.classList.toggle("on", same);
+          });
+          /* 存的是布尔（比如 use_bf16 -> 1/0），按 开/关 兜一次 */
+          if (!hit && el.children.length === 2) {
+            var onIdx = (v === true || v === 1 || v === "1") ? 0 : 1;
+            Array.prototype.forEach.call(el.children, function (b, i) {
+              b.classList.toggle("on", i === onIdx);
+            });
+          }
+        }
+      });
+
+      /* 「已读入 N 项」按当前页面上真实填上的行数算：补充块（TrainExtra）的行
+         可能比这次回填晚到，晚到的那批由下面的 __fillCfgRows 再补一次。 */
+      var hint = document.getElementById("cfgHint");
+      if (hint) {
+        /* 先记下原始文案：openCfg 每重画一次都会拉一遍配置，直接往后追加会叠成
+           "已读入 46 项真实参数 · 已读入 46 项真实参数"。 */
+        if (!hint.dataset.base) {
+          hint.dataset.base = (hint.textContent || "").replace(/\s*·\s*已读入 \d+ 项真实参数\s*$/, "");
+        }
+        var total = 0;
+        box.querySelectorAll("[data-cfg]").forEach(function (el) {
+          if (el.dataset.missing !== "1" && el.dataset.v0 !== undefined) total++;
+        });
+        hint.textContent = hint.dataset.base + " · 已读入 " + Math.max(filled, total) + " 项真实参数";
+      }
+      return filled;
+    }
+    window.__fillCfgRows = fillCfgRows;   /* TrainExtra 补挂的行要用它再填一次 */
+    window.__cfgOpts = null;
+
     /* 拉真实的 *_data.dat options 回填 —— 页面上的值不再是写死的默认值 */
     if (m) {
       fetch("/api/models/" + encodeURIComponent(m.name) + "/config")
@@ -8918,61 +9018,8 @@ function mgStageEmpty(on) {
         .then(function (d) {
           if (!d || !d.options) return;
           var opts = d.options;
-          var filled = 0;
-          box.querySelectorAll("[data-cfg]").forEach(function (el) {
-            var k = el.dataset.cfg, v = opts[k];
-            if (k === "target_batch" && (v === undefined || v === null || Number(v) === 0)) {
-              var _b0 = Number(opts.batch_size) || 1, _a0 = Number(opts.accum_steps) || 1;
-              v = _a0 > 1 ? _b0 * _a0 : 0;
-            }
-            if (v === undefined) {
-              /* dat 里没有这个键（老模型没存过 / 新建时没写）：
-                 标记一下，别给它记基线 —— 否则用户改成界面默认值会被判成"没改"，
-                 这个值永远存不进模型（"最大备份数填 3 不生效"就是这么来的）。 */
-              el.dataset.missing = "1";
-              return;
-            }
-            delete el.dataset.missing;
-            filled++;
-            if (el.tagName === "INPUT") el.value = v;
-            else if (el.tagName === "SELECT") {
-              /* 短码必须照 4.0 引擎的原表（Model_SAEHD:195 就是 ["h","mf","f","wf","head"]）。
-                 以前这里写的是 wf/ff/hf：face_type="f" 的模型在框里显示成第一项
-                 whole_face —— 只读行显示错的值比空白更误导。ff/hf 留着容忍早期写过的值。 */
-              var _ALIAS = { h: "half_face", mf: "midfull_face", f: "full_face",
-                             wf: "whole_face", head: "head",
-                             ff: "full_face", hf: "half_face" };
-              var sv = String(v);
-              el.value = sv;
-              if (el.selectedIndex < 0 && _ALIAS[sv.toLowerCase()]) el.value = _ALIAS[sv.toLowerCase()];
-              /* 设备：必须在下面那句兜底之前过一遍守卫 —— 一旦 selectedIndex<0 被改成 0，
-                 「存的是 GPU 1 但本机只有 GPU 0」就变成了「用户选了自动」，看不出来了。 */
-              if (el.dataset.cfg === "device" && window.__devGuard) window.__devGuard(el, sv);
-              if (el.selectedIndex < 0) el.selectedIndex = 0;
-            }
-            else if (el.classList.contains("sw")) el.classList.toggle("on", !!v);
-            else if (el.classList.contains("seg")) {
-              /* 按 data-v 比，不看 textContent —— 切到英文后文案变了，比文本永远不匹配 */
-              var hit = false;
-              Array.prototype.forEach.call(el.children, function (b) {
-                var bv = String(b.dataset.v !== undefined ? b.dataset.v : b.textContent);
-                /* 数字要按数值比：dat 里存的是 float 1.0，分段控件的 token 是字符串 "1.0"，
-                   直接比字符串会一个都不亮（表现是这一行看着"没选中"）。 */
-                var same = bv === String(v) ||
-                  (bv !== "" && String(v).trim() !== "" &&
-                   isFinite(Number(bv)) && isFinite(Number(v)) && Number(bv) === Number(v));
-                if (same) hit = true;
-                b.classList.toggle("on", same);
-              });
-              /* 存的是布尔（比如 use_bf16 -> 1/0），按 开/关 兜一次 */
-              if (!hit && el.children.length === 2) {
-                var onIdx = (v === true || v === 1 || v === "1") ? 0 : 1;
-                Array.prototype.forEach.call(el.children, function (b, i) {
-                  b.classList.toggle("on", i === onIdx);
-                });
-              }
-            }
-          });
+          window.__cfgOpts = opts;         /* 给晚挂的行（设备卡）留一份 */
+          fillCfgRows(opts, false);
           /* 回填完真实参数，把「初始值」重记一遍：之后只有用户真改过的才算改过 */
           if (window.syncCfgBaseline) window.syncCfgBaseline();
 
@@ -8985,15 +9032,12 @@ function mgStageEmpty(on) {
             }
           } catch (e) { console.warn("legacy notice failed", e); }
 
-          var hint = document.getElementById("cfgHint");
-          if (hint) {
-            /* 先记下原始文案：openCfg 每重画一次都会拉一遍配置，直接往后追加会叠成
-               "已读入 46 项真实参数 · 已读入 46 项真实参数"。 */
-            if (!hint.dataset.base) {
-              hint.dataset.base = (hint.textContent || "").replace(/\s*·\s*已读入 \d+ 项真实参数\s*$/, "");
-            }
-            hint.textContent = hint.dataset.base + " · 已读入 " + filled + " 项真实参数";
-          }
+          /* 设备下拉的选项是 /api/devices 回来后才填的，可能在这次回填之后：
+             等它到货时把「还没有基线」的行再填一遍（否则设备行永远停在默认值）。 */
+          setTimeout(function () {
+            var n = fillCfgRows(window.__cfgOpts, true);
+            if (n && window.syncCfgBaseline) window.syncCfgBaseline();
+          }, 0);
         })
         .catch(function (e) { console.warn("config load failed", e); });
     }
@@ -11362,7 +11406,9 @@ function mgStageEmpty(on) {
       rows: [
         {
           /* 一行就够：左边"设备"，右边下拉框 */
-          k: "device", l: "设备", t: "sel", v: "0", d: "", titlelabel: true,
+          /* 默认 "自动选择"：dat 里没有 device 这个键时，引擎就是自动挑卡。
+             以前这里写死 "0"，看起来像"用户已经选了 0 号卡"——是骗人的。 */
+          k: "device", l: "设备", t: "sel", v: "auto", d: "", titlelabel: true,
           /* 选项在运行时由 /api/devices 填（GPU 型号 / CPU 线程数），
              这里的只是网还没回来时的兜底 */
           o: [{ v: "auto", l: "自动选择" }, { v: "cpu", l: "CPU" }, { v: "0", l: "GPU 0" }]
@@ -11693,6 +11739,16 @@ function mgStageEmpty(on) {
       if (normal.length) box.appendChild(makeWrap(normal));
       var archNow = (window.__cfgModel && window.__cfgModel.archi) || window.__cfgArchi || "";
       try { if (window.__filterFreezeRows) window.__filterFreezeRows(box, archNow); } catch (e) {}
+
+      /* 关键：这批行是 openCfg 的 /config 回填**之后**才挂上来的（晚 80ms），
+         第一次回填扫不到它们 —— 于是「设备」下拉永远停在写死的默认值，
+         dat 里 device="auto" 页面上却显示 "0"。这里补一次，只填还没基线的行。 */
+      try {
+        if (window.__fillCfgRows && window.__cfgOpts) {
+          var _n = window.__fillCfgRows(window.__cfgOpts, true);
+          if (_n && window.syncCfgBaseline) window.syncCfgBaseline();
+        }
+      } catch (e) {}
       if (window.I18N && window.I18N.refresh) window.I18N.refresh();
     }, 80);
 

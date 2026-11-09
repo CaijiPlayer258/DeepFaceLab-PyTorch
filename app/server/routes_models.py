@@ -41,7 +41,7 @@ def model_config_get(name: str):
         raise HTTPException(500, "读取 _data.dat 失败: " + str(e))
     opts = info["options"] or {}
     return {"name": name, "iter": info["iter"],
-            "options": {k: v for k, v in opts.items() if isinstance(v, (int, float, str, bool)) or v is None},
+            "options": _scalar_options(opts),
             "readonly": sorted([k for k in opts if k in _CFG_STRUCTURAL]),
             "legacy": legacy}
 
@@ -68,8 +68,7 @@ def model_detail(name: str):
         info = {"options": {}, "iter": entry.get("iter", 0)}
     opts = info.get("options") or {}
     return {"name": name, "dat": str(dat), "iter": info.get("iter", entry.get("iter", 0)),
-            "options": {k: v for k, v in opts.items()
-                        if isinstance(v, (int, float, str, bool)) or v is None},
+            "options": _scalar_options(opts),
             "readonly": sorted([k for k in opts if k in _CFG_STRUCTURAL]),
             "legacy": entry.get("legacy") or {"detected": False}, "model": entry}
 
@@ -248,6 +247,30 @@ _STRUCTURAL_KEYS = {
 }
 
 
+def _scalar_options(opts):
+    """把 dat 里的 options 收敛成「界面能显示的一层」：只留标量。
+
+    以前这里的过滤器是 isinstance(v, (int, float, str, bool)) —— numpy 标量
+    不是 Python int：老 dat 里 resolution / gan_patch_size 是 np.int64，
+    于是这两个键**整个从 /config 里消失**，参数页拿不到值就退回写死的默认值
+    （16 的 GAN 块显示成 32），用户看到的是「和 dat 对不上」的假值。
+    np.float64 是 float 的子类，所以旧代码只是"碰巧"没漏掉浮点。
+    """
+    out = {}
+    for k, v in (opts or {}).items():
+        v = _jsonable(v)
+        if v is None or isinstance(v, (int, float, str, bool)):
+            out[k] = v
+        else:
+            try:
+                import numpy as _np
+                if isinstance(v, (_np.integer, _np.floating, _np.bool_)):
+                    out[k] = _jsonable(v)
+            except Exception:
+                pass
+    return out
+
+
 def _jsonable(v):
     """把 dat 里的值收敛成能进 JSON 的类型。
 
@@ -289,6 +312,19 @@ def _clean_options(raw, base):
             if v == "":
                 continue                  # 空着 = 不改
         cur = base.get(k)
+        # numpy 标量先摊平成原生类型：np.int64 不是 int，下面的 isinstance 分支
+        # 会全部落空，最后落到「原样写回去」—— 界面上填的 "48" 会被当成字符串存进
+        # dat，引擎读出来再 int() 才不炸，纯属运气。
+        try:
+            import numpy as _np
+            if isinstance(cur, _np.bool_):
+                cur = bool(cur)
+            elif isinstance(cur, _np.integer):
+                cur = int(cur)
+            elif isinstance(cur, _np.floating):
+                cur = float(cur)
+        except Exception:
+            pass
         try:
             if isinstance(cur, bool):
                 # 界面上的开关/分段派出来的是字符串：'bf16' / 'on' / '1' / '开' 都算真，
