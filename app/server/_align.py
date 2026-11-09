@@ -478,9 +478,20 @@ def dfljpg_bytes(jpeg_data: bytes, meta: dict) -> bytes:
     return data[:sos] + app15 + data[sos:]
 
 
-def write_dfljpg(path, img_bgr, meta: dict, quality: int = 95):
+def write_dfljpg(path, img_bgr, meta: dict, quality: int = 95, subsampling=None):
+    """写一张 DFLJPG（JPEG + APP15 元数据）。
+
+    subsampling=None 时完全沿用老行为（libjpeg 默认 4:2:0）；分段导出的切脸阶段会传
+    quality=100 + subsampling=0（4:4:4），把「最高质量」写死在调用点上，不靠默认值。
+    """
     import cv2
-    ok, enc = cv2.imencode(".jpg", img_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
+    params = [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)]
+    if subsampling is not None:
+        try:
+            params += [int(cv2.IMWRITE_JPEG_SAMPLING_FACTOR), int(subsampling)]
+        except AttributeError:                       # 老 OpenCV 没这个常量
+            params = [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)]
+    ok, enc = cv2.imencode(".jpg", img_bgr, params)
     if not ok:
         raise RuntimeError("JPEG 编码失败: %s" % path)
     blob = dfljpg_bytes(enc.tobytes(), meta)

@@ -6337,41 +6337,262 @@ function mgStageEmpty(on) {
       });
     }
 
-    /* 导出进度的演示：节奏参照真实 ffmpeg 抽帧 + ORT 推理，只为把界面跑起来看 */
+    /* ============================================================
+       分段导出的四步动画（复用「模型转换」的 Stepper）
+       ------------------------------------------------------------
+       动画资产不新画：节点/连线/当前步高亮全部来自 #p-train-convert 那一套
+       （index.html: <div class="cvsteps"><div class="cvst">…，css/app.css:
+       「模型转换页（Stepper）」那一段 .cvsteps .cvst / .cvic / .cvline）。
+       这里只把同一份结构放进 #mgpSteps，文案换成 切帧 → 切脸 → 合成 → 导出。
+       ============================================================ */
+    var MGP_STAGES = ["frames", "faces", "merge", "encode"];
     var MGP_TIMER = null;
-    function mgDemoProgress(total) {
-      /* 真跑合成的时候别让演示进度盖掉真实数据 */
-      if (window.__mergeExporting) return;
-      total = total || 486;
-      var fill = $("mgpFill"), pct = $("mgpPct"), fr = $("mgpFrames"), eta = $("mgpEta");
-      var steps = document.querySelectorAll("#p-merge .mgpstep");
-      var cur = 0, stage = 0;
-      var names = ["detect", "swap", "encode", "mux"];
-      if (MGP_TIMER) clearInterval(MGP_TIMER);
-      function paint() {
-        var p = Math.min(100, Math.round((cur / total) * 100));
-        if (fill) fill.style.width = p + "%";
-        if (pct) pct.textContent = p + "%";
-        if (fr) fr.textContent = cur + " / " + total + " 帧";
-        var left = Math.max(0, total - cur);
-        if (eta) eta.textContent = left ? ("剩余 " + Math.ceil(left / 24) + " 秒") : "完成";
-        stage = p < 34 ? 0 : p < 78 ? 1 : p < 96 ? 2 : 3;
-        for (var i = 0; i < steps.length; i++) {
-          steps[i].classList.toggle("on", i === stage);
-          steps[i].classList.toggle("done", i < stage);
-          var s = steps[i].querySelector("span");
-          if (s && i === 0) s.textContent = Math.round(cur * 0.62) + " 张";
-          if (s && i === 1 && stage >= 1) s.textContent = "overlay · rct";
-          if (s && i === 2 && stage >= 2) s.textContent = "h264_nvenc";
-          if (s && i === 3 && stage >= 3) s.textContent = "mp4";
-        }
+
+    function mgpNodes() {
+      var box = $("mgpSteps");
+      if (!box) return [];
+      return Array.prototype.slice.call(box.querySelectorAll(".cvst"));
+    }
+
+    /* 画到第 upto 步：前面全部 done（连线也连上），当前步 on / done / err */
+    function mgpPaint(upto, opts) {
+      opts = opts || {};
+      var nodes = mgpNodes();
+      for (var k = 0; k < nodes.length; k++) {
+        var n = nodes[k], ic = n.querySelector(".cvic"), tip = n.querySelector(".cvtip");
+        var state = "";
+        if (k < upto) state = "done";
+        else if (k === upto) state = (opts.state === "err" ? "err" : (opts.state === "done" ? "done" : "on"));
+        n.className = "cvst" + (state ? " " + state : "");
+        if (ic) ic.textContent = (state === "done" ? "✓" : (state === "err" ? "!" : String(k + 1)));
+        if (tip && k === upto && opts.tip !== undefined) tip.textContent = String(opts.tip || "");
       }
-      paint();
+    }
+
+    function mgpReset() {
+      var nodes = mgpNodes();
+      for (var k = 0; k < nodes.length; k++) {
+        nodes[k].className = "cvst";
+        var ic = nodes[k].querySelector(".cvic");
+        if (ic) ic.textContent = String(k + 1);
+        var tip = nodes[k].querySelector(".cvtip");
+        if (tip) tip.textContent = "";
+      }
+      var fill = $("mgpFill"); if (fill) fill.style.width = "0%";
+      var pct = $("mgpPct"); if (pct) pct.textContent = "0%";
+      var fr = $("mgpFrames"); if (fr) fr.textContent = "—";
+      var eta = $("mgpEta"); if (eta) eta.textContent = "剩余 —";
+      var fileEl = $("mgpFile"); if (fileEl) fileEl.textContent = "—";
+    }
+    window.mgpReset = mgpReset;
+    window.mgpPaint = mgpPaint;
+
+    /* 阶段状态 -> 总进度条 + 帧数/速度 + 当前步右侧小字 */
+    function mgpStatusPaint(d, idx) {
+      d = d || {};
+      var p = Math.max(0, Math.min(100, Number(d.stage_pct) || 0));
+      var overall = Math.round((idx * 100 + p) / 4);
+      if (d.phase === "done") overall = Math.round(((idx + 1) * 100) / 4);
+      var fill = $("mgpFill"); if (fill) fill.style.width = overall + "%";
+      var pct = $("mgpPct"); if (pct) pct.textContent = overall + "%";
+      var total = Number(d.frames_total) || 0, done = Number(d.frames_done) || 0;
+      var rate = Number(d.frame_fps) || 0;
+      var fr = $("mgpFrames");
+      if (fr) {
+        fr.textContent = total
+          ? (done + " / " + total + " 帧" + (rate > 0 ? (" · " + rate.toFixed(1) + " 帧/秒") : ""))
+          : (d.msg || "准备中…");
+      }
+      var eta = $("mgpEta");
+      if (eta) {
+        if (d.running) eta.textContent = (d.eta_s != null ? ("剩余 " + d.eta_s + " 秒") : (d.msg || "剩余 —"));
+        else eta.textContent = (d.phase === "done" ? "完成"
+          : (d.phase === "cancelled" ? "已取消" : "已停"));
+      }
+      var st = MGP_STAGES[idx] || "";
+      var counts = d.counts || {};
+      var tip = "";
+      if (st === "frames") tip = (Number(counts.frames) || 0) + " 帧";
+      else if (st === "faces") tip = (Number(counts.faces) || 0) + " 张脸";
+      else if (st === "merge") tip = total ? (done + "/" + total) : (d.msg || "");
+      else if (st === "encode") tip = "crf16 · yuv420p";
+      var fileEl = $("mgpFile");
+      if (fileEl && d.cache_dir) fileEl.textContent = String(d.cache_dir).split(/[\\/]/).pop();
+      var state = (d.phase === "failed" ? "err" : (d.phase === "done" ? "done" : "on"));
+      mgpPaint(idx, { state: state, tip: tip });
+    }
+
+    var MGP_POLL = null;
+    var MGP_RETRY = {};              /* 每个阶段只重试一次（网络抖动，不是后端报错） */
+    var MGP_TRACE = [];              /* 每个阶段 POST 的留痕（排障用：window.__mgpTrace） */
+    window.__mgpTrace = MGP_TRACE;
+    window.__mgStageRunning = false;
+
+    function mgpTrace(o) {
+      MGP_TRACE.push(o);
+      if (MGP_TRACE.length > 40) MGP_TRACE.shift();
+    }
+
+    function mgpStopPoll() {
+      if (MGP_POLL) { clearTimeout(MGP_POLL); MGP_POLL = null; }
+    }
+
+    function mgpTerminal(okAll, d, idx) {
+      mgpStopPoll();
+      window.__mgStageRunning = false;
+      window.__mergeExporting = false;
+      var cb = $("mgpCancel");
+      if (cb) { cb.disabled = false; cb.textContent = (okAll ? "返回设置" : "重新导出"); }
+      var d2 = d || {};
+      if (okAll) {
+        mgpPaint(MGP_STAGES.length - 1, { state: "done", tip: "mp4" });
+        var fill = $("mgpFill"); if (fill) fill.style.width = "100%";
+        var pct = $("mgpPct"); if (pct) pct.textContent = "100%";
+        var eta = $("mgpEta"); if (eta) eta.textContent = "完成";
+        toast("导出完成", String(d2.out_video || "").slice(-60) || "四个阶段全部完成", "success");
+      } else if (d2.phase === "cancelled") {
+        toast("已取消导出", "已完成的阶段留着，下次从这里接着跑", "info");
+      } else {
+        mgpPaint(idx, { state: "err", tip: "失败" });
+        var eta2 = $("mgpEta");
+        if (eta2) eta2.textContent = String(d2.error || "失败").slice(0, 60);
+        toast("导出失败", String(d2.error || "").slice(0, 140), "error");
+      }
+    }
+
+    function mgpPollStage(idx, body, next) {
+      MGP_POLL = setTimeout(function () {
+        fetch("/api/merge/stage/status").then(function (r) { return r.json(); }).then(function (d) {
+          mgpStatusPaint(d, idx);
+          if (d.running) { mgpPollStage(idx, body, next); return; }
+          if (d.phase === "done") {
+            var tip = "";
+            if (MGP_STAGES[idx] === "frames") tip = ((d.counts || {}).frames || 0) + " 帧";
+            else if (MGP_STAGES[idx] === "faces") tip = ((d.counts || {}).faces || 0) + " 张脸";
+            mgpPaint(idx, { state: "done", tip: tip });
+            next();
+            return;
+          }
+          mgpTerminal(false, d, idx);
+        }).catch(function () { mgpPollStage(idx, body, next); });
+      }, 600);
+    }
+
+    function mgpRunStage(idx, body, next) {
+      var st = MGP_STAGES[idx];
+      if (!st) { next(); return; }
+      mgpPaint(idx, { state: "on", tip: "" });
+      /* 换阶段时把上一段的帧数/速度清掉，别让人以为新阶段已经「完成」 */
+      var fr0 = $("mgpFrames"); if (fr0) fr0.textContent = "—";
+      var eta0 = $("mgpEta"); if (eta0) eta0.textContent = "启动 " + (idx + 1) + "/4…";
+      fetch("/api/merge/stage/" + st, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      }).then(function (r) {
+        return r.json().then(function (d) {
+          if (!r.ok || d.ok === false) throw new Error(d.error || d.detail || ("HTTP " + r.status));
+          return d;
+        });
+      }).then(function (d) {
+        mgpTrace({ stage: st, ev: "ok", skipped: !!d.skipped });
+        if (d.skipped) {
+          var tip = (MGP_STAGES[idx] === "faces") ? (((d.counts || {}).faces || 0) + " 张脸")
+                                                  : (((d.counts || {}).frames || 0) + " 帧");
+          mgpPaint(idx, { state: "done", tip: tip || "已有产物" });
+          next();
+          return;
+        }
+        mgpStatusPaint(d, idx);
+        mgpPollStage(idx, body, next);
+      }).catch(function (e) {
+        var msg = String((e && e.message) || e);
+        /* 长任务跑完那一拍偶尔掉一次连接（网络层抖动）：重试一次。
+           后端明确报的错（HTTP 4xx/5xx 带 error 文本）不重试，免得把真错误刷掉。 */
+        if (!/^HTTP /.test(msg) && !/^(合成|切帧|切脸|导出)/.test(msg) && !MGP_RETRY[st]) {
+          MGP_RETRY[st] = 1;
+          mgpTrace({ stage: st, ev: "retry", msg: msg.slice(0, 120) });
+          mgpPaint(idx, { state: "on", tip: "重试…" });
+          setTimeout(function () { mgpRunStage(idx, body, next); }, 900);
+          return;
+        }
+        mgpTrace({ stage: st, ev: "error", msg: msg.slice(0, 200) });
+        mgpPaint(idx, { state: "err", tip: "失败" });
+        mgpTerminal(false, { phase: "failed", error: (e && e.message) || String(e) }, idx);
+      });
+      mgpTrace({ stage: st, ev: "post" });
+    }
+
+    /* 视频模式导出 = 四个阶段串起来跑（每步一个 API，失败/取消都能续跑） */
+    function mgStageExport(payload) {
+      payload = payload || {};
+      var video = mgVidPath();
+      if (!video) {
+        toast("没有素材", "先在工作台导入一段视频", "warn");
+        return;
+      }
+      if (window.__mergeExporting || window.__mgStageRunning) {
+        toast("正在导出", "上一次还没结束", "info");
+        return;
+      }
+      var body = {
+        video: video,
+        faces_project: String(window.__mergeFaceLib || ""),
+        /* payload.model 优先（导出设置页/验收脚本可以直接点名一个 dfm），
+           没有就用左栏选中的那个模型 */
+        model: payload.model ||
+               (document.querySelector("#mgModels .mgitem.on .nm") || {}).textContent || "",
+        models: mgFaceModelsPayload(),
+        detector: payload.detector || "",
+        thresh: 0.5,
+        settings: mgMergeSettings(payload),
+        quality: payload.align_quality || "high",
+        force: false
+      };
+      if (payload.output_path && /^[A-Za-z]:[\\/]/.test(payload.output_path)) {
+        body.output_dir = payload.output_path;
+      }
+      window.__mergeExporting = true;
+      window.__mgStageRunning = true;
+      mgpStopPoll();
+      mgpReset();
+      if (window.mgStep) window.mgStep("progress");
+      var cb = $("mgpCancel");
+      if (cb) { cb.disabled = false; cb.textContent = "取消导出"; }
+      document.dispatchEvent(new CustomEvent("merge:export-start", { detail: payload }));
+
+      var idx = 0;
+      function next() {
+        idx += 1;
+        if (idx >= MGP_STAGES.length) {
+          /* 全部跑完：拿一次终态（成片路径 / cache 是否已删）再收尾 */
+          fetch("/api/merge/stage/status").then(function (r) { return r.json(); })
+            .then(function (d) { mgpTerminal(true, d || {}, MGP_STAGES.length - 1); })
+            .catch(function () { mgpTerminal(true, {}, MGP_STAGES.length - 1); });
+          return;
+        }
+        mgpRunStage(idx, body, next);
+      }
+      mgpPaint(0, { state: "on" });
+      mgpRunStage(0, body, next);
+    }
+    window.mgStageExport = mgStageExport;
+
+    /* 演示：没有真任务时把四步动画跑一遍（保留给调试/截图用） */
+    function mgDemoProgress() {
+      if (window.__mergeExporting || window.__mgStageRunning) return;
+      var k = 0;
+      if (MGP_TIMER) clearInterval(MGP_TIMER);
+      mgpReset();
+      mgpPaint(0, { state: "on" });
+      var fill = $("mgpFill"), pct = $("mgpPct");
       MGP_TIMER = setInterval(function () {
-        cur = Math.min(total, cur + Math.round(total / 60));
-        paint();
-        if (cur >= total) { clearInterval(MGP_TIMER); MGP_TIMER = null; }
-      }, 160);
+        k += 1;
+        if (k > 4) { clearInterval(MGP_TIMER); MGP_TIMER = null; return; }
+        mgpPaint(k - 1, { state: "done", tip: ["486 帧", "512 张脸", "486/486", "crf16"][k - 1] || "" });
+        if (k < 4) mgpPaint(k, { state: "on" });
+        if (fill) fill.style.width = Math.round(k * 25) + "%";
+        if (pct) pct.textContent = Math.round(k * 25) + "%";
+      }, 700);
     }
     window.mgDemoProgress = mgDemoProgress;
 
@@ -6381,6 +6602,18 @@ function mgStageEmpty(on) {
       cancelBtn.addEventListener("click", function () {
         if (!window.__mergeExporting) { if (window.mgStep) window.mgStep("settings"); return; }
         cancelBtn.disabled = true;
+        if (window.__mgStageRunning) {
+          fetch("/api/merge/stage/cancel", { method: "POST" })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+              toast(d.ok ? "正在取消" : "取消失败",
+                    d.ok ? ("跑完这一帧就停：" + (d.stage || "")) : String(d.error || ""),
+                    d.ok ? "info" : "error");
+            })
+            .catch(function () {})
+            .then(function () { setTimeout(function () { cancelBtn.disabled = false; }, 2000); });
+          return;
+        }
         fetch("/api/merge/export/cancel", { method: "POST" })
           .then(function (r) { return r.json(); })
           .then(function (d) {
@@ -6438,6 +6671,12 @@ function mgStageEmpty(on) {
       }
       if (window.__mergeExporting) {
         toast("正在合成", "上一次还没结束", "info");
+        return;
+      }
+      if (video && !inputDir) {
+        /* 视频模式：走分段链（切帧 → 切脸 → 合成 → 导出）。
+           每一步都是独立 API、独立产物，失败/取消能从断点接着跑 —— 不再一口气导出。 */
+        mgStageExport(payload);
         return;
       }
       window.__mergeExporting = true;
@@ -6684,18 +6923,13 @@ function mgStageEmpty(on) {
           if (done) frEl.textContent = done[1] + " / " + done[2] + " 帧";
           else if (!d.running && okAll) frEl.textContent = "完成";
         }
-        var steps = document.querySelectorAll("#p-merge .mgpstep");
-        for (var i = 0; i < steps.length; i++) {
-          steps[i].classList.toggle("on", d.running && i === stage);
-          steps[i].classList.toggle("done", (d.running && i < stage) || (!d.running && okAll));
-        }
-        var stepInfo = [null, done ? (done[1] + " / " + done[2]) : null,
-                        d.running && stage === 2 ? "h264" : null,
-                        (!d.running && okAll) ? "mp4" : null];
-        for (var k = 0; k < steps.length; k++) {
-          var sp = steps[k].querySelector("span");
-          if (sp && stepInfo[k]) sp.textContent = stepInfo[k];
-        }
+        /* 四步动画（复用「模型转换」的 Stepper）：后端 stage 0..6
+           -> 0 切帧 / 1 切脸 / 2 合成 / 3 导出。老的四行「—」已经删了。 */
+        var si = srv >= 6 ? 3 : (srv >= 3 ? 2 : (srv >= 2 ? 1 : 0));
+        mgpPaint(si, {
+          state: d.running ? "on" : (okAll ? "done" : "err"),
+          tip: (si === 2 && done) ? (done[1] + "/" + done[2]) : (si === 3 ? "crf16 · yuv420p" : "")
+        });
 
         if (!d.running) {
           clearInterval(MERGE_POLL); MERGE_POLL = null;

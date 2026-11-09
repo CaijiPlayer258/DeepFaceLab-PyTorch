@@ -998,11 +998,27 @@
               <span id="mgpEta">剩余 —</span>
             </div>
 
+            <!-- 四步动画：直接复用「模型转换」那套 Stepper（节点 + 连线 + 当前步高亮，
+                 index.html 的 #p-train-convert / app.css「模型转换页（Stepper）」），
+                 文案换成 切帧 → 切脸 → 合成 → 导出。每完成一个阶段推进一格。 -->
             <div class="mgprog-steps">
-              <div class="mgpstep on" data-s="load"><i></i><b>载入模型</b><span>—</span></div>
-              <div class="mgpstep" data-s="swap"><i></i><b>逐帧合成</b><span>—</span></div>
-              <div class="mgpstep" data-s="encode"><i></i><b>编码</b><span>—</span></div>
-              <div class="mgpstep" data-s="mux"><i></i><b>完成</b><span>—</span></div>
+              <div class="cvsteps" id="mgpSteps">
+                <div class="cvst" id="mgpS1" data-s="frames">
+                  <div class="cvline"><i></i></div>
+                  <div class="cvsh"><span class="cvic">1</span><span class="cvnm">切帧</span><span class="cvtip"></span></div>
+                </div>
+                <div class="cvst" id="mgpS2" data-s="faces">
+                  <div class="cvline"><i></i></div>
+                  <div class="cvsh"><span class="cvic">2</span><span class="cvnm">切脸</span><span class="cvtip"></span></div>
+                </div>
+                <div class="cvst" id="mgpS3" data-s="merge">
+                  <div class="cvline"><i></i></div>
+                  <div class="cvsh"><span class="cvic">3</span><span class="cvnm">合成</span><span class="cvtip"></span></div>
+                </div>
+                <div class="cvst" id="mgpS4" data-s="encode">
+                  <div class="cvsh"><span class="cvic">4</span><span class="cvnm">导出</span><span class="cvtip"></span></div>
+                </div>
+              </div>
             </div>
 
             <div class="mgprog-foot">

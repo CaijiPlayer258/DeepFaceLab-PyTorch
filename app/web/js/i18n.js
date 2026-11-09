@@ -574,6 +574,8 @@
     "封装": "Mux",
     "载入模型": "Loading model",
     "逐帧合成": "Frame merge",
+    "切帧": "Extract frames",
+    "切脸": "Extract faces",
     "完成": "Done",
     "夜深了": "It's late",
     "不限": "unlimited",
