@@ -3809,7 +3809,7 @@ function mgStageEmpty(on) {
       detector: s.detector || "TinyMog",
       face_type: s.face_type || "whole_face",
       /* 默认值同步：色域迁移 = mt、融合 = seamless */
-      mask_source: s.mask_source || "DFM",
+      mask_source: s.mask_source || "XSegLite",
       mask_mode: s.mask_mode || "prd×dst",
       color_transfer: s.color_transfer || "mt",
       erode_mask: s.erode_mask || 0,
@@ -5073,7 +5073,7 @@ function mgStageEmpty(on) {
       /* —— 旧字段兜底：后端还是老版本时认这一组 —— */
       mode: modeSel || blend,
       color_transfer: ct,
-      mask_source: mgSegVal("seg", "DFM"),
+      mask_source: mgSegVal("seg", "XSegLite"),
       mask_style: mm,
       erode_mask: erode,
       blur_mask: blur,
