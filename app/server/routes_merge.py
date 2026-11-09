@@ -1694,6 +1694,199 @@ def merge_frame_post(body: dict = None, w: int = 900, settings: str = "",
     return _frame_payload(_body_idx(payload), payload, default_w=w)
 
 
+# ============================================================
+# 单脸调试：GET / POST /api/merge/face-debug
+# ------------------------------------------------------------
+# 一张脸的「六宫格」证据链：两张模型遮罩、它们的合并、预测脸、对齐后的原脸、
+# 以及真的合成出来的那张脸。前端自己排版（3 列 × 2 行），所以这里返回**六张
+# 独立图**而不是拼好的一整张 —— 点开放大、单格存图都靠这个。
+#   第 1 行：(1) mask(dfm-pred)  (2) mask(dst)  (3) merged(mask(dfm-pred), mask(dst))
+#   第 2 行：(4) dfm-pred        (5) dst-original (6) merged
+# 图从哪来：**复用预览 worker**（同一份 MergeMaskedFace、同一批常驻 DFM），
+# 只多跑一次单脸合成 + 把中间量截下来，不重新加载模型、不另起进程。
+# 参数语义和 /api/merge/frame 完全一致（settings / models / detector …），
+# 唯一的例外：**idx 是「第几张脸」**，帧号只认 frame / n（见 _debug_face_idx）。
+# ============================================================
+_FACE_DBG_CACHE = collections.OrderedDict()     # 同一帧同一张脸 + 同一组参数 → 六格图
+_FACE_DBG_MAX = 8
+_FACE_DBG_LOCK = threading.Lock()
+
+
+def _debug_face_idx(payload: dict) -> int:
+    """这张脸是这一帧里的第几张（检测顺序，从 0 起）。
+
+    帧号只认 frame / n / frame_idx：本接口的 idx 按契约是**人脸序号**，
+    和老接口的「idx = 帧号」正好相反，所以这里绝不走 _body_idx()。
+    """
+    for k in ("face", "face_idx", "face_index", "idx", "i"):
+        if payload.get(k) not in (None, ""):
+            return _int_val("face", payload.get(k), 0, 63)
+    raise _BadInput("缺少人脸序号：给 face（也认 face_idx / idx）—— 这一帧里第几张脸，从 0 起")
+
+
+def _debug_frame_idx(payload: dict) -> int:
+    for k in ("frame", "n", "frame_idx"):
+        if payload.get(k) not in (None, ""):
+            return _int_val("frame", payload.get(k), 0, None)
+    return 0
+
+
+def _face_debug_payload(payload: dict) -> dict:
+    """一张脸 → 六张图（data URL）。"""
+    t_start = time.time()
+    payload = _as_dict(payload)
+    panel_size = max(96, min(int(payload.get("panel_size") or 256), 512))
+
+    snap = _cache_snap()
+    mode = _check_cache_ready(snap)
+    idx = _check_idx(snap, _debug_frame_idx(payload))
+    total = int(snap.get("frames") or 0) or len(snap.get("names") or [])
+    face_i = _debug_face_idx(payload)
+    frame, name = _source_frame(snap, mode, idx)
+
+    settings = _settings_val(payload.get("settings"))
+    cfg = _merge_settings_to_config(settings)
+    detector = _detector_val(payload.get("detector") or settings.get("detector"))
+    thresh = _float_val("thresh", payload.get("thresh"), 0.0, 1.0, 0.5)
+
+    # ---- 这一帧的脸都在哪：有 models 就照 models 分配，没有就按人脸库自动判 ----
+    models = _models_of(payload)
+    auto_plan = None
+    if not models:
+        auto_plan = _auto_face_plan(payload, frame, snap, mode, name, int(idx),
+                                    detector, thresh)
+        if auto_plan is not None:
+            models = auto_plan["models"] or None
+    boxes = list((auto_plan or {}).get("boxes") or [])
+    if not boxes:
+        try:
+            boxes = list(_detect_boxes(frame, detector, thresh))
+        except Exception:                                 # noqa: BLE001
+            boxes = []
+    if not boxes:
+        raise _BadInput("这一帧没检测到人脸 —— 换一帧再点调试", 404)
+    if face_i >= len(boxes):
+        raise _BadInput("这一帧只有 %d 张脸，要的是第 %d 张（从 0 起）"
+                        % (len(boxes), face_i), 404)
+
+    # ---- 这张脸用哪个 dfm：models 点名 → 自动判定 → 显式 dfm/model ----
+    dfm, model_name = None, ""
+    if models:
+        mi = _model_for_face(face_i, models)
+        m = models[mi]
+        # 只在「这个模型确实管这张脸」时才认（faces 空 = 管所有脸；点名了但没这张 = 不管）
+        named = (not (m.get("faces") or [])) or (int(face_i) in (m.get("faces") or []))
+        if named:
+            dfm, model_name = Path(m["dfm"]), str(m["name"])
+    if dfm is None:
+        try:
+            dfm, model_name = _dfm_of(payload)
+        except _BadInput:
+            dfm, model_name = None, ""
+    if dfm is None:
+        raise _BadInput("第 %d 张脸没有可用的 .dfm（谁的组都不像）—— 先在框上的 chip 里"
+                        "给它选一个模型，再看六宫格" % face_i, 409)
+
+    b = boxes[face_i]
+    try:
+        x1, y1, x2, y2 = [float(v) for v in (b.get("box") or ())]
+    except Exception:                                     # noqa: BLE001
+        raise _BadInput("第 %d 张脸的检测框不合法" % face_i, 500)
+    lm = _frame_landmarks(frame, b, [x1, y1, x2, y2])
+    if lm is None:
+        raise _BadInput("第 %d 张脸算不出 68 点 —— 换一帧再试" % face_i, 409)
+    box_wh = [int(round(x1)), int(round(y1)),
+              int(round(max(0.0, x2 - x1))), int(round(max(0.0, y2 - y1)))]
+
+    xseg = _xseg_of(payload)
+    key = json.dumps([_source_ident(snap, mode, name), int(idx), int(face_i),
+                      str(dfm), cfg, xseg, int(panel_size)], sort_keys=True, default=str)
+    with _FACE_DBG_LOCK:
+        hit = _FACE_DBG_CACHE.get(key)
+        if hit is not None:
+            _FACE_DBG_CACHE.move_to_end(key)
+            out = dict(hit)
+            out["cached"] = True
+            out["ms"] = int(round((time.time() - t_start) * 1000.0))
+            return out
+
+    import numpy as np
+    resp = _WORKER.call({
+        "cmd": "face_debug",
+        "frame": _send_frame_b64(frame, {"send_lossless": True}),
+        "dfm": str(dfm),
+        "landmarks": np.asarray(lm, dtype=np.float64).round(2).tolist(),
+        "box": list(box_wh),
+        "config": dict(cfg),
+        "xseg": xseg,
+        "panel_size": int(panel_size),
+    })
+    if not resp.get("ok"):
+        raise _BadInput("六宫格出图失败：%s" % (resp.get("error") or "预览 worker 没给原因"), 500)
+
+    panels = []
+    for item in resp.get("panels") or []:
+        raw = item.get("png") or ""
+        if not raw:
+            continue
+        panels.append({"key": str(item.get("key") or ""),
+                       "label": str(item.get("label") or ""),
+                       "w": int(item.get("w") or panel_size),
+                       "h": int(item.get("h") or panel_size),
+                       "png": "data:image/png;base64," + raw})
+    if len(panels) != 6:
+        raise _BadInput("六宫格只出了 %d 张（要 6 张）—— worker 版本对不上？" % len(panels), 500)
+
+    out = _ok(frame=int(idx), total=int(total), name=name, size=panel_size,
+              face={"idx": int(face_i), "box": box_wh,
+                    "score": (b.get("score") if isinstance(b, dict) else None),
+                    "model": model_name, "dfm": str(dfm)},
+              panels=panels, stats=resp.get("stats") or {},
+              settings=settings, detector=detector, xseg=xseg,
+              model=model_name, dfm=str(dfm), auto=bool(auto_plan is not None),
+              ms=int(round((time.time() - t_start) * 1000.0)), cached=False)
+    with _FACE_DBG_LOCK:
+        _FACE_DBG_CACHE[key] = out
+        while len(_FACE_DBG_CACHE) > _FACE_DBG_MAX:
+            _FACE_DBG_CACHE.popitem(last=False)
+    return out
+
+
+@router.get("/api/merge/face-debug")
+@router.post("/api/merge/face-debug")
+@_api
+def merge_face_debug(body: dict = None, frame: int = None, face: int = None,
+                     idx: int = None, settings: str = "", model: str = "",
+                     models: str = "", detector: str = "", thresh: float = None,
+                     xseg_onnx: str = "", panel_size: int = None):
+    """一张脸的六宫格（3 列 × 2 行）。
+
+    GET  /api/merge/face-debug?frame=0&idx=0            —— idx = 人脸序号
+    POST /api/merge/face-debug  {"frame":0,"face":0, "settings":{…}, "models":[…]}
+
+    body / query（除 frame、face 外全部可选）：
+        frame      帧号（也认 n；**不要**用 idx 传帧号）
+        face       这一帧里第几张脸，从 0 起（也认 face_idx / idx）
+        settings   {ct_mode, blend, mask_mode, mask_erode, mask_blur, detector, face_type}
+        models     [{"name","dfm","faces"}]（不给 = 按人脸库自动判每张脸用哪个 dfm）
+        detector / thresh / xseg_onnx / panel_size(默认 256)
+
+    返回 {ok, frame, face:{idx,box,model,dfm,score}, size, panels:[{key,label,w,h,png}], stats}
+    panels 顺序固定（行优先）：
+        mask-prd     mask(dfm-pred)
+        mask-dst     mask(dst)
+        mask-both    merged(mask(dfm-pred), mask(dst))
+        dfm-pred     dfm-pred
+        dst-original dst-original
+        merged       merged
+    """
+    payload = dict(_as_dict(body))
+    _merge_query_into(payload, frame=frame, face=face, idx=idx, settings=settings,
+                      model=model, models=models, detector=detector, thresh=thresh,
+                      xseg_onnx=xseg_onnx, panel_size=panel_size)
+    return _face_debug_payload(payload)
+
+
 @router.post("/api/merge/export")
 @_api
 def merge_export(body: dict):
@@ -2773,6 +2966,66 @@ def main():
                   "per_model": per, "count": len(per),
                   "pid": os.getpid(), "models": sorted(models),
                   "models_lru": list(models), "max_models": _MAX_MODELS})
+            continue
+        if cmd == "face_debug":
+            # 单脸六宫格：只跑**这一张脸**的一次合成，把中间量拆成六张 PNG 发回去。
+            # 走的就是普通的 MergeMaskedFace，只是多带一个 capture dict ——
+            # capture 只写不读，一个像素都不改，所以第 6 格「merged」和用户在画面上
+            # 看到的那张脸是同一份像素（脸发蒙时它是最直接的证据）。
+            try:
+                raw = base64.b64decode(req.get("frame") or "")
+                frame = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+                if frame is None:
+                    raise RuntimeError("帧解码失败")
+                dfm = str(req.get("dfm") or "")
+                if not dfm or not os.path.isfile(dfm):
+                    raise RuntimeError("DFM 不存在: %s" % dfm)
+                c = req.get("config") or {}
+                cfg = MergerConfigMasked(
+                    face_type=str(c.get("face_type") or "whole_face"),
+                    mode=str(c.get("mode") or "seamless"),
+                    mask_mode=max(0, min(9, int(c.get("mask_mode", 6)))),
+                    color_transfer_mode=ct_map.get(
+                        str(c.get("color_transfer_mode") or "none").strip().lower(), 0),
+                    erode_mask_modifier=max(-100, min(100, int(c.get("erode_mask_modifier", 0)))),
+                    blur_mask_modifier=max(-100, min(100, int(c.get("blur_mask_modifier", 0)))),
+                    show_debug=False,
+                )
+                lm = np.array(req.get("landmarks") or [], dtype=np.float32)
+                if lm.ndim != 2 or lm.shape[1] < 2 or lm.shape[0] < 5:
+                    raise RuntimeError("68 点不合法: %r" % (getattr(lm, "shape", None),))
+                sess, inp_name, size, nchw = _load(dfm, rid)
+                xs = _xseg(str(req.get("xseg") or ""), rid)
+                _merger._model_input_size = size
+                cap = {}
+                MergeMaskedFace(frame, lm, cfg, _predictor(sess, inp_name, size, nchw),
+                                xseg_256_extract_func=xs, capture=cap)
+                panel_size = int(req.get("panel_size") or 256)
+                panels = []
+                for key, label, img in _merger.build_debug_panels(cap, panel_size):
+                    ok_png, buf = cv2.imencode(".png", img,
+                                               [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
+                    if not ok_png:
+                        raise RuntimeError("PNG 编码失败: %s" % key)
+                    panels.append({"key": key, "label": label,
+                                   "w": int(img.shape[1]), "h": int(img.shape[0]),
+                                   "png": base64.b64encode(buf.tobytes()).decode("ascii")})
+
+                def _mean(k):
+                    try:
+                        return round(float(np.asarray(cap.get(k), np.float32).mean()), 4)
+                    except Exception:                        # noqa: BLE001
+                        return None
+                _say({"id": rid, "ok": True, "cmd": "face_debug", "size": size,
+                      "panels": panels,
+                      "stats": {"mask_prd": _mean("prd_face_mask"),
+                                "mask_dst": _mean("dst_face_mask"),
+                                "mask_effective": _mean("effective_mask")}})
+            except Exception as e:
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+                _say({"id": rid, "ok": False,
+                      "error": "%s: %s" % (e.__class__.__name__, str(e)[:300])})
             continue
         t0 = time.time()
         try:

@@ -60,11 +60,99 @@ def _build_debug_vis(prd_face_bgr, dst_face_bgr, wrk_face_mask_a_0,
     return vis
 
 
+#: 单脸调试六宫格的格子顺序：3 列 × 2 行、行优先（前端按这个顺序排版）。
+#: 第 1 行 = 三张遮罩，第 2 行 = 三张脸图 —— 和 _build_debug_vis() 的老排版一致，
+#: 只是这里把六格拆开单独发，前端才能自己排版、点开放大。
+DEBUG_PANELS = (
+    ("mask-prd", "mask(dfm-pred)"),
+    ("mask-dst", "mask(dst)"),
+    ("mask-both", "merged(mask(dfm-pred), mask(dst))"),
+    ("dfm-pred", "dfm-pred"),
+    ("dst-original", "dst-original"),
+    ("merged", "merged"),
+)
+
+
+def build_debug_panels(capture, size=256):
+    """MergeMaskedFace(capture=…) 攒下来的中间量 → 六张**等尺寸**的 BGR 图。
+
+    返回 [(key, label, img), …]，顺序 = DEBUG_PANELS。
+    缺哪一项就给一张同尺寸黑图：六格永远都有图，前端不用判空、也不用占位。
+    """
+    cap = capture or {}
+    side = max(64, int(size or 256))
+
+    def _fit_mask(mk):
+        if mk is None:
+            return None
+        m = np.asarray(mk, np.float32)
+        while m.ndim > 2:
+            m = m[..., 0]
+        m = np.clip(m, 0, 1)
+        if m.shape[:2] != (side, side):
+            m = cv2.resize(m, (side, side), interpolation=cv2.INTER_CUBIC)
+        return m
+
+    def _mask_img(mk):
+        m = _fit_mask(mk)
+        if m is None:
+            return np.zeros((side, side, 3), np.uint8)
+        g = np.clip(m * 255.0, 0, 255).astype(np.uint8)
+        return np.stack([g, g, g], axis=-1)
+
+    def _face_img(im):
+        if im is None:
+            return np.zeros((side, side, 3), np.uint8)
+        a = np.asarray(im, np.float32)
+        if a.ndim == 2:
+            a = np.stack([a, a, a], axis=-1)
+        if a.shape[-1] > 3:
+            a = a[:, :, :3]
+        if a.shape[-1] == 3 and float(a.max(initial=0.0)) > 1.5:   # 0-255 的旧图
+            a = a / 255.0
+        a = np.clip(a, 0, 1)
+        if a.shape[:2] != (side, side):
+            a = cv2.resize(a, (side, side), interpolation=cv2.INTER_AREA)
+        return np.clip(a * 255.0, 0, 255).astype(np.uint8)
+
+    prd_m = _fit_mask(cap.get("prd_face_mask"))
+    dst_m = _fit_mask(cap.get("dst_face_mask"))
+    eff_m = _fit_mask(cap.get("effective_mask"))
+    both = (prd_m * dst_m) if (prd_m is not None and dst_m is not None) else None
+
+    merged = cap.get("merged_face")
+    if merged is None:
+        # 拿不到「真合成图」就按老公式自己混一张：prd 用**实际生效**的遮罩盖回 dst
+        prd_f, dst_f = cap.get("prd_face_bgr"), cap.get("dst_face_bgr")
+        if prd_f is not None and dst_f is not None:
+            m3 = eff_m if eff_m is not None else np.ones((side, side), np.float32)
+            mask3 = np.stack([m3] * 3, axis=-1)
+            merged = prd_f * mask3 + dst_f * (1.0 - mask3)
+
+    imgs = {
+        "mask-prd": _mask_img(prd_m),
+        "mask-dst": _mask_img(dst_m),
+        "mask-both": _mask_img(both),
+        "dfm-pred": _face_img(cap.get("prd_face_bgr")),
+        "dst-original": _face_img(cap.get("dst_face_bgr")),
+        "merged": _face_img(merged),
+    }
+    for key, _label in DEBUG_PANELS:
+        imgs.setdefault(key, np.zeros((side, side, 3), np.uint8))
+    return [(key, label, imgs[key]) for key, label in DEBUG_PANELS]
+
+
 def MergeMaskedFace(frame_img, face_landmarks, cfg, predictor_func=None,
-                    face_enhancer_func=None, xseg_256_extract_func=None):
+                    face_enhancer_func=None, xseg_256_extract_func=None,
+                    capture=None):
     """
     Merge a single face. Matches original MergeMasked.py flow exactly.
     Everything works in 0-1 float range. Predictor returns [face, prd_mask, dst_mask].
+
+    capture（可选）= 一个 dict：把这次合成的中间量塞进去（单脸六宫格调试用）。
+    它**只写不读**，不影响任何一个像素 —— 不传的时候行为和老版本逐字节一致。
+    键：dst_face_bgr / prd_face_bgr / prd_face_mask / dst_face_mask /
+        effective_mask（真正贴回去用的那张，erode+blur 之后）/ merged_face。
     """
     try:
         if isinstance(cfg.face_type, str):
@@ -141,6 +229,12 @@ def MergeMaskedFace(frame_img, face_landmarks, cfg, predictor_func=None,
             prd_face_dst_mask_a_0 = np.clip(X_dst, 0, 1)
         elif seg == 'model' and prd_face_mask_a_0 is not None and prd_face_dst_mask_a_0 is not None:
             pass  # DFM masks already set above
+
+        # 单脸调试：两张模型遮罩 + 对齐后的原脸（就在这儿留，之后 wrk 遮罩会把它们盖掉概念上）
+        if capture is not None:
+            capture["dst_face_bgr"] = dst_face_bgr
+            capture["prd_face_mask"] = prd_face_mask_a_0
+            capture["dst_face_mask"] = prd_face_dst_mask_a_0
 
         # Build working mask
         if cfg.mask_mode == 0:  # full
@@ -227,6 +321,9 @@ def MergeMaskedFace(frame_img, face_landmarks, cfg, predictor_func=None,
         if wrk_face_mask_a_0.shape[0] != output_size:
             wrk_face_mask_a_0 = cv2.resize(wrk_face_mask_a_0, (output_size, output_size), interpolation=cv2.INTER_CUBIC)
         wrk_face_mask_a = wrk_face_mask_a_0[..., None]
+        # 真正贴回去用的那一张（erode/blur/裁剪之后）—— 六宫格第 3、6 格看的就是它
+        if capture is not None:
+            capture["effective_mask"] = wrk_face_mask_a_0
 
         if 'raw' in cfg.mode:
             if cfg.mode == 'raw-rgb':
@@ -389,6 +486,21 @@ def MergeMaskedFace(frame_img, face_landmarks, cfg, predictor_func=None,
 
         if out_img is None:
             out_img = img_bgr.copy()
+
+        # 单脸调试：预测脸（色彩迁移之后）与「真的合成出来的那张脸」。
+        # merged_face 是把整帧结果按 face_mat 反变换回正脸 —— 和用户看到的像素同一份，
+        # 所以「脸看起来发蒙」时第 6 格能直接指出是遮罩、色彩迁移还是 seamless。
+        if capture is not None:
+            try:
+                capture["prd_face_bgr"] = prd_face_bgr
+                if out_img.shape[:2] == img_bgr.shape[:2]:
+                    capture["merged_face"] = cv2.warpAffine(
+                        np.clip(out_img, 0, 1), face_mat, (output_size, output_size),
+                        flags=cv2.INTER_CUBIC)
+                else:
+                    capture["merged_face"] = out_img
+            except Exception:                                # noqa: BLE001
+                pass
 
         # Debug visualization (replaces normal output)
         if cfg.mode == 'debug' or getattr(cfg, 'show_debug', False):

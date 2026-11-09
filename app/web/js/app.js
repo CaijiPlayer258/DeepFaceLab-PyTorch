@@ -3928,12 +3928,8 @@
     if (!v || !mgVideoMode()) return Promise.resolve(null);
     if (st.streamDown) return Promise.resolve(null);
     if (!v.paused) return Promise.resolve(null);                   /* 播放中不要预览 */
-    /* 视图不是「合成」时，这条老预览接口没用：它只会回一张合成图，贴上去就把
-       原图 / 调试视图盖掉了。改走 mgCmpNow（同一条 /api/merge/frame，带视图字段）。 */
-    if (mgViewGet() !== "compose") {
-      return (window.mgCmpNow ? window.mgCmpNow({ frame: Math.round(v.currentTime * ((window.__mv || {}).fps || 30)) })
-                              : Promise.resolve(null));
-    }
+    /* 只有一条合成路：/api/merge/frame（带 settings / models）。这条老预览接口
+       只在「后端连 POST /frame 都不认」时才会走到（见 mgCmpLegacy）。 */
     /* 3 秒冷却只挡「用户主动连拖」：自动重试（retry）和手动重试（force）都不受影响 */
     if (!opt.force && !opt.retry && Date.now() < st.blockUntil) return Promise.resolve(null);
 
@@ -4187,10 +4183,12 @@
 
   /* 未分配的脸 = 灰色描边。以前取 --ink-3（深色主题 #6d6d78）：压在近黑的帧上
      实测对比只有 1.0~1.3:1 —— 框其实画了，肉眼和截图都看不出来。
-     改成半透明白：叠到任意底色上都是「比底色亮两档」的浅灰（#1a1a1a 上 ≈ #9a9a9a，
-     6.1:1），亮背景那一头由 mvDrawBoxes 里的 2px 深色外描边兜底（近白帧实测 4.4~5.0:1）。 */
+     中间那版是 rgba(255,255,255,.55)：亮度够了，但**半透明白**压在脸上就是用户报的
+     「框上有一层白蒙版」。现在用等亮度的**不透明**浅灰（#9aa0ae，压在 #1a1a1a 上仍然
+     6:1），亮背景那一头由 mvDrawBoxes 里的 2px 深色外描边兜底（近白帧实测 4.4~5.0:1）。
+     规矩：描边只准用不透明色 —— 框里一个像素都不许被半透明层糊到。 */
   function mgUnassignedColor() {
-    return "rgba(255,255,255,.55)";
+    return "#9aa0ae";
   }
   window.mgUnassignedColor = mgUnassignedColor;
 
@@ -4250,217 +4248,16 @@
   function mgBoxesOn() { return true; }
   window.mgBoxesOn = mgBoxesOn;
 
-  /* ---------- 整帧视图：合成 / 调试（画面右上角，两项互斥） ----------
-     这是**整帧视图**，和「点某张脸的框切原图」是两层东西，互不冲突：
-       · 视图 = 这张图怎么出：合成（正常换脸结果）/ 调试（debug=1，合成 + 遮罩/边界/检测框叠加）
-       · 点框 = 只把那一张脸留在原像素（请求体 no_swap_faces），两种视图下都照样生效
-     契约：
-       · 视图**不进** settings：融合方式（settings.blend = 模式下拉）和所有参数一个都不动，
-         切视图只往请求体上加 debug=1 / 不加（所以这里只动一个键）。
-       · 调试 = debug=1：后端合成完再叠调试信息，**融合方式照旧**（响应里的 mode 不变）。
-         fmt 跟合成那一发保持一致，这样「调试 vs 合成」的像素差全部来自调试叠加，
-         不掺 jpg 量化噪声。
-       · 默认「合成」，不落 localStorage：不给下次进来留一个"上次是调试"的坑。
-     速度：每一发回包都按 (视图 + 帧 + 参数签名) 进缓存；切视图先命缓存同步换图
-     （<16ms），命不中才发请求 —— 300ms 内生效靠的就是这份缓存 + 后台预热。 */
-  var MG_VIEW = "compose";
-  var MG_VIEW_KEYS = ["compose", "debug"];
-  var MG_VLABEL = { compose: "合成", debug: "调试" };
-  var MG_VCACHE = {};              /* 视图+帧+参数 → dataURL */
-  var MG_VCACHE_MAX = 12;
-  var MG_VPROM = {};               /* 同一个 key 只有一发在飞 */
-  var MG_VPREF = { t: null };      /* 预热防抖 */
+  /* 视图切换（合成 / 调试）已经删掉：合成视图就是唯一视图。
+     右上角那个 #mgViewSwitch、MG_VIEW 状态、按视图预热与缓存，全都不要了 ——
+     现在合成只有一条路（mgCmpNow），每一发回包只贴当前这一帧。
+     「调试」下沉到**每张脸**：框上的「调试」按钮打开那张脸的六宫格
+     （见 mgFaceDebug* / /api/merge/face-debug），舞台不动、底图不动。 */
 
-  function mgViewGet() { return MG_VIEW; }
-  window.mgViewGet = mgViewGet;
-  function mgViewIsValid(v) { return MG_VIEW_KEYS.indexOf(String(v || "")) >= 0; }
 
-  /* 视图 → 请求体：**只加视图字段**，别的键一个都不碰（融合方式/参数一个都不许动）。
-     compose = 什么都不加（正常换脸结果）；debug = 加 debug=1（后端合成后再叠调试信息）。 */
-  function mgViewBody(base, view) {
-    var b = {};
-    Object.keys(base || {}).forEach(function (k) { b[k] = base[k]; });
-    if (view === "debug") b.debug = 1;    /* 独立参数，不是融合方式 */
-    return b;
-  }
-  window.mgViewBody = mgViewBody;
-
-  function mgViewKey(view, body) {
-    var sig = "";
-    try {
-      sig = JSON.stringify({
-        f: body && (body.frame != null ? body.frame : body.idx),
-        s: body && body.settings, m: body && body.models,
-        one: body && body.model, ns: body && body.no_swap_faces,
-        fmt: body && body.fmt, raw: body && body.raw, dbg: body && body.debug
-      });
-    } catch (e) { sig = "x" + Math.random(); }
-    return view + "|" + sig;
-  }
-
-  function mgViewCachePut(key, png) {
-    if (!key || !png) return;
-    MG_VCACHE[key] = png;
-    var ks = Object.keys(MG_VCACHE);
-    if (ks.length > MG_VCACHE_MAX) {       /* 键序 = 插入序：先进先出 */
-      for (var i = 0; i < ks.length - MG_VCACHE_MAX; i++) delete MG_VCACHE[ks[i]];
-    }
-  }
-
-  /* 只有「还是这个视图、还是这一帧」才贴：切走之后晚到的那张不许盖掉当前画面 */
-  function mgViewPaint(view, frame, png) {
-    if (!png) return false;
-    if (mgViewGet() !== view) return false;
-    if (mgCmpFrameIdx() !== frame) return false;
-    window.mgShowOverlay(png);
-    return true;
-  }
-
-  function mgViewSync() {
-    var box = document.getElementById("mgViewSwitch");
-    if (!box) return;
-    var cur = mgViewGet();
-    Array.prototype.forEach.call(box.querySelectorAll("b[data-view]"), function (b) {
-      b.classList.toggle("on", b.getAttribute("data-view") === cur);
-      b.setAttribute("aria-selected", b.getAttribute("data-view") === cur ? "true" : "false");
-    });
-    /* 舞台上的视图标记（测试/样式都能读） */
-    var stage = document.getElementById("mgStage");
-    if (stage) stage.setAttribute("data-view", cur);
-    /* 切回合成 / 调试：框、chip 要立刻回来（画在 canvas 上的描边不会自己重画） */
-    if (window.mgApplyView) window.mgApplyView();
-  }
-  window.mgViewSync = mgViewSync;
-
-  /* 发一发「某视图 · 第 n 帧」。成功回包按 key 进缓存；若那会儿正好是这个视图
-     在这一帧上，就直接贴到画面上（所以预热的那一发回来也能直接生效）。 */
-  function mgViewFetch(view, frame, opt) {
-    opt = opt || {};
-    var base = opt.base || mgCmpBody(frame);
-    if (!base) return Promise.resolve(null);
-    var body = mgViewBody(base, view);
-    var key = mgViewKey(view, body);
-    if (MG_VCACHE[key]) {
-      mgViewPaint(view, frame, MG_VCACHE[key]);
-      return Promise.resolve(MG_VCACHE[key]);
-    }
-    if (MG_VPROM[key]) return MG_VPROM[key];
-    var ctl = null;
-    try { ctl = (typeof AbortController === "function") ? new AbortController() : null; } catch (e) { ctl = null; }
-    var p = fetch("/api/merge/frame", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: ctl ? ctl.signal : undefined
-    }).then(function (r) {
-      return r.json().then(function (d) {
-        if (!r.ok || !d) throw new Error((d && (d.detail || d.error)) || ("HTTP " + r.status));
-        return d;
-      }, function () { throw new Error("HTTP " + r.status); });
-    }).then(function (d) {
-      var png = d.png || d.image || d.data || d.frame_png || "";
-      mgViewCachePut(key, png);
-      mgViewPaint(view, frame, png);
-      return png;
-    }).catch(function (e) {
-      if (e && e.name === "AbortError") return null;
-      if (opt.report) mgHint(("视图「" + (MG_VLABEL[view] || view) + "」取图失败：" +
-                              String((e && e.message) || e)).slice(0, 80));
-      return null;
-    });
-    MG_VPROM[key] = p;
-    var done = function () { delete MG_VPROM[key]; };
-    p.then(done, done);
-    return p;
-  }
-  window.mgViewFetch = mgViewFetch;
-
-  /* 切视图：先同步命中缓存（这就是 300ms 的来源），没有才发一发。 */
-  function mgViewSet(name) {
-    var v = String(name || "");
-    if (!mgViewIsValid(v)) return mgViewGet();
-    var frame = mgCmpFrameIdx();
-    var base = mgCmpBody(frame);
-    MG_VIEW = v;
-    mgViewSync();
-    if (base) {
-      var key = mgViewKey(v, mgViewBody(base, v));
-      if (MG_VCACHE[key]) {
-        mgViewPaint(v, frame, MG_VCACHE[key]);
-        mgViewPrefetchSoon();
-        return v;
-      }
-    }
-    if (v === "compose") {
-      /* 回「合成」= 要那张换完的图：走正常的合成那一条（带 abort / seq / 进度提示） */
-      var p = mgCmpNow({ frame: frame });
-      if (p && p.catch) p.catch(function () {});
-    } else {
-      /* 调试：同一份参数 + debug=1，别的键一个都不改 */
-      mgViewFetch(v, frame, { base: base, report: true });
-    }
-    mgViewPrefetchSoon();
-    return v;
-  }
-  window.mgViewSet = mgViewSet;
-
-  /* 后台把「调试」那张备好：切过去才可能「瞬间」。只在「合成」视图里备 ——
-     调试图是诊断用的，用户不切就不烧算力（它要再跑一次合成 + 叠加）。 */
-  function mgViewPrefetchSoon() {
-    if (MG_VPREF.t) clearTimeout(MG_VPREF.t);
-    MG_VPREF.t = setTimeout(function () { MG_VPREF.t = null; mgViewPrefetch(); }, 220);
-  }
-  window.mgViewPrefetchSoon = mgViewPrefetchSoon;
-
-  function mgViewPrefetch() {
-    if (mgViewGet() !== "compose") return;
-    if (document.hidden) return;
-    if (MG_CMP.wait || MG_CMP.ctl) return;      /* 正在防抖 / 正在合成：别插队抢 worker */
-    if (!(window.__mv || {}).path && !mgVidPath()) return;
-    var frame = mgCmpFrameIdx();
-    var base = mgCmpBody(frame);
-    if (!base) return;
-    var queue = ["debug"];          /* 只有「调试」需要预热：合成那一发本来就会算 */
-    (function next(i) {
-      if (i >= queue.length) return;
-      if (mgViewGet() !== "compose") return;     /* 用户已经切走了：停 */
-      var v = queue[i];
-      var key = mgViewKey(v, mgViewBody(base, v));
-      if (MG_VCACHE[key] || MG_VPROM[key]) return next(i + 1);
-      mgViewFetch(v, frame, { base: base }).then(function () {
-        setTimeout(function () { next(i + 1); }, 90);
-      });
-    })(0);
-  }
-  window.mgViewPrefetch = mgViewPrefetch;
-
-  /* 测试/自动化用（只读）：这一帧、这个视图的图是不是已经在缓存里。
-     不改变任何行为 —— 只是把「后台预热到没到」这件事暴露出来。 */
-  window.mgViewCached = function (view) {
-    var v = String(view || mgViewGet());
-    var base = mgCmpBody(mgCmpFrameIdx());
-    if (!base) return false;
-    return !!MG_VCACHE[mgViewKey(v, mgViewBody(base, v))];
-  };
-
-  /* 绑按钮：一次就够（舞台节点不重建） */
-  function mgBindViewSwitch() {
-    var box = document.getElementById("mgViewSwitch");
-    if (!box || box.dataset.bound) return;
-    box.dataset.bound = "1";
-    box.addEventListener("click", function (e) {
-      var b = e.target && e.target.closest ? e.target.closest("b[data-view]") : null;
-      if (!b || !box.contains(b)) return;
-      e.preventDefault();
-      e.stopPropagation();
-      mgViewSet(b.getAttribute("data-view"));
-    });
-    mgViewSync();
-  }
-  window.mgBindViewSwitch = mgBindViewSwitch;
-
-  /* 当前参数下的「一发请求的底稿」：视图无关的部分全在这儿，
-     视图只在外面加一个 debug 键（见 mgViewBody）。 */
+  /* 一次请求的底稿：settings / models / 帧号 / 不换脸的脸，全在这儿。
+     合成视图只有一种，所以这里就是**完整**的请求体（六宫格那条接口拿它去掉
+     idx 再补一个 face 就是自己的 body，参数永远和画面一致）。 */
   function mgCmpBody(frame) {
     frame = Math.max(0, parseInt(frame, 10) || 0);
     var mv = window.__mv || {};
@@ -4499,9 +4296,6 @@
     mgSyncFaceCards();
     if (window.mvRedrawBoxes) window.mvRedrawBoxes();   /* 实线/虚线立刻换 */
     if (opt && opt.silent) return mgFaceIsRawView(i);
-    /* 视图 = 原图：整帧本来就是原像素，这一发重算只会白跑一次合成。
-       标记照记（切回合成/调试时它立刻生效），画面不动。 */
-    if (mgViewGet() === "raw") return mgFaceIsRawView(i);
     var p = (window.mgCmpNow ? window.mgCmpNow() : null);
     if (p && p.catch) p.catch(function () {});
     return mgFaceIsRawView(i);
@@ -4544,7 +4338,7 @@
     /* 点在其它控件上不算：左右栏、时间轴、顶部的「人脸数据库」胶囊、toast…
        它们和舞台在同一个坐标系里，光靠"点落在框的矩形里"会误判。 */
     var PICK_SKIP = ".mgfc, button, a, input, select, label, #toastroot, " +
-                    ".mgleft, .mgright, .mtl, .mgdbentry, .mgviews, .mgviewsw";
+                    ".mgleft, .mgright, .mtl, .mgdbentry, .mgviews, .mgfgrid";
 
     document.addEventListener("pointerdown", function (e) {
       if (e.button != null && e.button !== 0) { MG_PICK.id = null; return; }
@@ -4600,6 +4394,264 @@
     mgRenderFaces();
   }
 
+  /* ---------- 单脸调试：六宫格（3 列 × 2 行） ----------
+     用户点某张脸框上的「调试」→ 舞台换成这张脸的特写六宫格：
+       第 1 行  (1) mask(dfm-pred)      (2) mask(dst)    (3) merged(mask(dfm-pred), mask(dst))
+       第 2 行  (4) dfm-pred            (5) dst-original (6) merged
+     图从后端 GET/POST /api/merge/face-debug 来（**六张独立图**，前端自己排版，
+     所以点任意一格就能放大）。后端复用预览 worker 里那一份 MergeMaskedFace，
+     参数和画面用的是同一份 mgCmpBody（去掉 idx 再补 face）。
+     六宫格是**盖在舞台上的一层**：底下的合成图、描边 canvas、chip 一个都不动，
+     所以点「返回」= 把这层收起来，画面和进来之前逐像素一致。 */
+  var MG_FDBG_CELLS = [
+    ["mask-prd", "mask(dfm-pred)"],
+    ["mask-dst", "mask(dst)"],
+    ["mask-both", "merged(mask(dfm-pred), mask(dst))"],
+    ["dfm-pred", "dfm-pred"],
+    ["dst-original", "dst-original"],
+    ["merged", "merged"]
+  ];
+  var MG_FDBG = { face: -1, seq: 0, data: null, zoom: "", busy: false, err: "" };
+
+  function mgFdbgEl() { return document.getElementById("mgFaceGrid"); }
+
+  /* 这张脸的六宫格请求体：和画面上那一发**同一套参数**，
+     只把 idx（老接口里是帧号）摘掉 —— 这个接口的 face 才是「第几张脸」。 */
+  function mgFdbgBody(i) {
+    var frame = mgCmpFrameIdx();
+    var base = window.mgCmpBody ? (window.mgCmpBody(frame) || {}) : {};
+    var body = {};
+    Object.keys(base).forEach(function (k) { body[k] = base[k]; });
+    delete body.idx;
+    body.frame = frame;
+    body.n = frame;
+    body.face = parseInt(i, 10) || 0;
+    body.panel_size = 256;
+    return body;
+  }
+  window.mgFdbgBody = mgFdbgBody;
+
+  function mgFdbgSkeleton(i, frame) {
+    var el = mgFdbgEl();
+    if (!el) return null;
+    el.innerHTML = "";
+    var hd = document.createElement("div");
+    hd.className = "mgfg-hd";
+    var back = document.createElement("button");
+    back.type = "button";
+    back.id = "mgFaceGridBack";
+    back.className = "mgfg-back";
+    back.textContent = "← 返回";
+    back.title = "回到合成视图（Esc）";
+    var tt = document.createElement("span");
+    tt.className = "mgfg-tt";
+    tt.textContent = "第 " + i + " 张脸 · 六宫格";
+    var sub = document.createElement("span");
+    sub.className = "mgfg-sub";
+    sub.id = "mgfgSub";
+    sub.textContent = "正在算第 " + frame + " 帧…";
+    hd.appendChild(back);
+    hd.appendChild(tt);
+    hd.appendChild(sub);
+    el.appendChild(hd);
+
+    var body = document.createElement("div");
+    body.className = "mgfg-body";
+    body.id = "mgfgBody";
+    MG_FDBG_CELLS.forEach(function (pair, k) {
+      var cell = document.createElement("figure");
+      cell.className = "mgfg-cell";
+      cell.setAttribute("data-k", pair[0]);
+      cell.setAttribute("data-no", String(k + 1));
+      cell.innerHTML =
+        '<figcaption><b class="mgfg-no">' + (k + 1) + '</b>' +
+        '<span class="mgfg-nm">' + pair[1] + '</span></figcaption>' +
+        '<div class="mgfg-im"><img alt="' + pair[1] + '"></div>';
+      body.appendChild(cell);
+    });
+    el.appendChild(body);
+    return el;
+  }
+
+  function mgFdbgFill(d) {
+    var el = mgFdbgEl();
+    if (!el) return;
+    var by = {};
+    ((d && d.panels) || []).forEach(function (p) { if (p && p.key) by[p.key] = p; });
+    Array.prototype.forEach.call(el.querySelectorAll(".mgfg-cell"), function (cell) {
+      var k = cell.getAttribute("data-k");
+      var p = by[k] || null;
+      var img = cell.querySelector("img");
+      if (p && p.png) {
+        img.src = p.png;
+        cell.classList.add("has");
+        cell.setAttribute("data-w", String(p.w || 0));
+        cell.setAttribute("data-h", String(p.h || 0));
+      } else {
+        img.removeAttribute("src");
+        cell.classList.remove("has");
+      }
+    });
+    var sub = document.getElementById("mgfgSub");
+    if (sub) {
+      var st = (d && d.stats) || {};
+      var bits = [];
+      if (d && d.face && d.face.model) bits.push("模型 " + d.face.model);
+      if (st.mask_prd != null) bits.push("遮罩覆盖 " + Math.round(Number(st.mask_prd) * 100) + "%");
+      if (d && d.frozen) bits.push("冻结参数");
+      if (d && d.ms != null) bits.push(Number(d.ms) + "ms");
+      if (d && d.cached) bits.push("缓存");
+      sub.textContent = bits.join(" · ");
+    }
+  }
+  window.mgFdbgFill = mgFdbgFill;
+
+  function mgFaceDebugOpen(i) {
+    i = parseInt(i, 10);
+    if (isNaN(i) || i < 0) return null;
+    var el = mgFdbgEl();
+    if (!el) return null;
+    var frame = mgCmpFrameIdx();
+    MG_FDBG.face = i;
+    MG_FDBG.zoom = "";
+    MG_FDBG.data = null;
+    MG_FDBG.err = "";
+    mgFdbgSkeleton(i, frame);
+    el.hidden = false;
+    el.setAttribute("aria-hidden", "false");
+    el.classList.remove("zoom");
+    var st = document.getElementById("mgStage");
+    if (st) st.setAttribute("data-face-debug", String(i));
+    mgFaceDebugBind();
+    var seq = ++MG_FDBG.seq;
+    MG_FDBG.busy = true;
+    fetch("/api/merge/face-debug", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(mgFdbgBody(i))
+    }).then(function (r) {
+      return r.json().then(function (d) {
+        if (!r.ok || !d || d.ok === false) {
+          throw new Error((d && (d.detail || d.error)) || ("HTTP " + r.status));
+        }
+        return d;
+      }, function () { throw new Error("HTTP " + r.status); });
+    }).then(function (d) {
+      if (seq !== MG_FDBG.seq) return null;      /* 已经关了/换了另一张脸：丢掉 */
+      MG_FDBG.busy = false;
+      MG_FDBG.data = d;
+      mgFdbgFill(d);
+      return d;
+    }).catch(function (e) {
+      if (seq !== MG_FDBG.seq) return null;
+      MG_FDBG.busy = false;
+      MG_FDBG.err = String((e && e.message) || e);
+      var sub = document.getElementById("mgfgSub");
+      if (sub) sub.textContent = "六宫格取图失败：" + MG_FDBG.err.slice(0, 90);
+      if (window.mgHint) window.mgHint("");
+      if (window.toast) {
+        try { toast("六宫格取图失败", MG_FDBG.err.slice(0, 90), "warn", 5000); } catch (x) {}
+      }
+      return null;
+    });
+    return el;
+  }
+  window.mgFaceDebugOpen = mgFaceDebugOpen;
+
+  function mgFaceDebugClose() {
+    MG_FDBG.seq++;                 /* 在飞的那一发回来也不要了 */
+    MG_FDBG.face = -1;
+    MG_FDBG.data = null;
+    MG_FDBG.busy = false;
+    MG_FDBG.zoom = "";
+    var el = mgFdbgEl();
+    if (el) {
+      el.hidden = true;
+      el.setAttribute("aria-hidden", "true");
+      el.classList.remove("zoom", "on");
+      el.innerHTML = "";
+    }
+    var st = document.getElementById("mgStage");
+    if (st) st.removeAttribute("data-face-debug");
+    return true;
+  }
+  window.mgFaceDebugClose = mgFaceDebugClose;
+
+  /* 点格子放大 / 返回 / Esc —— 只绑一次（网格节点会重建，事件挂在容器上） */
+  function mgFaceDebugBind() {
+    var el = mgFdbgEl();
+    if (!el || el.dataset.bound) return;
+    el.dataset.bound = "1";
+    el.addEventListener("click", function (e) {
+      var t = e.target;
+      if (t && t.closest && t.closest(".mgfg-back")) {
+        e.preventDefault();
+        mgFaceDebugClose();
+        return;
+      }
+      var cell = t && t.closest ? t.closest(".mgfg-cell") : null;
+      if (!cell || !el.contains(cell)) return;
+      var k = String(cell.getAttribute("data-k") || "");
+      if (!cell.classList.contains("has")) return;
+      /* 再点一次同一格 = 缩回去 */
+      if (MG_FDBG.zoom === k) {
+        MG_FDBG.zoom = "";
+        el.classList.remove("zoom");
+        Array.prototype.forEach.call(el.querySelectorAll(".mgfg-cell.on"), function (c) {
+          c.classList.remove("on");
+        });
+        return;
+      }
+      MG_FDBG.zoom = k;
+      el.classList.add("zoom");
+      Array.prototype.forEach.call(el.querySelectorAll(".mgfg-cell"), function (c) {
+        c.classList.toggle("on", c === cell);
+      });
+    });
+    if (!window.__mgFdbgKeyBound) {
+      window.__mgFdbgKeyBound = 1;
+      document.addEventListener("keydown", function (e) {
+        if (e.key !== "Escape") return;
+        var box = mgFdbgEl();
+        if (!box || box.hidden) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (MG_FDBG.zoom) {          /* 先退出放大，再退六宫格 */
+          MG_FDBG.zoom = "";
+          box.classList.remove("zoom");
+          Array.prototype.forEach.call(box.querySelectorAll(".mgfg-cell.on"), function (c) {
+            c.classList.remove("on");
+          });
+          return;
+        }
+        mgFaceDebugClose();
+      });
+    }
+  }
+  window.mgFaceDebugBind = mgFaceDebugBind;
+
+  /* 测试/自动化用（只读）：六宫格现在开着没、哪张脸、六格都拿到图没有 */
+  window.mgFaceDebugState = function () {
+    var el = mgFdbgEl();
+    if (!el) return { present: false };
+    var cells = Array.prototype.map.call(el.querySelectorAll(".mgfg-cell"), function (c) {
+      var im = c.querySelector("img");
+      var r = c.getBoundingClientRect();
+      return { k: c.getAttribute("data-k"), no: c.getAttribute("data-no"),
+               nm: String((c.querySelector(".mgfg-nm") || {}).textContent || ""),
+               has: c.classList.contains("has"),
+               src: im ? String(im.getAttribute("src") || "").slice(0, 32) : "",
+               nw: im ? im.naturalWidth : 0, nh: im ? im.naturalHeight : 0,
+               w: Math.round(r.width), h: Math.round(r.height) };
+    });
+    return { present: true, open: !el.hidden, face: MG_FDBG.face,
+             zoom: MG_FDBG.zoom, busy: MG_FDBG.busy, err: MG_FDBG.err,
+             rect: (function () { var r = el.getBoundingClientRect();
+                                 return [r.x, r.y, r.width, r.height]; })(),
+             cells: cells };
+  };
+
+
   /* 换素材了：脸序号是「这一帧的检测顺序」，把上一份素材的分配带过去毫无意义
      （3 张脸的项目点了 face 2 不换脸，再开一个 1 张脸的视频，那张脸就永远不换）。 */
   function mgClearFaceAssign() {
@@ -4617,6 +4669,8 @@
     MG_FACE_RAW = [];
     var layer = document.getElementById("mgFaceLayer");
     if (layer) layer.innerHTML = "";
+    /* 脸都没了：还开着的六宫格指的就是不存在的脸，收掉 */
+    if (window.mgFaceDebugClose) window.mgFaceDebugClose();
   }
   window.mgResetFaces = mgResetFaces;
 
@@ -4735,7 +4789,22 @@
     }
     dd.appendChild(ring);
 
-    /* 右下角外侧：加进人脸数据库 */
+    /* 右下角外侧，和 ＋ 并排：这张脸的六宫格调试（3 列 × 2 行特写）。
+       位置靠右对齐、在 ＋ 左边一格 —— 两个按钮同高同圆角，视觉上是一对。 */
+    var dbg = document.createElement("button");
+    dbg.type = "button";
+    dbg.className = "mgfdbg";
+    dbg.textContent = "调试";
+    dbg.title = "看这张脸的六宫格（遮罩 / 预测脸 / 原脸 / 合成）";
+    dbg.setAttribute("data-tip", "看这张脸的六宫格");
+    dbg.setAttribute("aria-label", "看这张脸的六宫格");
+    dbg.style.top = Math.round(r.h + 3) + "px";
+    dbg.addEventListener("click", function (e) {
+      e.stopPropagation();
+      mgFaceDebugOpen(i);
+    });
+
+    /* 最右下角外侧：加进人脸数据库 */
     var plus = document.createElement("button");
     plus.type = "button";
     plus.className = "mgplus";
@@ -4751,6 +4820,7 @@
 
     card.appendChild(vtag);
     card.appendChild(dd);
+    card.appendChild(dbg);
     card.appendChild(plus);
     return card;
   }
@@ -4769,6 +4839,9 @@
         card.style.top = rc.y + "px";
         var pl = card.querySelector(".mgplus");
         if (pl) pl.style.top = Math.round(rc.h + 3) + "px";
+        /* 「调试」和 ＋ 同一行（并排），高度跟着框走 */
+        var dg = card.querySelector(".mgfdbg");
+        if (dg) dg.style.top = Math.round(rc.h + 3) + "px";
       }
       var nm = mgFaceModel(i);
       var color = nm ? mgModelColor(nm) : "";
@@ -4927,10 +5000,8 @@
 
     var seq = ++MG_CMP.seq;
     if (MG_CMP.ctl) { try { MG_CMP.ctl.abort(); } catch (e) {} MG_CMP.ctl = null; }
-    /* 底稿见 mgCmpBody（视图无关的那一半）；视图只往上加 raw / debug 两个键 */
-    var view = mgViewGet();
-    var body = mgViewBody(mgCmpBody(frame), view);
-    var vkey = mgViewKey(view, body);
+    /* 请求体全在 mgCmpBody 里：合成只有这一种出图方式（没有视图字段可加了） */
+    var body = mgCmpBody(frame);
     var ctrl = (typeof AbortController === "function") ? new AbortController() : null;
     MG_CMP.ctl = ctrl;
     mgCmpNote(true);
@@ -4965,14 +5036,10 @@
       mgCmpBusyClear();
       mgCmpNote(false);
       var png = d.png || d.image || d.data || d.frame_png || "";
-      /* 进缓存：切视图时先命它（这才是「300ms 内生效」的来源） */
-      mgViewCachePut(vkey, png);
-      /* 只在「还是这个视图、还是这一帧」时贴图：切视图/切帧之后晚到的结果不许盖画面 */
-      if (png) { mgViewPaint(view, frame, png); mgHint(""); }
+      /* 过期响应上面已经丢了：到这儿就一定是当前这一帧，直接贴 */
+      if (png) { window.mgShowOverlay(png); mgHint(""); }
       /* 每张脸被判给了哪个组 → chip 上直接显示（用户手动改则覆盖） */
       mgApplyFacePlan(d);
-      /* 合成这一发落地 → 顺手把「调试」那一张备好（有 220ms 防抖，且只在空闲时） */
-      if (view === "compose") mgViewPrefetchSoon();
       return d;
     }).catch(function (e) {
       if (seq !== MG_CMP.seq) return null;
@@ -5051,6 +5118,8 @@
     opt = opt || {};
     var mv = window.__mv || {};
     if (!mv.path && !mgVidPath()) return;
+    /* 换帧了：开着的那张脸的六宫格是上一帧的，直接收掉（别让人对着旧证据调参） */
+    if (window.mgFaceDebugClose) window.mgFaceDebugClose();
     var n = mgCmpFrameIdx();
     if (!opt.skipDetect) {
       try { window.mvDetect(n); } catch (e) {}
@@ -5479,8 +5548,8 @@
 
     /* 点框切这张脸的合成/原图：舞台上的指针判定（阈值 4px），只绑一次 */
     if (window.mgBindFacePick) window.mgBindFacePick();
-    /* 画面右上角的整帧视图切换（合成 / 原图 / 调试）：只绑一次 */
-    if (window.mgBindViewSwitch) window.mgBindViewSwitch();
+    /* 六宫格上的「返回」/ 点格放大：只绑一次 */
+    if (window.mgFaceDebugBind) window.mgFaceDebugBind();
 
     /* 「模式」下拉（4 个融合方式）和右边那个两档分段共用同一个值：动哪个，
        另一个跟着高亮。以前 blend 只读分段、下拉写 mode，后端以 blend 为准 ——

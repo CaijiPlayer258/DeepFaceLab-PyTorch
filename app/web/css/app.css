@@ -5114,26 +5114,50 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 }
 .mgdbbdg[hidden] { display: none !important; }
 
-/* chip / ＋ 的挂载层：和 canvas 同一个 6px 内缩盒子，坐标才能直接用 canvas 算出来的 */
-.mgflayer { position: absolute; inset: 6px; z-index: 4; pointer-events: none; }
+/* chip / 调试 / ＋ 的挂载层：和 canvas 同一个 6px 内缩盒子，坐标才能直接用 canvas 算出来的。
+   三层（这里 · .mgfc 锚点 · canvas 描边）**一律全透明**：框里一个像素都不许落，
+   验收是这么量的 —— 框中心 20×20 和底图逐像素差 0。所以：
+   background / backdrop-filter / filter / mix-blend-mode 全部显式写死，
+   免得哪天继承到一条半透明白底（用户报的「框上有一层白蒙版」就是这类东西）。 */
+.mgflayer {
+  position: absolute; inset: 6px; z-index: 4; pointer-events: none;
+  background: transparent; backdrop-filter: none; -webkit-backdrop-filter: none;
+  filter: none; mix-blend-mode: normal; opacity: 1;
+}
 .mgflayer > * { pointer-events: auto; }
 
-/* 零尺寸锚点落在框的右上角；子元素从锚点往「上 / 下 / 左」长，就是「外侧」 */
-.mgfc { position: absolute; width: 0; height: 0; }
+/* 零尺寸锚点落在框的右上角；子元素从锚点往「上 / 下 / 左」长，就是「外侧」。
+   width/height 必须为 0：它不是一块「盖在脸上的方块」，只是三个按钮的坐标原点。 */
+.mgfc {
+  position: absolute; width: 0; height: 0;
+  background: transparent; border: 0; box-shadow: none;
+  filter: none; mix-blend-mode: normal; opacity: 1;
+}
 .mgfc > .mgfdd { position: absolute; right: 0; bottom: 3px; }
 .mgfc > .mgplus { position: absolute; right: 0; }
+.mgfc > .mgfdbg { position: absolute; right: 26px; }
 
-/* 模型 chip：复用 .ddbtn 的骨架，压成小胶囊（不引原生 <select> 的弹层） */
-.mgfb {
-  width: auto; max-width: 148px; height: 20px; padding: 0 8px;
-  gap: 4px; border-radius: 999px;
-  font-size: 10.5px; line-height: 1;
-  background: var(--panel);
+/* 三个按钮（模型 chip / 调试 / ＋）同一套形状：**圆角矩形**，不是胶囊。
+   高度 22、圆角 6、同一底色描边阴影 —— 大小一致是验收项，别再单独改其中一个。 */
+.mgfb, .mgplus, .mgfdbg {
+  height: 22px; border-radius: 6px;
+  border: 1px solid var(--line-strong);
+  background: var(--panel); color: var(--ink-2);
+  font-family: inherit; font-size: 10.5px; line-height: 1;
+  cursor: pointer;
   box-shadow: 0 1px 5px rgba(0, 0, 0, .16);
+  transition: color .13s ease, border-color .13s ease, transform .13s ease;
+}
+
+/* 模型 chip：复用 .ddbtn 的骨架，压成小方角按钮（不引原生 <select> 的弹层） */
+.mgfb {
+  width: auto; max-width: 148px; padding: 0 8px;
+  gap: 4px; display: flex; align-items: center;
+  font-size: 10.5px;
 }
 .mgfb .ddtxt { max-width: 124px; font-weight: 500; }
 .mgfb.has { font-weight: 600; }
-/* 小胶囊上的箭头再小一号 */
+/* 小按钮上的箭头再小一号 */
 .mgfb::after { border-left-width: 3px; border-right-width: 3px; border-top-width: 4px; }
 .mgfmenu {
   min-width: 132px; max-width: 200px; max-height: 190px;
@@ -5152,17 +5176,19 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 }
 .mgfring[hidden] { display: none !important; }
 
-/* 右下角外侧的「＋」 */
+/* 右下角外侧的「＋」（形状见上面 .mgfb/.mgplus/.mgfdbg 那条共用规则） */
 .mgplus {
   display: flex; align-items: center; justify-content: center;
-  width: 20px; height: 20px; padding: 0;
-  border: 1px solid var(--line-strong); border-radius: 999px;
-  background: var(--panel); color: var(--ink-2);
-  font-family: inherit; font-size: 12px; line-height: 1; cursor: pointer;
-  box-shadow: 0 1px 5px rgba(0, 0, 0, .16);
-  transition: color .13s ease, border-color .13s ease, transform .13s ease;
+  width: 22px; padding: 0;
+  font-size: 12px;
 }
-.mgplus:hover { color: var(--accent); border-color: var(--accent); transform: scale(1.08); }
+/* 「调试」：和 ＋ 并排（在它左边一格），文字按钮，高度/圆角/字号和 chip 一样 */
+.mgfdbg {
+  display: flex; align-items: center; justify-content: center;
+  width: auto; min-width: 22px; padding: 0 7px;
+  white-space: nowrap;
+}
+.mgplus:hover, .mgfdbg:hover { color: var(--accent); border-color: var(--accent); }
 .mgplus:disabled { opacity: .45; cursor: default; transform: none; }
 
 /* 「正在合成…」：画面右下角的小字，不吃点击、不遮画面 */
@@ -5202,33 +5228,90 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 }
 .mgvtag[hidden] { display: none !important; }
 
-/* 画面右上角的整帧视图切换：合成 / 原图 / 调试。
-   层级压在画面各层之上（video/帧图 1 < 合成图 2 < 描边 3 < chip 4 < 小字 6 < 这里 7），
-   否则会被不透明的合成图盖住、点不到。它是**整帧视图**，不跟任何一张脸走 ——
-   和「点某张脸的框切那张脸的原图」（.mgvtag / no_swap_faces）是两层东西。 */
-.mgviewsw {
-  position: absolute; right: 10px; top: 10px; z-index: 7;
-  display: flex; align-items: center; gap: 2px; padding: 2px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, .16);
-  background: rgba(12, 16, 24, .62);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, .30);
-  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
-}
-.mgviewsw > b {
-  padding: 3px 10px; border-radius: 999px;
-  font-size: 11.5px; line-height: 1.5; font-weight: 500;
-  color: rgba(255, 255, 255, .80);
-  cursor: pointer; user-select: none; white-space: nowrap;
-  transition: background-color .13s ease, color .13s ease;
-}
-.mgviewsw > b:hover { color: #fff; background: rgba(255, 255, 255, .10); }
-.mgviewsw > b.on { background: var(--accent); color: var(--accent-ink, #0b0f14); font-weight: 600; }
-.mgviewsw > b.on:hover { background: var(--accent); }
-.mgviewsw > b:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* 右上角的整帧视图切换（合成 / 调试）已经删掉：合成视图就是唯一视图。
+   原来那颗胶囊是舞台上唯一带 backdrop-filter 的东西 —— 它让整个舞台多进一个
+   「backdrop root」，Chrome 在某些合成路径下会把底图叠着糊一层（脸发蒙）。
+   控件没了，舞台上再没有任何模糊/半透明白的容器，这一条也就跟着没了。 */
 
 /* ＋ 正在发请求：只做视觉禁用。/api/merge/faces/add 一动就落盘，
    连点 10 次 = 10 张脸（用户的意图），所以按钮**不真 disabled** ——
    真 disabled 会把后面 9 次点击直接吞掉；这里排队，一次只飞一发。 */
 .mgplus.busy { opacity: .45; cursor: progress; }
+
+/* ============================================================================
+   单脸调试 · 六宫格（点框上的「调试」进来）
+   3 列 × 2 行，整块贴合舞台（inset:0 在 .mgstage 里）：
+     第 1 行 mask(dfm-pred) · mask(dst) · merged(mask(dfm-pred), mask(dst))
+     第 2 行 dfm-pred       · dst-original · merged
+   它只是**盖在舞台上面的一层**：底下的合成图 / 描边 canvas / chip 一个都不动，
+   所以点「返回」收起来以后，画面和进来之前逐像素一致。
+   刻意不用 backdrop-filter：舞台上不能再出现任何模糊层（脸会被糊）。
+   ========================================================================== */
+.mgfgrid {
+  position: absolute; inset: 0; z-index: 9;
+  display: flex; flex-direction: column; gap: 8px;
+  box-sizing: border-box; padding: 10px;
+  background: var(--bg);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.mgfgrid[hidden] { display: none !important; }
+
+.mgfg-hd { display: flex; align-items: center; gap: 10px; flex: none; min-width: 0; }
+.mgfg-back {
+  height: 22px; padding: 0 9px; border-radius: 6px;
+  border: 1px solid var(--line-strong); background: var(--panel); color: var(--ink-1);
+  font-family: inherit; font-size: 11px; line-height: 1; cursor: pointer;
+  flex: none;
+  transition: color .13s ease, border-color .13s ease;
+}
+.mgfg-back:hover { color: var(--accent); border-color: var(--accent); }
+.mgfg-back:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mgfg-tt { font-size: 12px; font-weight: 600; color: var(--ink-1); white-space: nowrap; }
+.mgfg-sub {
+  margin-left: auto; font-size: 11px; color: var(--ink-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 六格：等高同宽（1fr × 1fr），格子里的图画在 .mgfg-im 里等比缩放 */
+.mgfg-body {
+  flex: 1 1 auto; min-height: 0;
+  display: grid; gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+}
+.mgfg-cell {
+  position: relative; margin: 0; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.mgfg-cell figcaption {
+  flex: none; display: flex; align-items: center; gap: 5px;
+  padding: 3px 6px; min-width: 0;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+  font-size: 10.5px; line-height: 1.5; color: var(--ink-2);
+}
+.mgfg-no {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 15px; height: 15px; border-radius: 4px;
+  background: var(--accent-soft); color: var(--accent);
+  font-size: 9.5px; font-weight: 700; font-style: normal;
+  font-variant-numeric: tabular-nums;
+}
+.mgfg-nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mgfg-im {
+  flex: 1 1 auto; min-height: 0;
+  display: grid; place-items: center;
+  background: var(--panel);
+}
+.mgfg-im img { display: block; max-width: 100%; max-height: 100%; }
+
+/* 点一格放大：其它格 display:none，这一格吃满整个网格；再点一次（或 Esc）缩回去 */
+.mgfg-cell.has { cursor: zoom-in; }
+.mgfgrid.zoom .mgfg-body { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+.mgfgrid.zoom .mgfg-cell:not(.on) { display: none; }
+.mgfgrid.zoom .mgfg-cell.on { cursor: zoom-out; }
 

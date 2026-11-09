@@ -669,17 +669,16 @@
               <span>人脸数据库</span>
               <i class="mgdbbdg" id="mgDbBadge" hidden>0</i>
             </button>
-            <!-- 视图不再有分段控件：框始终显示，点框内部 = 只把那一张脸切「合成 ↔ 原图」 -->
+            <!-- 合成视图就是唯一视图（不再有「合成 / 调试」切换）：框始终显示，
+                 点框内部 = 只把那一张脸切「合成 ↔ 原图」 -->
             <div class="mgstage" id="mgStage"><span id="mgStageHint">选择视频后显示</span><video id="mgVideo" playsinline muted preload="metadata"></video><img id="mgPreview" alt="">
-              <!-- 右上角：整帧视图（合成 / 调试）。只有两项，互斥。
-                   和「点某张脸的框切那张脸的原图」是两层东西：这里换的是**整张图**怎么出，
-                   点框只换那一张脸（整帧原图那条路由 per-face 点框覆盖，不再单列一项）。 -->
-              <div class="mgviewsw" id="mgViewSwitch" role="tablist" aria-label="视图">
-                <b class="on" data-view="compose" role="tab" aria-selected="true" title="正常换脸结果">合成</b>
-                <b data-view="debug" role="tab" aria-selected="false" title="调试画面：叠加遮罩、边界与检测框">调试</b>
-              </div>
-              <!-- 每张脸的模型 chip / ＋ 按钮挂在这一层（canvas 只负责 2px 描边） -->
+              <!-- 每张脸的模型 chip / 调试 / ＋ 按钮挂在这一层（canvas 只负责 2px 描边）。
+                   .mgfc 是 0×0 透明锚点：框内一个像素都不许落（验收按像素断言）。 -->
               <div class="mgflayer" id="mgFaceLayer"></div>
+              <!-- 单脸调试六宫格：点框上的「调试」进来，点「返回」回合成视图。
+                   整块盖在舞台上但不碰底下的图 —— 返回时画面逐像素和进来前一致。 -->
+              <div class="mgfgrid" id="mgFaceGrid" hidden aria-hidden="true" role="dialog"
+                   aria-label="单脸六宫格调试"></div>
               <span class="mgcnote" id="mgCmpNote" hidden>正在合成…</span>
             </div>
           </div>

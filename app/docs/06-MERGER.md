@@ -37,6 +37,7 @@
 | GET | `/api/merge/export-project/status` | 项目导出进度：`done/total/frame_fps/skipped/failed/warnings/missing/encode` |
 | POST | `/api/merge/export-project/cancel` | 取消项目导出（已写好的帧保留） |
 | POST | `/api/merge/reveal` | 在资源管理器里定位文件/目录（「打开所在目录」） |
+| GET/POST | `/api/merge/face-debug` | **一张脸的六宫格**：`frame` + `face`（人脸序号，也认 `idx`）→ 六张独立图 + 每格的名字/尺寸；参数同 `/api/merge/frame`（`settings/models/detector/xseg_onnx`），不给 `models` 就按人脸库自动判 |
 
 ## 二之一、每张脸用哪个 dfm：按人脸库自动判定
 
@@ -46,6 +47,37 @@
 保持原像素（绝不兜给"第 0 个模型"）。语义是「组里的人脸 = 那个组的 dfm」，详见
 [12-FACE-DB.md](12-FACE-DB.md)。手动指定（`models: [{name, faces}]`）优先，此时
 响应里 `faces[].auto=false`。
+
+## 二之二、单脸六宫格调试（`/api/merge/face-debug`）
+
+界面右上角那颗「合成 / 调试」整帧切换已经删掉：**合成视图就是唯一视图**。
+「调试」下沉到每张脸 —— 框下面和「＋」并排有个「调试」按钮，点它把舞台换成
+这张脸的特写六宫格（3 列 × 2 行，行优先）：
+
+| | 第 1 列 | 第 2 列 | 第 3 列 |
+|---|---|---|---|
+| 第 1 行 | `mask(dfm-pred)` | `mask(dst)` | `merged(mask(dfm-pred), mask(dst))` |
+| 第 2 行 | `dfm-pred` | `dst-original` | `merged` |
+
+```
+GET  /api/merge/face-debug?frame=0&idx=0        # idx = 这一帧里第几张脸，从 0 起
+POST /api/merge/face-debug  {"frame":0,"face":0,"settings":{…},"models":[…]}
+→ {"ok":true, "frame":0, "size":256,
+   "face":{"idx":0,"box":[x,y,w,h],"model":"<dfm 名>","dfm":"…","score":0.69},
+   "panels":[{"key":"mask-prd","label":"mask(dfm-pred)","w":256,"h":256,
+              "png":"data:image/png;base64,…"}, … 6 个，顺序固定 …],
+   "stats":{"mask_prd":0.18,"mask_dst":0.17,"mask_effective":0.17}}
+```
+
+* **图从哪来**：复用预览 worker（同一份 `MergeMaskedFace`、同一批常驻 DFM），
+  只多跑**这一张脸**的一次合成，把中间量截下来 —— 不重载模型、不另起进程。
+  `MergeMaskedFace(capture=…)` 只写不读，合成像素一个都不变，所以第 6 格
+  `merged` 和用户在画面上看到的那张脸是同一份像素（脸发蒙时它是直接证据）。
+* 六个格子在 `MergeStudio/core/merger.py::build_debug_panels()` 里生成，**等尺寸**
+  （默认 256×256），缺哪一项就给同尺寸黑图 —— 六格永远都有图。
+* 结果是六张 data URL，前端自己排版，所以点任意一格能放大（再点一次 / `Esc` 缩回去）。
+* 前端把它当**盖在舞台上的一层**：底图、描边 canvas、chip 一个都不动，点「返回」
+  收起来以后画面与进入前逐像素一致（验收：`app/tools/merge_face_debug_accept.py`）。
 
 ## 三、为什么要「抽帧 + 对齐」两步
 
