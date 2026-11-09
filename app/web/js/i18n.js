@@ -1700,6 +1700,18 @@
     "选模型后立刻重算这一帧": "Re-composes this frame as soon as a model is picked"
   });
 
+  /* 合成器 · 画面右上角的**整帧视图**切换（合成 / 原图 / 调试）。
+     这一批和上面的「融合方式」分开记：视图不是融合方式，"合成/原图/调试" 这三个
+     之前只是散落在别处（合成 = Merge、原图 = Source、调试 = Debug），这里补的是
+     按钮上的 tooltip 和分组名；下拉里被拿掉的 original / raw-rgb / raw-predict /
+     debug 本来就没有词条（它们一直是英文枚举值，不是界面文案），不用删。 */
+  Object.assign(DICT, {
+    "视图": "View",
+    "正常换脸结果": "Normal merged result",
+    "调试画面：叠加遮罩、边界与检测框": "Debug view — masks, boundaries and boxes overlaid",
+    "融合方式（模式）": "Blending mode"
+  });
+
   window.I18N = {
     apply: apply,
     refresh: function () { apply(lang); },

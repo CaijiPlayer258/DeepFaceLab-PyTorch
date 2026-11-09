@@ -3432,6 +3432,7 @@
       var show = !!st.png && !st.playing;
       p.style.display = show ? "block" : "none";
     }
+    /* 两种视图（合成 / 调试）都保留框和 chip：点框切单脸原图在哪一态下都要能用 */
     var cv = document.querySelector("#mgStage canvas.mgovl");
     if (cv) cv.style.display = "";
     var layer = document.getElementById("mgFaceLayer");
@@ -3927,6 +3928,12 @@
     if (!v || !mgVideoMode()) return Promise.resolve(null);
     if (st.streamDown) return Promise.resolve(null);
     if (!v.paused) return Promise.resolve(null);                   /* 播放中不要预览 */
+    /* 视图不是「合成」时，这条老预览接口没用：它只会回一张合成图，贴上去就把
+       原图 / 调试视图盖掉了。改走 mgCmpNow（同一条 /api/merge/frame，带视图字段）。 */
+    if (mgViewGet() !== "compose") {
+      return (window.mgCmpNow ? window.mgCmpNow({ frame: Math.round(v.currentTime * ((window.__mv || {}).fps || 30)) })
+                              : Promise.resolve(null));
+    }
     /* 3 秒冷却只挡「用户主动连拖」：自动重试（retry）和手动重试（force）都不受影响 */
     if (!opt.force && !opt.retry && Date.now() < st.blockUntil) return Promise.resolve(null);
 
@@ -4243,6 +4250,240 @@
   function mgBoxesOn() { return true; }
   window.mgBoxesOn = mgBoxesOn;
 
+  /* ---------- 整帧视图：合成 / 调试（画面右上角，两项互斥） ----------
+     这是**整帧视图**，和「点某张脸的框切原图」是两层东西，互不冲突：
+       · 视图 = 这张图怎么出：合成（正常换脸结果）/ 调试（debug=1，合成 + 遮罩/边界/检测框叠加）
+       · 点框 = 只把那一张脸留在原像素（请求体 no_swap_faces），两种视图下都照样生效
+     契约：
+       · 视图**不进** settings：融合方式（settings.blend = 模式下拉）和所有参数一个都不动，
+         切视图只往请求体上加 debug=1 / 不加（所以这里只动一个键）。
+       · 调试 = debug=1：后端合成完再叠调试信息，**融合方式照旧**（响应里的 mode 不变）。
+         fmt 跟合成那一发保持一致，这样「调试 vs 合成」的像素差全部来自调试叠加，
+         不掺 jpg 量化噪声。
+       · 默认「合成」，不落 localStorage：不给下次进来留一个"上次是调试"的坑。
+     速度：每一发回包都按 (视图 + 帧 + 参数签名) 进缓存；切视图先命缓存同步换图
+     （<16ms），命不中才发请求 —— 300ms 内生效靠的就是这份缓存 + 后台预热。 */
+  var MG_VIEW = "compose";
+  var MG_VIEW_KEYS = ["compose", "debug"];
+  var MG_VLABEL = { compose: "合成", debug: "调试" };
+  var MG_VCACHE = {};              /* 视图+帧+参数 → dataURL */
+  var MG_VCACHE_MAX = 12;
+  var MG_VPROM = {};               /* 同一个 key 只有一发在飞 */
+  var MG_VPREF = { t: null };      /* 预热防抖 */
+
+  function mgViewGet() { return MG_VIEW; }
+  window.mgViewGet = mgViewGet;
+  function mgViewIsValid(v) { return MG_VIEW_KEYS.indexOf(String(v || "")) >= 0; }
+
+  /* 视图 → 请求体：**只加视图字段**，别的键一个都不碰（融合方式/参数一个都不许动）。
+     compose = 什么都不加（正常换脸结果）；debug = 加 debug=1（后端合成后再叠调试信息）。 */
+  function mgViewBody(base, view) {
+    var b = {};
+    Object.keys(base || {}).forEach(function (k) { b[k] = base[k]; });
+    if (view === "debug") b.debug = 1;    /* 独立参数，不是融合方式 */
+    return b;
+  }
+  window.mgViewBody = mgViewBody;
+
+  function mgViewKey(view, body) {
+    var sig = "";
+    try {
+      sig = JSON.stringify({
+        f: body && (body.frame != null ? body.frame : body.idx),
+        s: body && body.settings, m: body && body.models,
+        one: body && body.model, ns: body && body.no_swap_faces,
+        fmt: body && body.fmt, raw: body && body.raw, dbg: body && body.debug
+      });
+    } catch (e) { sig = "x" + Math.random(); }
+    return view + "|" + sig;
+  }
+
+  function mgViewCachePut(key, png) {
+    if (!key || !png) return;
+    MG_VCACHE[key] = png;
+    var ks = Object.keys(MG_VCACHE);
+    if (ks.length > MG_VCACHE_MAX) {       /* 键序 = 插入序：先进先出 */
+      for (var i = 0; i < ks.length - MG_VCACHE_MAX; i++) delete MG_VCACHE[ks[i]];
+    }
+  }
+
+  /* 只有「还是这个视图、还是这一帧」才贴：切走之后晚到的那张不许盖掉当前画面 */
+  function mgViewPaint(view, frame, png) {
+    if (!png) return false;
+    if (mgViewGet() !== view) return false;
+    if (mgCmpFrameIdx() !== frame) return false;
+    window.mgShowOverlay(png);
+    return true;
+  }
+
+  function mgViewSync() {
+    var box = document.getElementById("mgViewSwitch");
+    if (!box) return;
+    var cur = mgViewGet();
+    Array.prototype.forEach.call(box.querySelectorAll("b[data-view]"), function (b) {
+      b.classList.toggle("on", b.getAttribute("data-view") === cur);
+      b.setAttribute("aria-selected", b.getAttribute("data-view") === cur ? "true" : "false");
+    });
+    /* 舞台上的视图标记（测试/样式都能读） */
+    var stage = document.getElementById("mgStage");
+    if (stage) stage.setAttribute("data-view", cur);
+    /* 切回合成 / 调试：框、chip 要立刻回来（画在 canvas 上的描边不会自己重画） */
+    if (window.mgApplyView) window.mgApplyView();
+  }
+  window.mgViewSync = mgViewSync;
+
+  /* 发一发「某视图 · 第 n 帧」。成功回包按 key 进缓存；若那会儿正好是这个视图
+     在这一帧上，就直接贴到画面上（所以预热的那一发回来也能直接生效）。 */
+  function mgViewFetch(view, frame, opt) {
+    opt = opt || {};
+    var base = opt.base || mgCmpBody(frame);
+    if (!base) return Promise.resolve(null);
+    var body = mgViewBody(base, view);
+    var key = mgViewKey(view, body);
+    if (MG_VCACHE[key]) {
+      mgViewPaint(view, frame, MG_VCACHE[key]);
+      return Promise.resolve(MG_VCACHE[key]);
+    }
+    if (MG_VPROM[key]) return MG_VPROM[key];
+    var ctl = null;
+    try { ctl = (typeof AbortController === "function") ? new AbortController() : null; } catch (e) { ctl = null; }
+    var p = fetch("/api/merge/frame", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: ctl ? ctl.signal : undefined
+    }).then(function (r) {
+      return r.json().then(function (d) {
+        if (!r.ok || !d) throw new Error((d && (d.detail || d.error)) || ("HTTP " + r.status));
+        return d;
+      }, function () { throw new Error("HTTP " + r.status); });
+    }).then(function (d) {
+      var png = d.png || d.image || d.data || d.frame_png || "";
+      mgViewCachePut(key, png);
+      mgViewPaint(view, frame, png);
+      return png;
+    }).catch(function (e) {
+      if (e && e.name === "AbortError") return null;
+      if (opt.report) mgHint(("视图「" + (MG_VLABEL[view] || view) + "」取图失败：" +
+                              String((e && e.message) || e)).slice(0, 80));
+      return null;
+    });
+    MG_VPROM[key] = p;
+    var done = function () { delete MG_VPROM[key]; };
+    p.then(done, done);
+    return p;
+  }
+  window.mgViewFetch = mgViewFetch;
+
+  /* 切视图：先同步命中缓存（这就是 300ms 的来源），没有才发一发。 */
+  function mgViewSet(name) {
+    var v = String(name || "");
+    if (!mgViewIsValid(v)) return mgViewGet();
+    var frame = mgCmpFrameIdx();
+    var base = mgCmpBody(frame);
+    MG_VIEW = v;
+    mgViewSync();
+    if (base) {
+      var key = mgViewKey(v, mgViewBody(base, v));
+      if (MG_VCACHE[key]) {
+        mgViewPaint(v, frame, MG_VCACHE[key]);
+        mgViewPrefetchSoon();
+        return v;
+      }
+    }
+    if (v === "compose") {
+      /* 回「合成」= 要那张换完的图：走正常的合成那一条（带 abort / seq / 进度提示） */
+      var p = mgCmpNow({ frame: frame });
+      if (p && p.catch) p.catch(function () {});
+    } else {
+      /* 调试：同一份参数 + debug=1，别的键一个都不改 */
+      mgViewFetch(v, frame, { base: base, report: true });
+    }
+    mgViewPrefetchSoon();
+    return v;
+  }
+  window.mgViewSet = mgViewSet;
+
+  /* 后台把「调试」那张备好：切过去才可能「瞬间」。只在「合成」视图里备 ——
+     调试图是诊断用的，用户不切就不烧算力（它要再跑一次合成 + 叠加）。 */
+  function mgViewPrefetchSoon() {
+    if (MG_VPREF.t) clearTimeout(MG_VPREF.t);
+    MG_VPREF.t = setTimeout(function () { MG_VPREF.t = null; mgViewPrefetch(); }, 220);
+  }
+  window.mgViewPrefetchSoon = mgViewPrefetchSoon;
+
+  function mgViewPrefetch() {
+    if (mgViewGet() !== "compose") return;
+    if (document.hidden) return;
+    if (MG_CMP.wait || MG_CMP.ctl) return;      /* 正在防抖 / 正在合成：别插队抢 worker */
+    if (!(window.__mv || {}).path && !mgVidPath()) return;
+    var frame = mgCmpFrameIdx();
+    var base = mgCmpBody(frame);
+    if (!base) return;
+    var queue = ["debug"];          /* 只有「调试」需要预热：合成那一发本来就会算 */
+    (function next(i) {
+      if (i >= queue.length) return;
+      if (mgViewGet() !== "compose") return;     /* 用户已经切走了：停 */
+      var v = queue[i];
+      var key = mgViewKey(v, mgViewBody(base, v));
+      if (MG_VCACHE[key] || MG_VPROM[key]) return next(i + 1);
+      mgViewFetch(v, frame, { base: base }).then(function () {
+        setTimeout(function () { next(i + 1); }, 90);
+      });
+    })(0);
+  }
+  window.mgViewPrefetch = mgViewPrefetch;
+
+  /* 测试/自动化用（只读）：这一帧、这个视图的图是不是已经在缓存里。
+     不改变任何行为 —— 只是把「后台预热到没到」这件事暴露出来。 */
+  window.mgViewCached = function (view) {
+    var v = String(view || mgViewGet());
+    var base = mgCmpBody(mgCmpFrameIdx());
+    if (!base) return false;
+    return !!MG_VCACHE[mgViewKey(v, mgViewBody(base, v))];
+  };
+
+  /* 绑按钮：一次就够（舞台节点不重建） */
+  function mgBindViewSwitch() {
+    var box = document.getElementById("mgViewSwitch");
+    if (!box || box.dataset.bound) return;
+    box.dataset.bound = "1";
+    box.addEventListener("click", function (e) {
+      var b = e.target && e.target.closest ? e.target.closest("b[data-view]") : null;
+      if (!b || !box.contains(b)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      mgViewSet(b.getAttribute("data-view"));
+    });
+    mgViewSync();
+  }
+  window.mgBindViewSwitch = mgBindViewSwitch;
+
+  /* 当前参数下的「一发请求的底稿」：视图无关的部分全在这儿，
+     视图只在外面加一个 debug 键（见 mgViewBody）。 */
+  function mgCmpBody(frame) {
+    frame = Math.max(0, parseInt(frame, 10) || 0);
+    var mv = window.__mv || {};
+    var v = mgVid();
+    var fps = mv.fps || 30;
+    var t = (v && mgVideoMode()) ? (Math.round(v.currentTime * 1000) / 1000) : (frame / fps);
+    var ns = mgFaceNoSwapIds();
+    return {
+      frame: frame, idx: frame, n: frame,
+      video: mgVidPath(), t: t, w: 900,
+      /* 人脸库跟着当前项目走（空串 = 默认库 <工作区>/merge） */
+      project: window.__mergeInputDir || "",
+      /* 点过「不换脸」/ 点成原图的那几张脸：后端按这个列表原样留下 */
+      no_swap_faces: ns,
+      /* 有「不换脸」的脸就要无损（png）：那几张脸要和原帧逐像素相同 */
+      fmt: (ns.length ? "png" : "jpg"),
+      model: mgFaceSingleModel(),
+      models: mgFaceModelsPayload(),
+      settings: mgCmpSettings()
+    };
+  }
+  window.mgCmpBody = mgCmpBody;
+
   /* ---------- 点框 = 只切这一张脸的「合成 / 原图」 ----------
      契约上就是 no_swap_faces：把这张脸的序号加进/移出请求体，后端把它原样留在
      帧里（其它脸照常换）。视觉反馈分两半：
@@ -4258,6 +4499,9 @@
     mgSyncFaceCards();
     if (window.mvRedrawBoxes) window.mvRedrawBoxes();   /* 实线/虚线立刻换 */
     if (opt && opt.silent) return mgFaceIsRawView(i);
+    /* 视图 = 原图：整帧本来就是原像素，这一发重算只会白跑一次合成。
+       标记照记（切回合成/调试时它立刻生效），画面不动。 */
+    if (mgViewGet() === "raw") return mgFaceIsRawView(i);
     var p = (window.mgCmpNow ? window.mgCmpNow() : null);
     if (p && p.catch) p.catch(function () {});
     return mgFaceIsRawView(i);
@@ -4300,7 +4544,7 @@
     /* 点在其它控件上不算：左右栏、时间轴、顶部的「人脸数据库」胶囊、toast…
        它们和舞台在同一个坐标系里，光靠"点落在框的矩形里"会误判。 */
     var PICK_SKIP = ".mgfc, button, a, input, select, label, #toastroot, " +
-                    ".mgleft, .mgright, .mtl, .mgdbentry, .mgviews";
+                    ".mgleft, .mgright, .mtl, .mgdbentry, .mgviews, .mgviewsw";
 
     document.addEventListener("pointerdown", function (e) {
       if (e.button != null && e.button !== 0) { MG_PICK.id = null; return; }
@@ -4588,15 +4832,23 @@
     var v = parseFloat(el ? el.value : "");
     return isFinite(v) ? v : dflt;
   }
+  /* 融合方式只有这 4 个（和「模式」下拉的选项、后端白名单三处必须一致）。 */
+  var MG_MERGE_BLENDS = ["overlay", "hist-match", "seamless", "seamless-hist-match"];
+
   function mgCmpSettings() {
     var ct = String((document.getElementById("mgColor") || {}).value || "mt");
-    var blend = mgSegVal("blend", "seamless");
-    if (blend !== "overlay") blend = "seamless";
     var mm = mgSegVal("mask", "prd×dst") || "prd×dst";
     var maskInt = (MG_MASK_INT[mm] == null) ? 3 : MG_MASK_INT[mm];
     var erode = mgNumVal("mgErode", 0);
     var blur = mgNumVal("mgBlur", 4);
-    var modeSel = (document.getElementById("mgMode") || {}).value || "";
+    /* 融合方式的真源 = 「模式」下拉（4 个）。右边那个两档分段（叠加/无缝）
+       只是它的快捷方式，两边由 mgSyncBlendSeg 保持同一个值。
+       以前 blend 只读分段、mode 读下拉，而后端以 blend 为准 —— 下拉里选
+       hist-match 画面一点不动（用户报的「选了没反应」就是这个）。 */
+    var modeSel = String((document.getElementById("mgMode") || {}).value || "");
+    if (MG_MERGE_BLENDS.indexOf(modeSel) < 0) modeSel = "";
+    var blend = modeSel || mgSegVal("blend", "seamless");
+    if (MG_MERGE_BLENDS.indexOf(blend) < 0) blend = "seamless";
     return {
       /* —— 新契约 —— */
       ct_mode: ct,
@@ -4616,6 +4868,21 @@
     };
   }
   window.mgCmpSettings = mgCmpSettings;
+
+  /* 「模式」下拉 ↔ 右边的「融合方式」两档分段：同一个值，两边一起亮。
+     overlay → 叠加，其它三种（hist-match / seamless / seamless-hist-match）→ 无缝，
+     因为分段只有这两档 —— 它就是个快捷方式，真值永远在下拉里。 */
+  function mgSyncBlendSeg(val) {
+    var v = String(val || "");
+    if (MG_MERGE_BLENDS.indexOf(v) < 0) return;
+    var seg = document.querySelector('#p-merge .seg[data-k="blend"]');
+    if (!seg) return;
+    var want = (v === "overlay") ? "overlay" : "seamless";
+    Array.prototype.forEach.call(seg.querySelectorAll("b"), function (b) {
+      b.classList.toggle("on", (b.getAttribute("data-v") || "") === want);
+    });
+  }
+  window.mgSyncBlendSeg = mgSyncBlendSeg;
 
   function mgCmpFrameIdx() {
     if (window.MergeTimeline && window.MergeTimeline.getFrame) {
@@ -4660,28 +4927,10 @@
 
     var seq = ++MG_CMP.seq;
     if (MG_CMP.ctl) { try { MG_CMP.ctl.abort(); } catch (e) {} MG_CMP.ctl = null; }
-    var v = mgVid();
-    var fps = mv.fps || 30;
-    var t = (v && mgVideoMode()) ? (Math.round(v.currentTime * 1000) / 1000) : (frame / fps);
-    var body = {
-      frame: frame, idx: frame, n: frame,
-      video: mgVidPath(), t: t, w: 900,
-      /* 人脸库跟着当前项目走（空串 = 默认库 <工作区>/merge）：
-         自动分配用的是**这个库**里的组。和人脸库页面 / 「＋」落库是同一个库。 */
-      project: window.__mergeInputDir || "",
-      /* 点过「不换脸」的那几张脸：后端按这个列表原样留下（no_swap_faces）。
-         以前这个键一次都没发过，界面上点「不换脸」只是清掉分配，后端照样兜给
-         第 0 个模型 —— 等于没生效。 */
-      no_swap_faces: mgFaceNoSwapIds(),
-      /* 格式：有「不换脸」的脸就要**无损**（fmt=png）—— 契约要求那几张脸和原帧
-         逐像素相同，走 jpg 的量化噪声会让它变成 2~3 的假差异。没有这种脸时用 jpg：
-         900px 一帧 png 要 1.16 MB（base64 1.55 MB），实测比 jpg 多花 300~700ms，
-         拖滑块/选模型会明显发滞。 */
-      fmt: (mgFaceNoSwapIds().length ? "png" : "jpg"),
-      model: mgFaceSingleModel(),
-      models: mgFaceModelsPayload(),
-      settings: mgCmpSettings()
-    };
+    /* 底稿见 mgCmpBody（视图无关的那一半）；视图只往上加 raw / debug 两个键 */
+    var view = mgViewGet();
+    var body = mgViewBody(mgCmpBody(frame), view);
+    var vkey = mgViewKey(view, body);
     var ctrl = (typeof AbortController === "function") ? new AbortController() : null;
     MG_CMP.ctl = ctrl;
     mgCmpNote(true);
@@ -4716,9 +4965,14 @@
       mgCmpBusyClear();
       mgCmpNote(false);
       var png = d.png || d.image || d.data || d.frame_png || "";
-      if (png) { window.mgShowOverlay(png); mgHint(""); }
+      /* 进缓存：切视图时先命它（这才是「300ms 内生效」的来源） */
+      mgViewCachePut(vkey, png);
+      /* 只在「还是这个视图、还是这一帧」时贴图：切视图/切帧之后晚到的结果不许盖画面 */
+      if (png) { mgViewPaint(view, frame, png); mgHint(""); }
       /* 每张脸被判给了哪个组 → chip 上直接显示（用户手动改则覆盖） */
       mgApplyFacePlan(d);
+      /* 合成这一发落地 → 顺手把「调试」那一张备好（有 220ms 防抖，且只在空闲时） */
+      if (view === "compose") mgViewPrefetchSoon();
       return d;
     }).catch(function (e) {
       if (seq !== MG_CMP.seq) return null;
@@ -5225,6 +5479,29 @@
 
     /* 点框切这张脸的合成/原图：舞台上的指针判定（阈值 4px），只绑一次 */
     if (window.mgBindFacePick) window.mgBindFacePick();
+    /* 画面右上角的整帧视图切换（合成 / 原图 / 调试）：只绑一次 */
+    if (window.mgBindViewSwitch) window.mgBindViewSwitch();
+
+    /* 「模式」下拉（4 个融合方式）和右边那个两档分段共用同一个值：动哪个，
+       另一个跟着高亮。以前 blend 只读分段、下拉写 mode，后端以 blend 为准 ——
+       下拉里选 hist-match 画面一动不动。 */
+    var modeEl = document.getElementById("mgMode");
+    if (modeEl && !modeEl.dataset.blendBound) {
+      modeEl.dataset.blendBound = "1";
+      modeEl.addEventListener("change", function () { mgSyncBlendSeg(modeEl.value); });
+      mgSyncBlendSeg(modeEl.value);
+    }
+    var bseg = page.querySelector('.seg[data-k="blend"]');
+    if (bseg && !bseg.dataset.blendBound) {
+      bseg.dataset.blendBound = "1";
+      bseg.addEventListener("click", function (e) {
+        var b = e.target && e.target.closest ? e.target.closest("b") : null;
+        if (!b || !bseg.contains(b)) return;
+        var v = b.getAttribute("data-v") || "";
+        var sel = document.getElementById("mgMode");
+        if (sel && MG_MERGE_BLENDS.indexOf(v) >= 0) sel.value = v;
+      });
+    }
 
     /* 参数实时预览：右栏任何控件动一下就防抖重算 */
     var right = page.querySelector(".mgright");
@@ -5281,6 +5558,17 @@
       if (!ok) {
         color.value = "mt";
         try { color.dispatchEvent(new Event("change", { bubbles: true })); } catch (e) {}
+      }
+    }
+
+    /* 模式下拉只剩 4 个**融合方式**：本地存着老值（debug / original / raw-*）时
+       回落到 seamless，别让下拉空着、也别把视图名当融合方式发给后端（会 400）。 */
+    var modeSel = document.getElementById("mgMode");
+    if (modeSel) {
+      var okm = Array.prototype.some.call(modeSel.options, function (o) { return o.value === modeSel.value; });
+      if (!okm) {
+        modeSel.value = "seamless";
+        try { modeSel.dispatchEvent(new Event("change", { bubbles: true })); } catch (e) {}
       }
     }
   }
@@ -10158,10 +10446,17 @@
         mask_source: segOf('seg'),
         mask_mode: segOf('mask'),
         color_transfer: byId('mgColor'),
+        /* 融合方式的真源 = 「模式」下拉（4 个）；分段只是快捷方式 */
+        blend: (function () {
+          var m = String(byId('mgMode') || '');
+          if (m === 'overlay' || m === 'hist-match' || m === 'seamless'
+              || m === 'seamless-hist-match') return m;
+          return segOf('blend') || 'seamless';
+        })(),
         /* 新契约：ct_mode / blend / mask_mode(int) / mask_erode / mask_blur。
-           导出和预览共用这一份，别让两条路各说一套。 */
+           导出和预览共用这一份，别让两条路各说一套。
+           （blend 在上面只写一次 —— 同一个对象里写两次，后面的会把前面的盖掉。） */
         ct_mode: byId('mgColor') || 'mt',
-        blend: this.readSeg('blend') || 'seamless',
         mask_mode_num: ({ 'prd': 1, 'dst': 2, 'prd×dst': 3 })[segOf('mask')] || 3,
         mask_erode: tiny('遮罩腐蚀'),
         mask_blur: tiny('遮罩羽化'),
@@ -10209,6 +10504,14 @@
       var el = document.getElementById(byId[k]);
       if (el && p[k] != null) el.value = p[k];
     });
+    /* 存着老的模式值（debug / original / raw-*）时下拉会变成空值 → 回落到 seamless；
+       再把「融合方式」两档分段同步成同一个值（否则两边亮的不一致）。 */
+    var modeEl = document.getElementById("mgMode");
+    if (modeEl) {
+      var known = ["overlay", "hist-match", "seamless", "seamless-hist-match"];
+      if (known.indexOf(String(modeEl.value || "")) < 0) modeEl.value = "seamless";
+      if (window.mgSyncBlendSeg) window.mgSyncBlendSeg(modeEl.value);
+    }
     /* seg 类按文字匹配 */
     var segMap = { detect: p.redetect, seg: p.mask_source, mask: p.mask_mode };
     Object.keys(segMap).forEach(function (dk) {

@@ -338,16 +338,25 @@ _ENCODERS = ("h264_nvenc", "hevc_nvenc", "h264_qsv", "hevc_qsv",
 # 4.0 的 hwaccel 只有 auto / ""（关）两种语义，_merge_runner 也是这么折的
 _HWACCEL = {"auto": "auto", "on": "auto", "1": "auto", "true": "auto",
             "off": "off", "none": "off", "0": "off", "false": "off", "": "off"}
-# MergeStudio.core.config.mode_dict
-_MERGE_MODES = ("overlay", "original", "hist-match", "seamless",
-                "seamless-hist-match", "raw-rgb", "raw-predict", "debug")
+# MergeStudio.core.config.mode_dict —— 但**只收融合方式**。
+# original / raw-rgb / raw-predict / debug 是「视图」（看原图 / 看原始预测 / 看调试
+# 信息），不是融合方式：以前混在这张表里，于是下拉里既有 overlay 又有 debug，
+# 传 mode=debug 后端还默默按 overlay 出片（_merge_runner 的 _MODE_EFFECTIVE 根本
+# 不认它）—— 用户选什么都不会变，等于假选项。
+# 现在：mode/blend 只认这 4 个，其余一律 400；视图走独立参数
+#   raw=1（原图，不合成） / debug=1（合成 + 遮罩/边界调试叠加）。
+_MERGE_MODES = ("overlay", "hist-match", "seamless", "seamless-hist-match")
+# 老前端/老脚本可能还在往 mode 里塞这些「视图名」：明确 400 并说清楚该用哪个参数，
+# 不许静默折成 overlay（那正是「选了没反应」的老 bug 的温床）。
+_MERGE_VIEW_MODES = ("original", "raw-rgb", "raw-predict", "debug")
 # MergeStudio.core.config.ctm_dict（+ "sot" 这个直白写法：worker 的 ct_map 把它
 # 折成 ctm_dict 里那一档，见 _PREVIEW_WORKER_SRC 的 ct_map["sot"]）
 _COLOR_TRANSFER = ("none", "rct", "lct", "mkl", "mkl-m", "idt", "idt-m",
                    "sot", "sot-m", "mix-m", "mt", "lut")
 # 接口契约里的两条主参数（★ 默认值就是「不传 settings」时的结果，改这里 = 改默认）
 _CT_MODES = ("mt", "rct", "lct", "mkl", "sot")
-_BLEND_MODES = ("seamless", "overlay")
+# 以前这里还有一份只写两个值的 _BLEND_MODES（seamless / overlay），谁都没用 ——
+# 留着只会让人以为 hist-match / seamless-hist-match 不合法。真白名单就一个：_MERGE_MODES。
 DEFAULT_CT_MODE = "mt"
 DEFAULT_BLEND = "seamless"
 _IMG_FORMATS = {"jpg": "jpg", "jpeg": "jpg", "png": "png"}
@@ -431,9 +440,14 @@ def _settings_val(raw) -> dict:
         return None
 
     # ---- blend（= MergeStudio 的 mode）----
-    # 契约字段叫 blend（seamless / overlay），老写法叫 mode；认一个就够，
-    # 两个都给时以 blend 为准。缺省 = seamless。
+    # 契约字段叫 blend，老写法叫 mode；认一个就够，两个都给时以 blend 为准。
+    # 缺省 = seamless。**只认 4 个融合方式**（白名单见 _MERGE_MODES）。
     mode = str(_first("blend", "mode") or DEFAULT_BLEND).strip().lower() or DEFAULT_BLEND
+    if mode in _MERGE_VIEW_MODES:
+        raise _BadInput(
+            "settings.blend 只认 4 个融合方式：%s；收到 %r —— 这是「视图」，不是融合方式，"
+            "视图请用 raw=1（原图）/ debug=1（调试）"
+            % (" / ".join(_MERGE_MODES), mode))
     if mode not in _MERGE_MODES:
         raise _BadInput("settings.blend 只认 %s，收到 %r"
                         % (" / ".join(_MERGE_MODES), raw.get("blend", raw.get("mode"))))
@@ -1029,15 +1043,21 @@ def _source_ident(snap: dict, mode: str, name: str) -> list:
 
 def _compose_sig(snap: dict, mode: str, idx: int, name: str, cfg: dict, dfm: str,
                  models, xseg: str, detector: str, thresh: float,
-                 fmt: str, quality: int, maxw: int, no_swap=None) -> str:
-    """合成结果的身份：**参数一个都不能漏**，漏了就是"改了参数画面不动"的老 bug。"""
+                 fmt: str, quality: int, maxw: int, no_swap=None,
+                 debug: bool = False) -> str:
+    """合成结果的身份：**参数一个都不能漏**，漏了就是"改了参数画面不动"的老 bug。
+
+    debug 也是身份的一部分：同一帧同一组参数，「合成」和「调试」是两张不同的图，
+    缓存键不分家的话切视图会拿到上一张（看着像"点了没反应"）。
+    """
     ident = _source_ident(snap, mode, name)
     try:
         tail = json.dumps([int(idx), cfg, str(dfm), str(xseg), str(detector),
                            round(float(thresh), 4),
                            [[m["name"], m["dfm"], list(m["faces"])] for m in (models or [])],
                            str(fmt), int(quality), int(maxw),
-                           sorted(int(x) for x in (no_swap or ()))],
+                           sorted(int(x) for x in (no_swap or ())),
+                           bool(debug)],
                           sort_keys=True, default=str)
     except Exception:                          # noqa: BLE001
         tail = repr([idx, cfg, dfm, xseg, detector, thresh, fmt, quality, maxw])
@@ -1300,14 +1320,121 @@ def _manual_faces(worker_faces, library=None) -> list:
 
 
 
+# ---- 调试视图（视图级，独立于融合方式）------------------------------------
+# 调试图 = 合成结果 + 4 类调试信息，一个像素都不改回合成链路：
+#   1) 每张脸的「遮罩区域」：整块检测框淡绿覆盖（算法认为的脸在哪儿）
+#   2) 68 点凸包边界：黄线，真正贴回去的多边形边界（不是矩形）
+#   3) 检测框 + 序号：绿框 = 换过了；红框 + keep = 这张没换（no_swap / 点框切的原图）
+#   4) 顶部 HUD：帧号 + 生效参数（blend / mask / ct / erode / blur）
+# 以前 debug 是塞在 settings.mode 里的一个「假融合方式」（引擎 _MODE_EFFECTIVE 不认，
+# 选了也按 overlay 出片）。现在它只由 payload.debug=1 触发，融合方式原样保留。
+_DEBUG_TINT_BGR = (60, 200, 120)
+_DEBUG_EDGE_BGR = (0, 210, 255)
+_DEBUG_BOX_BGR = (90, 220, 120)
+_DEBUG_NOSWAP_BGR = (70, 70, 235)
+_DEBUG_HUD_BGR = (24, 26, 30)
+_DEBUG_HUD_TXT = (120, 240, 150)
+
+
+def _debug_view_image(out, frame, boxes, no_swap, settings, idx, total):
+    """合成结果 → 调试图。返回 (图, 画了几张脸)。
+
+    boxes 是**原帧坐标**里的检测框（_detect_boxes 的格式）；out 可能已经缩到
+    maxw，这里按 frame 的尺寸算缩放比，框和边界才不会飘。
+    """
+    import cv2
+    import numpy as np
+
+    if out is None or getattr(out, "ndim", 0) != 3:
+        return out, 0
+    img = np.ascontiguousarray(out).copy()
+    h, w = img.shape[:2]
+    try:
+        fh, fw = frame.shape[:2]
+    except Exception:                                   # noqa: BLE001
+        fh, fw = h, w
+    sx = (w / float(fw)) if fw else 1.0
+    sy = (h / float(fh)) if fh else 1.0
+
+    def _rect_of(b):
+        try:
+            x1, y1, x2, y2 = [float(v) for v in (b.get("box") or ())]
+        except Exception:                               # noqa: BLE001
+            return None
+        if x2 <= x1 or y2 <= y1:
+            return None
+        X1 = max(0, min(w - 1, int(round(x1 * sx))))
+        Y1 = max(0, min(h - 1, int(round(y1 * sy))))
+        X2 = max(X1 + 1, min(w - 1, int(round(x2 * sx))))
+        Y2 = max(Y1 + 1, min(h - 1, int(round(y2 * sy))))
+        return X1, Y1, X2, Y2
+
+    no_swap = {int(x) for x in (no_swap or ())}
+    rects = []
+    for i, b in enumerate(boxes or []):
+        r = _rect_of(b or {})
+        if r is not None:
+            rects.append((int(i), b, r))
+
+    # ---- 1) 遮罩区域：整块框淡绿（先整体混一次，比逐框 addWeighted 快也干净）----
+    if rects:
+        region = img.copy()
+        for _i, _b, (X1, Y1, X2, Y2) in rects:
+            cv2.rectangle(region, (X1, Y1), (X2, Y2), _DEBUG_TINT_BGR, -1)
+        img = cv2.addWeighted(img, 0.88, region, 0.12, 0)
+
+    # ---- 2/3) 68 点凸包边界 + 检测框 ----
+    for i, b, (X1, Y1, X2, Y2) in rects:
+        try:
+            lm = _frame_landmarks(frame, b, [float(v) for v in ((b or {}).get("box") or ())])
+        except Exception:                               # noqa: BLE001
+            lm = None
+        if lm is not None and len(lm) >= 5:
+            try:
+                pts = np.asarray([[float(p[0]) * sx, float(p[1]) * sy] for p in lm],
+                                 dtype=np.float32)
+                hull = cv2.convexHull(pts.reshape(-1, 1, 2)).astype(np.int32)
+                cv2.polylines(img, [hull], True, _DEBUG_EDGE_BGR, 2, cv2.LINE_AA)
+            except Exception:                           # noqa: BLE001
+                pass
+        kept = i in no_swap
+        col = _DEBUG_NOSWAP_BGR if kept else _DEBUG_BOX_BGR
+        cv2.rectangle(img, (X1, Y1), (X2, Y2), col, 2, cv2.LINE_AA)
+        tag = "#%d%s" % (i, " keep" if kept else "")
+        ty = (Y1 - 6) if Y1 >= 18 else (Y1 + 16)
+        cv2.putText(img, tag, (X1 + 3, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                    (12, 12, 12), 3, cv2.LINE_AA)
+        cv2.putText(img, tag, (X1 + 3, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1,
+                    cv2.LINE_AA)
+
+    # ---- 4) HUD：帧号 + 生效参数（全是 ASCII，cv2 的 Hershey 字体只能画 ASCII）----
+    def _v(key, dflt="-"):
+        v = (settings or {}).get(key) if isinstance(settings, dict) else None
+        return dflt if v is None or v == "" else str(v)
+
+    hud = "DEBUG  idx=%s/%s  blend=%s  mask=%s  ct=%s  erode=%s  blur=%s  faces=%d" % (
+        idx, (total if total not in (None, "") else "?"), _v("blend"), _v("mask_mode"),
+        _v("ct_mode"), _v("mask_erode"), _v("mask_blur"), len(rects))
+    scale = max(0.38, min(0.62, w / 1700.0))
+    bar = int(round(24 * scale)) + 8
+    cv2.rectangle(img, (0, 0), (w, bar), _DEBUG_HUD_BGR, -1)
+    cv2.putText(img, hud, (8, bar - int(round(7 * scale))), cv2.FONT_HERSHEY_SIMPLEX,
+                scale, _DEBUG_HUD_TXT, 1, cv2.LINE_AA)
+    cv2.rectangle(img, (1, 1), (w - 2, h - 2), _DEBUG_EDGE_BGR, 2, cv2.LINE_AA)
+    return img, len(rects)
+
+
 def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
     """第 idx 帧 → 按 payload 里的合成参数出图（data URL）。
 
     payload 认的键（全部可选）：
-        w / fmt / quality / raw / compose
+        w / fmt / quality / raw / compose / debug
         settings: {ct_mode, blend, mask_mode, mask_erode, mask_blur, …}
         model: "<dfm 名>"        models: [{"name","dfm","faces"}]
         detector / thresh / xseg_onnx
+    raw=1（或 compose=0）= 原图视图，不合成；debug=1 = 调试视图（合成 + 调试叠加）。
+    settings.blend 只认 4 个融合方式（overlay / hist-match / seamless /
+    seamless-hist-match），其它值一律 400 —— 视图不进 settings。
     """
     t_start = time.time()
     payload = _as_dict(payload)
@@ -1325,10 +1452,13 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
                        88 if fmt == "jpg" else 92)
     raw_only = _bool_val(payload.get("raw"), False) or (
         "compose" in payload and not _bool_val(payload.get("compose"), True))
+    # 视图级的「调试」：独立参数（不是融合方式）。raw 优先级更高 —— 原图就是原图，
+    # 一个调试像素都不该有。
+    debug_view = (not raw_only) and _bool_val(payload.get("debug"), False)
 
     frame, name = _source_frame(snap, mode, idx)
 
-    # ---- 1) raw：老行为，一个字节都不动（原图 / 检测两个视图要它）----
+    # ---- 1) raw：老行为，一个字节都不动（原图视图要它）----
     if raw_only:
         buf = _encode_frame(frame, maxw, fmt, quality)
         mime = "image/png" if fmt == "png" else "image/jpeg"
@@ -1367,11 +1497,23 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
         # 那是"库判不出来时"的老兜底，不能让它把「这张脸不像任何组 → 回原帧」变成 400。
         if (asked_model and auto_plan is None) or e.status != 409:
             raise                      # 点名要了却没有 → 照实报，别装成"原帧"
-        buf = _encode_frame(frame, maxw, fmt, quality)
+        out_img, dbg_faces = frame, 0
+        if debug_view:
+            # 没有模型也能看调试视图：框 / 遮罩区域 / HUD 全都在，只是没有换脸结果。
+            dbg_boxes = list((auto_plan or {}).get("boxes") or [])
+            if not dbg_boxes:
+                try:
+                    dbg_boxes = list(_detect_boxes(frame, detector, thresh))
+                except Exception:                       # noqa: BLE001
+                    dbg_boxes = []
+            out_img, dbg_faces = _debug_view_image(out_img, frame, dbg_boxes, [],
+                                                   settings, idx, total)
+        buf = _encode_frame(out_img, maxw, fmt, quality)
         mime = "image/png" if fmt == "png" else "image/jpeg"
         resp = _ok(idx=idx, total=total, name=name, composed=False, swapped=False,
                    fmt=fmt, bytes=len(buf), settings=settings, detector=detector,
                    ms=int(round((time.time() - t_start) * 1000.0)),
+                   debug=bool(debug_view), debug_faces=int(dbg_faces),
                    note="没有可用的 .dfm 模型：只回原帧（%s）" % e.msg,
                    png="data:%s;base64,%s" % (mime, _b64.b64encode(buf).decode("ascii")))
         if auto_plan is not None:
@@ -1396,7 +1538,7 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
     # ---- 3) 命中缓存就直接回（同一帧 + 同一组参数，拖滑块回退时立刻出图）----
     sig = _compose_sig(snap, mode, idx, name, cfg, str(dfm), models, xseg,
                        detector, float(thresh), fmt, int(quality), int(maxw),
-                       no_swap)
+                       no_swap, debug=debug_view)
     hit = _compose_cached(sig)
     if hit is not None:
         hit["cached"] = True
@@ -1430,7 +1572,26 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
     out = cv2.imdecode(np.frombuffer(img, np.uint8), cv2.IMREAD_COLOR)
     if out is None:
         raise _BadInput("合成结果解不开", 500)
-    if want_png or out.shape[1] > maxw:   # png 一律重编（要缩到 maxw）；jpg 只在超大时缩
+    # 先缩到 maxw 再画调试信息：字号/线宽按最终展示尺寸给，图缩一半时框线才不会细成一条。
+    resized = False
+    if out.shape[1] > maxw:
+        out = cv2.resize(out, (maxw, max(1, int(out.shape[0] * maxw / out.shape[1]))),
+                         interpolation=cv2.INTER_AREA)
+        resized = True
+    dbg_faces = 0
+    if debug_view:
+        dbg_boxes = list((auto_plan or {}).get("boxes") or [])
+        if not dbg_boxes:
+            try:
+                dbg_boxes = list(_detect_boxes(frame, detector, thresh))
+            except Exception:                           # noqa: BLE001
+                dbg_boxes = []
+        out, dbg_faces = _debug_view_image(out, frame, dbg_boxes, no_swap,
+                                           settings, idx, total)
+    # 什么时候要重编：png（无损）· 刚缩过图 · 画了调试信息（不重编等于白画）。
+    # 老逻辑是「jpg 且没超出 maxw 就复用 worker 编好的那一份」—— 现在 out 可能
+    # 已经被我们缩过/画过，必须显式重编，不能再用 worker 那张原图。
+    if want_png or resized or debug_view:
         img = _encode_frame(out, maxw, fmt, quality)
     mime = "image/png" if fmt == "png" else "image/jpeg"
 
@@ -1447,6 +1608,7 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
                xseg=xseg, timings=res.get("timings") or {},
                no_swap_faces=list(no_swap), skipped=list(res.get("skipped") or []),
                cached=False, note=res.get("note") or "",
+               debug=bool(debug_view), debug_faces=int(dbg_faces),
                png="data:%s;base64,%s" % (mime, _b64.b64encode(img).decode("ascii")))
     if models:
         resp["models"] = [{"name": m["name"], "dfm": m["dfm"],
@@ -1491,21 +1653,24 @@ def merge_frame(idx: int, body: dict = None, w: int = 900, settings: str = "",
                 model: str = "", models: str = "", detector: str = "",
                 thresh: float = None, fmt: str = "", quality: int = None,
                 raw: str = "", compose: str = "", xseg_onnx: str = "",
-                no_swap_faces: str = ""):
+                no_swap_faces: str = "", debug: str = ""):
     """第 idx 帧的**合成结果**（data URL）。GET 走 query、POST 走 JSON body，两套都认。
 
     body（全部可选，缺省 = 当前 UI 默认值）：
         settings: {"ct_mode":"mt"|"rct"|"lct"|"mkl"|"sot",
-                   "blend":"seamless"|"overlay",
+                   "blend":"overlay"|"hist-match"|"seamless"|"seamless-hist-match",
                    "mask_mode":0~9, "mask_erode":-100~100, "mask_blur":-100~100}
         model: "<dfm 名>"  或  models: [{"name":"<dfm>","faces":[0,1]}]
         detector / thresh / w / fmt(png|jpg) / quality / xseg_onnx
-    raw=1（或 compose=0）：不合成，原样返回源帧（界面「原图 / 检测」用）。
+    raw=1（或 compose=0）：不合成，原样返回源帧（视图「原图」用）。
+    debug=1：合成 + 遮罩/边界/检测框/HUD 调试叠加（视图「调试」用），
+             融合方式照旧由 settings.blend 决定。视图不是融合方式：
+             往 settings.blend 里塞 original / raw-* / debug 一律 400。
     """
     payload = _frame_body(idx, body, w=w, settings=settings, model=model,
                           models=models, detector=detector, thresh=thresh,
                           fmt=fmt, quality=quality, raw=raw, compose=compose,
-                          xseg_onnx=xseg_onnx, no_swap_faces=no_swap_faces)
+                          xseg_onnx=xseg_onnx, no_swap_faces=no_swap_faces, debug=debug)
     return _frame_payload(idx, payload, default_w=w)
 
 
@@ -1515,7 +1680,7 @@ def merge_frame_post(body: dict = None, w: int = 900, settings: str = "",
                      model: str = "", models: str = "", detector: str = "",
                      thresh: float = None, fmt: str = "", quality: int = None,
                      raw: str = "", compose: str = "", xseg_onnx: str = "",
-                     no_swap_faces: str = ""):
+                     no_swap_faces: str = "", debug: str = ""):
     """POST /api/merge/frame —— 帧号放在 body 里（idx / frame / n），其余同 {idx} 版。
 
     前端在视频模式下拿的是「时间轴第几帧」而不是 URL 段，所以契约里这个不带路径参数
@@ -1525,7 +1690,7 @@ def merge_frame_post(body: dict = None, w: int = 900, settings: str = "",
     _merge_query_into(payload, w=w, settings=settings, model=model, models=models,
                       detector=detector, thresh=thresh, fmt=fmt, quality=quality,
                       raw=raw, compose=compose, xseg_onnx=xseg_onnx,
-                      no_swap_faces=no_swap_faces)
+                      no_swap_faces=no_swap_faces, debug=debug)
     return _frame_payload(_body_idx(payload), payload, default_w=w)
 
 

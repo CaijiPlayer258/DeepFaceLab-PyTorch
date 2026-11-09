@@ -671,6 +671,13 @@
             </button>
             <!-- 视图不再有分段控件：框始终显示，点框内部 = 只把那一张脸切「合成 ↔ 原图」 -->
             <div class="mgstage" id="mgStage"><span id="mgStageHint">选择视频后显示</span><video id="mgVideo" playsinline muted preload="metadata"></video><img id="mgPreview" alt="">
+              <!-- 右上角：整帧视图（合成 / 调试）。只有两项，互斥。
+                   和「点某张脸的框切那张脸的原图」是两层东西：这里换的是**整张图**怎么出，
+                   点框只换那一张脸（整帧原图那条路由 per-face 点框覆盖，不再单列一项）。 -->
+              <div class="mgviewsw" id="mgViewSwitch" role="tablist" aria-label="视图">
+                <b class="on" data-view="compose" role="tab" aria-selected="true" title="正常换脸结果">合成</b>
+                <b data-view="debug" role="tab" aria-selected="false" title="调试画面：叠加遮罩、边界与检测框">调试</b>
+              </div>
               <!-- 每张脸的模型 chip / ＋ 按钮挂在这一层（canvas 只负责 2px 描边） -->
               <div class="mgflayer" id="mgFaceLayer"></div>
               <span class="mgcnote" id="mgCmpNote" hidden>正在合成…</span>
@@ -701,10 +708,11 @@
             <div class="mgsec">
               <div class="mggrphd"><i class="dot"></i>合成</div>
               <div class="mgrow"><span class="f">模式</span>
-                <select class="mgsel" id="mgMode">
-                  <option>overlay</option><option>original</option><option>hist-match</option>
-                  <option>seamless</option><option>seamless-hist-match</option>
-                  <option>raw-rgb</option><option>raw-predict</option><option>debug</option>
+                <!-- 只放**融合方式**（4 个）。原图 / 调试是「视图」，在画面右上角切，
+                     不混进这里（以前 debug / raw-* / original 混在这，选了也不生效）。 -->
+                <select class="mgsel" id="mgMode" title="融合方式">
+                  <option>overlay</option><option>hist-match</option>
+                  <option selected>seamless</option><option>seamless-hist-match</option>
                 </select>
               </div>
               <div class="mgrow"><span class="f">遮罩来源</span>
