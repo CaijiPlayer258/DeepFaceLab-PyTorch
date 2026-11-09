@@ -4445,7 +4445,7 @@
     back.title = "回到合成视图（Esc）";
     var tt = document.createElement("span");
     tt.className = "mgfg-tt";
-    tt.textContent = "第 " + i + " 张脸 · 六宫格";
+    tt.textContent = "";
     var sub = document.createElement("span");
     sub.className = "mgfg-sub";
     sub.id = "mgfgSub";
@@ -4501,7 +4501,7 @@
       if (d && d.frozen) bits.push("冻结参数");
       if (d && d.ms != null) bits.push(Number(d.ms) + "ms");
       if (d && d.cached) bits.push("缓存");
-      sub.textContent = bits.join(" · ");
+      sub.textContent = "";
     }
   }
   window.mgFdbgFill = mgFdbgFill;
