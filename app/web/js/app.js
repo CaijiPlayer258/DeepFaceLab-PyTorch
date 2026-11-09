@@ -6517,24 +6517,6 @@
       });
     }
 
-    /* 舞台空态的两个入口：不带自己的逻辑，直接点左栏那两个已有按钮 ——
-       导入流程（桌面 pickFile → mgPrepare / 网页 pickDir → mvList）只有一份。 */
-    var emV = $("mgStageEmptyVideo");
-    if (emV && !emV.dataset.bound) {
-      emV.dataset.bound = "1";
-      emV.addEventListener("click", function () {
-        var b = $("mgAddVideo");
-        if (b) b.click();
-      });
-    }
-    var emP = $("mgStageEmptyProject");
-    if (emP && !emP.dataset.bound) {
-      emP.dataset.bound = "1";
-      emP.addEventListener("click", function () {
-        var b = $("mgAddProject");
-        if (b) b.click();
-      });
-    }
 
     var addProj = $("mgAddProject");
     if (addProj && !addProj.dataset.bound) {
