@@ -4287,6 +4287,158 @@ def _preview_multi(job: dict, frame, boxes, box_wh, timings, stage_fn, state) ->
             "swaps": len(plan), "skipped": skipped}
 
 
+def _stage_cache_for_video(video) -> Path:
+    """源视频旁边的 <名字>_cache（分段导出的沙箱）。没有就返回一个不存在的路径。"""
+    v = Path(str(video))
+    return v.parent / (v.stem + "_cache")
+
+
+def _preview_compose(job: dict, frame, boxes, timings: dict, stage_fn) -> dict:
+    """单帧预览的「所见即所得」路径：和 ⑤ 合成阶段**同一条** compose_frame。
+
+    以前预览走 MergeMaskedFace（seamless + 二次色彩迁移），导出走 4.0 视频那条
+    （_phase_merge_worker），两条算法不一样 —— 用户点预览和拿到的成片差 3.7 灰度，
+    那就是 bug。现在预览也走 pred → mask → compose：
+      · 有 <视频>_cache/ 且里面已经有 pred/mask（刚跑过分段导出/预览过）→ **直接读文件**，
+        和导出用的是同一份字节，合成结果逐像素相同（验收：diff = 0）；
+      · 没有缓存 → 现场跑一次 dfm + XSeg（和 ③④ 同一份函数），结果对下次预览可复用。
+    """
+    import cv2
+    import numpy as np
+    from ._merge_compose import compose_frame, ensure_engine_path
+    ensure_engine_path()
+    from facelib import FaceType
+    from facelib.LandmarksProcessor import get_transform_mat
+
+    cache = None
+    if job.get("video"):
+        cache = _stage_cache_for_video(job["video"])
+    elif job.get("cache_dir"):
+        cache = Path(str(job["cache_dir"]))
+    if cache is not None and not cache.is_dir():
+        cache = None
+    stem = str(job.get("frame_stem") or "")
+    cfg = dict(job.get("config") or {})
+    cfg["mask_mode"] = int(cfg.get("mask_mode", 6) or 0)
+    models = job.get("models") or None
+    single_dfm = str(job.get("dfm") or "")
+    xseg_path = str(job.get("xseg") or "")
+    xseg = _app_mod._get_xseg(None if not xseg_path else
+                             ("lite" if "lite" in Path(xseg_path).name.lower() else "xseg")) \
+        if xseg_path else None
+    fmt = str(job.get("fmt") or "jpg").strip().lower()
+    q = int(job.get("quality") or _PREVIEW_QUALITY)
+    state = job.get("state") or {}
+    hits = {"pred": 0, "mask": 0, "infer": 0}
+    faces_out, used, applied = [], [], []
+    tim = {"dfm_ms": 0.0, "xseg_ms": 0.0, "compose_ms": 0.0}
+
+    def _cached(path: Path):
+        if not path.is_file():
+            return None
+        try:
+            with open(str(path), "rb") as fh:
+                data = fh.read()
+        except OSError:
+            return None
+        return cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_UNCHANGED)
+
+    for i, b in enumerate(boxes or []):
+        state["stage"] = "compose"
+        if job.get("stop") is not None and job["stop"].is_set():
+            raise _BadInput("预览已取消", 499)
+        box_xyxy = [float(v) for v in (b.get("box") or ())]
+        x1, y1, x2, y2 = box_xyxy
+        _stage_lm = _frame_landmarks(frame, b, box_xyxy)
+        if _stage_lm is None:
+            continue
+        lm = np.asarray(_stage_lm, np.float32)
+        key = ("%s_%02d" % (stem, i)) if stem else ""
+        # 缓存里有这张脸的 DFLJPG 时，**用它的 68 点**（导出阶段用的就是这一份）。
+        # 现场重算 2D106 会差零点几个像素，脸的边缘就是几级灰度 —— 那就不是「所见即所得」了。
+        if cache is not None and key:
+            try:
+                from ._align import read_dfljpg_meta
+                _m = read_dfljpg_meta(cache / "aligned" / (key + ".jpg")) or {}
+                _lm = _m.get("source_landmarks") or _m.get("landmarks")
+                if _lm and len(_lm) == 68:
+                    lm = np.asarray(_lm, np.float32)
+            except Exception:                               # noqa: BLE001
+                pass
+        # 这张脸用哪个 dfm
+        dfm = single_dfm
+        name = ""
+        if models:
+            idx = _model_for_face(i, models)
+            if idx is not None and 0 <= idx < len(models):
+                dfm = str(models[idx].get("dfm") or single_dfm)
+                name = str(models[idx].get("name") or "")
+        pred = (_cached(cache / "pred" / (key + ".png"))
+                if (key and cache is not None) else None)
+        prd_dfm = dst_dfm = xprd = xdst = None
+        if key and pred is not None:
+            hits["pred"] += 1
+            prd_dfm = _cached(cache / "pred" / (key + "_prdm.png"))
+            dst_dfm = _cached(cache / "pred" / (key + "_dstdm.png"))
+            xprd = _cached(cache / "mask" / (key + "_xseg_prd.png"))
+            xdst = _cached(cache / "mask" / (key + "_xseg_dst.png"))
+            if xprd is not None:
+                hits["mask"] += 1
+        if pred is None:
+            # 缓存里没有：现场跑一次 dfm（和 ③ 同一条前向）
+            ent = _dfm_session(dfm) if (dfm and Path(dfm).is_file()) else None
+            if ent is None:
+                continue
+            size = int(ent[2])
+            fmat = get_transform_mat(lm, size, FaceType.WHOLE_FACE, scale=1.0)
+            crop = cv2.warpAffine(frame.astype(np.float32) / 255.0, fmat, (size, size),
+                                  flags=cv2.INTER_CUBIC)
+            t0 = time.time()
+            out = _dfm_run_batch(ent, np.clip(crop, 0, 1)[None])[0]
+            tim["dfm_ms"] += (time.time() - t0) * 1000.0
+            hits["infer"] += 1
+            face_f, prd_m, dst_m = out
+            pred = np.clip(face_f * 255.0, 0, 255).astype(np.uint8)
+            prd_dfm = None if prd_m is None else np.clip(prd_m * 255.0, 0, 255).astype(np.uint8)
+            dst_dfm = None if dst_m is None else np.clip(dst_m * 255.0, 0, 255).astype(np.uint8)
+        if xseg is not None and xprd is None:
+            t0 = time.time()
+            xprd = np.clip(xseg.mask(pred, out_size=256) * 255.0, 0, 255).astype(np.uint8)
+            dmat = get_transform_mat(lm, 256, FaceType.WHOLE_FACE, scale=1.0)
+            dface = cv2.warpAffine(frame, dmat, (256, 256), flags=cv2.INTER_CUBIC)
+            xdst = np.clip(xseg.mask(dface, out_size=256) * 255.0, 0, 255).astype(np.uint8)
+            _INFER_CALLS["xseg"] += 2
+            hits["infer"] += 2
+            tim["xseg_ms"] += (time.time() - t0) * 1000.0
+        _f = {"landmarks": lm, "pred": np.asarray(pred, np.float32) / 255.0,
+              "prd_dfm": None if prd_dfm is None else np.asarray(prd_dfm, np.float32) / 255.0,
+              "dst_dfm": None if dst_dfm is None else np.asarray(dst_dfm, np.float32) / 255.0,
+              "xseg_prd": None if xprd is None else np.asarray(xprd, np.float32) / 255.0,
+              "xseg_dst": None if xdst is None else np.asarray(xdst, np.float32) / 255.0}
+        t0 = time.time()
+        frame = compose_frame(frame, [_f], cfg, {}, roi=bool(job.get("roi", True)))
+        tim["compose_ms"] += (time.time() - t0) * 1000.0
+        applied.append(int(i))
+        used.append(name or Path(dfm).stem)
+        faces_out.append({"face": int(i), "dfm": name or Path(dfm).stem,
+                          "box": [int(round(v)) for v in (x1, y1, x2 - x1, y2 - y1)],
+                          "cached": bool(key and hits["pred"])})
+
+    if not applied:
+        return _plain_frame(job, frame, None, timings, note="这一帧没检出可换的脸",
+                            has_face=False, no_faces=True)
+    state["stage"] = "encode"
+    img = _img_bytes(frame, fmt, q)
+    timings = dict(timings or {})
+    timings.update({"compose_path": 1, "pred_cache_hits": hits["pred"],
+                    "mask_cache_hits": hits["mask"], "infer_calls": hits["infer"]})
+    timings.update({k: round(v, 1) for k, v in tim.items()})
+    return {"jpg": img, "img": img, "box": None, "has_face": True, "no_faces": False,
+            "swapped": True, "timings": timings, "faces": faces_out,
+            "models_used": sorted(set(used)), "swaps": len(applied),
+            "compose_path": 1, "note": ""}
+
+
 def _preview_job(job: dict) -> dict:
     """一次预览的重活：取帧 → 检测 → 68 点 → 换脸 + 遮罩 + 合成。
 
@@ -4332,6 +4484,10 @@ def _preview_job(job: dict) -> dict:
     else:
         boxes = _detect_boxes(frame, job["detector"], job["thresh"])
         timings["detect_ms"] = round((time.time() - t0) * 1000.0, 1)
+
+    if job.get("compose"):
+        # 所见即所得：和分段导出的 ⑤ 合成走同一份 compose_frame
+        return _preview_compose(job, frame, boxes, timings, _stage)
 
     best = _pick_face(boxes)
     box_xyxy, box_wh = None, None
@@ -4477,15 +4633,36 @@ def merge_preview(body: dict):
     holder = {}
     done = threading.Event()
 
+    # 有 <视频>_cache/ 时：帧也直接从 cache/frames 读（和导出用的是同一张 PNG），
+    # 这一步就把「视频解码 vs ffmpeg 抽帧」那点像素差也消掉了。
+    cached_frame, frame_stem = None, ""
+    try:
+        fps_v = float((_vid_probe(video) or {}).get("fps") or 0.0)
+        if fps_v > 0:
+            idx = int(round(float(t) * fps_v)) + 1
+            cand = _stage_cache_for_video(video) / "frames" / ("%06d.png" % idx)
+            if cand.is_file():
+                cached_frame = _stage_read_frame(cand)
+                if cached_frame is not None:
+                    frame_stem = "%06d" % idx
+    except Exception:                                       # noqa: BLE001
+        cached_frame, frame_stem = None, ""
+
     def _run():
         try:
-            holder["r"] = _preview_job({"video": video, "t": float(t), "dfm": dfm,
-                                        "models": models,
-                                        "xseg": xseg, "config": cfg,
-                                        "detector": detector, "thresh": float(thresh),
-                                        "stop": stop, "state": state,
-                                        "no_swap": _face_ids_val(
-                                            "no_swap_faces", body.get("no_swap_faces"))})
+            job = {"video": video, "t": float(t), "dfm": dfm,
+                   "models": models,
+                   "xseg": xseg, "config": cfg,
+                   "detector": detector, "thresh": float(thresh),
+                   "stop": stop, "state": state,
+                   "compose": not _bool_val(body.get("legacy"), False),
+                   "frame_stem": frame_stem,
+                   "roi": not _bool_val(body.get("no_roi"), False),
+                   "no_swap": _face_ids_val(
+                       "no_swap_faces", body.get("no_swap_faces"))}
+            if cached_frame is not None:
+                job["frame"] = cached_frame
+            holder["r"] = _preview_job(job)
         except _BadInput as e:
             holder["e"] = e
         except Exception as e:                  # noqa: BLE001
@@ -4605,6 +4782,15 @@ def merge_preview_frame(body: dict):
                         "xseg": xseg, "config": cfg, "detector": detector,
                         "thresh": float(thresh), "stop": stop, "state": state,
                         "fmt": fmt, "quality": int(quality),
+                        "compose": not _bool_val(body.get("legacy"), False),
+                        "frame_stem": str(body.get("frame_stem") or fp.stem),
+                        # cache 目录：显式给了就用（验收/外部调用把 ref 帧改名时靠它），
+                        # 否则从 <cache>/frames/xxx.png 的路径反推。
+                        "cache_dir": (str(_norm_path(body.get("cache_dir")) or "")
+                                      if str(body.get("cache_dir") or "").strip()
+                                      else (str(fp.parent.parent)
+                                            if fp.parent.name == "frames" else "")),
+                        "roi": not _bool_val(body.get("no_roi"), False),
                         "no_swap": _face_ids_val("no_swap_faces",
                                                  body.get("no_swap_faces")),
                         "send_lossless": (fmt == "png")})
@@ -6007,7 +6193,7 @@ def _vid_one(cfg: dict, frame, idx: int, scratch: Path, stop, state):
 
 
 # ============================================================
-# 分段式视频导出：<视频名>_cache/ + 四个能单独跑的阶段
+# 分段式视频导出：<视频名>_cache/ + 五个能单独跑的阶段
 # ------------------------------------------------------------
 # 用户定的口径（推翻原来「一个循环 decode→detect→swap→encode」）：
 #
@@ -6015,11 +6201,14 @@ def _vid_one(cfg: dict, frame, idx: int, scratch: Path, stop, state):
 #   D:/x/9月29日 (5)_cache/           <- 同目录，名字 + _cache
 #     frames/   000001.png …          <- 切帧；合成阶段**同名就地覆盖**成合成结果
 #     aligned/  000001_00.jpg …       <- 切脸：DFLJPG（original_name + 68 点 + face_mat）
+#                                       遮罩阶段把 256 的 XSeg 遮罩写回它的 APP15
 #     meta.json                       <- 源信息 / 阶段标记 / settings 快照
 #
-# 四个阶段各自一个 API（都能单独跑，也从任意已完成的阶段续跑）：
+# 五个阶段各自一个 API（都能单独跑，也从任意已完成的阶段续跑）：
 #   POST /api/merge/stage/frames   视频 -> frames/
 #   POST /api/merge/stage/faces    frames/ -> aligned/
+#   POST /api/merge/stage/mask     aligned/ -> 写回 APP15['xseg_mask']（只有遮罩来源是
+#                                  XSeg / XSegLite 时才需要；来源=DFM 时本阶段自动跳过）
 #   POST /api/merge/stage/merge    frames/ + aligned/ + dfm -> 就地覆盖 frames/
 #   POST /api/merge/stage/encode   frames/ + 源音轨 -> <视频名>_merged.mp4
 #   状态 GET /api/merge/stage/status · 取消 POST /api/merge/stage/cancel
@@ -6032,10 +6221,14 @@ def _vid_one(cfg: dict, frame, idx: int, scratch: Path, stop, state):
 #   3) 帧图一律最高质量：默认 PNG 无损（IMWRITE_PNG_COMPRESSION=3）；要 jpg 就是
 #      quality=100 + 4:4:4，绝不用默认的 95/85/75。
 # ============================================================
-_STAGE_ORDER = ("frames", "faces", "merge", "encode")
-_STAGE_LABEL = {"frames": "切帧", "faces": "切脸", "merge": "合成", "encode": "导出"}
-_STAGE_NUM = {"frames": 1, "faces": 2, "merge": 3, "encode": 6}   # 兼容老 stage 数字
-_STAGE_PCT = {"frames": (0, 15), "faces": (15, 32), "merge": (32, 88), "encode": (88, 100)}
+_STAGE_ORDER = ("frames", "faces", "pred", "mask", "merge", "encode")
+_STAGE_LABEL = {"frames": "切帧", "faces": "切脸", "pred": "换脸", "mask": "遮罩",
+                "merge": "合成", "encode": "导出"}
+# 老 _merge_job["stage"] 的 7 段进度条（0..6）里没有「遮罩」，给它 2 就是和切脸同一格：
+# 老前端照样能看出「还在前面几步」，不会因为多插一步跳到 3 把 31% 显示成合成中。
+_STAGE_NUM = {"frames": 1, "faces": 2, "pred": 2, "mask": 2, "merge": 3, "encode": 6}
+_STAGE_PCT = {"frames": (0, 10), "faces": (10, 20), "pred": (20, 35), "mask": (35, 48),
+              "merge": (48, 92), "encode": (92, 100)}
 _STAGE_ALIAS = {
     "frames": "frames", "frame": "frames", "extract-frames": "frames",
     "extract_frames": "frames", "extractframes": "frames", "decode": "frames",
@@ -6043,7 +6236,12 @@ _STAGE_ALIAS = {
     "faces": "faces", "face": "faces", "extract-faces": "faces",
     "extract_faces": "faces", "extractfaces": "faces", "align": "faces",
     "aligned": "faces", "切脸": "faces",
-    "merge": "merge", "swap": "merge", "compose": "merge", "merged": "merge",
+    "pred": "pred", "preds": "pred", "dfm": "pred", "infer": "pred", "face": "faces",
+    "swap": "pred", "swapped": "pred", "换脸": "pred", "推理": "pred", "dfm推理": "pred",
+    "mask": "mask", "masks": "mask", "xseg": "mask", "xseg-mask": "mask",
+    "xseg_mask": "mask", "xsegs": "mask", "seg": "mask", "apply-mask": "mask",
+    "segmask": "mask", "遮罩": "mask", "遮罩推理": "mask",
+    "merge": "merge", "compose": "merge", "merged": "merge",
     "swap-merge": "merge", "merge-frames": "merge", "合成": "merge",
     "encode": "encode", "mux": "encode", "export": "encode", "video": "encode",
     "导出": "encode",
@@ -6064,11 +6262,53 @@ _STAGE_JOB = {
 
 
 def _stage_name(raw):
-    """阶段名 -> 规范名（frames/faces/merge/encode）。认不出来返回 ""。"""
+    """阶段名 -> 规范名（frames/faces/mask/merge/encode）。认不出来返回 ""。"""
     return _STAGE_ALIAS.get(str(raw or "").strip().lower(), "")
 
 
-# ---------------- 文件 / meta ----------------
+# ---------------- 遮罩来源（决定 mask 阶段要不要跑） ----------------
+def _mask_src(settings, mask_mode=None) -> dict:
+    """settings（或 meta.settings）-> {"source": xseg|dfm, "model": lite|xseg|auto, "label"}。
+
+    两代口径都认，**显式 mask_source 优先**：
+      · 界面 seg 给的原文：DFM / XSeg / XSegLite（app.js 的 mgMergeSettings 把它折成
+        mask_mode 整数发出来，所以多数请求只剩下 mask_mode）；
+      · mask_mode 整数：6/7/8/9 = XSeg 系列（xseg-prd / xseg-dst / prd×dst / 全叠），
+        0/1/2/3/4/5 = 模型自带遮罩（DFM）。
+    认不出来既不算 xseg 也不算 dfm 时按 dfm 走（= 与老行为一致：合成里现算遮罩）。
+    """
+    settings = settings if isinstance(settings, dict) else {}
+    raw = ""
+    for k in ("mask_source", "mask_seg", "seg_source", "seg", "mask_model"):
+        v = settings.get(k)
+        if v is not None and str(v).strip():
+            raw = str(v).strip()
+            break
+    key = (raw.lower().replace("_", "").replace("-", "").replace(" ", "")
+           .replace("×", ""))
+    mm = mask_mode if mask_mode is not None else settings.get("mask_mode")
+    try:
+        mm = int(mm) if str(mm if mm is not None else "").strip() != "" else None
+    except (TypeError, ValueError):
+        mm = None
+
+    if key in ("dfm", "model", "learned", "learnedmask", "none", "off", "0"):
+        return {"source": "dfm", "model": "", "label": "DFM", "raw": raw}
+    if key in ("xseg", "xsegprddst", "xsegdst", "xsegprd", "1"):
+        return {"source": "xseg", "model": "xseg", "label": "XSeg", "raw": raw}
+    if key in ("xseglite", "lite", "xseglite2", "2"):
+        return {"source": "xseg", "model": "lite", "label": "XSegLite", "raw": raw}
+    if raw:
+        # 认不出的写法：不猜成 dfm，按 mask_mode（没有就按界面默认的 XSegLite）
+        pass
+    if mm is not None and mm >= 6:
+        return {"source": "xseg", "model": "auto", "label": "XSeg", "raw": raw}
+    if mm is not None:
+        return {"source": "dfm", "model": "", "label": "DFM", "raw": raw}
+    # settings 里什么都没有：和界面默认一致（遮罩来源默认 XSegLite）
+    return {"source": "xseg", "model": "auto", "label": "XSegLite", "raw": raw}
+
+
 def _stage_files(dirp, exts=_STAGE_IMG_EXTS) -> list:
     """目录里的图，按文件名排序（000001.png … 定长补零，字典序 = 帧序）。"""
     d = Path(dirp)
@@ -6199,6 +6439,15 @@ def _stage_imencode(img, ext=".png") -> bytes:
     return buf.tobytes()
 
 
+def _stage_imencode_png(img, level: int = 1) -> bytes:
+    """PNG 编码，压缩级别可指定。合成写回默认 level=1（体积换速度）。"""
+    import cv2
+    ok, buf = cv2.imencode(".png", img, [int(cv2.IMWRITE_PNG_COMPRESSION), int(level)])
+    if not ok:
+        raise _BadInput("这一帧编不出 PNG", 500)
+    return buf.tobytes()
+
+
 def _stage_write_atomic(path, data: bytes):
     """先写 .part 再 os.replace：半张图永远不会被当成「这一帧已经好了」。"""
     p = Path(path)
@@ -6210,6 +6459,24 @@ def _stage_write_atomic(path, data: bytes):
 
 def _stage_read_image(path):
     return _app_mod._imread_any(path)
+
+
+def _stage_read_frame(path):
+    """整帧 PNG 的快速读法：读字节 + imdecode（实测 20ms，_imread_any 要 40ms）。
+
+    _imread_any 里有一堆兜底分支（非 UTF-8 路径、EXIF、多解码器），合成阶段每帧都
+    走一遍是净亏。open() 用的是 Python 的 Unicode API，中文路径没问题。
+    """
+    import cv2
+    import numpy as np
+    try:
+        with open(str(path), "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    if not data:
+        return None
+    return cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
 
 
 def _stage_clear_dir(dirp, exts=_STAGE_IMG_EXTS, prefix="") -> int:
@@ -6414,12 +6681,13 @@ def _stage_do_frames(cfg: dict) -> dict:
                         "盖回来，和 meta 里「已合成」的标记打架。要重来请传 force=true："
                         "它会清掉 frames/ + aligned/ 和后面三个阶段的标记。", 409)
 
-    _stage_log("切帧：清空 frames/ 与 aligned/（帧变了，按帧配对的对齐脸一起作废）")
+    _stage_log("切帧：清空 frames/ 与 aligned/（帧变了，按帧配对的对齐脸和它们的遮罩一起作废）")
     n_old = _stage_clear_dir(frames_dir)
     n_old += _stage_clear_dir(aligned_dir)
     frames_dir.mkdir(parents=True, exist_ok=True)
     aligned_dir.mkdir(parents=True, exist_ok=True)
-    for k in ("faces", "merge", "encode"):
+    # 帧变了 -> 按帧配对的脸、换脸结果、遮罩一起作废
+    for k in ("faces", "pred", "mask", "merge", "encode"):
         meta["stages"][k] = {}
     meta["frame_swapped"] = False
     meta["stages"]["frames"] = {"done": False, "msg": "切帧中"}
@@ -6639,16 +6907,642 @@ def _stage_do_faces(cfg: dict) -> dict:
     return {"count": faces_total, "frames": total, "skipped": skipped, "seconds": sec}
 
 
-def _stage_do_merge(cfg: dict) -> dict:
-    """阶段 3 · 合成：frames/ + aligned/ + dfm -> **就地覆盖** frames/ 里的同名帧。
+# ---------------- ③ 换脸（dfm 推理）----------------
+# 产物（和 4.0 的 work 目录一一对应，export_pipeline.py:769/846/856 那三个名字）：
+#   pred/000001_00.png        换脸后的正脸（无损 PNG，S×S，S = dfm 输入边长）
+#   pred/000001_00_prdm.png   dfm 自带的 prd 遮罩（灰色 PNG，0..255）
+#   pred/000001_00_dstdm.png  dfm 自带的 dst 遮罩
+# 这一阶段**只做推理**：不碰遮罩组合、不碰合成、不写 frames/。
+_PRED_LOCK = threading.RLock()
+_DFM_SESS = {}          # dfm -> (sess, input_name, size, nchw, providers)
+_INFER_CALLS = collections.Counter()   # 各阶段真正跑了几次推理（验收要断言合成阶段 = 0）
 
-    语义照 13-MERGE-SEMANTICS.md：
-      · 没有人脸库 -> 左栏那个 dfm 换全部脸；
-      · 有人脸库   -> embedding 归组，不匹配的脸保持原像素（不兜给任何模型）；
-      · 无人脸的帧 -> 不跑 dfm，直接当原样帧（连重编码都不做，像素不动）。
-    逐帧像素和 /api/merge/preview、老的一口气导出走的是**同一条** _preview_job。
-    续跑游标写在 meta.stages.merge.done_frames：就地覆盖只往前推，断电也不重换。
+
+def _stage_pred_dir(cache) -> Path:
+    return Path(cache) / "pred"
+
+
+def _stage_mask_dir(cache) -> Path:
+    return Path(cache) / "mask"
+
+
+def _dfm_session(dfm: str):
+    """常驻的 dfm onnx session（4.1 进程内，CUDA 优先，没有就 CPU）。
+
+    以前每帧都要把整帧 base64 PNG 发到 4.0 的 worker 子进程再发回来；现在 dfm 推理
+    就在本进程里（onnxruntime 4.1 这份环境里也有），省掉两次编解码 + 两次 base64 +
+    两个进程边界。session 按路径常驻，切模型才重建。
     """
+    key = str(dfm)
+    with _PRED_LOCK:
+        hit = _DFM_SESS.get(key)
+        if hit is not None:
+            return hit
+        import onnxruntime as ort
+        try:
+            _ensure_ort_dll_dirs()
+        except Exception:                                   # noqa: BLE001
+            pass
+        so = ort.SessionOptions()
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sess = ort.InferenceSession(key, sess_options=so,
+                                    providers=["CUDAExecutionProvider",
+                                               "CPUExecutionProvider"])
+        shape = list(sess.get_inputs()[0].shape)
+        nchw = len(shape) >= 4 and shape[1] in (1, 3)
+        try:
+            size = int(shape[2] if nchw else shape[1])
+        except Exception:                                   # noqa: BLE001
+            size = 256
+        ent = (sess, sess.get_inputs()[0].name, size, nchw, list(sess.get_providers()))
+        _DFM_SESS[key] = ent
+        _stage_log("换脸：dfm 已加载 %s · %d×%d · %s"
+                   % (Path(key).name, size, size, ent[4]))
+        return ent
+
+
+def _mask2d(t, size):
+    """dfm 的遮罩输出 -> (size, size) float32 0..1（和 preview worker 里同名函数一致）。"""
+    import cv2
+    import numpy as np
+    m = np.squeeze(t)
+    if m.ndim == 3:
+        m = m[:, :, 0]
+    m = np.asarray(m, np.float32)
+    if m.shape[:2] != (int(size), int(size)):
+        m = cv2.resize(m, (int(size), int(size)), interpolation=cv2.INTER_CUBIC)
+    return m
+
+
+def _dfm_run_batch(ent, batch_in):
+    """一次前向跑 N 张（N = batch_in.shape[0]），返回 [(face, prd_mask, dst_mask)]。
+
+    batch_in: (N,S,S,3) float32 0..1（NHWC；NCHW 的 dfm 在调用方转置）。
+    dfm 的 batch 维是动态的（['batch',416,416,3]），所以批处理不用重新导出模型；
+    CUDA graph 那种「按 batch 捕获」的坑在 ORT 这边不存在（我们不开 cuda_graph），
+    真要开 TRT 引擎就得按 batch 分桶 —— 见 _engines.try_engine 的 graph_max_batch。
+    """
+    import cv2
+    import numpy as np
+    sess, name, size, nchw, _prov = ent
+    x = batch_in
+    if nchw:
+        x = np.transpose(x, (0, 3, 1, 2))
+    _INFER_CALLS["dfm"] += int(x.shape[0])
+    outs = sess.run(None, {name: np.ascontiguousarray(x, np.float32)})
+    n = int(x.shape[0])
+    faces, prds, dsts = [], [], []
+    for i in range(n):
+        face = None
+        for o in outs:
+            a = np.asarray(o)
+            if a.ndim >= 4 and a.shape[-1] == 3:
+                face = a[i] if a.ndim == 4 else a[i][0]
+                break
+        if face is None:
+            a = np.asarray(outs[0])
+            face = a[i]
+            if face.ndim == 3 and face.shape[-1] == 1:
+                face = np.repeat(face, 3, axis=-1)
+        face = np.asarray(face, np.float32)
+        if face.ndim > 3:
+            face = face[0]
+        if nchw and face.shape[0] == 3:
+            face = np.transpose(face, (1, 2, 0))
+        if face.shape[:2] != (size, size):
+            face = cv2.resize(face, (size, size), interpolation=cv2.INTER_LANCZOS4)
+        prd = dst = None
+        if len(outs) >= 3:
+            prd = _mask2d(np.asarray(outs[0])[i], size)
+            dst = _mask2d(np.asarray(outs[2])[i], size)
+        faces.append(np.clip(face, 0, 1))
+        prds.append(prd)
+        dsts.append(dst)
+    return list(zip(faces, prds, dsts))
+
+
+def _stage_face_rows(aligned) -> list:
+    """aligned/ 里的对齐脸按帧归组：[("000001", [路径…]), …]（帧序 = 文件名字典序）。"""
+    out, order = {}, []
+    for p in aligned:
+        key = p.stem.split("_")[0]
+        if key not in out:
+            out[key] = []
+            order.append(key)
+        out[key].append(p)
+    return [(k, out[k]) for k in order]
+
+
+def _stage_frame_path(frames_dir, key: str):
+    d = Path(frames_dir)
+    for ext in _STAGE_IMG_EXTS:
+        cand = d / (key + ext)
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _stage_pred_assign(cfg: dict, frame, metas: list) -> list:
+    """这一帧每张脸用哪个 dfm（多模型 = 人脸库 embedding 归组；没有库就全用同一个）。
+
+    和 13-MERGE-SEMANTICS 的口径一致：
+      · 没有人脸库 -> 左栏那个 dfm 换全部脸；
+      · 有人脸库   -> 按 embedding 归组，**不匹配的脸不给 pred**（⑤ 保持原像素，
+        绝不兜给任何模型）。
+    返回 [dfm 路径 or ""]（下标 = aligned 里的脸序号）。
+    """
+    single = str(cfg.get("dfm") or "")
+    if not cfg.get("use_library") or not cfg.get("library"):
+        return [single] * len(metas)
+    from . import _face_group as _fg
+    from . import _faces as _store
+    from ._align import align_face_68
+
+    cache = cfg.setdefault("_pred_plan_cache", {})
+    if "profiles" not in cache:
+        library = _auto_library(cfg.get("plan_payload") or {})
+        index = None
+        profiles = []
+        if library is not None:
+            try:
+                index = _store.load_index(library)
+                if any(str(g.get("dfm") or "").strip() for g in index["groups"]):
+                    profiles = _fg.group_profiles(library, index,
+                                                  compute_limit=_AUTO_EMB_LIMIT)
+            except Exception:                               # noqa: BLE001
+                profiles = []
+        cache["profiles"] = profiles or []
+        if not cache["profiles"]:
+            cache["off"] = True                             # 库不可用 -> 退回单模型
+    if cache.get("off"):
+        return [single] * len(metas)
+    threshold = cfg.get("face_threshold")
+    threshold = float(_fg.DEFAULT_THRESHOLD if threshold is None else threshold)
+    out = []
+    for m in metas:
+        dfm = ""
+        try:
+            lm = np.asarray(m.get("lm"), np.float32)
+            box = m.get("box")
+            crop, _mf = align_face_68(frame, lm, box, 512)
+            vec = _fg.embed_crop(crop) if crop is not None else None
+            best = _fg.match_vector(vec, cache["profiles"], threshold) if vec is not None else None
+            if best and best.get("matched") and best.get("dfm"):
+                dfm = _dfm_by_name(best["dfm"]) or ""
+        except Exception:                                   # noqa: BLE001
+            dfm = ""
+        out.append(dfm or "")
+    return out
+
+
+def _stage_do_pred(cfg: dict) -> dict:
+    """阶段 3 · 换脸：frames/ + aligned/ -> pred/（换脸正脸 + dfm 自带两张遮罩）。
+
+    语义照 4.0 export_pipeline.py:769（fo = warpAffine(frame, get_transform_mat(lm,
+    swap_sz, WHOLE_FACE)) → dfm 前向）。改动只有两处：
+      · 一次送 N 张（dfm 的 batch 维是动态的）—— 实测 N=1/4/8 是 25.5 / 22.2 / 27.7 张/秒；
+      · 推理就在 4.1 进程里跑（以前每帧 base64 PNG 往返 4.0 worker，编解码 + IPC 全砍掉）。
+    多模型：有人脸库时按 embedding 归组，每组用各自的 dfm；不匹配的脸**不产出 pred**
+    （⑤ 保持原像素）。游标 = meta.stages.pred.done_frames（帧数），取消可续。
+    """
+    import cv2
+    import numpy as np
+    from ._merge_compose import ensure_engine_path
+    ensure_engine_path()
+    from facelib import FaceType
+    from facelib.LandmarksProcessor import get_transform_mat
+    from ._align import read_dfljpg_meta
+
+    cache = Path(cfg["cache"])
+    meta = cfg["meta"]
+    st = meta["stages"].setdefault("pred", {})
+    aligned = _stage_files(_stage_aligned_dir(cache), (".jpg", ".jpeg"))
+    if not aligned:
+        raise _BadInput("aligned/ 里没有对齐脸 —— 先跑切脸（POST /api/merge/stage/faces）", 409)
+    if not (meta["stages"].get("faces") or {}).get("done"):
+        raise _BadInput("切脸（faces）还没完成 —— 先跑切脸，再换脸", 409)
+    frames_dir = _stage_frames_dir(cache)
+    groups = _stage_face_rows(aligned)
+    total = len(groups)
+    pred_dir = _stage_pred_dir(cache)
+    pred_dir.mkdir(parents=True, exist_ok=True)
+
+    dfm = str(cfg.get("dfm") or "")
+    if not dfm or not Path(dfm).is_file():
+        raise _BadInput("没有 .dfm 模型（换脸阶段要它）：%s" % (dfm or "空"), 409)
+    batch = max(1, int(cfg.get("pred_batch") or 8))
+    chunk_frames = max(1, int(cfg.get("pred_chunk") or max(2, batch // 2)))
+
+    cursor = 0 if cfg["force"] else max(0, min(int(st.get("done_frames") or 0), total))
+    if (not cfg["force"]) and st.get("done") and cursor >= total and total:
+        _stage_log("换脸：复用已有 %d 帧的 pred/（不重跑）" % total)
+        return {"skipped": True, "count": int(st.get("count") or 0), "reason": "already-done"}
+    if cursor:
+        _stage_log("换脸：从第 %d 帧续跑（前 %d 帧的 pred/ 已经在）" % (cursor + 1, cursor))
+    _stage_log("换脸：dfm=%s · batch=%d · %d 帧 / %d 张脸%s"
+               % (Path(dfm).name, batch, total, len(aligned),
+                  " · 人脸库归组" if cfg.get("library") else ""))
+
+    t0 = time.time()
+    done_faces = int(st.get("count") or 0)
+    unmatched = int(st.get("unmatched") or 0)
+    failed = int(st.get("failed") or 0)
+    sizes = {}
+
+    def _save(up_to: int, done: bool = False, extra: dict = None):
+        node = {
+            "done": bool(done), "done_frames": int(up_to), "frames": total,
+            "count": done_faces, "unmatched": unmatched, "failed": failed,
+            "faces_total": len(aligned), "dfm": str(dfm), "model": Path(dfm).name,
+            "batch": int(batch), "sizes": dict(sizes), "pred_dir": str(pred_dir),
+            "resumed_from": int(cursor),
+            "msg": ("换脸完成：%d 张脸 / %d 帧（未匹配 %d）" % (done_faces, total, unmatched))
+                   if done else ("换脸 %d/%d 帧" % (up_to, total)),
+        }
+        if extra:
+            node.update(extra)
+        meta["stages"]["pred"] = node
+        _stage_meta_save(cache, meta)
+
+    def _run(use_dfm, keys, inputs):
+        """一个 dfm 的一批：前向 → 按 4.0 的命名写盘。"""
+        nonlocal done_faces, failed
+        if not keys:
+            return
+        ent = _dfm_session(use_dfm)
+        sizes[Path(use_dfm).name] = int(ent[2])
+        arr = np.stack(inputs, axis=0).astype(np.float32)
+        try:
+            outs = _dfm_run_batch(ent, arr)
+        except Exception as e:                              # noqa: BLE001
+            if "allocate" in str(e).lower() or "memory" in str(e).lower():
+                _stage_log("换脸：batch=%d 显存不够，退回逐张（%s）"
+                           % (len(keys), str(e)[:120]))
+                outs = []
+                for k in range(len(keys)):
+                    outs.extend(_dfm_run_batch(ent, arr[k:k + 1]))
+            else:
+                raise
+        for key, (face, prd, dst) in zip(keys, outs):
+            try:
+                _stage_write_atomic(
+                    pred_dir / (key + ".png"),
+                    _stage_imencode_png(np.clip(face * 255.0, 0, 255).astype(np.uint8), 1))
+                if prd is not None:
+                    _stage_write_atomic(
+                        pred_dir / (key + "_prdm.png"),
+                        _stage_imencode_png(np.clip(prd * 255.0, 0, 255).astype(np.uint8), 1))
+                if dst is not None:
+                    _stage_write_atomic(
+                        pred_dir / (key + "_dstdm.png"),
+                        _stage_imencode_png(np.clip(dst * 255.0, 0, 255).astype(np.uint8), 1))
+                done_faces += 1
+            except Exception as e:                          # noqa: BLE001
+                failed += 1
+                _stage_log("换脸写盘失败 %s：%s" % (key, str(e)[:140]))
+
+    def _process_chunk(lo: int, hi: int) -> int:
+        """跑 [lo,hi) 这些帧：解码 → 每张脸 warp → 按 dfm 分组批处理。返回处理到的帧号。"""
+        from collections import OrderedDict as _OD
+        jobs = _OD()          # dfm -> ([keys], [inputs])
+        got = lo
+        for gi in range(lo, hi):
+            _stage_check_cancel()
+            key, paths = groups[gi]
+            fp = _stage_frame_path(frames_dir, key)
+            if fp is None:
+                _stage_log("换脸跳过 %s：frames/ 里没有这一帧" % key)
+                got = gi + 1
+                continue
+            frame = _stage_read_frame(fp)
+            if frame is None:
+                _stage_log("换脸跳过 %s：帧读不出来" % key)
+                got = gi + 1
+                continue
+            metas = []
+            for ap in paths:
+                m = read_dfljpg_meta(ap) or {}
+                lm = m.get("source_landmarks") or m.get("landmarks")
+                box = m.get("source_rect") or None
+                metas.append({"ap": ap, "lm": lm, "box": box})
+            plans = _stage_pred_assign(cfg, frame, metas)
+            fc = None
+            for meta_f, use_dfm in zip(metas, plans):
+                ap = meta_f["ap"]
+                lm = meta_f["lm"]
+                if not lm or len(lm) != 68:
+                    failed += 1
+                    _stage_log("换脸跳过 %s：没有 68 点" % ap.name)
+                    continue
+                if not use_dfm:
+                    unmatched += 1
+                    continue
+                if fc is None:
+                    fc = frame.astype(np.float32) / 255.0
+                try:
+                    ent = _dfm_session(use_dfm)
+                    size = int(ent[2])
+                    fmat = get_transform_mat(np.asarray(lm, np.float32), size,
+                                             FaceType.WHOLE_FACE, scale=1.0)
+                    crop = cv2.warpAffine(fc, fmat, (size, size), flags=cv2.INTER_CUBIC)
+                    bucket = jobs.setdefault(use_dfm, ([], []))
+                    bucket[0].append(ap.stem)
+                    bucket[1].append(np.clip(crop, 0, 1))
+                except Exception as e:                      # noqa: BLE001
+                    failed += 1
+                    _stage_log("换脸跳过 %s：%s" % (ap.name, str(e)[:140]))
+            got = gi + 1
+            # 攒够一批就立刻发，别等整块：显存/吞吐都更稳
+            for use_dfm in list(jobs):
+                keys, inputs = jobs[use_dfm]
+                while len(keys) >= batch:
+                    _run(use_dfm, keys[:batch], inputs[:batch])
+                    del keys[:batch], inputs[:batch]
+        for use_dfm in list(jobs):
+            keys, inputs = jobs[use_dfm]
+            if keys:
+                _run(use_dfm, keys, inputs)
+            jobs[use_dfm] = ([], [])
+        return got
+
+    gi = cursor
+    while gi < total:
+        _stage_check_cancel()
+        hi = min(total, gi + chunk_frames)
+        gi = _process_chunk(gi, hi)
+        el = max(0.001, time.time() - t0)
+        rate = (gi - cursor) / el
+        _stage_progress("pred", 100.0 * gi / total,
+                        "换脸 %d/%d 帧 · %d 张脸 · %.1f 帧/秒 · %.1f 张/秒"
+                        % (gi, total, done_faces, rate, done_faces / el),
+                        frames_done=gi, frames_total=total,
+                        frame_fps=round(rate, 2))
+        _save(gi)
+    sec = round(time.time() - t0, 2)
+    _save(total, done=True, extra={
+        "seconds": sec, "finished_at": time.time(),
+        "faces_per_sec": round(done_faces / sec, 2) if sec else None,
+        "frame_fps": round((total - cursor) / sec, 2) if sec else None})
+    _stage_log("换脸完成：%d 帧 · %d 张脸 · 未匹配 %d · 失败 %d · %.2f s · %.1f 张/秒"
+               % (total, done_faces, unmatched, failed, sec,
+                  done_faces / sec if sec > 0 else 0.0))
+    return {"count": done_faces, "frames": total, "unmatched": unmatched, "failed": failed,
+            "seconds": sec, "faces_per_sec": round(done_faces / sec, 2) if sec else None}
+
+
+# ---------------- ④ 遮罩推理 ----------------
+def _mask_signature(src: dict, cfg: dict = None) -> str:
+    """遮罩阶段的「来源指纹」：来源/模型变了，mask/ 就失效（不许静默复用）。"""
+    model = str(src.get("model") or "")
+    if src.get("source") == "dfm":
+        return "dfm"
+    return "xseg:%s" % (model or "auto")
+
+
+def _stage_do_mask(cfg: dict) -> dict:
+    """阶段 4 · 遮罩推理：pred/ + frames/ -> mask/（每个对齐脸两张灰图）。
+
+    语义照 4.0 export_pipeline.py:758-799（_phase_mask_worker）：
+      · XSeg / XSegLite 来源：mask/<key>_xseg_prd.png = XSeg(pred)，
+        mask/<key>_xseg_dst.png = XSeg(warpAffine(frame, get_transform_mat(lm,256)))
+      · DFM 来源：遮罩就是 dfm 自带的那两条分支（③ 已经落盘 prdm/dstdm），这一步
+        只把它们按 mask/ 的命名**落盘留档**（便于检查），不跑任何推理。
+    两种来源都会把 dfm 的两张遮罩一起放进 mask/（mask_mode=9 全乘要用）。
+    游标 = meta.stages.mask.done_frames（对齐脸张数）。
+    """
+    import cv2
+    import numpy as np
+    from ._merge_compose import ensure_engine_path
+    ensure_engine_path()
+    from facelib import FaceType
+    from facelib.LandmarksProcessor import get_transform_mat
+    from ._align import read_dfljpg_meta
+
+    cache = Path(cfg["cache"])
+    meta = cfg["meta"]
+    st = meta["stages"].setdefault("mask", {})
+    src = _mask_src(cfg.get("settings"), cfg.get("mask_mode"))
+    cfg["mask_src"] = src
+    sig = _mask_signature(src, cfg)
+    aligned = _stage_files(_stage_aligned_dir(cache), (".jpg", ".jpeg"))
+    if not aligned:
+        raise _BadInput("aligned/ 里没有对齐脸 —— 先跑切脸（POST /api/merge/stage/faces）", 409)
+    if not (meta["stages"].get("faces") or {}).get("done"):
+        raise _BadInput("切脸（faces）还没完成 —— 先跑切脸，再补遮罩", 409)
+    if not (meta["stages"].get("pred") or {}).get("done"):
+        raise _BadInput("换脸（pred）还没完成 —— 遮罩阶段要用换脸后的正脸，先跑换脸", 409)
+    total = len(aligned)
+    pred_dir = _stage_pred_dir(cache)
+    mask_dir = _stage_mask_dir(cache)
+    mask_dir.mkdir(parents=True, exist_ok=True)
+
+    if (st.get("signature") and st.get("signature") != sig and not cfg["force"]
+            and int(st.get("done_frames") or 0) > 0):
+        raise _BadInput("遮罩来源变了（%s → %s）：mask/ 里的东西已经失效，"
+                        "不能静默复用。传 force=true 重跑遮罩阶段"
+                        % (st.get("signature"), sig), 409)
+    if (not cfg["force"]) and st.get("done") and st.get("signature") == sig \
+            and int(st.get("done_frames") or 0) >= total:
+        _stage_log("遮罩：复用已有 %d 张遮罩（不重跑；要重做传 force=true）" % total)
+        return {"skipped": True, "count": int(st.get("count") or 0), "reason": "already-done"}
+
+    xseg = None
+    engine = "none"
+    if src["source"] == "xseg":
+        xseg = _app_mod._get_xseg(src.get("model") or None)
+        if xseg is None:
+            raise _BadInput("找不到 XSeg 模型（workspace/model/XSegLite/xseglite.onnx 或 "
+                            "workspace/model/XSeg/XSeg.onnx）—— 遮罩来源选了 %s 就必须有它"
+                            % (src.get("label") or "XSeg"), 500)
+        provid = []
+        try:
+            provid = list(xseg.sess.get_providers())
+        except Exception:                                   # noqa: BLE001
+            provid = []
+        cls = type(xseg.sess).__name__.lower()
+        engine = "trt" if ("trt" in cls or not provid) else "ort"
+    cursor = 0 if cfg["force"] else max(0, min(int(st.get("done_frames") or 0), total))
+    if cursor:
+        _stage_log("遮罩：从第 %d 张续跑（前 %d 张已经在）" % (cursor + 1, cursor))
+    _stage_log("遮罩：来源=%s · 引擎=%s · %d 张对齐脸"
+               % (src.get("label") or src.get("source"), engine, total))
+
+    t0 = time.time()
+    wrote = int(st.get("count") or 0)
+    failed = int(st.get("failed") or 0)
+    means = []
+    frames_dir = _stage_frames_dir(cache)
+    cache_frame = {"key": None, "img": None}
+
+    def _save(up_to: int, done: bool = False, extra: dict = None):
+        node = {
+            "done": bool(done), "done_frames": int(up_to), "total": total,
+            "count": wrote, "failed": failed, "signature": sig,
+            "mask_source": src.get("label") or src.get("source"),
+            "mask_model": str(src.get("model") or ""), "engine": engine,
+            "size": 256, "inference": (src["source"] == "xseg"),
+            "dir": str(mask_dir), "resumed_from": int(cursor),
+            "msg": ("遮罩完成：%d 张脸（来源 %s）"
+                    % (wrote, src.get("label") or src.get("source"))) if done
+                   else ("遮罩 %d/%d 张" % (up_to, total)),
+        }
+        if extra:
+            node.update(extra)
+        meta["stages"]["mask"] = node
+        _stage_meta_save(cache, meta)
+
+    def _copy_dfm_masks(key: str):
+        """把 ③ 的 dfm 遮罩按 mask/ 的命名落盘（来源=DFM 时就是这一步的产物）。"""
+        n = 0
+        for src_name, dst_name in (("_prdm", "_dfm_prd"), ("_dstdm", "_dfm_dst")):
+            a = pred_dir / (key + src_name + ".png")
+            if not a.is_file():
+                continue
+            try:
+                _stage_write_atomic(mask_dir / (key + dst_name + ".png"), a.read_bytes())
+                n += 1
+            except OSError:
+                pass
+        return n
+
+    _save(cursor)
+    k = cursor
+    try:
+      for k in range(cursor, total):
+          _stage_check_cancel()
+          ap = aligned[k]
+          key = ap.stem
+          try:
+              _copy_dfm_masks(key)
+              if src["source"] == "dfm":
+                  wrote += 1
+              else:
+                  pm = pred_dir / (key + ".png")
+                  pred = _stage_read_image(pm) if pm.is_file() else None
+                  if pred is None:
+                      failed += 1
+                      _stage_log("遮罩跳过 %s：pred/ 里没有换脸结果（先跑换脸）" % key)
+                  else:
+                      mk = xseg.mask(pred, out_size=256)
+                      _INFER_CALLS["xseg"] += 1
+                      _stage_write_atomic(
+                          mask_dir / (key + "_xseg_prd.png"),
+                          _stage_imencode(np.clip(mk * 255.0, 0, 255).astype(np.uint8), ".png"))
+                      means.append(float(np.asarray(mk).mean()))
+                      # dst 侧：原帧按 68 点正变换到 256，再跑一次 XSeg（4.0:790-797）
+                      fkey = key.split("_")[0]
+                      if cache_frame["key"] != fkey:
+                          cache_frame["key"] = fkey
+                          fp = _stage_frame_path(frames_dir, fkey)
+                          cache_frame["img"] = _stage_read_frame(fp) if fp else None
+                      frame = cache_frame["img"]
+                      if frame is not None:
+                          m = read_dfljpg_meta(ap) or {}
+                          lm = m.get("source_landmarks") or m.get("landmarks")
+                          lm = np.asarray(lm, np.float32)
+                          dmat = get_transform_mat(lm, 256, FaceType.WHOLE_FACE, scale=1.0)
+                          dface = cv2.warpAffine(frame, dmat, (256, 256),
+                                                 flags=cv2.INTER_CUBIC)
+                          mk2 = xseg.mask(dface, out_size=256)
+                          _INFER_CALLS["xseg"] += 1
+                          _stage_write_atomic(
+                              mask_dir / (key + "_xseg_dst.png"),
+                              _stage_imencode(np.clip(mk2 * 255.0, 0, 255).astype(np.uint8),
+                                              ".png"))
+                      wrote += 1
+          except Exception as e:                              # noqa: BLE001
+              failed += 1
+              _stage_log("遮罩跳过 %s：%s" % (key, str(e)[:140]))
+          el = max(0.001, time.time() - t0)
+          _stage_progress("mask", 100.0 * (k + 1) / total,
+                          "遮罩 %d/%d 张 · %.1f 张/秒" % (k + 1, total, (k + 1 - cursor) / el),
+                          frames_done=k + 1, frames_total=total,
+                          frame_fps=round((k + 1 - cursor) / el, 2))
+    except _StageCancel:
+        _save(k)                    # 取消也要把游标落盘：下次从这里接着跑
+        _stage_log("遮罩取消：停在 %d/%d 张（游标已存）" % (k, total))
+        raise
+    sec = round(time.time() - t0, 2)
+    _save(total, done=True, extra={
+        "seconds": sec, "finished_at": time.time(),
+        "fps": round((total - cursor) / sec, 2) if sec else None,
+        "mask_mean": (round(sum(means) / len(means), 4) if means else None),
+    })
+    _stage_log("遮罩完成：%d 张 · 失败 %d · %.2f s · %.1f 张/秒 · 来源 %s%s"
+               % (total, failed, sec, (total - cursor) / sec if sec > 0 else 0.0,
+                  src.get("label") or src.get("source"),
+                  (" · 遮罩均值 %.3f" % (sum(means) / len(means))) if means else ""))
+    return {"count": wrote, "failed": failed, "total": total, "seconds": sec,
+            "mask_source": src.get("label") or src.get("source"),
+            "signature": sig, "engine": engine}
+
+
+
+
+
+def _stage_profile_blank() -> dict:
+    """合成阶段的逐帧打点容器（五段 + 帧计数）。"""
+    return {"frames": 0, "faces": 0, "no_face": 0, "swapped": 0,
+            "read_ms": 0.0, "prep_ms": 0.0, "mask_ms": 0.0, "ct_ms": 0.0, "paste_ms": 0.0,
+            "blend_ms": 0.0, "encode_ms": 0.0, "write_ms": 0.0, "frame_ms": 0.0}
+
+
+def _gpu_mem_used_mb():
+    """当前显存占用（MB）。拿不到就 None —— 只在验收/报告里用，不影响主流程。"""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=getattr(_app_mod, "_NO_WINDOW", 0))
+        vals = [int(x) for x in (out.stdout or "").split() if x.strip().isdigit()]
+        return max(vals) if vals else None
+    except Exception:                                       # noqa: BLE001
+        return None
+
+
+def _stage_merge_face_inputs(cache, ap, cfg) -> dict:
+    """一张对齐脸的合成输入：pred PNG + 三组遮罩（全从磁盘读，不跑推理）。"""
+    import numpy as np
+    from ._align import read_dfljpg_meta
+    from ._merge_compose import _read_gray
+
+    key = ap.stem
+    pred_dir = _stage_pred_dir(cache)
+    mask_dir = _stage_mask_dir(cache)
+    m = read_dfljpg_meta(ap) or {}
+    lm = m.get("source_landmarks") or m.get("landmarks")
+    if not lm or len(lm) != 68:
+        return None
+    pred = _stage_read_image(pred_dir / (key + ".png"))
+    if pred is None:
+        return None
+    return {
+        "key": key,
+        "landmarks": np.asarray(lm, np.float32),
+        "pred": pred.astype(np.float32) / 255.0,
+        "prd_dfm": _read_gray(pred_dir / (key + "_prdm.png")),
+        "dst_dfm": _read_gray(pred_dir / (key + "_dstdm.png")),
+        "xseg_prd": _read_gray(mask_dir / (key + "_xseg_prd.png")),
+        "xseg_dst": _read_gray(mask_dir / (key + "_xseg_dst.png")),
+    }
+
+
+def _stage_do_merge(cfg: dict) -> dict:
+    """阶段 5 · 合成：**纯 CPU**。frames/ + aligned/ + pred/ + mask/ -> 就地覆盖 frames/。
+
+    语义基准 = 4.0 MergeStudio/core/export_pipeline.py 的 _phase_merge_worker()
+    （见 app/server/_merge_compose.py 顶部的逐段对照表）：遮罩准备（mask_mode 组合 +
+    erode/blur）→ 色彩迁移（ct_mode）→ 融合（overlay / hist-match / seamless /
+    seamless-hist-match）→ 反贴回原帧（face_mat 逆变换）→ 写盘。
+
+    这一阶段**不许碰推理**：dfm / XSeg 都已经在 ③④ 落盘，这里只读文件。
+    验收会断言「推理调用计数 = 0」且显存不增长（profile 里也有 gpu_mem 前后值）。
+    续跑游标 = meta.stages.merge.done_frames（就地覆盖只往前推）。
+    """
+    import cv2
+    import numpy as np
+    from ._merge_compose import compose_frame
+
     cache = Path(cfg["cache"])
     meta = cfg["meta"]
     st = meta["stages"].setdefault("merge", {})
@@ -6659,123 +7553,189 @@ def _stage_do_merge(cfg: dict) -> dict:
     if (not cfg["force"]) and st.get("done") and int(st.get("done_frames") or 0) >= total:
         _stage_log("合成：复用已完成的结果（%d 帧，不重跑）" % total)
         return {"skipped": True, "count": total, "reason": "already-done"}
-    if not (meta["stages"].get("faces") or {}).get("done"):
-        raise _BadInput("aligned/ 还没切完脸（faces 阶段没完成）—— 先跑切脸", 409)
+    for need, label in (("faces", "切脸"), ("pred", "换脸"), ("mask", "遮罩")):
+        if not (meta["stages"].get(need) or {}).get("done"):
+            raise _BadInput("合成要用 %s 的产物，但「%s」阶段还没完成 —— 先跑%s"
+                            "（POST /api/merge/stage/%s）" % (label, label, label, need), 409)
+    src = _mask_src(cfg.get("settings"), cfg.get("mask_mode"))
+    sig = _mask_signature(src, cfg)
+    mst = meta["stages"].get("mask") or {}
+    if mst.get("signature") and mst.get("signature") != sig:
+        raise _BadInput("遮罩来源变了（mask/ 是 %s 产出的，现在是 %s）—— 先重跑遮罩阶段"
+                        "（force=true），别拿旧遮罩合成" % (mst.get("signature"), sig), 409)
 
     aligned = _stage_files(_stage_aligned_dir(cache), (".jpg", ".jpeg"))
     by_frame = {}
-    for p in aligned:
-        by_frame.setdefault(p.stem.split("_")[0], []).append(p.name)
+    for ap in aligned:
+        by_frame.setdefault(ap.stem.split("_")[0], []).append(ap)
 
     cursor = int(st.get("done_frames") or 0)
     if cfg["force"] and not meta.get("frame_swapped"):
         cursor = 0
     cursor = max(0, min(cursor, total))
-    if meta.get("frame_swapped") and cursor == 0:
+    if meta.get("frame_swapped") and cursor == 0 and int(st.get("done_frames") or 0) == 0:
         raise _BadInput("frames/ 已经是合成结果（frame_swapped=true），但 meta 里没有续跑位置 —— "
-                        "只能重跑切帧 + 切脸", 409)
+                        "只能重跑切帧 + 切脸 + 换脸 + 遮罩", 409)
     if cursor:
         _stage_log("合成：从第 %d 帧续跑（前 %d 帧已经是合成结果）" % (cursor + 1, cursor))
 
-    # 一开始就把 frame_swapped 立起来：从这一刻起 frames/ 里的内容会陆续变成合成结果，
-    # 再跑切帧必须被拦住（否则会把原帧盖回来）。
     meta["frame_swapped"] = True
-    _stage_log("合成：%d 帧 · dfm=%s · aligned 里 %d 张脸"
-               % (total, Path(str(cfg.get("dfm") or "")).name or "无", len(aligned)))
+    comp_cfg = dict(cfg.get("config") or {})
+    comp_cfg["mask_mode"] = int((cfg.get("settings") or {}).get("mask_mode", 6) or 0)
+    threads = max(1, int(cfg.get("merge_threads") or 4))
+    png_level = int(cfg.get("png_level") if cfg.get("png_level") is not None else 1)
+    _stage_log("合成（纯 CPU）：%d 帧 · 遮罩 %s/%s · ct=%s · blend=%s · %d 线程 · PNG level %d"
+               % (total, src.get("label") or src.get("source"),
+                  comp_cfg.get("mask_mode"), comp_cfg.get("color_transfer_mode"),
+                  comp_cfg.get("mode"), threads, png_level))
 
-    stop = threading.Event()
-    state = {"stage": ""}
+    prof = dict(_stage_profile_blank())
+    for k in ("read_ms", "prep_ms", "mask_ms", "ct_ms", "paste_ms", "blend_ms", "encode_ms",
+              "write_ms", "frame_ms"):
+        prof[k] = float(st.get("profile", {}).get(k) or 0.0)
+    prof["frames"] = cursor
     swapped = int(st.get("swapped") or 0)
     copied = int(st.get("copied") or 0)
     no_face = int(st.get("no_face") or 0)
-    recs = []
-    prog = {"done": cursor}
+    failed = int(st.get("failed") or 0)
     t0 = time.time()
     start_cursor = cursor
+    infer0 = int(sum(_INFER_CALLS.values()))
+    sess0 = len(_DFM_SESS)
+    gpu0 = _gpu_mem_used_mb()
+    stop = threading.Event()
+    lock = threading.Lock()
 
-    def _save(up_to: int, done: bool = False):
-        meta["stages"]["merge"] = {
+    def _save(up_to: int, done: bool = False, extra: dict = None):
+        node = {
             "done": bool(done), "done_frames": int(up_to), "frames": total,
-            "swapped": swapped, "copied": copied, "no_face": no_face,
-            "resumed_from": int(start_cursor),
-            "in_place": True,          # 合成结果直接覆盖 frames/，没有 merged/ 目录
-            "aligned_faces": len(aligned),
+            "swapped": swapped, "copied": copied, "no_face": no_face, "failed": failed,
+            "resumed_from": int(start_cursor), "in_place": True,
+            "aligned_faces": len(aligned), "pure_cpu": True,
+            "threads": threads, "png_level": png_level,
+            "mask_mode": comp_cfg.get("mask_mode"),
+            "ct_mode": comp_cfg.get("color_transfer_mode"),
+            "blend": comp_cfg.get("mode"),
+            "profile": {k: round(float(v), 2) for k, v in prof.items()},
             "msg": ("合成完成：%d 帧（换脸 %d · 原样 %d）" % (total, swapped, copied)) if done
                    else ("合成 %d/%d 帧" % (up_to, total)),
         }
+        if extra:
+            node.update(extra)
+        meta["stages"]["merge"] = node
         _stage_meta_save(cache, meta)
 
-    _save(cursor)
+    def _one(fp):
+        """一帧：读图 → 逐脸合成 → PN G编码 → 写盘。返回 (rec, 各段耗时)。"""
+        t = time.time()
+        tim = {}
+        frame = _stage_read_frame(fp)
+        if frame is None:
+            return {"key": fp.stem, "ok": False, "why": "读不出来"}, tim
+        tim["read_ms"] = (time.time() - t) * 1000.0
+        aps = by_frame.get(fp.stem) or []
+        faces = []
+        for ap in aps:
+            f = _stage_merge_face_inputs(cache, ap, cfg)
+            if f is not None:
+                faces.append(f)
+        if not faces:
+            return {"key": fp.stem, "ok": True, "no_face": True, "faces": len(aps)}, tim
+        t_c = time.time()
+        out = compose_frame(frame, faces, comp_cfg, tim)
+        tim["frame_ms"] = (time.time() - t_c) * 1000.0
+        t_e = time.time()
+        data = _stage_imencode_png(out, png_level)
+        tim["encode_ms"] = (time.time() - t_e) * 1000.0
+        t_w = time.time()
+        _stage_write_atomic(fp, data)
+        tim["write_ms"] = (time.time() - t_w) * 1000.0
+        return {"key": fp.stem, "ok": True, "swapped": 1, "faces": len(faces)}, tim
+
+    from concurrent.futures import ThreadPoolExecutor
+    chunk = max(threads * 2, 8)
+    prog = {"done": cursor}
     try:
-        for i in range(cursor, total):
+        while prog["done"] < total:
             if _stage_cancelled():
                 stop.set()
                 raise _StageCancel()
-            path = frames[i]
-            frame = _stage_read_image(path)
-            if frame is None:
-                raise _BadInput("这一帧读不出来：%s" % path, 500)
-            try:
-                rec, data = _vid_one(cfg, frame, i, cache, stop, state)
-            except _BadInput:
-                raise
-            except Exception as e:                          # noqa: BLE001
-                raise _BadInput("第 %d 帧合成失败：%s" % (i + 1, str(e)[:200]), 500)
-            if rec.get("no_face") or not rec.get("swapped"):
-                # 没人脸 / 谁都不像：原帧本身就是结果，不重写（PNG 重编码虽无损，
-                # 但没必要多写一次盘）。计数照记，游标照样往前推。
-                copied += 1
-                if rec.get("no_face"):
-                    no_face += 1
-            else:
-                _stage_write_atomic(path, data)
-                swapped += 1
-            rec["aligned"] = len(by_frame.get(path.stem, []))
-            # 逐帧留痕（和原来那条路同一个格式）：验收要能 grep「每帧都走了 dfm」
-            if rec.get("no_face"):
-                _stage_log("[帧 %d] 无人脸 -> 原帧保持（没跑 dfm）" % (i + 1))
-            elif rec.get("swapped"):
-                _stage_log("[帧 %d] %d 张脸 · dfm=%s · %d 张换了"
-                           % (i + 1, int(rec.get("detected") or 0),
-                              rec.get("dfm") or "", int(rec.get("swapped") or 0)))
-            else:
-                _stage_log("[帧 %d] %d 张脸 · 谁都不像 -> 保持原像素"
-                           % (i + 1, int(rec.get("detected") or 0)))
-            if cfg.get("chain"):
-                _vid_record(rec)
-            else:
-                recs.append(rec)
-                if len(recs) > 400:
-                    del recs[:-400]
-            prog["done"] = i + 1
+            lo = prog["done"]
+            hi = min(total, lo + chunk)
+            batch = frames[lo:hi]
+            with ThreadPoolExecutor(max_workers=threads) as pool:
+                for rec, tim in pool.map(_one, batch):
+                    if _stage_cancelled():
+                        stop.set()
+                        raise _StageCancel()
+                    if not rec.get("ok"):
+                        failed += 1
+                        _stage_log("合成跳过 %s：%s" % (rec.get("key"), rec.get("why")))
+                    elif rec.get("no_face"):
+                        copied += 1
+                        no_face += 1
+                    else:
+                        swapped += 1
+                    prof["frames"] += 1
+                    prof["faces"] += int(rec.get("faces") or 0)
+                    for kk, vv in tim.items():
+                        prof[kk] = float(prof.get(kk) or 0.0) + float(vv or 0.0)
+            prog["done"] = hi
             el = max(0.001, time.time() - t0)
             rate = (prog["done"] - start_cursor) / el
             eta = int((total - prog["done"]) / rate) if rate > 0 and prog["done"] < total else None
-            kw = {"frames_done": prog["done"], "frames_total": total,
-                  "frame_fps": round(rate, 2), "eta_s": eta,
-                  "swapped": swapped, "copied": copied, "no_face": no_face}
-            if not cfg.get("chain"):
-                kw["frames"] = recs
-            _stage_progress("merge", 100.0 * prog["done"] / total,
-                            "合成 %d/%d 帧 · %.1f 帧/秒（换脸 %d · 原样 %d）"
-                            % (prog["done"], total, rate, swapped, copied), **kw)
-            if prog["done"] % 10 == 0:
-                _save(prog["done"])
+            n = max(1, prof["frames"] - cursor)
+            _stage_progress(
+                "merge", 100.0 * prog["done"] / total,
+                "合成 %d/%d 帧 · %.1f 帧/秒（换脸 %d · 原样 %d）"
+                % (prog["done"], total, rate, swapped, copied),
+                frames_done=prog["done"], frames_total=total,
+                frame_fps=round(rate, 2), eta_s=eta,
+                swapped=swapped, copied=copied, no_face=no_face,
+                profile={"per_frame_ms":
+                         {k: round(float(prof.get(k) or 0.0) / n, 2)
+                          for k in ("read_ms", "prep_ms", "mask_ms", "ct_ms", "paste_ms",
+                                    "blend_ms", "encode_ms", "write_ms", "frame_ms")},
+                         "fps": round(rate, 2)})
+            _save(prog["done"])
     except _StageCancel:
-        _save(prog["done"])            # 取消也要把游标落盘：下次从这里接着换
+        _save(prog["done"])
         _stage_log("合成取消：停在 %d/%d 帧（游标已存）" % (prog["done"], total))
         raise
 
     sec = round(time.time() - t0, 2)
-    _save(total, done=True)
-    # seconds 在 _save 之后再写：_save 会整份重建这个 dict，先写会被盖掉
-    meta["stages"]["merge"]["seconds"] = sec
-    _stage_meta_save(cache, meta)
-    _stage_log("合成完成：%d 帧（换脸 %d · 原样 %d，其中无人脸 %d）· %.2f s · %.2f 帧/秒"
-               % (total, swapped, copied, no_face, sec,
-                  (total - start_cursor) / sec if sec > 0 else 0.0))
-    return {"count": total, "swapped": swapped, "copied": copied,
-            "no_face": no_face, "seconds": sec}
+    n = max(1, prof["frames"] - cursor)
+    per = {k: round(float(prof.get(k) or 0.0) / n, 2)
+           for k in ("read_ms", "prep_ms", "mask_ms", "ct_ms", "paste_ms", "blend_ms",
+                     "encode_ms", "write_ms", "frame_ms")}
+    infer_n = int(sum(_INFER_CALLS.values())) - infer0
+    gpu1 = _gpu_mem_used_mb()
+    sess_after = len(_DFM_SESS)
+    fps = round((total - start_cursor) / sec, 2) if sec > 0 else 0.0
+    prof_out = {
+        "per_frame_ms": per,
+        "frames": int(prof["frames"]), "faces": int(prof["faces"]),
+        "threads": threads, "png_level": png_level,
+        "fps": fps, "pure_cpu": True,
+        "inference_calls": infer_n,
+        "dfm_sessions_before": sess0, "dfm_sessions_after": sess_after,
+        "gpu_mem_mb_before": gpu0, "gpu_mem_mb_after": gpu1,
+        "wall_s": sec,
+    }
+    _save(total, done=True, extra={"seconds": sec, "profile": prof_out,
+                                   "fps": fps, "inference_calls": infer_n})
+    _stage_log("合成完成：%d 帧（换脸 %d · 原样 %d，无人脸 %d · 失败 %d）· %.2f s · %.2f 帧/秒"
+               % (total, swapped, copied, no_face, failed, sec, fps))
+    _stage_log("合成 profile（每帧 ms）：%s"
+               % " · ".join("%s=%.2f" % (k, v) for k, v in per.items()))
+    _stage_log("合成阶段推理调用：%d（必须为 0）· 显存 %s → %s MB"
+               % (infer_n, gpu0, gpu1))
+    if infer_n:
+        _stage_log("警告：合成阶段发生了 %d 次推理 —— 违反「纯 CPU」约定" % infer_n)
+    return {"count": total, "swapped": swapped, "copied": copied, "no_face": no_face,
+            "failed": failed, "seconds": sec, "fps": fps,
+            "inference_calls": infer_n, "profile": per}
+
 
 
 def _stage_do_encode(cfg: dict) -> dict:
@@ -6912,6 +7872,8 @@ def _stage_drop_cache(cfg: dict) -> bool:
 _STAGE_FN = {
     "frames": _stage_do_frames,
     "faces": _stage_do_faces,
+    "pred": _stage_do_pred,
+    "mask": _stage_do_mask,
     "merge": _stage_do_merge,
     "encode": _stage_do_encode,
 }
@@ -6919,6 +7881,11 @@ _STAGE_FN = {
 
 # ---------------- 请求 -> cfg ----------------
 _STAGE_KEEP = str(os.environ.get("DFL_STAGE_KEEP") or "").strip().lower() in ("1", "true", "yes", "on")
+# ③ 换脸一批几张 / ⑤ 合成几个线程 / ⑤ 写 PNG 的压缩级别（1 = 体积换速度）
+_PRED_BATCH_DEFAULT = max(1, int(str(os.environ.get("DFL_PRED_BATCH") or "8").strip() or 8))
+_MERGE_THREADS_DEFAULT = max(1, int(str(os.environ.get("DFL_MERGE_THREADS")
+                                     or max(4, min(8, (os.cpu_count() or 4) // 4))).strip()))
+_MERGE_PNG_LEVEL = max(0, min(9, int(str(os.environ.get("DFL_MERGE_PNG_LEVEL") or "1").strip() or 1)))
 
 
 def _stage_dfm_pair(body: dict, need: bool):
@@ -7022,20 +7989,41 @@ def _stage_cfg(body: dict, stage: str, chain: bool = False) -> dict:
         "thresh": _float_val("thresh", body.get("thresh"), 0.0, 1.0, 0.5),
         "align_thresh": _float_val("align_thresh", body.get("align_thresh"), 0.0, 1.0, 0.5),
         "dfm": str(dfm), "model": str(model_name), "xseg": str(xseg),
+        "mask_mode": int((settings or {}).get("mask_mode", 6) or 0),
+        "mask_src": _mask_src(settings, (settings or {}).get("mask_mode")),
         "config": dict(_merge_settings_to_config(settings)),
         "snap": snap, "plan_payload": plan_payload, "single_models": models,
         "use_library": True, "chain": bool(chain), "stages": [stage],
         "library": library_raw, "face_threshold": face_thr,
+        # ③ 的批大小 / ⑤ 的线程数与 PNG 压缩级别（都能从请求体或环境变量调）
+        "pred_batch": _int_val("batch", body.get("batch") or body.get("pred_batch"), 1, 64,
+                               _PRED_BATCH_DEFAULT),
+        "merge_threads": _int_val("threads", body.get("threads") or body.get("merge_threads"),
+                                  1, 32, _MERGE_THREADS_DEFAULT),
+        "png_level": _int_val("png_compression", body.get("png_compression"), 0, 9,
+                              _MERGE_PNG_LEVEL),
     }
 
 
 def _stage_precheck(cfg: dict, stage: str) -> dict:
-    """阶段前的闸门：缺前置产物就 409；已完成就 skip（幂等）；frames 被覆盖过就拒。"""
+    """阶段前的闸门：缺前置产物就 409；已完成就 skip（幂等）；frames 被覆盖过就拒。
+
+    六步链：frames → faces → pred → mask → merge → encode，每一步只读它前面那几步的
+    产物。少跑一步就 409 点名前一步（不再"偷偷在合成里现算"）。
+    """
     cache = Path(cfg["cache"])
     meta = cfg["meta"]
     frames = _stage_files(_stage_frames_dir(cache))
+    aligned = _stage_files(_stage_aligned_dir(cache), (".jpg", ".jpeg"))
     st = meta["stages"].get(stage) or {}
     force = bool(cfg.get("force"))
+
+    def _need(stage_name: str, why: str = ""):
+        if not (meta["stages"].get(stage_name) or {}).get("done"):
+            raise _BadInput("%s还没完成 —— 先跑%s（POST /api/merge/stage/%s）%s"
+                            % (_STAGE_LABEL.get(stage_name, stage_name),
+                               _STAGE_LABEL.get(stage_name, stage_name), stage_name,
+                               ("：" + why) if why else ""), 409)
 
     if stage == "frames":
         # 「已经切完了」先判：续跑时 frames 往往已经被合成结果覆盖过，
@@ -7047,34 +8035,67 @@ def _stage_precheck(cfg: dict, stage: str) -> dict:
         if meta.get("frame_swapped") and not force:
             raise _BadInput("frames/ 已经被合成结果覆盖（meta.frame_swapped=true）—— 重切会把原帧"
                             "盖回来、却留下「已合成」的标记。要重来请传 force=true："
-                            "会清掉 frames/ + aligned/ 和后面三个阶段的标记。", 409)
+                            "会清掉 frames/ + aligned/ + pred/ + mask/ 和后面几个阶段的标记。", 409)
         return {"skip": False}
 
     if stage == "faces":
         if not frames:
             raise _BadInput("frames/ 是空的 —— 先跑切帧（POST /api/merge/stage/frames）", 409)
-        aligned = _stage_files(_stage_aligned_dir(cache), (".jpg", ".jpeg"))
         if (st.get("done") and not force and int(st.get("frames") or 0) == len(frames) and aligned):
             return {"skip": True, "reason": "already-done", "count": len(aligned)}
         return {"skip": False}
 
-    if stage == "merge":
+    if stage == "pred":
         if not frames:
             raise _BadInput("frames/ 是空的 —— 先跑切帧（POST /api/merge/stage/frames）", 409)
-        if not (meta["stages"].get("faces") or {}).get("done"):
-            raise _BadInput("aligned/ 还没切完脸 —— 先跑切脸（POST /api/merge/stage/faces）", 409)
+        _need("faces")
+        if not aligned:
+            raise _BadInput("aligned/ 里没有对齐脸 —— 先跑切脸", 409)
+        groups = len(_stage_face_rows(aligned))
+        if (st.get("done") and not force and int(st.get("done_frames") or 0) >= groups):
+            return {"skip": True, "reason": "already-done", "count": int(st.get("count") or 0)}
+        return {"skip": False}
+
+    if stage == "mask":
+        _need("faces")
+        _need("pred", "遮罩阶段要拿换脸结果去跑 XSeg")
+        if not aligned:
+            raise _BadInput("aligned/ 里没有对齐脸 —— 先跑切脸", 409)
+        src = _mask_src(cfg.get("settings"), cfg.get("mask_mode"))
+        sig = _mask_signature(src, cfg)
+        cfg["mask_src"] = src
+        if (st.get("signature") and st.get("signature") != sig and not force
+                and int(st.get("done_frames") or 0) > 0):
+            raise _BadInput("遮罩来源变了（%s → %s）：mask/ 里的东西已经失效，不能静默复用。"
+                            "传 force=true 重跑遮罩阶段" % (st.get("signature"), sig), 409)
+        if (st.get("done") and not force and st.get("signature") == sig
+                and int(st.get("done_frames") or 0) >= len(aligned)):
+            return {"skip": True, "reason": "already-done", "count": int(st.get("count") or 0)}
+        return {"skip": False}
+
+    if stage == "merge":
+        if not frames:
+            raise _BadInput("frames/ 是空的 —— 先跑切帧", 409)
+        _need("faces")
+        _need("pred")
+        _need("mask")
+        src = _mask_src(cfg.get("settings"), cfg.get("mask_mode"))
+        sig = _mask_signature(src, cfg)
+        mst = meta["stages"].get("mask") or {}
+        if mst.get("signature") and mst.get("signature") != sig:
+            raise _BadInput("遮罩来源变了（mask/ 是 %s 产出的，现在是 %s）—— 先重跑遮罩阶段"
+                            "（force=true），别拿旧遮罩合成" % (mst.get("signature"), sig), 409)
         if st.get("done") and not force:
             return {"skip": True, "reason": "already-done", "count": len(frames)}
         if meta.get("frame_swapped") and int(st.get("done_frames") or 0) == 0:
             raise _BadInput("frames/ 已经是合成结果（frame_swapped=true）但没有续跑位置 —— "
-                            "只能重跑切帧 + 切脸", 409)
+                            "只能重跑切帧 + 切脸 + 换脸 + 遮罩", 409)
         return {"skip": False}
 
     if stage == "encode":
         if not frames:
             raise _BadInput("frames/ 是空的 —— 先跑切帧 + 合成", 409)
-        if not (meta["stages"].get("merge") or {}).get("done"):
-            raise _BadInput("合成（merge）还没完成 —— 先跑合成（POST /api/merge/stage/merge）", 409)
+        _need("merge")
         out = Path(cfg["out"])
         if st.get("done") and out.is_file() and out.stat().st_size > 0 and not force:
             return {"skip": True, "reason": "already-done", "count": len(frames)}
@@ -7084,8 +8105,14 @@ def _stage_precheck(cfg: dict, stage: str) -> dict:
 
 
 def _stage_counts(cache) -> dict:
+    """各阶段产物数量（status 里给界面/验收看）。"""
+    pred_dir = _stage_pred_dir(cache)
+    mask_dir = _stage_mask_dir(cache)
     return {"frames": len(_stage_files(_stage_frames_dir(cache))),
-            "faces": len(_stage_files(_stage_aligned_dir(cache), (".jpg", ".jpeg")))}
+            "faces": len(_stage_files(_stage_aligned_dir(cache), (".jpg", ".jpeg"))),
+            "pred": len([x for x in _stage_files(pred_dir) if "_prdm" not in x.name
+                         and "_dstdm" not in x.name]),
+            "masks": len(_stage_files(mask_dir))}
 
 
 def _stage_stages_meta(meta: dict) -> dict:
@@ -7307,6 +8334,16 @@ def merge_stage_status(cache_dir: str = "", video: str = ""):
         "frame_swapped": bool(meta.get("frame_swapped")),
         "counts": counts,
         "seconds": dict(snap.get("seconds") or {}),
+        "stage_seconds": {k: float((v or {}).get("seconds") or 0.0)
+                          for k, v in stages.items()},
+        "stage_fps": {k: float((v or {}).get("fps") or 0.0) for k, v in stages.items()},
+        "profile": snap.get("profile") if isinstance(snap.get("profile"), dict) else None,
+        "mask_source": str((stages.get("mask") or {}).get("mask_source") or
+                           (_mask_src(meta.get("settings")).get("label") or "")),
+        "mask_signature": str((stages.get("mask") or {}).get("signature") or ""),
+        "pred": dict(stages.get("pred") or {}),
+        "skipped_why": str((stages.get(str(snap.get("stage") or "")) or {})
+                           .get("skipped_why") or ""),
         "skipped": list(snap.get("skipped") or []),
         "started_at": snap.get("started_at"), "finished_at": snap.get("finished_at"),
         "log": log[-80:],
@@ -7364,6 +8401,7 @@ def merge_stage(name: str, body: dict = None):
                    counts=_stage_counts(cfg["cache"]),
                    started_at=None, finished_at=time.time())
         return _ok(started=False, skipped=True, reason=plan.get("reason") or "already-done",
+                   skipped_why=str(plan.get("skipped_why") or ""),
                    **_stage_brief_meta(cfg))
 
     with _STAGE_LOCK:

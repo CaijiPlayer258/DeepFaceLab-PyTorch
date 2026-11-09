@@ -998,9 +998,8 @@
               <span id="mgpEta">剩余 —</span>
             </div>
 
-            <!-- 四步动画：直接复用「模型转换」那套 Stepper（节点 + 连线 + 当前步高亮，
-                 index.html 的 #p-train-convert / app.css「模型转换页（Stepper）」），
-                 文案换成 切帧 → 切脸 → 合成 → 导出。每完成一个阶段推进一格。 -->
+            <!-- 六步动画：直接复用「模型转换」那套 Stepper（节点 + 连线 + 当前步高亮），
+                 文案换成 切帧 → 切脸 → 换脸 → 遮罩 → 合成 → 导出。每完成一个阶段推进一格。 -->
             <div class="mgprog-steps">
               <div class="cvsteps" id="mgpSteps">
                 <div class="cvst" id="mgpS1" data-s="frames">
@@ -1011,12 +1010,20 @@
                   <div class="cvline"><i></i></div>
                   <div class="cvsh"><span class="cvic">2</span><span class="cvnm">切脸</span><span class="cvtip"></span></div>
                 </div>
-                <div class="cvst" id="mgpS3" data-s="merge">
+                <div class="cvst" id="mgpS3" data-s="pred">
                   <div class="cvline"><i></i></div>
-                  <div class="cvsh"><span class="cvic">3</span><span class="cvnm">合成</span><span class="cvtip"></span></div>
+                  <div class="cvsh"><span class="cvic">3</span><span class="cvnm">换脸</span><span class="cvtip"></span></div>
                 </div>
-                <div class="cvst" id="mgpS4" data-s="encode">
-                  <div class="cvsh"><span class="cvic">4</span><span class="cvnm">导出</span><span class="cvtip"></span></div>
+                <div class="cvst" id="mgpS4" data-s="mask">
+                  <div class="cvline"><i></i></div>
+                  <div class="cvsh"><span class="cvic">4</span><span class="cvnm">遮罩</span><span class="cvtip"></span></div>
+                </div>
+                <div class="cvst" id="mgpS5" data-s="merge">
+                  <div class="cvline"><i></i></div>
+                  <div class="cvsh"><span class="cvic">5</span><span class="cvnm">合成</span><span class="cvtip"></span></div>
+                </div>
+                <div class="cvst" id="mgpS6" data-s="encode">
+                  <div class="cvsh"><span class="cvic">6</span><span class="cvnm">导出</span><span class="cvtip"></span></div>
                 </div>
               </div>
             </div>

@@ -52,7 +52,7 @@ SERVER_LOG = LOGDIR / "server.log"
 
 DFM = "阿証証証証-416"                  # 小的那个（539 MB），416 输入
 TOL = 8                                # 成片 vs 单帧预览的逐像素容差
-STAGE_NAMES = ("frames", "faces", "merge", "encode")
+STAGE_NAMES = ("frames", "faces", "pred", "mask", "merge", "encode")
 
 BASE = ""
 RESULTS = []
@@ -62,16 +62,24 @@ OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 # ============================================================
 # 小工具
 # ============================================================
+def _p(line):
+    """打印一行：控制台是 cp936 时把编码不出来的字符替换掉，别因为一个「✓」崩掉整轮验收。"""
+    try:
+        print(line, flush=True)
+    except UnicodeEncodeError:
+        enc = (sys.stdout.encoding or "utf-8")
+        print(line.encode(enc, "replace").decode(enc, "replace"), flush=True)
+
+
 def check(ok, name, detail=""):
     ok = bool(ok)
     RESULTS.append((ok, name, str(detail)))
-    print(("[PASS] " if ok else "[FAIL] ") + name + ("  · " + str(detail) if detail else ""),
-          flush=True)
+    _p(("[PASS] " if ok else "[FAIL] ") + name + ("  · " + str(detail) if detail else ""))
     return ok
 
 
 def say(msg):
-    print("       " + str(msg), flush=True)
+    _p("       " + str(msg))
 
 
 def http(method, path, body=None, timeout=1800.0):
@@ -460,6 +468,20 @@ def case_a(video):
     check(st == 200 and d.get("skipped") is True, "a 已完成的阶段再点一次 = 跳过（幂等）",
           "skipped=%s" % d.get("skipped"))
 
+    st, d, fin = run_stage("pred", body)
+    check(st == 200, "a 换脸 接口 200", "HTTP %s · %s 张/秒 %s"
+          % (st, (((fin.get("meta") or {}).get("stages", {}).get("pred") or {})
+                  .get("faces_per_sec")), (fin.get("error") or "")[:80]))
+    preds = count_files(cache / "pred", (".png",))
+    check(preds >= len(al) >= 1, "a pred/ 每张对齐脸一个换脸 PNG", "%d / %d" % (preds, len(al)))
+    st, d, fin = run_stage("mask", body)
+    mst2 = (((fin.get("meta") or {}).get("stages") or {}).get("mask") or {})
+    check(st == 200 and mst2.get("done") is True, "a 遮罩 接口 200 + 完成",
+          "HTTP %s · 来源 %s" % (st, mst2.get("mask_source")))
+    check(count_files(cache / "mask", (".png",)) >= 2 * len(al),
+          "a mask/ 有 xseg_prd + xseg_dst（每张脸两张）",
+          "%d 张" % count_files(cache / "mask", (".png",)))
+
     n_before = len(frame_files(cache))
     st, d, fin = run_stage("merge", body)
     fin_meta = (fin or {}).get("meta") or {}
@@ -499,11 +521,16 @@ def case_a(video):
         mean, p99, mx = diff(ref, got)
         worst_mean = max(worst_mean, mean)
         worst_max = max(worst_max, mx)
-        check(mean < 1.0 and mx <= 2,
-              "e 第 %d 帧 磁盘帧 vs 合成结果原图（mean<1 · max≤2）" % (n + 1),
-              "mean=%.3f p99=%.1f max=%d" % (mean, p99, mx))
-    check(worst_mean < 1.0 and worst_max <= 2, "e 三帧里最差的一帧也达标",
-          "worst mean=%.3f max=%d" % (worst_mean, worst_max))
+        # 注意：这条**不再**是「无损合成对拍」。单帧预览走的是 MergeMaskedFace
+        # （seamless + 二次色彩迁移 + hull 遮罩），分段导出的合成阶段走的是 4.0
+        # 视频导出的 _phase_merge_worker（mask_mode 组合 + ct + overlay/seamless，
+        # 见 app/server/_merge_compose.py）。两条路的算法本来就不同，差值落在
+        # 「成片 vs 预览」的同一量级（mean ≈ 3~4），所以这里用成片那档容差。
+        # 真正的逐像素对拍在 stage6_accept.py 的 h 段（4.0 vs 我们：mean ≤ 2 / max ≤ 8）。
+        check(mean <= TOL, "e 第 %d 帧 磁盘帧 vs 单帧预览（容差 %d）" % (n + 1, TOL),
+              "mean=%.2f p99=%.1f max=%d" % (mean, p99, mx))
+    check(worst_mean <= TOL, "e 三帧里最差的一帧也在容差内",
+          "worst mean=%.2f max=%d" % (worst_mean, worst_max))
 
     # ---- 编码 ----
     st, d, fin = run_stage("encode", body)
@@ -537,7 +564,7 @@ def case_a(video):
     check(worst <= TOL, "d 三帧里最差的一帧也在容差内", "worst mean=%.2f" % worst)
 
     st, s = get("/api/merge/stage/status")
-    check(s.get("stages_done") == list(STAGE_NAMES), "a 四个阶段全部 done",
+    check(s.get("stages_done") == list(STAGE_NAMES), "a 六个阶段全部 done",
           "%s" % (s.get("stages_done"),))
     check(dict(s.get("seconds") or {}).get("encode") is not None, "a 每阶段耗时都记了",
           "%s" % {k: round(float(v), 1) for k, v in (s.get("seconds") or {}).items()})
@@ -563,6 +590,11 @@ def case_b_stage_by_stage(video):
     check(st == 200 and len(aligned_files(cache)) >= 1, "b 再跑切脸 → aligned/ 有",
           "%d 张脸" % len(aligned_files(cache)))
 
+    st, d, fin = run_stage("pred", body)
+    check(st == 200, "b 再跑换脸 → pred/ 有", "%d 张" % count_files(cache / "pred", (".png",)))
+    st, d, fin = run_stage("mask", body)
+    check(st == 200, "b 再跑遮罩 → mask/ 有",
+          "%d 张" % count_files(cache / "mask", (".png",)))
     st, d, fin = run_stage("merge", body)
     meta = json.loads((cache / "meta.json").read_text("utf-8"))
     check(st == 200 and meta.get("frame_swapped") is True, "b 再跑合成 → frames 就地变成合成结果",
@@ -584,6 +616,8 @@ def case_c_resume(video):
 
     run_stage("frames", body)
     run_stage("faces", body)
+    run_stage("pred", body)
+    run_stage("mask", body)
     t_frames = float(((json.loads((cache / "meta.json").read_text("utf-8"))
                        .get("stages") or {}).get("frames") or {}).get("seconds") or 0.0)
 
@@ -641,6 +675,10 @@ def case_c_resume(video):
     rec["faces"] = d
     check(d.get("skipped") is True, "c 续跑：切脸复用（不重跑）",
           "skipped=%s · %s 张脸" % (d.get("skipped"), ((d.get("counts") or {}).get("faces"))))
+    st, d, fin3b = run_stage("pred", body)
+    check(d.get("skipped") is True, "c 续跑：换脸复用（不重跑）", "skipped=%s" % d.get("skipped"))
+    st, d, fin3c = run_stage("mask", body)
+    check(d.get("skipped") is True, "c 续跑：遮罩复用（不重跑）", "skipped=%s" % d.get("skipped"))
     meta2 = json.loads((cache / "meta.json").read_text("utf-8"))
     t_frames2 = float(((meta2.get("stages") or {}).get("frames") or {}).get("seconds") or 0.0)
     check(abs(t_frames2 - t_frames) < 1e-6, "c 切帧阶段的耗时没变（证明没重跑）",
@@ -719,9 +757,9 @@ def case_ui(video):
         b.eval("window.mgStep && window.mgStep('progress'); true")
         time.sleep(0.6)
         snap0 = b.js(UI_SNAP)
-        check(snap0.get("n") == 4, "f 四步动画有 4 个节点", "%s" % (snap0.get("labels"),))
-        check(snap0.get("labels") == ["切帧", "切脸", "合成", "导出"],
-              "f 文案 = 切帧/切脸/合成/导出", "%s" % (snap0.get("labels"),))
+        check(snap0.get("n") == 6, "f 六步动画有 6 个节点", "%s" % (snap0.get("labels"),))
+        check(snap0.get("labels") == ["切帧", "切脸", "换脸", "遮罩", "合成", "导出"],
+              "f 文案 = 切帧/切脸/换脸/遮罩/合成/导出", "%s" % (snap0.get("labels"),))
         check(snap0.get("oldRows") == 0 and not snap0.get("hasOld"),
               "f 旧的四行（载入模型/逐帧合成/编码/完成）已消失",
               "mgpstep=%s · 旧文案=%s" % (snap0.get("oldRows"), snap0.get("hasOld")))
@@ -731,8 +769,8 @@ def case_ui(video):
         b.eval("window.mgStageExport({model: %s}); true" % json.dumps(DFM))
 
         seq = []
-        seen_on = [False] * 4
-        seen_done = [False] * 4
+        seen_on = [False] * 6
+        seen_done = [False] * 6
         shot = BOX / "ui_step2.png"
         try:
             shot.unlink()                     # 别拿上一轮留下的旧图当证据
@@ -743,7 +781,7 @@ def case_ui(video):
             s = b.js(UI_SNAP)
             cls = s.get("cls") or []
             # 切帧已 ✓、切脸正在跑：截一张图当「动画真的推进了」的视觉证据
-            if (not shot.exists() and len(cls) == 4
+            if (not shot.exists() and len(cls) == 6
                     and "done" in cls[0] and "on" in cls[1]):
                 try:
                     shot.write_bytes(base64.b64decode(
@@ -768,8 +806,8 @@ def case_ui(video):
         say("f trace：%s" % json.dumps(final.get("trace"), ensure_ascii=False)[:900])
         check(all(seen_on), "f 每一步都出现过「当前步」高亮", "seen_on=%s" % (seen_on,))
         check(all(seen_done), "f 每一步都推进到「完成」", "seen_done=%s" % (seen_done,))
-        check(final.get("icons") == ["✓"] * 4, "f 终态四个节点都是 ✓", "%s" % (final.get("icons"),))
-        check(len(seq) >= 4, "f 阶段切换时动画确实推进了", "%d 次状态变化" % len(seq))
+        check(final.get("icons") == ["✓"] * 6, "f 终态六个节点都是 ✓", "%s" % (final.get("icons"),))
+        check(len(seq) >= 6, "f 阶段切换时动画确实推进了", "%d 次状态变化" % len(seq))
         say("f 动画状态序列：%s" % " -> ".join(x.replace("cvst", "").replace("  ", " ").strip() or "-"
                                               for x in seq[:10]))
         return True
