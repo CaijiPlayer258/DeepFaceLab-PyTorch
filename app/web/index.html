@@ -928,12 +928,17 @@
                   <span class="cd">随 models[] 一起发出去</span>
                   <span class="cc"><div class="mgexp-models" id="mgSelModels"></div></span>
                 </div>
+                <!-- 输出目录：和下面「输出路径」同一套 pathinp 控件（可编辑 + 右侧文件夹图标）。
+                     以前是 readonly 的只读回显，看着像「展示」不像「能填」，用户反馈要能改。 -->
                 <div class="cfgrow cfgpathrow">
                   <span class="cl">输出目录</span>
                   <span class="cc">
                     <div class="inp mono pathinp cfgpath">
-                      <input class="pathval" id="mgDefOut" type="text" readonly spellcheck="false"
-                             autocomplete="off" title="默认输出位置（只读；要改在下面「输出路径」里填）">
+                      <input class="pathval" id="mgDefOut" type="text" spellcheck="false"
+                             autocomplete="off" title="默认输出位置（可编辑；也可以点右边图标选目录）">
+                      <span class="pill iconpill" id="mgDefOutPick" title="选择输出目录">
+                        <svg class="ic"><use href="#i-folder"/></svg>
+                      </span>
                     </div>
                   </span>
                 </div>

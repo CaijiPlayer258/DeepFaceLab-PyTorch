@@ -5431,12 +5431,10 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 }
 .mgexp-models-empty { font-size: 11.5px; color: var(--ink-3); }
 
-/* 默认输出目录：只读，一眼看出是「展示」不是「可编辑」 */
-#mgDefOut[readonly] {
-  cursor: default;
-  color: var(--ink-2);
-  background: transparent;
-}
+/* 默认输出目录：以前这条把它压成「展示态」（只读、灰字、透明底）。
+   用户反馈这一行要能改 —— 现在它和下面「输出路径」是同一个 .pathinp 控件
+   （可编辑 + 右侧文件夹图标），所以只读态那套样式整块删掉，
+   颜色/底色/图标位置全部走 .pathinp / .pathval / .iconpill 的共用规则。 */
 
 /* 帧范围：两个小数字框 + 箭头 + 「全片」。
    注意 app.css:4198 有一条 '#p-merge .mgrow .mgtiny{width:100% !important;flex:1 1 auto !important}'
@@ -5653,3 +5651,93 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 /* 阶段列表的行距按训练页的节奏（一行 ≈ 44px，和 .cfgrow 一致） */
 #p-merge .mgprog .cvsteps .cvst { padding: 11px 0; }
 #p-merge .mgprog .cvsteps .cvline { top: 36px; bottom: -11px; }
+
+
+/* ============================================================================
+   导出界面三处修复（用户截图反馈 · 本轮）
+   ----------------------------------------------------------------------------
+   ① 导出设置页「输出目录」：与下一行「输出路径」同一套 pathinp 控件
+      （可编辑 + 右侧文件夹图标 + 同宽 / 同高 / 同图标位置）。结构在 index.html，
+      样式全部复用既有的 .cfgpath / .pathinp / .pathval / .iconpill，
+      这里只负责删掉旧的只读态（见上一条注释）。
+   ② 进度页「取消导出」：从左边挪到右下，danger 红 + 真描边 + hover 加深，
+      与「开始导出」同高（30px）、圆角矩形不做胶囊。
+   ③ 完成 / 失败结果区：不再内嵌小卡片，按钮铺满主卡片内容区（整行按钮）。
+   追加在文件末尾：同权重靠后写胜出，不去前面几百行里改旧规则。
+   ============================================================================ */
+
+/* ---------- ② 进度页「取消导出」：右下 + 危险色描边 ---------- */
+/* 位置：.mgprog-foot 以前是默认 flex-start，按钮贴在卡片左边；
+   页脚动作区（设置页 .cfgactions）是右对齐的，这里对齐过去。
+   只锁[导出进度]这一页（[导出项目]那页的同名按钮不动，免得顺手改到别的界面）。 */
+#p-merge .mgview[data-view="progress"] .mgprog-foot {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+}
+#p-merge .mgview[data-view="progress"] .mgprog-foot #mgpCancel {
+  height: 30px !important;              /* 与「开始导出」同一口径 */
+  min-height: 30px !important;
+  padding: 0 16px !important;
+  /* 描边必须画出来：上一版是 rgba(239,68,68,.35) 的 1px，深色卡片上等于没有 */
+  border: 1px solid #ef4444 !important;
+  border-radius: 8px !important;        /* 圆角矩形，不做胶囊 */
+  background: transparent !important;   /* .btn 的近黑实心带 !important，压回透明 */
+  color: #ef4444 !important;
+  font-size: 12.5px !important;
+  font-weight: 600 !important;
+  line-height: 1 !important;
+  box-sizing: border-box;
+  cursor: pointer;
+  transition: border-color .13s ease, background .13s ease, color .13s ease;
+}
+#p-merge .mgview[data-view="progress"] .mgprog-foot #mgpCancel:hover:not(:disabled) {
+  border-color: #b91c1c !important;     /* hover 加深：描边/字都压深一档 */
+  color: #b91c1c !important;
+  background: rgba(239, 68, 68, .16) !important;
+  filter: none;
+}
+#p-merge .mgview[data-view="progress"] .mgprog-foot #mgpCancel:active:not(:disabled) {
+  background: rgba(239, 68, 68, .24) !important;
+  filter: none;
+}
+#p-merge .mgview[data-view="progress"] .mgprog-foot #mgpCancel:focus-visible {
+  outline: 2px solid rgba(239, 68, 68, .55);
+  outline-offset: 2px;
+}
+/* 设置页底部那颗「开始导出」：全局 .btn 的 height:32px !important 压过
+   .cfgactions 的 36px，实测是 32。"与开始导出同高（30px）"的验收口径落在这里：
+   两颗一起锁 30px，进度页那颗才可能和它一模一样高。 */
+#p-merge .mgset-acts .btn {
+  height: 30px !important;
+  min-height: 30px !important;
+}
+
+/* ---------- ③ 结果区：不是卡片，按钮铺满整行 ---------- */
+#p-merge .mgprog-res {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;         /* 以前 flex-start：按钮被挤成 140px 一条 */
+  gap: 8px;
+  padding: 0;                   /* 内嵌小卡片的三件套全部撤掉 */
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+#p-merge .mgprog-res-hd { font-size: 11px; }
+#p-merge .mgprog-res-acts {
+  display: flex;
+  width: 100%;
+  gap: 8px;
+}
+/* 整行按钮：跟「人脸提取器」页的「开始提取」一样铺满卡片内容区 */
+#p-merge .mgprog-res .btn,
+#p-merge .mgprog-res-acts .btn {
+  width: 100%;
+  min-width: 0;                 /* 压掉 app.css:5528 的 min-width:140px */
+  flex: 1 1 auto;
+  height: 32px;
+  border-radius: 8px;
+  font-size: 12.5px;
+}

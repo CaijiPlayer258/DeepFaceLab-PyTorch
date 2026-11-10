@@ -6188,9 +6188,11 @@ function mgStageEmpty(on) {
        ② 把这一页的只读回显填好，切到导出设置页。**一个请求都不发。**
        真正 POST 阶段请求的是下面 #mgStartExport 那一下。 */
     function mgDefOutPath() {
-      var p = (window.MergePages && window.MergePages.settings)
-        ? window.MergePages.settings() : {};
-      var manual = String(p.output_path || "").trim();
+      /* 只认「输出路径」框里用户手填的值。这里不能读 MergePages.settings().output_path：
+         那条现在会把「输出目录」里改过的值也当 output_path 返回，默认值就会跟着自己跑
+         （改一版 → 默认值变成上一版 → 再改又叠一层）。 */
+      var outEl = document.getElementById("mgOutPath");
+      var manual = String((outEl && outEl.value) || "").trim();
       if (manual) return manual;
       var dir = String(window.__mergeInputDir || "");
       if (dir) {
@@ -6223,7 +6225,12 @@ function mgStageEmpty(on) {
         }
       }
       var out = document.getElementById("mgDefOut");
-      if (out) out.value = mgDefOutPath();
+      if (out) {
+        out.value = mgDefOutPath();
+        /* 每次进导出设置页都把「用户改过没有」清掉：这一格刚被重算成默认值，
+           继续把它当用户填的目录发出去，就会悄悄改掉上一次的输出位置。 */
+        window.__mgDefOutEdited = false;
+      }
       var total = 0;
       try {
         total = parseInt(String((window.__mv || {}).frames || 0), 10) || 0;
@@ -11365,6 +11372,13 @@ function mgStageEmpty(on) {
     /* 采集导出参数：字段名与 /api/export/start 一致 */
     settings: function () {
       var out = one('#mgOutPath');
+      /* 「输出目录」这一行现在是可编辑的路径框（原来是 readonly 回显）。
+         默认值仍由 mgFillExportSettings 填（= 后端本来就会用的位置），
+         所以只有用户真改过（__mgDefOutEdited）且填的是 Windows 绝对路径，
+         才把它当 output_path 发出去 —— 不动它就和以前完全一致。 */
+      var dirOut = one('#mgDefOut');
+      var dirVal = dirOut ? String(dirOut.value || '').trim() : '';
+      var dirUsed = !!window.__mgDefOutEdited && /^[A-Za-z]:[\\/]|^\\\\/.test(dirVal);
       var workers = one('#mgWorkers');
       var nw = parseInt(workers ? workers.value : '0', 10);
       if (isNaN(nw)) nw = 0;
@@ -11392,7 +11406,7 @@ function mgStageEmpty(on) {
         image_format: this.readSeg('image_format') || 'jpg',
         encoder: this.readSeg('encoder') || 'h264_nvenc',
         hwaccel: this.readSeg('hwaccel'),
-        output_path: out ? out.value.trim() : '',
+        output_path: (out ? out.value.trim() : '') || (dirUsed ? dirVal : ''),
         num_workers: nw,
         /* 检测 */
         detector: byId('mgDetector'),
@@ -11543,11 +11557,37 @@ function mgStageEmpty(on) {
       });
     }
 
-    var pick = document.getElementById('mgOutPick');
-    if (pick) {
-      pick.addEventListener('click', function () {
-        document.dispatchEvent(new CustomEvent('merge:pick-output-dir', { detail: {} }));
+    /* 导出设置页两个路径框（输出目录 / 输出路径）右边那颗文件夹图标：
+       走全局同一套 pickFolderFor（系统目录选择器 → 写回 .pathval 并派发 change）。
+       以前 #mgOutPick 只派发 'merge:pick-output-dir'，而那条事件**没有任何监听者**，
+       点了等于没点；现在两行图标绑同一份逻辑，行为一致。
+       用 onclick 属性（不是 addEventListener）：bindPickPaths 也写这个属性，
+       谁后绑定谁生效，不会一次点击弹两个对话框。 */
+    function mgBindOutPickers() {
+      var icons = document.querySelectorAll(
+        '#p-merge .mgview[data-view="settings"] .pathinp .pill.iconpill');
+      Array.prototype.forEach.call(icons, function (icon) {
+        icon.onclick = function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          var box = icon.closest ? icon.closest('.pathinp') : null;
+          if (window.pickFolderFor) { window.pickFolderFor(box); return; }
+          document.dispatchEvent(new CustomEvent('merge:pick-output-dir', { detail: {} }));
+        };
       });
+    }
+    mgBindOutPickers();
+    window.mgBindOutPickers = mgBindOutPickers;
+
+    /* 「输出目录」被手改过才参与导出（默认值只是回显，不动它 = 与以前一致） */
+    var defOut = document.getElementById('mgDefOut');
+    if (defOut && !defOut.dataset.dirtyBound) {
+      defOut.dataset.dirtyBound = '1';
+      var markDirty = function () {
+        window.__mgDefOutEdited = String(defOut.value || '').trim() !== '';
+      };
+      defOut.addEventListener('input', markDirty);
+      defOut.addEventListener('change', markDirty);   /* 目录选择器写回来也走这条 */
     }
 
     var workers = document.getElementById('mgWorkers');

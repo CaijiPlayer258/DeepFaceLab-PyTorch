@@ -575,6 +575,7 @@
   "已完成的阶段留着，下次从这里接着跑": "Finished stages are kept — resume here next time",
   "导出失败": "Export failed",
   "默认输出位置（只读；要改在下面「输出路径」里填）": "Default output location (read-only; use Output path below to change)",
+  "默认输出位置（可编辑；也可以点右边图标选目录）": "Default output location (editable; or pick a folder with the icon on the right)",
   "起始帧（0 = 从第一帧开始）": "Start frame (0 = first frame)",
   "结束帧（留空 = 到最后一帧，即全片）": "End frame (empty = last frame, i.e. whole video)",
   "恢复成整段视频（全片）": "Reset to the whole video",
