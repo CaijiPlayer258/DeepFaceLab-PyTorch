@@ -5521,3 +5521,8 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 }
 /* 终态时取消键自己藏起来 —— [hidden] 要能压过 .mgprog-foot .btn 的其它声明 */
 #p-merge .mgprog-foot #mgpCancel[hidden] { display: none !important; }
+
+/* 导出进度 / 结果卡片居中，结果块只留一个按钮 */
+#p-merge .mgprog { margin-left: auto; margin-right: auto; }            /* mgprog-center-fix */
+#p-merge .mgprog-res { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+#p-merge .mgprog-res .btn { min-width: 140px; }
