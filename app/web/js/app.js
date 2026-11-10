@@ -3925,7 +3925,11 @@ function mgStageEmpty(on) {
       bd.dataset.faces = mgFaceKey(faces);
     });
   }
-  /* 选中判定：Ctrl/Cmd 切换单条、Shift 从锚点到本条整段、普通点击仍是单选 */
+  /* 选中判定：**点一下就是切换**（多选，0 / 1 / N 个都合法）；Shift 从锚点到本条整段选中。
+     以前普通点击是单选（点一行把别的全清掉），想同时用两个模型只能按 Ctrl —— 用户不知道
+     有这个手势，看到的永远是单选。现在取消单选语义：点一次选中，再点一次取消。
+     Ctrl/Cmd 与普通点击同义（留给肌肉记忆，不再是「多选的唯一入口」）；
+     也不再有「最后一条不许取消」的守卫 —— 0 个选中是正常状态，导出入口自己会禁用并提示。 */
   function mgPickRow(box, idx, ev) {
     MG_SEL_AUTO = false;                  /* 用户自己点了：以后不许再自动改选中 */
     var rows = Array.prototype.filter.call(box.children, function (x) {
@@ -3933,25 +3937,19 @@ function mgStageEmpty(on) {
     });
     var row = rows[idx];
     if (!row) return;
-    var mod = !!(ev && (ev.ctrlKey || ev.metaKey));
     var shift = !!(ev && ev.shiftKey);
     if (shift) {
       var a = (MG_ANCHOR == null) ? idx : MG_ANCHOR;
       a = Math.max(0, Math.min(rows.length - 1, a));
       var lo = Math.min(a, idx), hi = Math.max(a, idx);
       rows.forEach(function (x, i) { x.classList.toggle("on", i >= lo && i <= hi); });
-    } else if (mod) {
-      /* 最后一条不许被切掉：预览/导出总得有个模型可用 */
-      var on = rows.filter(function (x) { return x.classList.contains("on"); }).length;
-      if (row.classList.contains("on") && on <= 1) { MG_ANCHOR = idx; return; }
-      row.classList.toggle("on");
-      MG_ANCHOR = idx;
     } else {
-      rows.forEach(function (x, i) { x.classList.toggle("on", i === idx); });
+      row.classList.toggle("on");         /* 切换：选中 ↔ 取消 */
       MG_ANCHOR = idx;
     }
     mgSyncFaces();
     mgWarmSelected();
+    mgSyncExportGate();                    /* 选中项变了 → 导出入口跟着启用/禁用 */
     /* 左栏换模型 = 换「整帧用哪个 dfm」：右边参数一动就会重算，这里以前不动，
        于是"选了模型画面没反应"，得再去点一下别的东西才刷新。 */
     if (window.mgCmpSoon) window.mgCmpSoon();
@@ -3971,6 +3969,50 @@ function mgStageEmpty(on) {
     });
   }
   window.mgModelsPayload = mgModelsPayload;
+
+  /* 导出/合成请求用的 models：**左栏选中的全部模型**，一个不落。
+     预览那一路（mgModelsPayload）的 faces 还按「第几个选中管第几张脸」的默认分摊；
+     导出不玩分摊 —— 没在画面上手动指过脸就是 faces: []（= 这个模型管全部脸），
+     手动指过的沿用画面上的分配。这样「选 2 个 → models 长度 2」是稳的，
+     不会因为人脸库还没分配就退化成空数组（以前导出走的就是 mgFaceModelsPayload，
+     它一张脸都没分配时返回 []，等于一个模型都没带）。 */
+  function mgExportModelsPayload() {
+    var sel = mgSelNames();
+    var byFace = [];
+    try {
+      byFace = (window.mgFaceModelsPayload && window.mgFaceModelsPayload()) || [];
+    } catch (e) { byFace = []; }
+    var assigned = {};
+    byFace.forEach(function (x) { if (x && x.name) assigned[x.name] = (x.faces || []).slice(); });
+    if (!sel.length) return byFace;       /* 0 个选中：这条不该发生（导出入口已禁用），兜底放行库分配 */
+    return sel.map(function (n) {
+      return {
+        name: n,
+        faces: Object.prototype.hasOwnProperty.call(assigned, n) ? assigned[n] : []
+      };
+    });
+  }
+  window.mgExportModelsPayload = mgExportModelsPayload;
+
+  /* 导出入口的开关：0 个模型 → 按钮禁用 + 「先选一个模型」。
+     返回当前选中个数（调用方可以直接拿来判断）。 */
+  function mgSyncExportGate() {
+    var n = mgSelNames().length;
+    var btn = document.getElementById("mgExport");
+    if (btn) {
+      btn.disabled = (n === 0);
+      btn.title = n ? "" : "先选一个模型";
+      btn.setAttribute("aria-disabled", n === 0 ? "true" : "false");
+    }
+    ["mgExportHint", "mgStartHint"].forEach(function (id) {
+      var h = document.getElementById(id);
+      if (!h) return;
+      h.hidden = (n !== 0);
+      h.textContent = "先选一个模型";
+    });
+    return n;
+  }
+  window.mgSyncExportGate = mgSyncExportGate;
 
 
   /* 暂停/拖动结束 → 取一张合成帧。120ms 防抖：拖动会连着「结束」好几次 */
@@ -6100,28 +6142,95 @@ function mgStageEmpty(on) {
       });
     }
 
+    /* ---------- 导出：先设置页，再开跑 ----------
+       以前的「导出」是**直接开跑**：点下去就 mgRunExport，参数全是默认值，想改只能
+       先手动摸到导出设置页去（还得知道有那一页）。现在入口只做两件事：
+       ① 校验「有没有选模型」（0 个 = 按钮本来就是禁用的，这里再兜一层）；
+       ② 把这一页的只读回显填好，切到导出设置页。**一个请求都不发。**
+       真正 POST 阶段请求的是下面 #mgStartExport 那一下。 */
+    function mgDefOutPath() {
+      var p = (window.MergePages && window.MergePages.settings)
+        ? window.MergePages.settings() : {};
+      var manual = String(p.output_path || "").trim();
+      if (manual) return manual;
+      var dir = String(window.__mergeInputDir || "");
+      if (dir) {
+        var base = dir.split(/[\\/]/).filter(Boolean).pop() || "project";
+        return dir.replace(/[\\/]+$/, "") + "\\" + base + "_merged.mp4";
+      }
+      var video = mgVidPath();
+      if (video) return video.replace(/\.[^./\\]+$/, "") + "_merged.mp4";
+      return "（默认：源视频名 _merged.mp4，与源视频同目录）";
+    }
+
+    /* 打开/刷新导出设置页：只读回显 + 当前参数，不动任何请求 */
+    function mgFillExportSettings() {
+      var names = mgSelNames();
+      var box = document.getElementById("mgSelModels");
+      if (box) {
+        box.innerHTML = "";
+        if (!names.length) {
+          var em = document.createElement("span");
+          em.className = "mgexp-models-empty";
+          em.textContent = "还没选模型";
+          box.appendChild(em);
+        } else {
+          names.forEach(function (n) {
+            var chip = document.createElement("span");
+            chip.className = "mgexp-chip";
+            chip.textContent = n;
+            box.appendChild(chip);
+          });
+        }
+      }
+      var out = document.getElementById("mgDefOut");
+      if (out) out.value = mgDefOutPath();
+      var total = 0;
+      try {
+        total = parseInt(String((window.__mv || {}).frames || 0), 10) || 0;
+      } catch (e) { total = 0; }
+      if (!total) {
+        var tf = document.getElementById("mtlTotal");
+        total = parseInt(String((tf && tf.textContent) || "0"), 10) || 0;
+      }
+      /* 右边那颗「全片」按钮本身就是「恢复整段」，这行字只补「一共多少帧」；
+         总帧数还不知道（视频还没探测完）就干脆不显示，别写成「全片 全片」。 */
+      var tot = document.getElementById("mgFrameTotal");
+      if (tot) {
+        if (total > 0) { tot.textContent = "全片 · " + total + " 帧"; tot.hidden = false; }
+        else { tot.textContent = ""; tot.hidden = true; }
+      }
+      var to = document.getElementById("mgFrameTo");
+      if (to) to.placeholder = total > 0 ? String(Math.max(0, total - 1)) : "末帧";
+      var cnt = document.getElementById("mgSettingsCount");
+      if (cnt) {
+        cnt.textContent = names.length
+          ? (names.length + " 个模型 · 全片")
+          : "没有选中模型";
+      }
+      if (window.MergePages && window.MergePages.syncStatus) window.MergePages.syncStatus();
+      mgSyncExportGate();
+    }
+    window.mgFillExportSettings = mgFillExportSettings;
+
+    function mgOpenExportSettings() {
+      if (!mgSyncExportGate()) {
+        mgToastErr("export-nosel", "先选一个模型",
+                   "左栏「模型」里点一个（可多选），导出要用它换脸", "warn", 4000);
+        return false;
+      }
+      mgFillExportSettings();
+      mgStep("settings");
+      return true;
+    }
+    window.mgOpenExportSettings = mgOpenExportSettings;
+
     var exBtn = $("mgExport");
     if (exBtn && !exBtn.dataset.bound) {
       exBtn.dataset.bound = "1";
       exBtn.addEventListener("click", function () {
-        /* 视频模式（有源视频、没有 DFL 项目目录）**直接导出**：
-           不要求先建项目，也不经过人脸库那一页（那一页本身就要项目目录，
-           以前就是在这一步被拦下、弹「还没有能导出的项目」，一张都没导出）。
-           后端 /api/merge/export 认 video：逐帧解码 → 检测 → 68 点 → 判定模型
-           → dfm → 遮罩 → 合成 → 写帧 → ffmpeg（音轨 copy）。 */
-        var s = (window.MergePages && window.MergePages.settings)
-          ? window.MergePages.settings() : {};
-        if (!(window.__mergeInputDir || "") && mgVidPath()) {
-          mgRunExport(s);
-          return;
-        }
-        mgNeedProjectDir().then(function (hit) {
-          if (!hit) return;                 /* 已经弹过一条说明模式与缺件的提示 */
-          window.__mergeInputDir = hit.dir;
-          mgOpenFaceDb("export", function () {
-            mgRunExport((window.MergePages && window.MergePages.settings) ? window.MergePages.settings() : {});
-          }, hit.dir);
-        });
+        /* 只切页；不解析项目、不请求后端 —— 断言「点导出 → 0 个 /api/merge/stage」靠这一条 */
+        mgOpenExportSettings();
       });
     }
 
@@ -6387,6 +6496,42 @@ function mgStageEmpty(on) {
     window.mgpReset = mgpReset;
     window.mgpPaint = mgpPaint;
 
+    /* 终态结果面板（进度页）：导出中藏起来，只留「取消导出」；
+       完成/失败/取消才顶上来，给「返回导出设置」+「再次导出」两个出口。 */
+    function mgpResultHide() {
+      var box = $("mgpResult");
+      if (box) box.hidden = true;
+      var cb = $("mgpCancel");
+      if (cb) cb.hidden = false;
+      return box;
+    }
+    function mgpResultShow(okAll, d) {
+      d = d || {};
+      var box = $("mgpResult");
+      var txt = $("mgpResultText");
+      var cb = $("mgpCancel");
+      if (cb) cb.hidden = true;               /* 终态不再有「取消导出」 */
+      if (txt) {
+        var bits = [];
+        if (okAll) {
+          bits.push("导出完成");
+          if (d.out_video || d.out) bits.push(String(d.out_video || d.out));
+          if (d.cache_removed) bits.push("cache 已清理");
+        } else if (d.phase === "cancelled") {
+          bits.push("已取消");
+          bits.push("已完成的阶段留着，下次从这里接着跑");
+        } else {
+          bits.push("导出失败");
+          if (d.error) bits.push(String(d.error).slice(0, 160));
+        }
+        txt.textContent = bits.join(" · ");
+      }
+      if (box) box.hidden = false;
+      return box;
+    }
+    window.mgpResultHide = mgpResultHide;
+    window.mgpResultShow = mgpResultShow;
+
     /* 阶段状态 -> 总进度条 + 帧数/速度 + 当前步右侧小字 */
     function mgpStatusPaint(d, idx) {
       d = d || {};
@@ -6444,7 +6589,8 @@ function mgStageEmpty(on) {
       window.__mgStageRunning = false;
       window.__mergeExporting = false;
       var cb = $("mgpCancel");
-      if (cb) { cb.disabled = false; cb.textContent = (okAll ? "返回设置" : "重新导出"); }
+      /* 终态：取消键自己藏起来（mgpResultShow 里 hidden），出口改成结果面板那两颗 */
+      if (cb) { cb.disabled = false; cb.textContent = "取消导出"; }
       var d2 = d || {};
       if (okAll) {
         mgpPaint(MGP_STAGES.length - 1, { state: "done", tip: "mp4" });
@@ -6460,6 +6606,8 @@ function mgStageEmpty(on) {
         if (eta2) eta2.textContent = String(d2.error || "失败").slice(0, 60);
         toast("导出失败", String(d2.error || "").slice(0, 140), "error");
       }
+      /* 结果面板：完成 / 取消 / 失败三种终态都要有「返回导出设置 + 再次导出」 */
+      mgpResultShow(okAll, d2);
     }
 
     function mgpPollStage(idx, body, next) {
@@ -6546,7 +6694,12 @@ function mgStageEmpty(on) {
            没有就用左栏选中的那个模型 */
         model: payload.model ||
                (document.querySelector("#mgModels .mgitem.on .nm") || {}).textContent || "",
-        models: mgFaceModelsPayload(),
+        /* 导出用**左栏选中的全部模型**（models[] 一个不落）；预览那边才按 faces 分摊。
+           以前这里走的是 mgFaceModelsPayload()，人脸库没分配时它是空数组 ——
+           导出的 models 就成了 []，等于一个模型都没带。 */
+        models: (window.mgExportModelsPayload ? window.mgExportModelsPayload() : mgModelsPayload()),
+        /* cache 默认不保留（后端成功导出后会删掉 <名字>_cache/）；导出设置页勾「保留」才拦住 */
+        keep_cache: !!payload.keep_cache,
         detector: payload.detector || "",
         thresh: 0.5,
         settings: mgMergeSettings(payload),
@@ -6556,13 +6709,19 @@ function mgStageEmpty(on) {
       if (payload.output_path && /^[A-Za-z]:[\\/]/.test(payload.output_path)) {
         body.output_dir = payload.output_path;
       }
+      /* 帧范围：默认全片。只有真改过才带上，别给后端塞一对它不一定认的默认值。 */
+      var frameFrom = parseInt(payload.frame_from, 10);
+      if (!isNaN(frameFrom) && frameFrom > 0) body.start_frame = frameFrom;
+      var frameTo = parseInt(payload.frame_to, 10);
+      if (!isNaN(frameTo) && frameTo > 0) body.end_frame = frameTo;
       window.__mergeExporting = true;
       window.__mgStageRunning = true;
       mgpStopPoll();
       mgpReset();
+      mgpResultHide();                    /* 上一轮的结果面板先收起来 */
       if (window.mgStep) window.mgStep("progress");
       var cb = $("mgpCancel");
-      if (cb) { cb.disabled = false; cb.textContent = "取消导出"; }
+      if (cb) { cb.disabled = false; cb.textContent = "取消导出"; cb.hidden = false; }
       document.dispatchEvent(new CustomEvent("merge:export-start", { detail: payload }));
 
       var idx = 0;
@@ -6687,6 +6846,7 @@ function mgStageEmpty(on) {
         return;
       }
       window.__mergeExporting = true;
+      if (typeof window.mgpResultHide === "function") window.mgpResultHide();
 
       var body = {
         input_dir: inputDir,
@@ -6696,8 +6856,10 @@ function mgStageEmpty(on) {
            库有组就按 embedding 判、没组就全部用左栏选中的 dfm（后端判定）。 */
         faces_project: String(window.__mergeFaceLib || ""),
         model: (document.querySelector("#mgModels .mgitem.on .nm") || {}).textContent || "",
-        /* 多选契约：每个选中模型一条 {name, faces}；faces=[] = 全部脸 */
-        models: mgFaceModelsPayload(),
+        /* 多选契约：每个选中模型一条 {name, faces}；faces=[] = 全部脸。
+           导出用**全部选中项**（mgExportModelsPayload），不按预览那套按脸分摊。 */
+        models: (window.mgExportModelsPayload ? window.mgExportModelsPayload() : mgModelsPayload()),
+        keep_cache: !!payload.keep_cache,
         workers: parseInt(payload.num_workers, 10) || 0,
         encoder: payload.encoder || "h264_nvenc",
         hwaccel: payload.hwaccel === "" ? "off" : (payload.hwaccel || "auto"),
@@ -6739,13 +6901,75 @@ function mgStageEmpty(on) {
       });
     }
 
-    /* 导出设置子页里的「开始导出」：它以前只 dispatch 一个没人听的事件 */
-    document.addEventListener("click", function (e) {
-      var t = e.target && e.target.closest ? e.target.closest("#mgStartExport") : null;
-      if (!t) return;
-      e.preventDefault();
-      mgRunExport((window.MergePages && window.MergePages.settings) ? window.MergePages.settings() : {});
-    });
+    /* 导出设置页底部的「开始导出」：**整条导出链唯一的 POST 入口**。
+       0 个模型直接挡回去（页面上这颗按钮本来就该是禁的，这里再兜一层）。
+       参数一律从 MergePages.settings() 现取：编码器 / 质量 / 格式 / 每帧进程 /
+       保留 cache / 帧范围，都是用户在设置页上改完的那一份，不会被重置。 */
+    var startGo = $("mgStartExport");
+    if (startGo && !startGo.dataset.bound) {
+      startGo.dataset.bound = "1";
+      startGo.addEventListener("click", function () {
+        if (!mgSyncExportGate()) {
+          mgToastErr("export-nosel", "先选一个模型",
+                     "回合成器左栏「模型」里点一个（可多选），再回来导出", "warn", 4000);
+          return;
+        }
+        var p = (window.MergePages && window.MergePages.settings)
+          ? window.MergePages.settings() : {};
+        mgRunExport(p);
+      });
+    }
+
+    /* 导出设置页的「取消」：回合成器，参数一个都不动（控件值原样留着，下次进来还是它） */
+    var cancelSet = $("mgCancelExport");
+    if (cancelSet && !cancelSet.dataset.bound) {
+      cancelSet.dataset.bound = "1";
+      cancelSet.addEventListener("click", function () {
+        mgStep("main");
+      });
+    }
+
+    /* 「全片」：把帧范围清回默认（起始 0、结束留空） */
+    var frameAll = $("mgFrameAll");
+    if (frameAll && !frameAll.dataset.bound) {
+      frameAll.dataset.bound = "1";
+      frameAll.addEventListener("click", function () {
+        var a = $("mgFrameFrom"), b = $("mgFrameTo");
+        if (a) a.value = "0";
+        if (b) b.value = "";
+        if (window.MergePages && window.MergePages.syncStatus) window.MergePages.syncStatus();
+      });
+    }
+
+    /* 结果面板：返回导出设置（参数都还在）/ 再次导出（同一份参数再跑一遍） */
+    var toSet2 = $("mgpToSettings");
+    if (toSet2 && !toSet2.dataset.bound) {
+      toSet2.dataset.bound = "1";
+      toSet2.addEventListener("click", function () {
+        mgpResultHide();
+        mgStep("settings");
+        mgFillExportSettings();
+      });
+    }
+    var againBtn = $("mgpAgain");
+    if (againBtn && !againBtn.dataset.bound) {
+      againBtn.dataset.bound = "1";
+      againBtn.addEventListener("click", function () {
+        if (window.__mergeExporting || window.__mgStageRunning) {
+          toast("正在导出", "上一次还没结束", "info");
+          return;
+        }
+        if (!mgSyncExportGate()) {
+          mgpResultHide();
+          mgStep("settings");
+          mgToastErr("export-nosel", "先选一个模型", "回合成器左栏选一个模型", "warn", 4000);
+          return;
+        }
+        mgpResultHide();
+        mgRunExport((window.MergePages && window.MergePages.settings)
+          ? window.MergePages.settings() : {});
+      });
+    }
 
     var tlBox = $("mergeTracks");
     if (tlBox && !tlBox.dataset.frameBound) {
@@ -6946,20 +7170,20 @@ function mgStageEmpty(on) {
             msg.textContent = okAll ? "完成"
               : (wasCancel ? "已取消" : String(d.error || d.msg || "合成失败").slice(0, 60));
           }
-          /* 取消按钮在终态变成「返回设置 / 重新导出」，点它回导出设置页 */
+          /* 终态出口统一交给结果面板（返回导出设置 / 再次导出），
+             取消键自己藏起来 —— 不再让同一颗按钮在「取消导出 / 返回设置 / 重新导出」
+             三种身份之间来回变。也不再自动跳回工作台：那会把刚出来的结果盖掉。 */
           var cbEnd = document.getElementById("mgpCancel");
-          if (cbEnd) { cbEnd.disabled = false; cbEnd.textContent = okAll ? "返回设置" : "重新导出"; }
+          if (cbEnd) { cbEnd.disabled = false; cbEnd.textContent = "取消导出"; }
           toast(okAll ? "合成完成" : (wasCancel ? "已取消合成" : "合成失败"),
                 okAll ? ("输出 " + d.out)
                       : (wasCancel ? "已停在你按取消时的位置" : String(d.error || "").slice(0, 120)),
                 okAll ? "success" : (wasCancel ? "info" : "error"));
-          if (okAll) {
-            /* 导出完自动切回工作台并显示成片那一帧，省得用户自己找 */
-            try {
-              if (window.mgStep) window.mgStep("main");
-              /* 回到工作台就现算一帧合成结果（不再有「合成/原图」按钮可点） */
-              if (window.mgCmpNow) window.mgCmpNow();
-            } catch (e) {}
+          if (typeof window.mgpResultShow === "function") {
+            window.mgpResultShow(!!okAll, {
+              phase: okAll ? "done" : (wasCancel ? "cancelled" : "failed"),
+              out_video: d.out, error: d.error || d.msg || ""
+            });
           }
         }
       }).catch(function () {});
@@ -7047,6 +7271,7 @@ function mgStageEmpty(on) {
     }
     mgSyncFaces();        /* 徽章跟着恢复后的选中项走 */
     mgWarmSelected();     /* 渲染完预热：多选时每个选中模型各打一枪（__mgWarm 自带 10 秒去重） */
+    mgSyncExportGate();   /* 列表从 0 条变 N 条（或反过来）→ 导出入口跟着变 */
   }
 
   function renderDatasets(ds) {
@@ -11157,8 +11382,16 @@ function mgStageEmpty(on) {
         blur_mask: tiny('遮罩羽化'),
         model: (document.querySelector('#mgModels .mgitem.on .nm') || {}).textContent || '',
         /* 多选契约：models=[{name, faces}]，导出事件 detail 里也带上。
-           合成视图里按框分配过的，以那个为准（按脸分配优先于左栏多选）。 */
-        models: (window.mgFaceModelsPayload ? window.mgFaceModelsPayload() : mgModelsPayload())
+           合成视图里按框分配过的，以那个为准（按脸分配优先于左栏多选）。
+           导出真正发请求时用的是 mgExportModelsPayload()（全部选中项），
+           这里留的是预览那一路的口径。 */
+        models: (window.mgFaceModelsPayload ? window.mgFaceModelsPayload() : mgModelsPayload()),
+        /* 导出设置页新增的两项：
+           keep_cache —— 默认 false（成功导出后后端会删掉 <名字>_cache/，勾「保留」才留）；
+           frame_from / frame_to —— 默认 0 / 空 = 全片，填了才随阶段请求带出去。 */
+        keep_cache: String(this.readSeg('keep_cache') || '') === '1',
+        frame_from: Math.max(0, parseInt(byId('mgFrameFrom'), 10) || 0),
+        frame_to: Math.max(0, parseInt(byId('mgFrameTo'), 10) || 0)
       };
     },
 

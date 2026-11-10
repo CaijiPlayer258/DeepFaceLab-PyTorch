@@ -5378,3 +5378,146 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 .mgfgrid.zoom .mgfg-cell:not(.on) { display: none; }
 .mgfgrid.zoom .mgfg-cell.on { cursor: zoom-out; }
 
+/* ============================================================================
+   导出流程：入口门禁 · 导出设置页新增项 · 进度页结果面板
+
+   —— 只补这一轮新加的元素，不改任何既有类。追加在文件末尾：同权重靠后写胜出，
+      不用去前面几百行里找位置，也不和带 !important 的老规则打架。
+   ============================================================================ */
+
+/* ---------- 一、导入口的「先选一个模型」---------- */
+/* 左栏导出按钮下面那一行小字（0 个模型时出现；一旦选中就收起） */
+.mgexport-hint {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #ef4444;
+  text-align: center;
+}
+.mgexport-hint[hidden] { display: none !important; }
+
+/* 禁用态：全局 .btn 的背景是 var(--solid) !important，不在这里钉一次，
+   禁用和可点的按钮长得一模一样（用户会一直点它） */
+#mgExport[disabled],
+#mgExport.btn[disabled] {
+  background: var(--line) !important;
+  color: var(--ink-3) !important;
+  cursor: not-allowed !important;
+  opacity: .9;
+}
+
+/* ---------- 二、导出设置页 ---------- */
+/* 选中模型：只读 chip 列表（点不动，要改回合成器左栏） */
+.mgexp-models {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 24px;
+}
+.mgexp-chip {
+  max-width: 100%;
+  padding: 2px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--panel);
+  font-size: 11.5px;
+  line-height: 18px;
+  color: var(--ink-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mgexp-models-empty { font-size: 11.5px; color: var(--ink-3); }
+
+/* 默认输出目录：只读，一眼看出是「展示」不是「可编辑」 */
+#mgDefOut[readonly] {
+  cursor: default;
+  color: var(--ink-2);
+  background: transparent;
+}
+
+/* 帧范围：两个小数字框 + 箭头 + 「全片」。
+   注意 app.css:4198 有一条 '#p-merge .mgrow .mgtiny{width:100% !important;flex:1 1 auto !important}'
+   —— 它是给「质量 / 并行进程」那几行铺满宽度用的，直接落到这一行会把三个控件
+   各占一行。这里用更高权重把它按回 64px，并禁止换行。 */
+#p-merge .mgview[data-view="settings"] .mgrow .mgexp-range {
+  width: auto;
+  flex-wrap: nowrap;
+  gap: 6px;
+  min-width: 0;
+}
+#p-merge .mgview[data-view="settings"] .mgrow .mgexp-range > .mgtiny {
+  width: 64px !important;
+  max-width: 64px;
+  flex: 0 0 64px !important;
+  text-align: center;
+}
+#p-merge .mgview[data-view="settings"] .mgrow .mgexp-range > #mgFrameTotal {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#p-merge .mgview[data-view="settings"] .mgrow .mgexp-range > #mgFrameAll {
+  flex: 0 0 auto;
+}
+
+/* 底部动作区：取消（次要）+ 开始导出（主） */
+.mgp-footrow { display: flex; gap: 8px; }
+.mgp-footrow .btn {
+  flex: 1 1 0;
+  height: 34px;
+  border-radius: 8px;
+  font-size: 12.5px;
+}
+#p-merge #mgStartExport {
+  background: var(--solid) !important;
+  color: var(--solid-ink) !important;
+}
+#p-merge #mgStartExport[disabled] {
+  background: var(--line) !important;
+  color: var(--ink-3) !important;
+  cursor: not-allowed !important;
+}
+#mgStartHint { margin: 0 0 6px; }
+
+/* ---------- 三、进度页的结果面板 ---------- */
+#p-merge .mgprog-res {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-2);
+}
+#p-merge .mgprog-res[hidden] { display: none !important; }
+#p-merge .mgprog-res-hd {
+  font-size: 11px;
+  letter-spacing: .02em;
+  color: var(--ink-3);
+}
+#p-merge .mgprog-res-txt {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-1);
+  word-break: break-all;
+}
+#p-merge .mgprog-res-acts { display: flex; gap: 8px; }
+#p-merge .mgprog-res-acts .btn {
+  height: 32px;
+  padding: 0 16px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+/* 「再次导出」是主操作：实心；「返回导出设置」保持次要（全局 .btn 的中性色） */
+#p-merge .mgprog-res-acts #mgpAgain {
+  background: var(--solid) !important;
+  color: var(--solid-ink) !important;
+}
+/* 终态时取消键自己藏起来 —— [hidden] 要能压过 .mgprog-foot .btn 的其它声明 */
+#p-merge .mgprog-foot #mgpCancel[hidden] { display: none !important; }

@@ -738,7 +738,10 @@
     
 
             <div class="mgsec mgexport">
+              <!-- 「导出」只是入口：点它进导出设置页（mgOpenExportSettings），
+                   真正发请求的是那一页底部的「开始导出」。左栏一个模型都没选时禁用。 -->
               <button class="btn pri" id="mgExport" style="width:100%">导出</button>
+              <div class="mgexport-hint" id="mgExportHint" hidden>先选一个模型</div>
               <!-- 标准 DFL 项目模式：先逐帧合成到 <项目>/merged/，再编码成片。
                    和上面那个「导出」（4.0 MergeStudio 一口气出 mp4）并列，两条路都在。 -->
               <button class="btn" id="mgExportProject" style="width:100%;margin-top:8px"
@@ -910,11 +913,39 @@
       <b>导出设置</b>
     </div>
     <!-- 参数最终写入 POST /api/export/start（字段名同 4.0 ExportStartRequest） -->
-    <span class="mgp-count">输出 · 编码 · 性能</span>
-          <button class="btn pri mgp-btn" id="mgStartExport2" type="button">开始导出</button>
+    <span class="mgp-count" id="mgSettingsCount">输出 · 编码 · 性能</span>
   </div>
 
   <div class="mgp-scroll">
+    <!-- 组 0：这次导出（只读回显 + 帧范围）。要改模型/参数就回合成器，这里只看不改。
+         点「导出」只走到这一页，一个请求都不发；底部「开始导出」才 POST 阶段请求。 -->
+    <div class="mgp-sec">
+      <div class="mgp-hd">这次导出</div>
+      <div class="mgrow">
+        <span class="f">选中模型</span>
+        <div class="mgexp-models" id="mgSelModels"></div>
+      </div>
+      <div class="mgrow">
+        <span class="f">输出目录</span>
+        <div class="inp mono pathinp">
+          <input class="pathval" id="mgDefOut" type="text" readonly spellcheck="false"
+                 autocomplete="off" title="默认输出位置（只读；要改在下面「输出路径」里填）">
+        </div>
+      </div>
+      <div class="mgrow">
+        <span class="f" title="默认全片。填了会随阶段请求带上 start_frame / end_frame；当前后端阶段按整段视频执行。">帧范围</span>
+        <div class="mgnum mgexp-range">
+          <input class="mgtiny" id="mgFrameFrom" type="number" min="0" value="0"
+                 title="起始帧（0 = 从第一帧开始）">
+          <span class="mgunit">→</span>
+          <input class="mgtiny" id="mgFrameTo" type="number" min="0" placeholder="末帧"
+                 title="结束帧（留空 = 到最后一帧，即全片）">
+          <span class="mgunit" id="mgFrameTotal">全片</span>
+          <button class="mini" id="mgFrameAll" type="button" title="恢复成整段视频（全片）">全片</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 组 1：输出 -->
     <div class="mgp-sec">
       <div class="mgp-hd">输出</div>
@@ -978,9 +1009,24 @@
           <span class="mgunit">0 = 自动</span>
         </div>
       </div>
+      <!-- cache 默认不保留：成功导出后后端会把 <名字>_cache/ 整个删掉（这是既有行为）。
+           选「保留」会把 keep_cache=true 随阶段请求发下去，方便数产物/续跑。 -->
+      <div class="mgrow">
+        <span class="f">保留 cache</span>
+        <div class="seg" data-k="keep_cache">
+          <b class="on" data-v="">不保留</b><b data-v="1">保留</b>
+        </div>
+      </div>
     </div>
   </div>
   <div id="mgExportStatus" class="hint"></div>
+  <div class="mgp-foot">
+    <div class="mgexport-hint" id="mgStartHint" hidden>先选一个模型</div>
+    <div class="mgp-footrow">
+      <button class="btn ghost" id="mgCancelExport" type="button">取消</button>
+      <button class="btn pri mgp-go" id="mgStartExport" type="button">开始导出</button>
+    </div>
+  </div>
         </div>
         <div class="mgview" data-view="progress">
           <div class="mgprog">
@@ -1025,6 +1071,18 @@
                 <div class="cvst" id="mgpS6" data-s="encode">
                   <div class="cvsh"><span class="cvic">6</span><span class="cvnm">导出</span><span class="cvtip"></span></div>
                 </div>
+              </div>
+            </div>
+
+            <!-- 终态结果：完成/失败/取消都在这里收口。
+                 导出中 hidden（这时只有下面那颗「取消导出」）；终态一出来就顶上来，
+                 给「返回导出设置」和「再次导出」两个出口，参数一个都不丢。 -->
+            <div class="mgprog-res" id="mgpResult" hidden>
+              <div class="mgprog-res-hd">结果</div>
+              <div class="mgprog-res-txt" id="mgpResultText">—</div>
+              <div class="mgprog-res-acts">
+                <button class="btn" id="mgpToSettings" type="button">返回导出设置</button>
+                <button class="btn pri" id="mgpAgain" type="button">再次导出</button>
               </div>
             </div>
 
