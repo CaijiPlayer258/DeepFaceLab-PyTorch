@@ -907,127 +907,151 @@
             </div>
           </div>
         </div>
+        <!-- 导出设置：与训练器参数页同一套设计语言（.card + .cardhd + .cfgrow）。
+             每个分组一张卡，行 = 左侧定宽标签（.cl）+ 中间说明（.cd）+ 右侧控件（.cc）；
+             行高、控件（.seg / .mgsel / .inp）、底部 .cfgactions 全部复用训练页那几条规则，
+             这里只写本页的排布（.mgset / .mgset-scroll）。
+             参数最终写入 POST /api/export/start（字段名同 4.0 ExportStartRequest）。 -->
         <div class="mgview" data-view="settings">
-<div class="mgp-head">
-    <div class="mgp-tt">
-      <b>导出设置</b>
-    </div>
-    <!-- 参数最终写入 POST /api/export/start（字段名同 4.0 ExportStartRequest） -->
-    <span class="mgp-count" id="mgSettingsCount">输出 · 编码 · 性能</span>
-  </div>
+          <div class="mgset">
+            <div class="mgset-hd">
+              <b>导出设置</b>
+              <span class="hint" id="mgSettingsCount">输出 · 编码 · 性能</span>
+            </div>
 
-  <div class="mgp-scroll">
-    <!-- 组 0：这次导出（只读回显 + 帧范围）。要改模型/参数就回合成器，这里只看不改。
-         点「导出」只走到这一页，一个请求都不发；底部「开始导出」才 POST 阶段请求。 -->
-    <div class="mgp-sec">
-      <div class="mgp-hd">这次导出</div>
-      <div class="mgrow">
-        <span class="f">选中模型</span>
-        <div class="mgexp-models" id="mgSelModels"></div>
-      </div>
-      <div class="mgrow">
-        <span class="f">输出目录</span>
-        <div class="inp mono pathinp">
-          <input class="pathval" id="mgDefOut" type="text" readonly spellcheck="false"
-                 autocomplete="off" title="默认输出位置（只读；要改在下面「输出路径」里填）">
-        </div>
-      </div>
-      <div class="mgrow">
-        <span class="f" title="默认全片。填了会随阶段请求带上 start_frame / end_frame；当前后端阶段按整段视频执行。">帧范围</span>
-        <div class="mgnum mgexp-range">
-          <input class="mgtiny" id="mgFrameFrom" type="number" min="0" value="0"
-                 title="起始帧（0 = 从第一帧开始）">
-          <span class="mgunit">→</span>
-          <input class="mgtiny" id="mgFrameTo" type="number" min="0" placeholder="末帧"
-                 title="结束帧（留空 = 到最后一帧，即全片）">
-          <span class="mgunit" id="mgFrameTotal">全片</span>
-          <button class="mini" id="mgFrameAll" type="button" title="恢复成整段视频（全片）">全片</button>
-        </div>
-      </div>
-    </div>
+            <div class="mgset-scroll">
+              <!-- 组 0：这次导出（只读回显 + 帧范围）。要改模型/参数就回合成器，这里只看不改。 -->
+              <div class="card">
+                <div class="cardhd"><b>这次导出</b><span class="hint">改模型 / 参数请回合成器</span></div>
+                <div class="cfgrow">
+                  <span class="cl">选中模型</span>
+                  <span class="cd">随 models[] 一起发出去</span>
+                  <span class="cc"><div class="mgexp-models" id="mgSelModels"></div></span>
+                </div>
+                <div class="cfgrow cfgpathrow">
+                  <span class="cl">输出目录</span>
+                  <span class="cc">
+                    <div class="inp mono pathinp cfgpath">
+                      <input class="pathval" id="mgDefOut" type="text" readonly spellcheck="false"
+                             autocomplete="off" title="默认输出位置（只读；要改在下面「输出路径」里填）">
+                    </div>
+                  </span>
+                </div>
+                <div class="cfgrow">
+                  <span class="cl" title="默认全片。填了会随阶段请求带上 start_frame / end_frame。">帧范围</span>
+                  <span class="cd">留空 = 全片</span>
+                  <span class="cc">
+                    <input class="inp rng" id="mgFrameFrom" type="number" min="0" value="0"
+                           title="起始帧（0 = 从第一帧开始）">
+                    <span class="unit">→</span>
+                    <input class="inp rng" id="mgFrameTo" type="number" min="0" placeholder="末帧"
+                           title="结束帧（留空 = 到最后一帧，即全片）">
+                    <span class="unit" id="mgFrameTotal">全片</span>
+                    <button class="mini" id="mgFrameAll" type="button" title="恢复成整段视频（全片）">恢复全片</button>
+                  </span>
+                </div>
+              </div>
 
-    <!-- 组 1：输出 -->
-    <div class="mgp-sec">
-      <div class="mgp-hd">输出</div>
-      <div class="mgrow">
-        <span class="f">格式</span>
-        <div class="seg" data-k="image_format">
-          <b class="on" data-v="jpg" title="4.0 值 jpg（Cache Format，JPEG 100%）">JPEG</b>
-          <b data-v="png" title="4.0 值 png（PNG 帧缓存）">PNG</b>
-        </div>
-      </div>
-      <div class="mgrow">
-        <span class="f">质量</span>
-        <div class="mgnum">
-          <!-- MISSING: 4.0 后端 ExportStartRequest 没有质量字段，
-               _stage1_extract_frames 固定 -q:v 2（export_pipeline.py:1272）；
-               这里只按设计稿占位，禁用且不随导出请求提交 -->
-          <input class="mgtiny" id="mgQuality" type="number" min="1" max="100" value="95"
-                 title="4.0 固定 -q:v 2，无此参数" disabled>
-          <span class="mgunit">%</span>
-        </div>
-      </div>
-      <div class="mgrow">
-        <span class="f">输出路径</span>
-        <div class="inp mono pathinp">
-          <input class="pathval" id="mgOutPath" type="text" spellcheck="false" autocomplete="off"
-                 placeholder="留空 = 源视频名_result.mp4">
-          <span class="pill iconpill" id="mgOutPick" title="选择输出目录">
-            <svg class="ic"><use href="#i-folder"/></svg>
-          </span>
-        </div>
-      </div>
-    </div>
+              <!-- 组 1：输出 -->
+              <div class="card">
+                <div class="cardhd"><b>输出</b></div>
+                <div class="cfgrow">
+                  <span class="cl">格式</span>
+                  <span class="cd">4.0 的 Cache Format</span>
+                  <span class="cc">
+                    <div class="seg" data-k="image_format">
+                      <b class="on" data-v="jpg" title="4.0 值 jpg（Cache Format，JPEG 100%）">JPEG</b>
+                      <b data-v="png" title="4.0 值 png（PNG 帧缓存）">PNG</b>
+                    </div>
+                  </span>
+                </div>
+                <div class="cfgrow">
+                  <span class="cl">质量</span>
+                  <!-- MISSING: 4.0 后端 ExportStartRequest 没有质量字段，
+                       _stage1_extract_frames 固定 -q:v 2（export_pipeline.py:1272）；
+                       这里只按设计稿占位，禁用且不随导出请求提交 -->
+                  <span class="cd">4.0 固定 -q:v 2，无此参数</span>
+                  <span class="cc">
+                    <input class="inp rng" id="mgQuality" type="number" min="1" max="100" value="95"
+                           title="4.0 固定 -q:v 2，无此参数" disabled>
+                    <span class="unit">%</span>
+                  </span>
+                </div>
+                <div class="cfgrow cfgpathrow">
+                  <span class="cl">输出路径</span>
+                  <span class="cc">
+                    <div class="inp mono pathinp cfgpath">
+                      <input class="pathval" id="mgOutPath" type="text" spellcheck="false" autocomplete="off"
+                             placeholder="留空 = 源视频名_result.mp4">
+                      <span class="pill iconpill" id="mgOutPick" title="选择输出目录">
+                        <svg class="ic"><use href="#i-folder"/></svg>
+                      </span>
+                    </div>
+                  </span>
+                </div>
+              </div>
 
-    <!-- 组 2：编码 -->
-    <div class="mgp-sec">
-      <div class="mgp-hd">编码</div>
-      <div class="mgrow">
-        <span class="f">编码器</span>
-        <div class="seg" data-k="encoder">
-          <b class="on" data-v="h264_nvenc" title="NVENC 硬件编码（4.0 默认）">h264_nvenc</b>
-          <b data-v="libx264" title="x264 软件编码">libx264</b>
-        </div>
-      </div>
-      <div class="mgrow">
-        <span class="f">解码加速</span>
-        <div class="seg" data-k="hwaccel">
-          <b class="on" data-v="auto" title="hwaccel='auto'，无 GPU 时自动回退软解">开</b>
-          <b data-v="" title="hwaccel=''（关闭硬解）">关</b>
-        </div>
-      </div>
-    </div>
+              <!-- 组 2：编码 -->
+              <div class="card">
+                <div class="cardhd"><b>编码</b></div>
+                <div class="cfgrow">
+                  <span class="cl">编码器</span>
+                  <span class="cd">NVENC 硬件编码 / x264 软件编码</span>
+                  <span class="cc">
+                    <div class="seg" data-k="encoder">
+                      <b class="on" data-v="h264_nvenc" title="NVENC 硬件编码（4.0 默认）">h264_nvenc</b>
+                      <b data-v="libx264" title="x264 软件编码">libx264</b>
+                    </div>
+                  </span>
+                </div>
+                <div class="cfgrow">
+                  <span class="cl">解码加速</span>
+                  <span class="cd">hwaccel=auto，无 GPU 自动回退软解</span>
+                  <span class="cc">
+                    <div class="seg" data-k="hwaccel">
+                      <b class="on" data-v="auto" title="hwaccel='auto'，无 GPU 时自动回退软解">开</b>
+                      <b data-v="" title="hwaccel=''（关闭硬解）">关</b>
+                    </div>
+                  </span>
+                </div>
+              </div>
 
-    <!-- 组 3：性能 -->
-    <div class="mgp-sec">
-      <div class="mgp-hd">性能</div>
-      <div class="mgrow">
-        <span class="f">并行进程</span>
-        <div class="mgnum">
-          <input class="mgtiny" id="mgWorkers" type="number" min="0" max="16" value="0"
-                 title="num_workers · 0 = 自动 · 范围 0 ~ 16">
-          <span class="mgunit">0 = 自动</span>
+              <!-- 组 3：性能 -->
+              <div class="card">
+                <div class="cardhd"><b>性能</b></div>
+                <div class="cfgrow">
+                  <span class="cl">并行进程</span>
+                  <span class="cd">num_workers · 0 = 自动</span>
+                  <span class="cc">
+                    <input class="inp rng" id="mgWorkers" type="number" min="0" max="16" value="0"
+                           title="num_workers · 0 = 自动 · 范围 0 ~ 16">
+                  </span>
+                </div>
+                <!-- cache 默认不保留：成功导出后后端会把 <名字>_cache/ 整个删掉（这是既有行为）。
+                     选「保留」会把 keep_cache=true 随阶段请求发下去，方便数产物/续跑。 -->
+                <div class="cfgrow">
+                  <span class="cl">保留 cache</span>
+                  <span class="cd">成功后 <名字>_cache/ 默认会被删掉</span>
+                  <span class="cc">
+                    <div class="seg" data-k="keep_cache">
+                      <b class="on" data-v="">不保留</b><b data-v="1">保留</b>
+                    </div>
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <!-- 底部动作区：与训练页 .cfgactions 同一套（分隔线 + 吸底 + 右侧主按钮） -->
+            <div class="cfgactions mgset-acts">
+              <span class="hint" id="mgExportStatus"></span>
+              <div style="flex:1"></div>
+              <span class="mgexport-hint" id="mgStartHint" hidden>先选一个模型</span>
+              <button class="btn ghost" id="mgCancelExport" type="button">取消</button>
+              <button class="btn pri" id="mgStartExport" type="button">开始导出</button>
+            </div>
+          </div>
         </div>
-      </div>
-      <!-- cache 默认不保留：成功导出后后端会把 <名字>_cache/ 整个删掉（这是既有行为）。
-           选「保留」会把 keep_cache=true 随阶段请求发下去，方便数产物/续跑。 -->
-      <div class="mgrow">
-        <span class="f">保留 cache</span>
-        <div class="seg" data-k="keep_cache">
-          <b class="on" data-v="">不保留</b><b data-v="1">保留</b>
-        </div>
-      </div>
-    </div>
-  </div>
-  <div id="mgExportStatus" class="hint"></div>
-  <div class="mgp-foot">
-    <div class="mgexport-hint" id="mgStartHint" hidden>先选一个模型</div>
-    <div class="mgp-footrow">
-      <button class="btn ghost" id="mgCancelExport" type="button">取消</button>
-      <button class="btn pri mgp-go" id="mgStartExport" type="button">开始导出</button>
-    </div>
-  </div>
-        </div>
+
         <div class="mgview" data-view="progress">
           <div class="mgprog">
             <div class="mgprog-hd">

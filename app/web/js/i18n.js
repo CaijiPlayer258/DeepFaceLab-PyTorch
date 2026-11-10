@@ -928,6 +928,20 @@
   /* 全站 i18n 审计补的一批：设置页、合成器、提取器统计、若干 tooltip */
   Object.assign(DICT, {
     "4.0 值 jpg（Cache Format，JPEG 100%）": "4.0 used jpg (Cache Format, JPEG 100%)",
+    /* 导出设置页重排成训练参数那套 .card + .cfgrow 之后新出现的说明文案 */
+    "改模型 / 参数请回合成器": "Change models / options back in the merger",
+    "随 models[] 一起发出去": "Sent along as models[]",
+    "留空 = 全片": "Empty = whole clip",
+    "恢复全片": "Whole clip",
+    "4.0 的 Cache Format": "4.0 Cache Format",
+    "NVENC 硬件编码 / x264 软件编码": "NVENC hardware / x264 software",
+    "hwaccel=auto，无 GPU 自动回退软解": "hwaccel=auto — falls back to software without a GPU",
+    "num_workers · 0 = 自动": "num_workers · 0 = auto",
+    "成功后 <名字>_cache/ 默认会被删掉": "<name>_cache/ is deleted after a successful export",
+    "默认全片。填了会随阶段请求带上 start_frame / end_frame。":
+      "Whole clip by default; when set, start_frame / end_frame go with the stage request.",
+    "末帧": "Last frame",
+    "帧范围": "Frame range",
     "4.0 值 png（PNG 帧缓存）": "4.0 used png (PNG frame cache)",
     "4.0 固定 -q:v 2，无此参数": "4.0 hard-coded -q:v 2 — no such option",
     "留空 = 源视频名_result.mp4": "Empty = <source>_result.mp4",

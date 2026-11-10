@@ -5526,3 +5526,130 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 #p-merge .mgprog { margin-left: auto; margin-right: auto; }            /* mgprog-center-fix */
 #p-merge .mgprog-res { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
 #p-merge .mgprog-res .btn { min-width: 140px; }
+
+/* ============================================================================
+   合成器 · 导出设置页 / 导出进度页（本轮：统一到训练器参数页的设计语言）
+   ----------------------------------------------------------------------------
+   用户口径：
+     · 设置页每个分组一张 .card（.cardhd 标题 + N 行 .cfgrow），
+       行 = 左侧定宽标签（.cl）+ 说明（.cd）+ 右侧控件（.cc）；控件只许用
+       训练页那几套（.seg / .mgsel / .inp / .mini），不新造；
+     · 进度页卡片宽度 == 训练页参数卡宽度（两边都等于「页面内容区」）；
+     · 六步 Stepper 在窄窗口不被挤扁：容器可横向滚动，.cvsteps 最小 420px。
+   这里只写本页自己的排布；行高、控件高度、悬停高亮全部沿用既有规则。
+   ============================================================================ */
+
+/* ---------- 一、设置页骨架：标题 + 滚动区 + 吸底动作条 ---------- */
+.mgset {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.mgset-hd {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 0 2px 10px;
+  flex: 0 0 auto;
+}
+.mgset-hd b {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--ink-1);
+}
+.mgset-hd .hint { white-space: nowrap; }
+.mgset-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 1px;
+  scrollbar-width: thin;
+}
+.mgset-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.mgset-scroll::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 3px; }
+.mgset-scroll::-webkit-scrollbar-track { background: transparent; }
+/* 卡片之间用 14px 的行间距（.mgset-scroll 的 gap），不要再叠 .page > .card 那套 48px */
+#p-merge .mgset .card { margin: 0 !important; }
+
+/* ---------- 二、行：只补本页控件的宽度，行结构沿用 .cfgrow ---------- */
+#p-merge .mgset .cfgrow .cc { gap: 8px; }
+#p-merge .mgset .cfgrow .cc .inp { width: 120px; }
+#p-merge .mgset .cfgrow .cc .inp.rng {
+  width: 84px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+#p-merge .mgset .cfgrow .cc .unit {
+  font-size: 11px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+/* 模型 chip 是只读回显：靠右排，和别的控件同一列 */
+#p-merge .mgset .cfgrow .cc .mgexp-models { justify-content: flex-end; }
+/* 路径行：整行给输入框（训练页 .cfgpathrow 的同一套），只是这里允许更宽 */
+#p-merge .mgset .cfgrow.cfgpathrow .cc {
+  flex: 1 1 320px;
+  min-width: 0;
+  padding-left: 28px;
+}
+#p-merge .mgset .cfgrow.cfgpathrow .cfgpath {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+}
+/* 底部动作条：与训练页 .cfgactions 同一条（吸底 + 上分隔线 + 右侧主按钮） */
+.mgset-acts { margin-top: 0; flex: 0 0 auto; }
+.mgset-acts .hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mgset-acts .mgexport-hint { margin: 0; }
+
+/* ---------- 三、进度页：卡片放到和训练页参数卡一样宽 ---------- */
+/* 以前这里写死 max-width: 760px，卡片比训练页窄一大截，内容全挤在一起。
+   现在放开：.mgview 铺满内容区 → .mgprog 随之铺满，与 #p-train-cfg > .card 等宽。 */
+#p-merge .mgview[data-view="progress"],
+#p-merge .mgview[data-view="project"] { max-width: none; }
+#p-merge .mgprog {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--pad-card);
+  gap: 16px;
+}
+#p-merge .mgprog-hd { gap: 10px; }
+/* 六步列表：窄窗口不许被挤扁 —— 容器横向滚动，列表本身最少 420px */
+#p-merge .mgprog-steps {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
+}
+#p-merge .mgprog-steps::-webkit-scrollbar { height: 6px; }
+#p-merge .mgprog-steps::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 3px; }
+#p-merge .cvsteps { min-width: 420px; }
+/* 名字与提示不许折行（折了就变成两行，看着像重影） */
+#p-merge .cvsteps .cvnm,
+#p-merge .cvsteps .cvtip { white-space: nowrap; }
+#p-merge .mgprog-foot { padding-top: 0; }
+
+/* 进度页的「取消导出」：.btn 的底色/字色带 !important，不改这里会是一颗白胶囊
+   （和训练页的次要按钮完全不是一个样子）。这里把它压回 ghost + 危险色的边框。 */
+#p-merge .mgprog-foot .btn {
+  background: transparent !important;
+  color: var(--ink-2) !important;
+  border: 1px solid var(--line-strong);
+}
+#p-merge .mgprog-foot #mgpCancel {
+  border-color: rgba(239, 68, 68, .35);
+  color: #ef4444 !important;
+}
+#p-merge .mgprog-foot #mgpCancel:hover {
+  border-color: #ef4444;
+  background: rgba(239, 68, 68, .10) !important;
+}
+/* 阶段列表的行距按训练页的节奏（一行 ≈ 44px，和 .cfgrow 一致） */
+#p-merge .mgprog .cvsteps .cvst { padding: 11px 0; }
+#p-merge .mgprog .cvsteps .cvline { top: 36px; bottom: -11px; }

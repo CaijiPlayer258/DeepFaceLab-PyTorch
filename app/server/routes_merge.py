@@ -6663,6 +6663,142 @@ def _stage_frames_inproc(cfg: dict, frames_dir, meta, w, h) -> int:
     return idx
 
 
+
+# ---------------- 切脸流水线：读帧 ‖ 检测 ‖ 后处理 ----------------
+# 为什么要有这一段：切脸原来是「读一帧 → 检测 → 2D106 → 裁剪 → 编码写盘」一条直线。
+# 1080x1920 的 PNG 实测（40 帧平均，retinaface_10g）：
+#     读帧 19.0ms（47%）· 检测 17.8ms（44%）· 2D106 1.2ms · 裁剪 0.3ms · 编码写盘 0.6ms
+# 串起来 40ms/帧 = 25 帧/秒；而这三段用的是完全不同的资源（磁盘+解码 / GPU / CPU），
+# 串行等于每一段都在等另外两段。拆成三段重叠之后，单帧成本 ≈ 三段里最慢的那一段。
+_FACES_END = object()                       # 流水线哨兵：这一条队列到头了
+_FACES_READ_ENV = "DFL_FACES_READ_THREADS"  # 读帧线程数（1..12）
+_FACES_QUEUE_ENV = "DFL_FACES_QUEUE"        # 读帧队列深度（在飞的帧数）
+_FACES_BATCH_ENV = "DFL_FACES_BATCH"        # 检测批次（0 = 自动）
+
+
+class _StageTicks:
+    """阶段内计时（多线程安全）。profile 表就是从这里出去的。"""
+
+    def __init__(self):
+        self._d = {}
+        self._lk = threading.Lock()
+
+    def add(self, k: str, dt: float):
+        with self._lk:
+            self._d[k] = self._d.get(k, 0.0) + float(dt)
+
+    def total(self, k: str) -> float:
+        with self._lk:
+            return float(self._d.get(k, 0.0))
+
+    def ms(self, k: str, n: int) -> float:
+        with self._lk:
+            v = self._d.get(k, 0.0)
+        return round(1000.0 * v / max(1, int(n)), 2)
+
+
+def _stage_faces_int(env: str, default: int, lo: int, hi: int) -> int:
+    try:
+        raw = os.environ.get(env)
+        v = int(str(raw).strip()) if (raw is not None and str(raw).strip()) else int(default)
+    except (TypeError, ValueError):
+        v = int(default)
+    return max(int(lo), min(int(hi), v))
+
+
+def _stage_faces_read_threads() -> int:
+    """读帧线程数。PNG 解码在 cv2 里会放开 GIL，所以多线程是真的并行。
+
+    实测（1080x1920 PNG，24 帧平均）：单线程 20.2ms / 2 线程 10.8ms / 6 线程 4.96ms /
+    8 线程 4.34ms。默认取 6：再往上每加一个线程只省零点几毫秒，却要跟 2D106 抢 CPU。
+    """
+    cpu = int(os.cpu_count() or 4)
+    return _stage_faces_int(_FACES_READ_ENV, min(6, max(2, cpu // 4)), 1, 12)
+
+
+def _stage_faces_queue(read_threads: int) -> int:
+    """读帧队列深度（同时最多几张帧在飞）。一张 1080x1920 BGR 是 6.2MB。"""
+    return _stage_faces_int(_FACES_QUEUE_ENV, max(4, read_threads * 2), 2, 32)
+
+
+def _stage_faces_batchable(det) -> bool:
+    """这个检测器能不能真批量。只看它自己声明的能力，不看配置。"""
+    return bool(hasattr(det, "detect_batch") and getattr(det, "needs_canvas", False))
+
+
+def _stage_faces_batch(det) -> int:
+    """一次送几张进检测器（1 = 逐帧）。
+
+    能不能批量由**模型的 onnx 输入签名**决定，这里不猜：
+      · TinyMog        input [batch_size, 3, 640, 640]        → 动态 batch，可以；
+      · RetinaFace_10g input [1, 3, ?, ?]                     → batch 维写死 1
+        （只有 H/W 是动态的），硬塞 batch 只会在 ORT 里报 shape 错，所以恒定逐帧。
+    引擎侧还有一层上界（TrtSession.max_batch）：超过它 batch 反而不走 CUDA Graph。
+    """
+    if not _stage_faces_batchable(det):
+        return 1
+    # 默认逐帧：**批量在这台机器上是负收益**，实测（整条片子 1439 帧，tinymog）——
+    #   逐帧   detect 5.06 ms/帧 → 75.9 帧/秒（单帧走 CUDA Graph replay）
+    #   批次 4 detect 9.04 ms/帧 → 69.7 帧/秒（batch>1 走 numpy 路径，图重放用不上）
+    # 所以批量做成开关（DFL_FACES_BATCH=4 之类），不默认开。
+    want = _stage_faces_int(_FACES_BATCH_ENV, 1, 1, 16)
+    if want <= 1:
+        return 1
+    cap = None
+    for sess in (getattr(det, "sess_batch", None), getattr(det, "sess", None)):
+        if sess is None:
+            continue
+        try:
+            cap = int(sess.max_batch())
+        except Exception:                                      # noqa: BLE001
+            cap = None
+        if cap:
+            break
+    if cap is not None:
+        if cap <= 1:
+            return 1
+        want = min(want, cap)
+    return max(1, want)
+
+
+def _stage_faces_canvas(frame, det):
+    """按检测器自己的 letterbox 口径把整帧缩进 S×S 画布（批量检测用）。
+
+    这与 TinyMogDet.detect() 里那三行逐字一致（128 填充 + INTER_LINEAR），
+    所以批量与逐帧的输入像素相同。
+    """
+    import cv2
+    import numpy as np
+
+    S = int(getattr(det, "input_size", 640) or 640)
+    H, W = frame.shape[:2]
+    scale = min(S / float(W), S / float(H))
+    nw = max(1, int(round(W * scale)))
+    nh = max(1, int(round(H * scale)))
+    canvas = np.full((S, S, 3), 128, np.uint8)
+    canvas[:nh, :nw] = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_LINEAR)
+    return canvas, scale
+
+
+def _stage_faces_detect(det, imgs, thresh):
+    """一批帧 → 一批框（与输入等长、同序）。
+
+    batch = 1 或检测器不支持动态 batch 时，逐帧走 det.detect() —— 和优化前**同一条
+    调用路径**，结果逐位一致；只有真支持批量时才走 detect_batch，跑挂了就当场退回逐帧。
+    """
+    if len(imgs) <= 1 or not _stage_faces_batchable(det):
+        return [det.detect(im) for im in imgs]
+    items = []
+    for im in imgs:
+        canvas, scale = _stage_faces_canvas(im, det)
+        items.append((im, canvas, scale))
+    try:
+        return det.detect_batch(items)
+    except Exception as e:                                     # noqa: BLE001
+        _stage_log("切脸：批量检测失败（%s）→ 这一批退回逐帧" % (str(e)[:120],))
+        return [det.detect(im) for im in imgs]
+
+
 def _stage_do_faces(cfg: dict) -> dict:
     """阶段 2 · 切脸：frames/ -> aligned/000001_00.jpg（DFLJPG：original_name + 68 点 + face_mat）。"""
     import cv2
@@ -6713,6 +6849,8 @@ def _stage_do_faces(cfg: dict) -> dict:
                    % (int(rng["start"]) + cursor, cursor))
     _stage_log("切脸：检测器 %s · thresh=%.2f · 68 点仿射 · 帧范围 %d..%d（%d 帧）"
                % (det_name, thresh, int(rng["start"]), int(rng["end"]), total))
+    # 检测器先建好（加载要几百毫秒）：流水线里只有一个线程用它，不再每帧走 _detector()
+    det = _detector(det_name)
 
     t0 = time.time()
 
@@ -6730,88 +6868,282 @@ def _stage_do_faces(cfg: dict) -> dict:
         }
         _stage_meta_save(cache, meta)
 
-    for pos in range(cursor, total):
-        i = rows[pos]
-        _stage_check_cancel()
-        path = frames[i]
-        frame = _stage_read_image(path)
-        if frame is None:
-            raise _BadInput("这一帧读不出来：%s" % path, 500)
-        boxes = _detect_boxes(frame, det_name, thresh)
-        boxes = sorted(boxes, key=lambda b: float((b.get("box") or [0, 0, 0, 0])[0]))
-        n = 0
-        for k, b in enumerate(boxes):
-            _stage_check_cancel()
-            box = b.get("box") or [0, 0, 0, 0]
-            x1, y1, x2, y2 = [float(v) for v in box]
-            bw = max(1.0, x2 - x1)
-            bh = max(1.0, y2 - y1)
-            side = int(round(max(bw, bh) * 2.0))
-            side -= side % 2
-            kps = b.get("kps") or []
-            if len(kps) < 5 or side < 32:
-                skipped += 1
-                continue
+    # ---- 流水线：读帧线程池 → 检测线程 → 本线程做 2D106 / 裁剪 / 编码写盘 ----
+    # 三段用的资源互不相干（磁盘+解码 / GPU / CPU），串行做等于每段都在等另外两段。
+    from concurrent.futures import ThreadPoolExecutor
+
+    nread = _stage_faces_read_threads()
+    depth = _stage_faces_queue(nread)
+    batch_n = _stage_faces_batch(det)
+    ticks = _StageTicks()
+    count0 = faces_total
+    _stage_log("切脸流水线：读帧 %d 线程 · 队列 %d · 检测批次 %d%s"
+               % (nread, depth, batch_n,
+                  "" if batch_n > 1 else "（%s 的 onnx 输入 batch 维固定=1 → 逐帧）" % det_name))
+
+    read_q = queue.Queue(maxsize=depth)     # (pos, frame, err)；满了读帧线程就等，内存可控
+    det_q = queue.Queue()                   # (pos, frame, boxes) / ("err", None, 异常)
+    stop = threading.Event()
+    pool = ThreadPoolExecutor(max_workers=nread, thread_name_prefix="faces-read")
+
+    def _read_job(path):
+        t = time.perf_counter()
+        try:
+            return _stage_read_image(path), None
+        except Exception as e:                                 # noqa: BLE001
+            return None, e
+        finally:
+            ticks.add("read", time.perf_counter() - t)
+
+    def _q_put(q, item):
+        while not stop.is_set():
             try:
-                cmat = coarse_align_from_5(kps)
-                coarse = cv2.warpAffine(frame, cmat, (COARSE_SIZE, COARSE_SIZE),
-                                        flags=cv2.INTER_LINEAR,
-                                        borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
-                lm68a = lm.landmarks68(coarse)
-                if lm68a is None:
-                    raise ValueError("2D106 没有输出")
-                pts = landmarks68_in_source(lm68a, cmat)
-                crop, meta_f = align_face_68(frame, np.asarray(pts, np.float64),
-                                             box=[int(round(x1)), int(round(y1)),
-                                                  int(round(x2)), int(round(y2))],
-                                             size=side)
-            except Exception as e:                          # noqa: BLE001
-                skipped += 1
-                _stage_log("切脸跳过 %s 第 %d 张：%s" % (path.name, k, str(e)[:120]))
+                q.put(item, timeout=0.2)
+                return True
+            except queue.Full:
                 continue
-            if crop is None or not meta_f:
-                skipped += 1
-                continue
-            # 配对键 / 68 点 / face_mat 三样都写进 DFLJPG 的 APP15
-            meta_f.update({
-                "original_name": path.name,         # 用户口径：original_name = 帧文件名
-                "source_filename": path.stem,       # DFL 传统键，引擎/老工具认这个
-                "face_mat": meta_f.get("image_to_face_mat"),
-                "landmarks_68": meta_f.get("landmarks"),
-                "source_landmarks_68": meta_f.get("source_landmarks"),
-                "frame_index": int(i), "frame_name": path.name, "face_index": int(k),
-                "detector": det_name, "side": int(side),
-            })
-            try:
-                yaw, pitch, roll = pose_from_kps(kps, box)
-                if yaw is not None:
-                    meta_f["yaw"], meta_f["pitch"], meta_f["roll"] = yaw, pitch, roll
-            except Exception:                               # noqa: BLE001
-                pass
-            write_dfljpg(aligned_dir / _stage_face_name(i, k), crop, meta_f,
-                         quality=100, subsampling=0)
-            n += 1
-        faces_total += n
-        if n:
-            with_faces += 1
-        el = max(0.001, time.time() - t0)
-        _stage_progress("faces", 100.0 * (pos + 1) / total,
-                        "切脸 %d/%d 帧（第 %d..%d 帧）· %d 张脸 · %.2f 帧/秒"
-                        % (pos + 1, total, int(rng["start"]), int(rng["end"]),
-                           faces_total, (pos + 1 - cursor) / el),
-                        frames_done=pos + 1, frames_total=total,
-                        frame_fps=round((pos + 1 - cursor) / el, 2))
-        if (pos + 1) % 20 == 0:
-            _save_progress(pos + 1)
+        return False
+
+    def _feeder():
+        """按帧序读图：最多 depth 张在飞，读出来的帧立即进 read_q。
+
+        注意「读完了」和「在飞的都取完了」是两件事：帧迭代器耗尽后 pending 里还压着
+        最多 depth 张，必须继续取完再收尾（曾经在这里直接 break，末尾 12 帧被静默丢掉，
+        阶段照样报 40/40 完成 —— 所以主循环末尾还有一道 consumed 对账）。
+        """
+        pending = collections.deque()
+        it = iter(range(cursor, total))
+        exhausted = False
+        try:
+            while True:
+                while (not exhausted) and (not stop.is_set()) and len(pending) < depth:
+                    try:
+                        pos = next(it)
+                    except StopIteration:
+                        exhausted = True
+                        break
+                    try:
+                        pending.append((pos, pool.submit(_read_job, frames[rows[pos]])))
+                    except RuntimeError:            # 取消时主线程已经 shutdown 了线程池
+                        exhausted = True
+                        break
+                if not pending:
+                    break
+                pos, fut = pending.popleft()
+                try:
+                    img, err = fut.result()
+                except Exception as e:                         # noqa: BLE001
+                    img, err = None, e
+                if not _q_put(read_q, (pos, img, err)):
+                    return
+        except Exception:                       # 收尾阶段的竞态不该把线程栈打到控制台
+            pass
+        finally:
+            _q_put(read_q, _FACES_END)
+
+    def _detect_worker():
+        """从 read_q 取帧、按 batch_n 攒一批送检测器，结果按帧序进 det_q。"""
+        ended = False
+        try:
+            while True:
+                item = read_q.get()
+                if item is _FACES_END:
+                    ended = True
+                    item = None
+                group = []
+                if item is not None:
+                    if item[2] is not None:
+                        det_q.put(item)
+                        continue
+                    group.append(item)
+                while (not ended) and len(group) < batch_n:
+                    try:
+                        nxt = read_q.get_nowait()
+                    except queue.Empty:
+                        break
+                    if nxt is _FACES_END:
+                        ended = True
+                        break
+                    if nxt[2] is not None:
+                        det_q.put(nxt)
+                        continue
+                    group.append(nxt)
+                if group:
+                    _stage_check_cancel()
+                    imgs = [g[1] for g in group]
+                    t = time.perf_counter()
+                    try:
+                        with _det_run_lock:                     # thresh 是共享检测器上的字段
+                            det.thresh = float(thresh)
+                            got = _stage_faces_detect(det, imgs, thresh)
+                    except _StageCancel:
+                        raise
+                    except Exception as e:                      # noqa: BLE001
+                        raise _BadInput("检测失败：%s" % (str(e)[:200],), 500)
+                    finally:
+                        ticks.add("detect", time.perf_counter() - t)
+                    for g, boxes in zip(group, got):
+                        det_q.put((g[0], g[1], boxes))
+                if ended:
+                    return
+        except BaseException as e:                              # noqa: BLE001
+            det_q.put(("err", None, e))
+        finally:
+            det_q.put(_FACES_END)
+
+    feeder_th = threading.Thread(target=_feeder, name="faces-feed", daemon=True)
+    det_th = threading.Thread(target=_detect_worker, name="faces-detect", daemon=True)
+    feeder_th.start()
+    det_th.start()
+
+    consumed = 0
+    try:
+        while True:
+            item = det_q.get()
+            if item is _FACES_END:
+                break
+            pos, frame, extra = item
+            if pos == "err":
+                raise extra
+            if frame is None:
+                raise _BadInput("这一帧读不出来：%s" % frames[rows[pos]], 500)
+            if isinstance(extra, BaseException):
+                raise extra
+            boxes = sorted(list(extra or []),
+                           key=lambda b: float((b.get("box") or [0, 0, 0, 0])[0]))
+            n = 0
+            for k, b in enumerate(boxes):
+                _stage_check_cancel()
+                box = b.get("box") or [0, 0, 0, 0]
+                x1, y1, x2, y2 = [float(v) for v in box]
+                bw = max(1.0, x2 - x1)
+                bh = max(1.0, y2 - y1)
+                side = int(round(max(bw, bh) * 2.0))
+                side -= side % 2
+                kps = b.get("kps") or []
+                if len(kps) < 5 or side < 32:
+                    skipped += 1
+                    continue
+                try:
+                    cmat = coarse_align_from_5(kps)
+                    coarse = cv2.warpAffine(frame, cmat, (COARSE_SIZE, COARSE_SIZE),
+                                            flags=cv2.INTER_LINEAR,
+                                            borderMode=cv2.BORDER_CONSTANT,
+                                            borderValue=(0, 0, 0))
+                    t_lm = time.perf_counter()
+                    lm68a = lm.landmarks68(coarse)
+                    ticks.add("lm68", time.perf_counter() - t_lm)
+                    if lm68a is None:
+                        raise ValueError("2D106 没有输出")
+                    pts = landmarks68_in_source(lm68a, cmat)
+                    t_cr = time.perf_counter()
+                    crop, meta_f = align_face_68(frame, np.asarray(pts, np.float64),
+                                                 box=[int(round(x1)), int(round(y1)),
+                                                      int(round(x2)), int(round(y2))],
+                                                 size=side)
+                    ticks.add("crop", time.perf_counter() - t_cr)
+                except Exception as e:                          # noqa: BLE001
+                    skipped += 1
+                    _stage_log("切脸跳过 %s 第 %d 张：%s" % (frames[rows[pos]].name, k,
+                                                          str(e)[:120]))
+                    continue
+                if crop is None or not meta_f:
+                    skipped += 1
+                    continue
+                # 配对键 / 68 点 / face_mat 三样都写进 DFLJPG 的 APP15
+                meta_f.update({
+                    "original_name": frames[rows[pos]].name,
+                    "source_filename": frames[rows[pos]].stem,
+                    "face_mat": meta_f.get("image_to_face_mat"),
+                    "landmarks_68": meta_f.get("landmarks"),
+                    "source_landmarks_68": meta_f.get("source_landmarks"),
+                    "frame_index": int(rows[pos]),
+                    "frame_name": frames[rows[pos]].name, "face_index": int(k),
+                    "detector": det_name, "side": int(side),
+                })
+                try:
+                    yaw, pitch, roll = pose_from_kps(kps, box)
+                    if yaw is not None:
+                        meta_f["yaw"], meta_f["pitch"], meta_f["roll"] = yaw, pitch, roll
+                except Exception:                               # noqa: BLE001
+                    pass
+                t_en = time.perf_counter()
+                write_dfljpg(aligned_dir / _stage_face_name(rows[pos], k), crop, meta_f,
+                             quality=100, subsampling=0)
+                ticks.add("encode", time.perf_counter() - t_en)
+                n += 1
+            faces_total += n
+            if n:
+                with_faces += 1
+            el = max(0.001, time.time() - t0)
+            _stage_progress("faces", 100.0 * (pos + 1) / total,
+                            "切脸 %d/%d 帧（第 %d..%d 帧）· %d 张脸 · %.2f 帧/秒"
+                            % (pos + 1, total, int(rng["start"]), int(rng["end"]),
+                               faces_total, (pos + 1 - cursor) / el),
+                            frames_done=pos + 1, frames_total=total,
+                            frame_fps=round((pos + 1 - cursor) / el, 2))
+            consumed += 1
+            if (pos + 1) % 20 == 0:
+                _save_progress(pos + 1)
+    finally:
+        stop.set()
+        pool.shutdown(wait=False)
+        det_th.join(timeout=1.5)
+        feeder_th.join(timeout=1.5)
 
     sec = round(time.time() - t0, 2)
+    done_n = max(0, total - cursor)
+    # 对账：流水线少喂了帧就等于少切了脸，绝不能把「跑到 30/40」报成「40/40 完成」
+    if consumed != done_n:
+        raise _BadInput("切脸流水线提前结束：只有 %d/%d 帧走完了检测（产物不完整，"
+                        "重跑 force=true）" % (consumed, done_n), 500)
+    fps = float(done_n) / max(1e-6, sec)
+    # 三段是**并行**的，所以「每帧在各段上花的时间」加起来会大于每帧墙钟：
+    #   read     = 读图总耗时 / 读帧线程数（摊到单帧、按并行度折算）
+    #   others   = 每帧真的花在那一段上的时间
+    #   stage_util = 这一段占用了整段墙钟的百分之多少（>100% = 多线程并行）
+    post = ticks.total("lm68") + ticks.total("crop") + ticks.total("encode")
+    prof = {"frames": int(done_n), "faces": int(faces_total - count0), "seconds": sec,
+            "fps": round(fps, 2),
+            "per_frame_ms": {"read": round(1000.0 * ticks.total("read") / max(1, nread)
+                                           / max(1, done_n), 2),
+                             "detect": ticks.ms("detect", done_n),
+                             "lm68": ticks.ms("lm68", done_n),
+                             "crop": ticks.ms("crop", done_n),
+                             "encode": ticks.ms("encode", done_n)},
+            "stage_util": {"read": round(100.0 * ticks.total("read") / max(1e-6, sec), 1),
+                           "detect": round(100.0 * ticks.total("detect") / max(1e-6, sec), 1),
+                           "post": round(100.0 * post / max(1e-6, sec), 1)},
+            "lm68_ms_per_face": ticks.ms("lm68", max(1, faces_total - count0)),
+            "pipeline": {"read_threads": int(nread), "queue": int(depth),
+                         "detect_batch": int(batch_n),
+                         "batchable": bool(_stage_faces_batchable(det)),
+                         "overlap": "read || detect || post"}}
+    # 谁在拖后腿：按「占用墙钟的比例」比，读帧那一路要除以线程数
+    # （read 的 stage_util 是 6 个线程之和，直接比会把多线程误判成瓶颈）
+    eff = {"read": prof["stage_util"]["read"] / max(1, int(nread)),
+           "detect": prof["stage_util"]["detect"],
+           "post": prof["stage_util"]["post"]}
+    prof["stage_share"] = {k: round(v, 1) for k, v in eff.items()}
+    prof["bottleneck"] = max(eff.items(), key=lambda kv: kv[1])[0] if eff else ""
+    prof["per_frame_total_ms"] = round(1000.0 * sec / max(1, done_n), 2)
+    prof["per_frame_ms"]["other"] = round(max(
+        0.0, prof["per_frame_total_ms"] - sum(prof["per_frame_ms"].values())), 2)
     _save_progress(total, done=True)
     meta["stages"]["faces"]["seconds"] = sec
+    meta["stages"]["faces"]["fps"] = round(fps, 2)
+    meta["stages"]["faces"]["profile"] = prof
     _stage_meta_save(cache, meta)
-    _stage_log("切脸完成：第 %d..%d 帧（%d 帧）· %d 张脸（%d 帧有脸）· 跳过 %d · %.2f s"
+    _stage_log("切脸完成：第 %d..%d 帧（%d 帧）· %d 张脸（%d 帧有脸）· 跳过 %d · %.2f s · "
+               "%.2f 帧/秒（读 %s / 检测 %s / 2D106 %s / 裁剪 %s / 写盘 %s ms，"
+               "读帧 %d 线程 · 批次 %d）"
                % (int(rng["start"]), int(rng["end"]), total, faces_total,
-                  with_faces, skipped, sec))
+                  with_faces, skipped, sec, fps,
+                  prof["per_frame_ms"]["read"], prof["per_frame_ms"]["detect"],
+                  prof["per_frame_ms"]["lm68"], prof["per_frame_ms"]["crop"],
+                  prof["per_frame_ms"]["encode"], nread, batch_n))
     return {"count": faces_total, "frames": total, "skipped": skipped, "seconds": sec,
+            "fps": round(fps, 2), "profile": prof,
             "range": {"start": int(rng["start"]), "end": int(rng["end"])}}
 
 

@@ -224,8 +224,11 @@ class TrtSession:
         if batch > self.graph_max_batch:
             if "_batch" not in self._graph_skip_logged:
                 self._graph_skip_logged.add("_batch")
+                # 注意：这两段字面量里的 "%" 会被当成格式符（"5%" 曾把整条日志打成
+                # TypeError: not enough arguments for format string），所以只在最后一段
+                # 走 % 运算，前面的百分号写成 %%。
                 _say("batch=%d 超过 CUDA Graph 上限 %d → 这些形状不走图，照常推理"
-                     "（batch>1 的纯推理只快约 5%，却要在抽取中段多付 3~10 ms 捕获）；"
+                     "（batch>1 的纯推理只快约 5%%，却要在抽取中段多付 3~10 ms 捕获）；"
                      "要开就把 graph_max_batch 调大" % (batch, self.graph_max_batch))
             return
         if len(self._graph_cache) >= self.graph_max_captures:

@@ -267,7 +267,13 @@ def try_engine(workspace, name, onnx_path, sm=None, precision="bf16", use_graph=
             continue
         try:
             from ._trt_session import TrtSession
-            sess = TrtSession(str(p), use_graph=use_graph)
+            # graph_max_batch 必须传下去：以前这里把它丢了，TrtSession 永远拿到默认值 1，
+            # 于是「按 batch 分桶建 CUDA Graph」（app.py 里 TinyMogDet(graph_max_batch=8)）
+            # 从来没生效过 —— batch>1 单纯推理能跑，但没有图重放，还顺手踩到
+            # _trt_session 那条日志的 %-格式化 bug（batch>1 直接 TypeError）。
+            sess = TrtSession(str(p), use_graph=use_graph,
+                              graph_max_batch=(1 if graph_max_batch is None
+                                               else int(graph_max_batch)))
         except Exception as e:                                 # noqa: BLE001
             _note(info, reason="引擎 %s 加载失败（%r）" % (p.name, e))
             _trt_log((name, prec, p.name),
