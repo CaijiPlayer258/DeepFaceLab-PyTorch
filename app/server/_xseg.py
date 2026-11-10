@@ -151,6 +151,68 @@ class XSegMasker:
         prov = ",".join(self.info.get("providers") or []) or "?"
         return "onnxruntime(%s)" % prov
 
+    def batch_limit(self) -> int:
+        """一次前向最多塞几张（1 = 只能逐张）。首次调用时探测一次并缓存。"""
+        cap = getattr(self, "_batch_cap", None)
+        if cap is not None:
+            return cap
+        cap = 1
+        try:
+            mb = getattr(self.sess, "max_batch", None)
+            if callable(mb):
+                cap = int(mb() or 1)                 # 原生 TRT：按优化档位
+            else:
+                shape = list(self.sess.get_inputs()[0].shape)
+                if shape and isinstance(shape[0], int) and shape[0] > 0:
+                    cap = int(shape[0])              # 静态 batch 的 ort 模型
+                else:
+                    cap = 8                          # 动态 batch（ort）
+        except Exception:                             # noqa: BLE001
+            cap = 1
+        self._batch_cap = max(1, int(cap))
+        return self._batch_cap
+
+    def mask_batch(self, faces, out_size: int = 256):
+        """N 张 BGR 对齐脸 → N 张 (out_size,out_size) float32 0..1。
+
+        能批量就一次前向（本机 256² 实测：ort-CUDA 逐张 4.02 ms/张 → batch2 2.68 ms/张），
+        引擎只吃 batch 1（TRT 的 xseglite 档位是单档）就老实逐张 —— 逐张也不慢，
+        1.44 ms/张，瓶颈根本不在推理（见 app/tools/stage_perf_profile.py 的实测表）。
+        批量失败时把上限降回 1 并逐张重跑，行为静默但对调用方仍然正确。
+        """
+        import cv2
+        import numpy as np
+
+        faces = list(faces or [])
+        if not faces:
+            return []
+        cap = self.batch_limit()
+        if any(f is None for f in faces):
+            # 保住「下标一一对应」：批量里混进 None 时逐张走，绝不让返回值的个数错位
+            return [None if f is None else self.mask(f, out_size=out_size) for f in faces]
+        if len(faces) == 1 or cap <= 1:
+            return [self.mask(f, out_size=out_size) for f in faces]
+        outs = []
+        for i in range(0, len(faces), cap):
+            part = [f for f in faces[i:i + cap] if f is not None]
+            if not part:
+                continue
+            blobs = [cv2.dnn.blobFromImage(
+                (f if f.shape[:2] == (256, 256)
+                 else cv2.resize(f, (256, 256), interpolation=cv2.INTER_LINEAR)),
+                1.0 / 255.0, (256, 256), swapRB=True, crop=False) for f in part]
+            try:
+                y = self.sess.run(None, {self.input_name: np.concatenate(blobs, axis=0)})[0]
+            except Exception:                         # noqa: BLE001
+                self._batch_cap = 1                   # 这张引擎其实吃不了批量
+                return [self.mask(f, out_size=out_size) for f in faces]
+            for b in np.asarray(y)[:len(part)]:
+                m = np.clip(np.squeeze(b).astype(np.float32), 0.0, 1.0)
+                if m.shape[0] != out_size or m.shape[1] != out_size:
+                    m = cv2.resize(m, (out_size, out_size), interpolation=cv2.INTER_LINEAR)
+                outs.append(m)
+        return outs
+
     def mask(self, face_bgr, out_size: int = 256):
         """ face_bgr: 任意尺寸的 BGR 对齐脸；返回 (out_size, out_size) float32，0..1。"""
         import cv2

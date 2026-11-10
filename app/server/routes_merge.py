@@ -7169,12 +7169,54 @@ def _stage_mask_dir(cache) -> Path:
     return Path(cache) / "mask"
 
 
-def _dfm_session(dfm: str):
-    """常驻的 dfm onnx session（4.1 进程内，CUDA 优先，没有就 CPU）。
+def _dfm_engine_name(dfm) -> str:
+    r"""dfm → TRT 引擎名（稳定、纯 ASCII）。
 
-    以前每帧都要把整帧 base64 PNG 发到 4.0 的 worker 子进程再发回来；现在 dfm 推理
-    就在本进程里（onnxruntime 4.1 这份环境里也有），省掉两次编解码 + 两次 base64 +
-    两个进程边界。session 按路径常驻，切模型才重建。
+    为什么必须 ASCII：TensorRT 的 C++ 侧用 stat() 打开 onnx，非 ASCII 路径直接
+    INVALID_VALUE（实测 "阿証証証証-416.dfm" 就过不去），所以引擎名里不能留中文。
+
+    编引擎的办法（没有引擎就自动回落 ort-CUDA，功能不受影响，只是慢 16%）：
+        :: 中文模型名先把 onnx 拷成 ASCII 再喂给 builder
+        copy "workspace\model\<模型>.dfm" "%TEMP%\dfm.onnx"
+        runtime\server\Scripts\python.exe app\server\_trt_build.py ^
+            --onnx "%TEMP%\dfm.onnx" --out "workspace\_engines\<本函数的名字>_<md5>_sm<SM>_trt<TRT>.bf16.engine" ^
+            --name <本函数的名字> --bf16 --profile "1,416,416,3;4,416,416,3;8,416,416,3"
+    引擎文件名里的 md5/SM/TRT 三段必须是这台机器的真实值（[TRT] 那行日志会直接
+    打印它在找哪个文件名，照抄即可）。
+    """
+    stem = Path(str(dfm)).stem
+    key = re.sub(r"[^0-9A-Za-z_.-]+", "_", stem).strip("._-") or "dfm"
+    return "dfm_" + key[:40]
+
+
+def _sess_batch_cap(sess) -> int:
+    """这个 session 一次前向最多能塞几张（1 = 只能逐张）。"""
+    try:
+        mb = getattr(sess, "max_batch", None)
+        if callable(mb):
+            return max(1, int(mb() or 1))            # 原生 TRT：按优化档位
+    except Exception:                                   # noqa: BLE001
+        return 1
+    try:
+        shape = list(sess.get_inputs()[0].shape)
+        if shape and isinstance(shape[0], int) and shape[0] > 0:
+            return int(shape[0])
+    except Exception:                                   # noqa: BLE001
+        pass
+    return 8                                            # 动态 batch（ort）
+
+
+def _dfm_session(dfm: str):
+    """常驻的 dfm session：**原生 TRT 引擎优先 → ort-CUDA → 最后才 CPU（并且喊出来）**。
+
+    为什么不是「一律 ort-CUDA」：这台机子上 416 dfm 的实测（stage_perf_profile.py）
+        ort-CUDA 35.9 ms/张（27.9 张/秒）· 原生 TRT(bf16) 30.9 ms/张（32.3 张/秒）
+    差的 16% 全在 ORT 的 EP 调度 + 15 个 Memcpy 节点上；有 .engine 就该用它。
+    没有引擎时照旧走 ort-CUDA —— 唯一的硬要求是**不能静默退到 CPU**：
+    CPU 单张 527 ms（1.9 张/秒），而 ORT 在 CUDA provider 加载失败时只会打一行
+    warning 就继续跑，所以这里自己把 providers 拿出来核对并打醒目日志。
+
+    session 按路径常驻，切模型才重建。
     """
     key = str(dfm)
     with _PRED_LOCK:
@@ -7186,21 +7228,53 @@ def _dfm_session(dfm: str):
             _ensure_ort_dll_dirs()
         except Exception:                                   # noqa: BLE001
             pass
-        so = ort.SessionOptions()
-        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        sess = ort.InferenceSession(key, sess_options=so,
-                                    providers=["CUDAExecutionProvider",
-                                               "CPUExecutionProvider"])
-        shape = list(sess.get_inputs()[0].shape)
+        ws = Path(WORKSPACE)
+        info = {}
+        sess = None
+        backend = "ort-cuda"
+        try:
+            from . import _engines as _E
+            sess = _E.try_engine(ws, _dfm_engine_name(key), key,
+                                 precision=("bf16",), use_graph=False, info=info)
+        except Exception as e:                          # noqa: BLE001
+            info = {"reason": "try_engine 抛异常：%r" % (e,)}
+            sess = None
+        if sess is not None:
+            backend = "trt"
+            sess.precision = info.get("precision") or ""
+            shape = list(sess.get_inputs()[0].shape)
+            name = sess.get_inputs()[0].name
+            provs = ["TensorrtExecutionProvider"]
+            _stage_log("换脸：dfm 走原生 TRT(%s) 引擎 %s"
+                       % (info.get("precision") or "?", Path(str(info.get("engine") or "")).name))
+        else:
+            so = ort.SessionOptions()
+            so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            sess = ort.InferenceSession(key, sess_options=so,
+                                        providers=["CUDAExecutionProvider",
+                                                   "CPUExecutionProvider"])
+            shape = list(sess.get_inputs()[0].shape)
+            name = sess.get_inputs()[0].name
+            provs = list(sess.get_providers())
+            if provs[:1] == ["CPUExecutionProvider"]:
+                backend = "ort-cpu"
+                _stage_log("换脸：★ 警告 ★ dfm 掉到 CPU 了（%s）—— 这张卡上会慢 ~15 倍"
+                           "（416 实测 527 ms/张）。查 cublasLt64_12.dll / cudnn64_9.dll "
+                           "是否在 PATH 上（torch/lib），或改用原生 TRT 引擎。"
+                           % (info.get("reason") or "CUDA provider 没加载上"))
+            else:
+                _stage_log("换脸：dfm 走 onnxruntime(%s)（没有 dfm 的 TRT 引擎：%s）"
+                           % (provs[0], str(info.get("reason") or "未查询")[:120]))
         nchw = len(shape) >= 4 and shape[1] in (1, 3)
         try:
             size = int(shape[2] if nchw else shape[1])
         except Exception:                                   # noqa: BLE001
             size = 256
-        ent = (sess, sess.get_inputs()[0].name, size, nchw, list(sess.get_providers()))
+        cap = _sess_batch_cap(sess)
+        ent = (sess, name, size, nchw, provs, cap, backend)
         _DFM_SESS[key] = ent
-        _stage_log("换脸：dfm 已加载 %s · %d×%d · %s"
-                   % (Path(key).name, size, size, ent[4]))
+        _stage_log("换脸：dfm 已加载 %s · %d×%d · %s · 单次最多 %d 张"
+                   % (Path(key).name, size, size, backend, cap))
         return ent
 
 
@@ -7227,7 +7301,15 @@ def _dfm_run_batch(ent, batch_in):
     """
     import cv2
     import numpy as np
-    sess, name, size, nchw, _prov = ent
+    sess, name, size, nchw = ent[0], ent[1], ent[2], ent[3]
+    cap = int(ent[5] or 1) if len(ent) > 5 else 1
+    n_in = int(batch_in.shape[0])
+    if cap > 1 and n_in > cap:
+        # 一次塞不下（原生 TRT 的优化档位可能只有 1）—— 按上限切开，结果顺序不变
+        out = []
+        for _i in range(0, n_in, cap):
+            out.extend(_dfm_run_batch(ent, batch_in[_i:_i + cap]))
+        return out
     x = batch_in
     if nchw:
         x = np.transpose(x, (0, 3, 1, 2))
@@ -7390,20 +7472,32 @@ def _pred_pick_batch(cfg: dict, ent) -> tuple:
                                        "ladder": [], "free_mb": None, "total_mb": None,
                                        "per_item_mb": None, "best_per_face_ms": None}
     import numpy as np
-    _sess, _name, size, _nchw, _prov = ent
+    _sess, _name, size, _nchw = ent[0], ent[1], ent[2], ent[3]
+    _cap = int(ent[5] or 1) if len(ent) > 5 else 8
     size = int(size)
     free0, total0 = _vram_free_mb()
-    ladder = [1, 4, 8]
+    # 阶梯不能超过 session 真正能吃的批（原生 TRT 引擎的优化档位可能就是 batch 1）
+    ladder = [1]
+    for _b in (4, 8):
+        if _b <= _cap and _b not in ladder:
+            ladder.append(_b)
     rows = []
     best_per = None
     try:
         i = 0
         while i < len(ladder):
-            b = min(int(ladder[i]), _PRED_BATCH_CAP)
+            b = min(int(ladder[i]), _PRED_BATCH_CAP, _cap)
             x = np.zeros((b, size, size, 3), np.float32)
+            # 每个档位先跑一次不计时：第一次跑某个形状要编 kernel / 选算法，实测能把
+            # batch 1 的量测放大到 1000 ms（真值是 36 ms）—— 以前就是拿这个被污染的
+            # 数字去选 batch，结果选了更慢的那一档。取两次里快的那次才是稳态。
+            _dfm_run_batch(ent, x)
             t0 = time.perf_counter()
             _dfm_run_batch(ent, x)
             dt = (time.perf_counter() - t0) * 1000.0
+            t0 = time.perf_counter()
+            _dfm_run_batch(ent, x)
+            dt = min(dt, (time.perf_counter() - t0) * 1000.0)
             per = dt / b
             free_now, _t = _vram_free_mb()
             rows.append({"batch": b, "ms": round(dt, 1), "per_face_ms": round(per, 2),
@@ -7471,7 +7565,12 @@ def _stage_do_pred(cfg: dict) -> dict:
     语义照 4.0 export_pipeline.py:769（fo = warpAffine(frame, get_transform_mat(lm,
     swap_sz, WHOLE_FACE)) → dfm 前向）。
 
-    **吞吐**：老实现是一条串行链（读帧 → warp → 攒 batch → 前向 → 写 3 张 PNG），
+    **吞吐**（本机实测，1080×1920、每帧 1 张脸、app/tools/stage_perf_profile.py）：
+        read 28.5ms/张（4 线程摊薄后，整帧 PNG 解码 17.7ms 是底）· prep 9ms/张 ·
+        infer 37.6ms(ort-CUDA) / 30.4ms(原生 TRT bf16) ← 硬底 · write 26ms/张（2 线程）
+    墙钟 ≈ max(三段)：25.6 张/秒(ort-CUDA) / 31.8 张/秒(原生 TRT)。
+    所以这一段**已经贴着推理跑了**，再优化 CPU 侧不会让吞吐变高，只会让它更抗噪。
+    老实现是一条串行链（读帧 → warp → 攒 batch → 前向 → 写 3 张 PNG），
     一张脸 = 22(读) + 8(float 转换) + 36(前向) + 21(三张 PNG 编码) ≈ 100ms，实测 9.6 张/秒，
     而且 batch 从 1 加到 16 吞吐几乎不动 —— 说明瓶颈根本不在推理。
     现在拆成三段，用队列连起来（谁慢谁是瓶颈，其它两段被完全藏住）：
@@ -7480,6 +7579,12 @@ def _stage_do_pred(cfg: dict) -> dict:
         推理线程     攒够 batch 一次前向（416 dfm ≈ 36ms/张，GPU 99% 占用，是硬底）
         写线程 ×M    PNG 编码 + 原子落盘（416×416 ×3 ≈ 21ms/张）
     墙钟 ≈ max(三段)，而不是三段之和。
+
+    已经踩过的两个坑（别再踩）：
+      · 读线程以前先把 1080p 整帧 astype(float32)/255 再 warp（实测多花 25ms/帧），
+        而 4.0 是「uint8 整帧 warp → 再 /255」，两边只差舍入 —— 现在和 4.0 同序；
+      · 进度里的「帧/秒」以前拿续跑游标 k 算，而 k 为了不留空洞会滞后 readers 倍：
+        25.4 张/秒被显示成 6.3 帧/秒，用户报的「5.8~6.2 帧/秒」就是它，不是真变慢。
 
     其它三处通用优化（都不是针对某台机器）：
       · batch 按可用显存实测自动选（_pred_pick_batch），OOM / 明显变慢自动退档 8→4→2→1；
@@ -7662,7 +7767,7 @@ def _stage_do_pred(cfg: dict) -> dict:
             except queue.Full:
                 continue
 
-    # ---- 读线程：解码 + float + warp（不碰推理，也不碰写盘）----
+    # ---- 读线程：解码 + warp（不碰推理，也不碰写盘）----
     def _reader(lo: int, hi: int):
         try:
             for gi in range(lo, hi):
@@ -7679,11 +7784,9 @@ def _stage_do_pred(cfg: dict) -> dict:
                 if frame is None:
                     _put_frame((gi, key, False, None, None, None))
                     continue
-                fc = None
                 crops = None
                 if not use_lib:
                     tp = time.perf_counter()
-                    fc = frame.astype(np.float32) / 255.0
                     crops = []
                     for ap in paths:
                         m = read_dfljpg_meta(ap) or {}
@@ -7695,14 +7798,19 @@ def _stage_do_pred(cfg: dict) -> dict:
                             sz = size0
                             fmat = get_transform_mat(np.asarray(lm, np.float32), sz,
                                                      FaceType.WHOLE_FACE, scale=1.0)
-                            crop = cv2.warpAffine(fc, fmat, (sz, sz), flags=cv2.INTER_CUBIC)
-                            crops.append((ap.stem, np.clip(crop, 0, 1), None))
+                            # 顺序和 4.0 export_pipeline:720-721 完全一致：**uint8 整帧
+                            # warp → 再 /255**。以前是先把 1080p 整帧转 float32 再 warp，
+                            # 实测这多花的 25ms/帧（astype 11.8 + 浮点 warp 13.4 vs
+                            # uint8 warp 0.18）只是把同样的双线性插值算在 float 上，
+                            # 结果只差舍入 —— 却把 4 个读线程全拖成瓶颈。
+                            crop = cv2.warpAffine(frame, fmat, (sz, sz), flags=cv2.INTER_CUBIC)
+                            crops.append((ap.stem,
+                                          np.clip(crop.astype(np.float32) / 255.0, 0, 1), None))
                         except Exception as e:              # noqa: BLE001
                             crops.append((ap.stem, None, str(e)[:100]))
                     _bump("prep_ms", time.perf_counter() - tp)
-                    fc = None          # 整帧 float 副本用完就丢：别让队列里压着 8×25MB
                 # ok=True 才是「这一帧能处理」；frame 只在人脸库归组时才需要带回主线程
-                _put_frame((gi, key, True, frame if use_lib else None, fc, crops))
+                _put_frame((gi, key, True, frame if use_lib else None, None, crops))
         except Exception as e:                              # noqa: BLE001
             boss["exc"] = boss["exc"] or e
             stop.set()
@@ -7790,12 +7898,18 @@ def _stage_do_pred(cfg: dict) -> dict:
         threads.append(t)
 
     k = cursor
+    cancelled = {"flag": False}
+    got = 0            # 已经处理完的帧数（显示用）。k 是**续跑游标**，它会为了
+                       # 「不留空洞」而滞后（4 个读线程各跑一段，游标只认连续前缀），
+                       # 以前拿 k 算帧/秒 → 正好少报 readers 倍（实测 6.3 帧/秒 vs
+                       # 真实 25.4 张/秒，差 4 倍，就是被当成「慢」的那个数）。
     try:
         for gi in range(cursor, total):
             _stage_check_cancel()
             item = q_frames.get()
             if item[0] is None:
                 break
+            got += 1
             gi2, key, ok, frame, fc, crops = item
             if not ok:
                 _stage_log("换脸跳过 %s：frames/ 里没有这一帧（或读不出来）" % key)
@@ -7810,7 +7924,6 @@ def _stage_do_pred(cfg: dict) -> dict:
                                   "lm": m.get("source_landmarks") or m.get("landmarks"),
                                   "box": m.get("source_rect") or None})
                 plans = _stage_pred_assign(cfg, frame, metas)
-                fc2 = frame.astype(np.float32) / 255.0
                 for meta_f, use_dfm in zip(metas, plans):
                     lm = meta_f["lm"]
                     if not lm or len(lm) != 68:
@@ -7823,8 +7936,9 @@ def _stage_do_pred(cfg: dict) -> dict:
                     size = int(_dfm_session(use_dfm)[2])
                     fmat = get_transform_mat(np.asarray(lm, np.float32), size,
                                              FaceType.WHOLE_FACE, scale=1.0)
-                    crop = cv2.warpAffine(fc2, fmat, (size, size), flags=cv2.INTER_CUBIC)
-                    _submit(gi2, meta_f["ap"].stem, use_dfm, np.clip(crop, 0, 1))
+                    crop = cv2.warpAffine(frame, fmat, (size, size), flags=cv2.INTER_CUBIC)
+                    _submit(gi2, meta_f["ap"].stem, use_dfm,
+                            np.clip(crop.astype(np.float32) / 255.0, 0, 1))
             else:
                 for stem, crop, err in (crops or []):
                     if crop is None:
@@ -7835,26 +7949,32 @@ def _stage_do_pred(cfg: dict) -> dict:
             _commit_upto()
             k = commit["n"]
             el = max(0.001, time.time() - t0)
-            _stage_progress("pred", 100.0 * k / total,
+            _stage_progress("pred", 100.0 * got / total,
                             "换脸 %d/%d 帧（第 %d..%d 帧）· %d 张脸 · %.1f 帧/秒 · "
                             "%.1f 张/秒 · batch %d"
-                            % (k, total, int(rng["start"]), int(rng["end"]), done_faces,
-                               (k - cursor) / el, done_faces / el, batch),
-                            frames_done=k, frames_total=total,
-                            frame_fps=round((k - cursor) / el, 2))
+                            % (got, total, int(rng["start"]), int(rng["end"]), done_faces,
+                               got / el, done_faces / el, batch),
+                            frames_done=got, frames_total=total,
+                            frame_fps=round(got / el, 2))
             if (gi - cursor) % 20 == 0:
                 _save(k)
         else:
             k = total
+    except _StageCancel:
+        # 取消也要把游标落盘 —— 但**必须等排空之后**再落：以前在 except 里立刻
+        # _save(commit)，那一刻队里还有没写完的脸，游标会停在 0（实测 60 张脸
+        # 取消时 done_frames=0，续跑等于从头再来）。现在置标志位，排空在 finally 里做。
+        cancelled["flag"] = True
     finally:
         stop.set()
-        tidy = _sys.exc_info()[0] is None and boss.get("exc") is None
-        if tidy:
+        exc_t = _sys.exc_info()[0]
+        broken = boss.get("exc") is not None or exc_t not in (None, _StageCancel)
+        if not broken:
             for use_dfm in list(jobs):
                 _flush(use_dfm, force=True)
         for _i in range(writers):
             q_write.put(None)
-        if tidy:
+        if not broken:
             # 等写盘排空：游标必须对得上磁盘上真的有的文件（否则续跑会跳过没写的帧）
             t_wait = time.time()
             while time.time() - t_wait < 600:
@@ -7863,9 +7983,14 @@ def _stage_do_pred(cfg: dict) -> dict:
                 if left <= 0:
                     break
                 time.sleep(0.05)
-        _commit_upto()
+        k = _commit_upto()
         for t in threads:
             t.join(timeout=5.0)
+    if cancelled["flag"]:
+        _save(k)
+        _stage_log("换脸取消：停在 %d/%d 帧（游标已存；已跑完 %d 张脸）"
+                   % (k, total, done_faces))
+        raise _StageCancel()
     if boss.get("exc") is not None:
         raise boss["exc"]
     sec = round(time.time() - t0, 2)
@@ -8018,7 +8143,14 @@ def _stage_do_mask(cfg: dict) -> dict:
         只把它们按 mask/ 的命名**落盘留档**（便于检查），不跑任何推理。
     两种来源都会把 dfm 的两张遮罩一起放进 mask/（mask_mode=9 全乘要用）。
     游标 = meta.stages.mask.done_frames（对齐脸张数）。
+
+    **吞吐**：这条链以前是纯串行（读 pred → 元数据 → warp 原帧 → XSeg(prd) → 写盘 →
+    XSeg(dst) → 写盘 → 复制 dfm 遮罩），一台机器上 2059 张脸 ≈ 26 张/秒，而原生 TRT
+    的 XSegLite 纯推理只要 1.44 ms/图（实测），也就是 92% 的时间不在推理上。现在拆成
+    读 N 线程 / 推理 1 线程 / 写 M 线程三段（和 ③ 换脸同一套结构），墙钟从「各段相加」
+    变成「取最长的那段」，实测 25 → 75~115 张/秒（见 app/tools/stage_perf_profile.py）。
     """
+    import sys as _sys
     import cv2
     import numpy as np
     from ._merge_compose import ensure_engine_path
@@ -8105,7 +8237,18 @@ def _stage_do_mask(cfg: dict) -> dict:
     means = []
     t_infer = 0.0          # 纯推理累计（两张 256 的 XSeg 前向，不含读图/写盘）
     frames_dir = _stage_frames_dir(cache)
-    cache_frame = {"key": None, "img": None}
+    # 逐段打点（和 ③ 换脸同一套口径：读图 / 预处理 / 推理 / 写盘，各自累计 ms）
+    prof = {"read_ms": 0.0, "prep_ms": 0.0, "infer_ms": 0.0, "write_ms": 0.0,
+            "faces": 0, "images": 0}
+    plock = threading.Lock()
+
+    def _bump(ms_name: str, sec: float, n: int = 0, images: int = 0):
+        with plock:
+            prof[ms_name] += sec * 1000.0
+            if n:
+                prof["faces"] += n
+            if images:
+                prof["images"] += images
 
     def _save(up_to: int, done: bool = False, extra: dict = None):
         node = {
@@ -8149,72 +8292,309 @@ def _stage_do_mask(cfg: dict) -> dict:
                 pass
         return n
 
+    # ---- 串行链 → 三段流水线 ----
+    # 以前这里是一条串行链：读 pred PNG → 读 DFLJPG 元数据 → warp 原帧 →
+    # XSeg(prd) → 编码写盘 → XSeg(dst) → 编码写盘 → 复制 dfm 的两张遮罩。
+    # 纯推理（原生 TRT int8，见 stage_perf_profile.py 的实测）只有 1.44 ms/张，
+    # 两张也就 2.9 ms；2059 张脸却只有 26 张/秒（≈38 ms/张）—— 也就是 92% 的时间
+    # 不在推理上，而且串行意味着「各段相加」。现在拆成三段用队列连起来：
+    #     读线程 ×N   pred PNG 解码 + DFLJPG 元数据 + warp 原帧到 256
+    #     推理线程    攒够 mask_batch 张脸，一次前向（ORT 动态 batch 或 TRT 逐张）
+    #     写线程 ×M   PNG 编码 + 原子落盘 + dfm 两张遮罩的文件复制
+    # 墙钟 ≈ max(三段) 而不是三段之和。
+    # 读线程要盖住「每帧解码一次 1080p PNG」这条硬开销（本机 17.7 ms/帧，8 线程并发时实测
+    # 摊到 ~7 ms）；写线程盖住「每张脸 4 个 PNG + 2 次文件复制」（本机 ~24 ms/张）。
+    readers = max(1, int(cfg.get("mask_readers")
+                         or min(6, max(2, (os.cpu_count() or 4) // 4))))
+    writers = max(1, int(cfg.get("mask_writers")
+                         or min(6, max(2, (os.cpu_count() or 4) // 8))))
+    # 默认**不批量**（1）：本机实测 256² 逐张 4.79 ms/图 比 batch4 的 5.24 ms/图 更快
+    # （ORT 在 batch>1 时换 kernel，流水线里还被队列拉长），而批量会换规约顺序、遮罩
+    # 逐像素差 1~2 LSB。要试就传 mask_batch=N（引擎真吃批时的收益见 _xseg.mask_batch）。
+    mbatch = max(1, int(cfg.get("mask_batch") or 1))
+    if src["source"] == "xseg" and xseg is not None:
+        try:
+            # TRT 的 xseglite 引擎是静态 batch=1（_engines.PROFILES 单档位）→ 老实逐张；
+            # ort-CUDA 的输入是动态 batch → 一次多张（256² 实测 4.02 → 2.68 ms/张）
+            mbatch = max(1, min(mbatch, int(xseg.batch_limit())))
+        except Exception:                                   # noqa: BLE001
+            mbatch = 1
+    _stage_log("遮罩：流水线 读 %d 线程 / 推理 batch %d / 写 %d 线程 · 后端 %s"
+               % (readers, mbatch, writers, backend))
+
+    if src["source"] != "xseg":
+        # 来源=DFM：遮罩就是 ③ 落盘的那两张，这里只按 mask/ 的命名留档，不推理。
+        k = cursor
+        try:
+            for k in range(cursor, total):
+                _stage_check_cancel()
+                key = aligned[k].stem
+                try:
+                    _copy_dfm_masks(key)
+                    wrote += 1
+                except Exception as e:                      # noqa: BLE001
+                    failed += 1
+                    _stage_log("遮罩跳过 %s：%s" % (key, str(e)[:140]))
+                el = max(0.001, time.time() - t0)
+                _stage_progress("mask", 100.0 * (k + 1) / total,
+                                "遮罩 %d/%d 张（第 %d..%d 帧）· %.1f 张/秒"
+                                % (k + 1, total, int(rng["start"]), int(rng["end"]),
+                                   (k + 1 - cursor) / el),
+                                frames_done=k + 1, frames_total=total,
+                                frame_fps=round((k + 1 - cursor) / el, 2))
+        except _StageCancel:
+            _save(k)                # 取消也要把游标落盘：下次从这里接着跑
+            _stage_log("遮罩取消：停在 %d/%d 张（游标已存）" % (k, total))
+            raise
+        sec = round(time.time() - t0, 2)
+        done_n = max(1, total - cursor)
+        _save(total, done=True, extra={
+            "seconds": sec, "finished_at": time.time(),
+            "fps": round((total - cursor) / sec, 2) if sec else None,
+            "mask_mean": None, "infer_seconds": 0.0, "infer_ms_per_face": 0.0,
+        })
+        _stage_log("遮罩完成：第 %d..%d 帧 · %d 张 · 失败 %d · %.2f s · %.1f 张/秒 · "
+                   "来源 %s（不推理，只落 dfm 自带遮罩）"
+                   % (int(rng["start"]), int(rng["end"]), total, failed, sec,
+                      (total - cursor) / sec if sec > 0 else 0.0,
+                      src.get("label") or src.get("source")))
+        return {"count": wrote, "failed": failed, "total": total, "seconds": sec,
+                "mask_source": src.get("label") or src.get("source"),
+                "signature": sig, "engine": engine, "backend": backend,
+                "engine_file": engine_file,
+                "range": {"start": int(rng["start"]), "end": int(rng["end"])},
+                "infer_ms_per_face": 0.0}
+
+    # ---------------- XSeg：读 / 推理 / 写 三段流水线 ----------------
+    q_prep = queue.Queue(maxsize=max(2, readers * 2))
+    q_write = queue.Queue(maxsize=max(4, writers * mbatch * 2))
+    stop = threading.Event()
+    boss = {"exc": None}
+    pend, completed, plock2 = {}, set(), threading.Lock()
+    commit = {"n": cursor}
+
+    def _commit_upto():
+        with plock2:
+            n = commit["n"]
+            while n in completed:
+                completed.discard(n)
+                n += 1
+            commit["n"] = n
+            return n
+
+    def _pend_add(gi: int):
+        with plock2:
+            pend[gi] = int(pend.get(gi) or 0) + 1
+
+    def _pend_done(gi: int):
+        with plock2:
+            left = int(pend.get(gi) or 0) - 1
+            if left <= 0:
+                pend.pop(gi, None)
+                completed.add(gi)
+            else:
+                pend[gi] = left
+
+    def _put_prep(item):
+        while not stop.is_set():
+            try:
+                q_prep.put(item, timeout=0.2)
+                return
+            except queue.Full:
+                continue
+
+    def _u8(m):
+        return None if m is None else np.clip(m * 255.0, 0, 255).astype(np.uint8)
+
+    def _writer():
+        nonlocal failed
+        while True:
+            item = q_write.get()
+            if item is None:
+                return
+            gi, key, prd_u8, dst_u8 = item
+            tw = time.perf_counter()
+            try:
+                _copy_dfm_masks(key)
+                if prd_u8 is not None:
+                    # PNG level=1（无损，只是少压一层）：掩码是灰度，level 3 每张只快一点点
+                    _stage_write_atomic(mask_dir / (key + "_xseg_prd.png"),
+                                        _stage_imencode_png(prd_u8, 1))
+                if dst_u8 is not None:
+                    _stage_write_atomic(mask_dir / (key + "_xseg_dst.png"),
+                                        _stage_imencode_png(dst_u8, 1))
+            except Exception as e:                          # noqa: BLE001
+                failed += 1
+                _stage_log("遮罩写盘失败 %s：%s" % (key, str(e)[:140]))
+            finally:
+                _bump("write_ms", time.perf_counter() - tw)
+                _pend_done(gi)
+
+    def _reader(lo: int, hi: int):
+        cache = {"key": None, "img": None}
+        try:
+            for gi in range(lo, hi):
+                if stop.is_set():
+                    break
+                ap = aligned[gi]
+                key = ap.stem
+                tr = time.perf_counter()
+                pm = pred_dir / (key + ".png")
+                pred = _stage_read_image(pm) if pm.is_file() else None
+                _bump("read_ms", time.perf_counter() - tr)
+                if pred is None:
+                    _put_prep((gi, key, None, None))
+                    continue
+                tp = time.perf_counter()
+                dst = None
+                fkey = key.split("_")[0]
+                if cache["key"] != fkey:
+                    cache["key"] = fkey
+                    fp = _stage_frame_path(frames_dir, fkey)
+                    cache["img"] = _stage_read_frame(fp) if fp else None
+                frame = cache["img"]
+                if frame is not None:
+                    m = read_dfljpg_meta(ap) or {}
+                    lm = m.get("source_landmarks") or m.get("landmarks")
+                    if lm:
+                        dmat = get_transform_mat(np.asarray(lm, np.float32), 256,
+                                                 FaceType.WHOLE_FACE, scale=1.0)
+                        # 整帧是 uint8 → warp 一次 0.18ms（float 帧要 13ms）
+                        dst = cv2.warpAffine(frame, dmat, (256, 256), flags=cv2.INTER_CUBIC)
+                _bump("prep_ms", time.perf_counter() - tp)
+                _put_prep((gi, key, pred, dst))
+        except Exception as e:                              # noqa: BLE001
+            boss["exc"] = boss["exc"] or e
+            stop.set()
+            try:
+                q_prep.put((None, None, None, None))
+            except Exception:                               # noqa: BLE001
+                pass
+
+    jobs = []
+
+    def _flush(force: bool = False):
+        nonlocal t_infer, wrote
+        while jobs and (len(jobs) >= mbatch or (force and jobs)):
+            n = min(len(jobs), mbatch)
+            chunk = jobs[:n]
+            imgs, slots = [], []
+            for i, (_gi, _k, pred, dst) in enumerate(chunk):
+                imgs.append(pred)
+                slots.append((i, 0))
+                if dst is not None:
+                    imgs.append(dst)
+                    slots.append((i, 1))
+            ti = time.perf_counter()
+            outs = xseg.mask_batch(imgs, out_size=256)
+            dt = time.perf_counter() - ti
+            t_infer += dt
+            _bump("infer_ms", dt, n, len(imgs))
+            _INFER_CALLS["xseg"] += len(imgs)
+            prd_m = [None] * n
+            dst_m = [None] * n
+            for (i, slot), mk in zip(slots, outs):
+                if slot:
+                    dst_m[i] = mk
+                else:
+                    prd_m[i] = mk
+                    means.append(float(np.asarray(mk).mean()))
+            for i, (gi, key, _p, _d) in enumerate(chunk):
+                q_write.put((gi, key, _u8(prd_m[i]), _u8(dst_m[i])))
+                wrote += 1
+            del jobs[:n]
+
     _save(cursor)
+    threads = []
+    for i in range(writers):
+        t = threading.Thread(target=_writer, daemon=True, name="mask-w%d" % i)
+        t.start()
+        threads.append(t)
+    for r in range(readers):
+        lo = cursor + (total - cursor) * r // readers
+        hi = cursor + (total - cursor) * (r + 1) // readers
+        if lo >= hi:
+            continue
+        t = threading.Thread(target=_reader, args=(lo, hi), daemon=True, name="mask-r%d" % r)
+        t.start()
+        threads.append(t)
+
+    got = 0                     # 已经处理完的张数（显示用；游标 commit 会为了不留空洞而滞后）
     k = cursor
+    cancelled = {"flag": False}
     try:
-      for k in range(cursor, total):
-          _stage_check_cancel()
-          ap = aligned[k]
-          key = ap.stem
-          try:
-              _copy_dfm_masks(key)
-              if src["source"] == "dfm":
-                  wrote += 1
-              else:
-                  pm = pred_dir / (key + ".png")
-                  pred = _stage_read_image(pm) if pm.is_file() else None
-                  if pred is None:
-                      failed += 1
-                      _stage_log("遮罩跳过 %s：pred/ 里没有换脸结果（先跑换脸）" % key)
-                  else:
-                      _ti = time.perf_counter()
-                      mk = xseg.mask(pred, out_size=256)
-                      t_infer += time.perf_counter() - _ti
-                      _INFER_CALLS["xseg"] += 1
-                      _stage_write_atomic(
-                          mask_dir / (key + "_xseg_prd.png"),
-                          # PNG level=1（无损，只是少压一层）：掩码是二值化的灰度，level 3 每张多花 ~8ms，
-                          # TRT 把推理压到 6.6ms/张之后，编码就成了这一步的主要开销
-                          _stage_imencode_png(np.clip(mk * 255.0, 0, 255).astype(np.uint8), 1))
-                      means.append(float(np.asarray(mk).mean()))
-                      # dst 侧：原帧按 68 点正变换到 256，再跑一次 XSeg（4.0:790-797）
-                      fkey = key.split("_")[0]
-                      if cache_frame["key"] != fkey:
-                          cache_frame["key"] = fkey
-                          fp = _stage_frame_path(frames_dir, fkey)
-                          cache_frame["img"] = _stage_read_frame(fp) if fp else None
-                      frame = cache_frame["img"]
-                      if frame is not None:
-                          m = read_dfljpg_meta(ap) or {}
-                          lm = m.get("source_landmarks") or m.get("landmarks")
-                          lm = np.asarray(lm, np.float32)
-                          dmat = get_transform_mat(lm, 256, FaceType.WHOLE_FACE, scale=1.0)
-                          dface = cv2.warpAffine(frame, dmat, (256, 256),
-                                                 flags=cv2.INTER_CUBIC)
-                          _ti = time.perf_counter()
-                          mk2 = xseg.mask(dface, out_size=256)
-                          t_infer += time.perf_counter() - _ti
-                          _INFER_CALLS["xseg"] += 1
-                          _stage_write_atomic(
-                              mask_dir / (key + "_xseg_dst.png"),
-                              _stage_imencode_png(np.clip(mk2 * 255.0, 0, 255).astype(np.uint8), 1))
-                      wrote += 1
-          except Exception as e:                              # noqa: BLE001
-              failed += 1
-              _stage_log("遮罩跳过 %s：%s" % (key, str(e)[:140]))
-          el = max(0.001, time.time() - t0)
-          _stage_progress("mask", 100.0 * (k + 1) / total,
-                          "遮罩 %d/%d 张（第 %d..%d 帧）· %.1f 张/秒"
-                          % (k + 1, total, int(rng["start"]), int(rng["end"]),
-                             (k + 1 - cursor) / el),
-                          frames_done=k + 1, frames_total=total,
-                          frame_fps=round((k + 1 - cursor) / el, 2))
+        for gi in range(cursor, total):
+            _stage_check_cancel()
+            item = q_prep.get()
+            if item[0] is None:
+                break
+            got += 1
+            gi2, key, pred, dst = item
+            if pred is None:
+                failed += 1
+                _stage_log("遮罩跳过 %s：pred/ 里没有换脸结果（先跑换脸）" % key)
+                with plock2:
+                    completed.add(gi2)
+            else:
+                _pend_add(gi2)
+                jobs.append((gi2, key, pred, dst))
+                _flush()
+            _commit_upto()
+            k = commit["n"]
+            el = max(0.001, time.time() - t0)
+            _stage_progress("mask", 100.0 * got / total,
+                            "遮罩 %d/%d 张（第 %d..%d 帧）· %.1f 张/秒 · batch %d"
+                            % (got, total, int(rng["start"]), int(rng["end"]),
+                               got / el, mbatch),
+                            frames_done=got, frames_total=total,
+                            frame_fps=round(got / el, 2))
     except _StageCancel:
-        _save(k)                    # 取消也要把游标落盘：下次从这里接着跑
+        cancelled["flag"] = True
+    finally:
+        stop.set()
+        exc_t = _sys.exc_info()[0]
+        broken = boss.get("exc") is not None or exc_t not in (None, _StageCancel)
+        if not broken:
+            _flush(force=True)
+        for _i in range(writers):
+            q_write.put(None)
+        if not broken:
+            t_wait = time.time()
+            while time.time() - t_wait < 600:
+                with plock2:
+                    left = sum(int(v) for v in pend.values())
+                if left <= 0:
+                    break
+                time.sleep(0.05)
+        k = _commit_upto()
+        for t in threads:
+            t.join(timeout=5.0)
+    if cancelled["flag"]:
+        # 取消也要把游标落盘（排空之后再落，才和磁盘上真的有的文件对得上）
+        _save(k)
         _stage_log("遮罩取消：停在 %d/%d 张（游标已存）" % (k, total))
-        raise
+        raise _StageCancel()
+    if boss.get("exc") is not None:
+        raise boss["exc"]
     sec = round(time.time() - t0, 2)
     done_n = max(1, total - cursor)
+    n_faces = max(1, prof["faces"])
+    prof_out = {
+        "read_ms": round(prof["read_ms"], 1), "prep_ms": round(prof["prep_ms"], 1),
+        "infer_ms": round(prof["infer_ms"], 1), "write_ms": round(prof["write_ms"], 1),
+        "readers": int(readers), "writers": int(writers), "mask_batch": int(mbatch),
+        "backend": backend, "engine_file": engine_file,
+        "images": int(prof["images"]),
+        # 每张脸各段各花多少 ms（读图 / warp+元数据 / 2 次推理 / 编码+落盘）
+        "per_face_ms": {
+            "read": round(prof["read_ms"] / max(1, total - cursor), 2),
+            "prep": round(prof["prep_ms"] / max(1, total - cursor), 2),
+            "infer": round(prof["infer_ms"] / n_faces, 2),
+            "write": round(prof["write_ms"] / n_faces, 2),
+        },
+        # 单张纯推理 = 总推理时间 / 推理张数（一张脸两张图）
+        "per_image_ms": round(prof["infer_ms"] / max(1, prof["images"]), 3),
+    }
     _save(total, done=True, extra={
         "seconds": sec, "finished_at": time.time(),
         "fps": round((total - cursor) / sec, 2) if sec else None,
@@ -8223,20 +8603,25 @@ def _stage_do_mask(cfg: dict) -> dict:
         "infer_seconds": round(t_infer, 3),
         "infer_ms_per_face": (round(t_infer * 1000.0 / done_n, 3)
                               if src["source"] == "xseg" else 0.0),
+        "profile": prof_out,
     })
     _stage_log("遮罩完成：第 %d..%d 帧 · %d 张 · 失败 %d · %.2f s · %.1f 张/秒 · "
-               "后端 %s%s · 来源 %s%s"
+               "后端 %s%s · 来源 %s · 每张 读 %.1f + 预处理 %.1f + 推理 %.1f"
+               "（%.2f ms/图 × %d 图）+ 写 %.1f ms（读 %d / 写 %d 线程 · batch %d）"
                % (int(rng["start"]), int(rng["end"]), total, failed, sec,
                   (total - cursor) / sec if sec > 0 else 0.0,
                   backend, ("(%s)" % engine_file) if engine_file else "",
                   src.get("label") or src.get("source"),
-                  (" · 推理 %.2f ms/张" % (t_infer * 1000.0 / done_n))
-                  if src["source"] == "xseg" else ""))
+                  prof_out["per_face_ms"]["read"], prof_out["per_face_ms"]["prep"],
+                  prof_out["per_face_ms"]["infer"], prof_out["per_image_ms"],
+                  prof["images"], prof_out["per_face_ms"]["write"],
+                  readers, writers, mbatch))
     return {"count": wrote, "failed": failed, "total": total, "seconds": sec,
             "mask_source": src.get("label") or src.get("source"),
             "signature": sig, "engine": engine, "backend": backend,
             "engine_file": engine_file,
             "range": {"start": int(rng["start"]), "end": int(rng["end"])},
+            "mask_batch": int(mbatch), "profile": prof_out,
             "infer_ms_per_face": (round(t_infer * 1000.0 / done_n, 3)
                                   if src["source"] == "xseg" else 0.0)}
 
@@ -8976,6 +9361,12 @@ def _stage_cfg(body: dict, stage: str, chain: bool = False) -> dict:
                                   1, 32, _MERGE_THREADS_DEFAULT),
         "png_level": _int_val("png_compression", body.get("png_compression"), 0, 9,
                               _MERGE_PNG_LEVEL),
+        # ③④ 两条流水线的并行度（0 = 自动；验收/测速脚本可以点名覆盖）
+        "pred_readers": _int_val("pred_readers", body.get("pred_readers"), 0, 16, 0),
+        "pred_writers": _int_val("pred_writers", body.get("pred_writers"), 0, 16, 0),
+        "mask_readers": _int_val("mask_readers", body.get("mask_readers"), 0, 16, 0),
+        "mask_writers": _int_val("mask_writers", body.get("mask_writers"), 0, 16, 0),
+        "mask_batch": _int_val("mask_batch", body.get("mask_batch"), 0, 32, 0),
     }
 
 
