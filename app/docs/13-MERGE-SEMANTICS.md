@@ -69,3 +69,19 @@ iperov 当年的设计背景：
 - [ ] 无人脸的帧：复制原帧，不跑 dfm；
 - [ ] 无人脸库时：用左栏选中的单个 dfm 换所有脸（这是合法的降级，不是兜底错误）；
 - [ ] 人脸库 embedding 缓存：进程重启清空、一次导出结束后清空。
+## 推理后端：TRT 必须用 TensorRT 原生库（硬规定）
+
+> **TRT 推理用 TRT 库，不准使用 ONNX 库的 TRT 提供者，那不一样。**
+
+| 路径 | 是什么 | 允许 |
+|---|---|---|
+| **原生 TRT** `TrtSession` + `*.engine` | 直接用 TensorRT 库加载 builder 生成的 engine，CUDA Graph / IO binding / 零拷贝可用 | ✅ 只允许这一条 |
+| `onnxruntime` 的 `TensorrtExecutionProvider` | ort 内部自己 build、行为不同、可能每次重编 | ❌ 禁止 |
+| `onnxruntime` 的 `CUDAExecutionProvider` | 没有 .engine 时的回落 | ✅ 回落，需日志 |
+| `onnxruntime` 的 `CPUExecutionProvider` | 兜底 | ⚠️ 仅最后，必须打醒目 WARN |
+
+**判定顺序**：原生 TRT（有 .engine）→ ort-CUDA → CPU。任何回落都要在 status / 日志里写明实际后端与原因，禁止静默。
+
+**报告口径**：涉及推理性能时，必须按「原生 TRT / ort-CUDA / ort-CPU」三分类给结论，并附 `session.get_providers()` 与引擎文件名；笼统说「用了 GPU」不算结论。
+
+缺 `.engine` 时用 `POST /api/engines/build` 生成（`app/server/_trt_build.py`，Python Builder API）。
