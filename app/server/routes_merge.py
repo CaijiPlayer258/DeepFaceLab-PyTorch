@@ -6733,8 +6733,15 @@ def _stage_do_frames(cfg: dict) -> dict:
     meta["source"]["frames"] = idx
     meta["source"]["width"] = w
     meta["source"]["height"] = h
+    rng_f = _stage_range(cfg)
     meta["stages"]["frames"] = {
         "done": True, "count": idx, "seconds": sec, "finished_at": time.time(),
+        # 切帧**永远整段**（方案 B：帧索引必须完整，成本也极低）；这里记的 range 是
+        # 「frames 覆盖了 1..idx」，后五个阶段各自记自己真正处理的那一段。
+        "range": {"start": 1, "end": int(idx)},
+        "range_key": "1-%d" % int(idx),
+        "range_requested": {"start": int(rng_f["start"]), "end": int(rng_f["end"]),
+                            "total": int(rng_f["total"])},
         "msg": "切帧完成：%d 帧" % idx,
         # 帧图的真实编码参数（验收要能一眼看到，不再靠"默认值"猜）
         # png 是无损：ffmpeg 走 -compression_level 1（快、略大）；兜底的进程内那条
@@ -6806,11 +6813,17 @@ def _stage_do_faces(cfg: dict) -> dict:
     if not frames:
         raise _BadInput("frames/ 里没有帧图 —— 先跑切帧", 409)
     aligned_dir = _stage_aligned_dir(cache)
-    total = len(frames)
+    # 帧范围：只处理 [start, end] 里的帧（帧索引仍是全局的 —— aligned/ 的命名不许挪位）
+    rng = _stage_range(cfg)
+    rkey = str(cfg.get("range_key") or rng.get("key") or "")
+    rows = [i for i, p in enumerate(frames) if _stage_in_range(rng, p.stem)]
+    total = len(rows)                     # 范围内的帧数（游标从这里数到 0）
     have = len(_stage_files(aligned_dir, (".jpg", ".jpeg")))
 
-    if (not cfg["force"]) and st.get("done") and have and int(st.get("frames") or 0) == total:
-        _stage_log("切脸：复用已有 %d 张对齐脸（%d 帧，不重跑）" % (have, total))
+    if ((not cfg["force"]) and not cfg.get("range_changed") and st.get("done") and have
+            and int(st.get("frames") or 0) == len(frames)):
+        _stage_log("切脸：复用已有 %d 张对齐脸（第 %d..%d 帧，不重跑）"
+                   % (have, int(rng["start"]), int(rng["end"])))
         return {"skipped": True, "count": have, "reason": "already-done"}
 
     if cfg["force"]:
@@ -6825,28 +6838,36 @@ def _stage_do_faces(cfg: dict) -> dict:
         raise _BadInput("2D106 关键点模型不可用（weights/insightface_2d106.onnx）—— "
                         "没有 68 点就不写对齐脸", 500)
 
-    cursor = 0 if cfg["force"] else int(st.get("done_frames") or 0)
+    # 游标 **相对范围**：0..total（total = end-start+1），换范围时旧游标（相对旧范围）作废
+    cursor = 0 if (cfg["force"] or cfg.get("range_changed")) else int(st.get("done_frames") or 0)
     cursor = max(0, min(cursor, total))
-    faces_total = int(st.get("count") or 0)
-    with_faces = int(st.get("frames_with_faces") or 0)
+    faces_total = 0 if (cfg["force"] or cfg.get("range_changed")) else int(st.get("count") or 0)
+    with_faces = 0 if (cfg["force"] or cfg.get("range_changed")) else int(st.get("frames_with_faces") or 0)
     skipped = int(st.get("skipped") or 0)
     if cursor:
-        _stage_log("切脸：从第 %d 帧续跑（前 %d 帧的对齐脸已经在）" % (cursor + 1, cursor))
-    _stage_log("切脸：检测器 %s · thresh=%.2f · 68 点仿射" % (det_name, thresh))
+        _stage_log("切脸：从第 %d 帧续跑（前 %d 帧的对齐脸已经在）"
+                   % (int(rng["start"]) + cursor, cursor))
+    _stage_log("切脸：检测器 %s · thresh=%.2f · 68 点仿射 · 帧范围 %d..%d（%d 帧）"
+               % (det_name, thresh, int(rng["start"]), int(rng["end"]), total))
 
     t0 = time.time()
 
     def _save_progress(up_to: int, done: bool = False):
         meta["stages"]["faces"] = {
-            "done": bool(done), "done_frames": int(up_to), "frames": total,
+            "done": bool(done), "done_frames": int(up_to), "frames": len(frames),
+            "total": int(total), "range": {"start": int(rng["start"]), "end": int(rng["end"])},
+            "range_key": rkey, "range_total": int(total),
             "count": faces_total, "frames_with_faces": with_faces, "skipped": skipped,
             "detector": det_name, "align": "68", "thumb": "2x box",
-            "msg": ("切脸完成：%d 张脸 / %d 帧" % (faces_total, total)) if done
-                   else ("切脸 %d/%d 帧" % (up_to, total)),
+            "msg": ("切脸完成：%d 张脸 / %d 帧（第 %d..%d 帧）"
+                    % (faces_total, total, int(rng["start"]), int(rng["end"]))) if done
+                   else ("切脸 %d/%d 帧（第 %d..%d 帧）"
+                         % (up_to, total, int(rng["start"]), int(rng["end"]))),
         }
         _stage_meta_save(cache, meta)
 
-    for i in range(cursor, total):
+    for pos in range(cursor, total):
+        i = rows[pos]
         _stage_check_cancel()
         path = frames[i]
         frame = _stage_read_image(path)
@@ -6910,21 +6931,24 @@ def _stage_do_faces(cfg: dict) -> dict:
         if n:
             with_faces += 1
         el = max(0.001, time.time() - t0)
-        _stage_progress("faces", 100.0 * (i + 1) / total,
-                        "切脸 %d/%d 帧 · %d 张脸 · %.2f 帧/秒"
-                        % (i + 1, total, faces_total, (i + 1 - cursor) / el),
-                        frames_done=i + 1, frames_total=total,
-                        frame_fps=round((i + 1 - cursor) / el, 2))
-        if (i + 1) % 20 == 0:
-            _save_progress(i + 1)
+        _stage_progress("faces", 100.0 * (pos + 1) / total,
+                        "切脸 %d/%d 帧（第 %d..%d 帧）· %d 张脸 · %.2f 帧/秒"
+                        % (pos + 1, total, int(rng["start"]), int(rng["end"]),
+                           faces_total, (pos + 1 - cursor) / el),
+                        frames_done=pos + 1, frames_total=total,
+                        frame_fps=round((pos + 1 - cursor) / el, 2))
+        if (pos + 1) % 20 == 0:
+            _save_progress(pos + 1)
 
     sec = round(time.time() - t0, 2)
     _save_progress(total, done=True)
     meta["stages"]["faces"]["seconds"] = sec
     _stage_meta_save(cache, meta)
-    _stage_log("切脸完成：%d 帧 · %d 张脸（%d 帧有脸）· 跳过 %d · %.2f s"
-               % (total, faces_total, with_faces, skipped, sec))
-    return {"count": faces_total, "frames": total, "skipped": skipped, "seconds": sec}
+    _stage_log("切脸完成：第 %d..%d 帧（%d 帧）· %d 张脸（%d 帧有脸）· 跳过 %d · %.2f s"
+               % (int(rng["start"]), int(rng["end"]), total, faces_total,
+                  with_faces, skipped, sec))
+    return {"count": faces_total, "frames": total, "skipped": skipped, "seconds": sec,
+            "range": {"start": int(rng["start"]), "end": int(rng["end"])}}
 
 
 # ---------------- ③ 换脸（dfm 推理）----------------
@@ -7286,8 +7310,13 @@ def _stage_do_pred(cfg: dict) -> dict:
     if not (meta["stages"].get("faces") or {}).get("done"):
         raise _BadInput("切脸（faces）还没完成 —— 先跑切脸，再换脸", 409)
     frames_dir = _stage_frames_dir(cache)
-    groups = _stage_face_rows(aligned)
+    # 帧范围：只对 [start, end] 里的帧做推理（groups 的下标/游标都按过滤后的列表数）
+    rng = _stage_range(cfg)
+    rkey = str(cfg.get("range_key") or rng.get("key") or "")
+    groups_all = _stage_face_rows(aligned)
+    groups = [(k, ps) for k, ps in groups_all if _stage_in_range(rng, k)]
     total = len(groups)
+    faces_in_range = sum(len(ps) for _k, ps in groups)
     pred_dir = _stage_pred_dir(cache)
     pred_dir.mkdir(parents=True, exist_ok=True)
 
@@ -7304,14 +7333,19 @@ def _stage_do_pred(cfg: dict) -> dict:
     writers = max(1, int(cfg.get("pred_writers") or 2))
     use_lib = bool(cfg.get("use_library") and cfg.get("library"))
 
-    cursor = 0 if cfg["force"] else max(0, min(int(st.get("done_frames") or 0), total))
-    if (not cfg["force"]) and st.get("done") and cursor >= total and total:
-        _stage_log("换脸：复用已有 %d 帧的 pred/（不重跑）" % total)
+    # 游标 **相对范围**：0..total（total = 范围内有脸的帧数）
+    rchg = bool(cfg.get("range_changed"))
+    cursor = 0 if (cfg["force"] or rchg) else max(0, min(int(st.get("done_frames") or 0), total))
+    if (not cfg["force"]) and not rchg and st.get("done") and cursor >= total and total:
+        _stage_log("换脸：复用已有 %d 帧的 pred/（第 %d..%d 帧，不重跑）"
+                   % (total, int(rng["start"]), int(rng["end"])))
         return {"skipped": True, "count": int(st.get("count") or 0), "reason": "already-done"}
     if cursor:
-        _stage_log("换脸：从第 %d 帧续跑（前 %d 帧的 pred/ 已经在）" % (cursor + 1, cursor))
-    _stage_log("换脸：dfm=%s · batch=%d(%s) · %d 帧 / %d 张脸 · 读 %d 线程 / 写 %d 线程%s"
-               % (Path(dfm).name, batch, bmeta.get("source"), total, len(aligned),
+        _stage_log("换脸：从范围内第 %d 帧续跑（前 %d 帧的 pred/ 已经在）" % (cursor + 1, cursor))
+    _stage_log("换脸：dfm=%s · batch=%d(%s) · 帧范围 %d..%d（%d 帧 / %d 张脸）· "
+               "读 %d 线程 / 写 %d 线程%s"
+               % (Path(dfm).name, batch, bmeta.get("source"),
+                  int(rng["start"]), int(rng["end"]), total, faces_in_range,
                   readers, writers, " · 人脸库归组" if use_lib else ""))
     if bmeta.get("source") == "auto":
         _stage_log("换脸：batch 自动选择 %d（可用显存 %s / 共 %s MB · 单张约 %s MB · "
@@ -7323,8 +7357,8 @@ def _stage_do_pred(cfg: dict) -> dict:
     t0 = time.time()
     # force 重跑时从 0 数起：以前会把上一轮的 count 累加（90 张脸跑完显示 180），
     # 于是 faces_per_sec 一直偏大 —— 吞吐对比全是错的数
-    done_faces = 0 if cfg.get("force") else int(st.get("count") or 0)
-    if cfg.get("force"):
+    done_faces = 0 if (cfg.get("force") or rchg) else int(st.get("count") or 0)
+    if cfg.get("force") or rchg:
         st["count"] = 0
     unmatched = int(st.get("unmatched") or 0)
     failed = int(st.get("failed") or 0)
@@ -7342,14 +7376,18 @@ def _stage_do_pred(cfg: dict) -> dict:
     def _save(up_to: int, done: bool = False, extra: dict = None):
         node = {
             "done": bool(done), "done_frames": int(up_to), "frames": total,
+            "total": int(total), "range": {"start": int(rng["start"]), "end": int(rng["end"])},
+            "range_key": rkey, "range_total": int(total),
             "count": done_faces, "unmatched": unmatched, "failed": failed,
-            "faces_total": len(aligned), "dfm": str(dfm), "model": Path(dfm).name,
+            "faces_total": int(faces_in_range), "dfm": str(dfm), "model": Path(dfm).name,
             "batch": int(batch), "batch_source": str(bmeta.get("source") or ""),
             "batch_meta": dict(bmeta), "sizes": dict(sizes), "pred_dir": str(pred_dir),
             "readers": int(readers), "writers": int(writers),
             "resumed_from": int(cursor),
-            "msg": ("换脸完成：%d 张脸 / %d 帧（未匹配 %d）" % (done_faces, total, unmatched))
-                   if done else ("换脸 %d/%d 帧" % (up_to, total)),
+            "msg": ("换脸完成：%d 张脸 / %d 帧（第 %d..%d 帧 · 未匹配 %d）"
+                    % (done_faces, total, int(rng["start"]), int(rng["end"]), unmatched))
+                   if done else ("换脸 %d/%d 帧（第 %d..%d 帧）"
+                                 % (up_to, total, int(rng["start"]), int(rng["end"]))),
         }
         if extra:
             node.update(extra)
@@ -7599,9 +7637,10 @@ def _stage_do_pred(cfg: dict) -> dict:
             k = commit["n"]
             el = max(0.001, time.time() - t0)
             _stage_progress("pred", 100.0 * k / total,
-                            "换脸 %d/%d 帧 · %d 张脸 · %.1f 帧/秒 · %.1f 张/秒 · batch %d"
-                            % (k, total, done_faces, (k - cursor) / el,
-                               done_faces / el, batch),
+                            "换脸 %d/%d 帧（第 %d..%d 帧）· %d 张脸 · %.1f 帧/秒 · "
+                            "%.1f 张/秒 · batch %d"
+                            % (k, total, int(rng["start"]), int(rng["end"]), done_faces,
+                               (k - cursor) / el, done_faces / el, batch),
                             frames_done=k, frames_total=total,
                             frame_fps=round((k - cursor) / el, 2))
             if (gi - cursor) % 20 == 0:
@@ -7645,15 +7684,17 @@ def _stage_do_pred(cfg: dict) -> dict:
         "faces_per_sec": round(done_faces / sec, 2) if sec else None,
         "frame_fps": round((total - cursor) / sec, 2) if sec else None,
         "profile": prof_out, "batch_final": int(batch)})
-    _stage_log("换脸完成：%d 帧 · %d 张脸 · 未匹配 %d · 失败 %d · %.2f s · %.1f 张/秒 "
-               "（batch %d · 读 %d/写 %d 线程 · 每张 读 %.1f + 预处理 %.1f + 推理 %.1f + 写 %.1f ms）"
-               % (total, done_faces, unmatched, failed, sec,
-                  done_faces / sec if sec > 0 else 0.0, batch, readers, writers,
-                  prof_out["per_face_ms"]["read"], prof_out["per_face_ms"]["prep"],
+    _stage_log("换脸完成：第 %d..%d 帧（%d 帧）· %d 张脸 · 未匹配 %d · 失败 %d · %.2f s · "
+               "%.1f 张/秒（batch %d · 读 %d/写 %d 线程 · 每张 读 %.1f + 预处理 %.1f + "
+               "推理 %.1f + 写 %.1f ms）"
+               % (int(rng["start"]), int(rng["end"]), total, done_faces, unmatched,
+                  failed, sec, done_faces / sec if sec > 0 else 0.0, batch, readers,
+                  writers, prof_out["per_face_ms"]["read"], prof_out["per_face_ms"]["prep"],
                   prof_out["per_face_ms"]["infer"], prof_out["per_face_ms"]["write"]))
     return {"count": done_faces, "frames": total, "unmatched": unmatched, "failed": failed,
             "seconds": sec, "faces_per_sec": round(done_faces / sec, 2) if sec else None,
-            "batch": int(batch), "lane": "pipeline"}
+            "batch": int(batch), "lane": "pipeline",
+            "range": {"start": int(rng["start"]), "end": int(rng["end"])}}
 
 
 # ---------------- ④ 遮罩推理 ----------------
@@ -7793,13 +7834,18 @@ def _stage_do_mask(cfg: dict) -> dict:
     src = _mask_src(cfg.get("settings"), cfg.get("mask_mode"))
     cfg["mask_src"] = src
     sig = _mask_signature(src, cfg)
-    aligned = _stage_files(_stage_aligned_dir(cache), (".jpg", ".jpeg"))
-    if not aligned:
+    aligned_all = _stage_files(_stage_aligned_dir(cache), (".jpg", ".jpeg"))
+    if not aligned_all:
         raise _BadInput("aligned/ 里没有对齐脸 —— 先跑切脸（POST /api/merge/stage/faces）", 409)
     if not (meta["stages"].get("faces") or {}).get("done"):
         raise _BadInput("切脸（faces）还没完成 —— 先跑切脸，再补遮罩", 409)
     if not (meta["stages"].get("pred") or {}).get("done"):
         raise _BadInput("换脸（pred）还没完成 —— 遮罩阶段要用换脸后的正脸，先跑换脸", 409)
+    # 帧范围：只对 [start, end] 里的对齐脸推理（total/游标都按这一段的张数数）
+    rng = _stage_range(cfg)
+    rkey = str(cfg.get("range_key") or rng.get("key") or "")
+    rchg = bool(cfg.get("range_changed"))
+    aligned = _stage_filter_range(rng, aligned_all, lambda p: p.stem.split("_")[0])
     total = len(aligned)
     pred_dir = _stage_pred_dir(cache)
     mask_dir = _stage_mask_dir(cache)
@@ -7810,9 +7856,10 @@ def _stage_do_mask(cfg: dict) -> dict:
         raise _BadInput("遮罩来源变了（%s → %s）：mask/ 里的东西已经失效，"
                         "不能静默复用。传 force=true 重跑遮罩阶段"
                         % (st.get("signature"), sig), 409)
-    if (not cfg["force"]) and st.get("done") and st.get("signature") == sig \
+    if (not cfg["force"]) and not rchg and st.get("done") and st.get("signature") == sig \
             and int(st.get("done_frames") or 0) >= total:
-        _stage_log("遮罩：复用已有 %d 张遮罩（不重跑；要重做传 force=true）" % total)
+        _stage_log("遮罩：复用已有 %d 张遮罩（第 %d..%d 帧，不重跑；要重做传 force=true）"
+                   % (total, int(rng["start"]), int(rng["end"])))
         return {"skipped": True, "count": int(st.get("count") or 0), "reason": "already-done"}
 
     # ---- 按界面选择加载模型；后端 = TRT 有就用、没有就 onnxruntime（结论全部回显）----
@@ -7840,18 +7887,20 @@ def _stage_do_mask(cfg: dict) -> dict:
                        "（原因：%s）" % (model_label, Path(model_onnx).name,
                                         fallback or "未知"))
     engine = backend          # 老字段（导出/验收还在用它）—— 语义就是 trt|ort|none
-    cursor = 0 if cfg["force"] else max(0, min(int(st.get("done_frames") or 0), total))
+    cursor = 0 if (cfg["force"] or rchg) else max(0, min(int(st.get("done_frames") or 0), total))
     if cursor:
-        _stage_log("遮罩：从第 %d 张续跑（前 %d 张已经在）" % (cursor + 1, cursor))
-    _stage_log("遮罩：来源=%s · 模型=%s · 引擎=%s%s · %d 张对齐脸%s"
+        _stage_log("遮罩：从范围内第 %d 张续跑（前 %d 张已经在）" % (cursor + 1, cursor))
+    _stage_log("遮罩：来源=%s · 模型=%s · 引擎=%s%s · 第 %d..%d 帧（%d 张对齐脸）%s"
                % (src.get("label") or src.get("source"), model_label or "-", engine,
-                  ("(%s)" % engine_file) if engine_file else "", total,
+                  ("(%s)" % engine_file) if engine_file else "",
+                  int(rng["start"]), int(rng["end"]), total,
                   ("" if not src.get("model_note") else
                    " · 注意：" + str(src.get("model_note")))))
 
     t0 = time.time()
-    wrote = 0 if cfg.get("force") else int(st.get("count") or 0)   # 同上：force 从 0 数
-    if cfg.get("force"):
+    # force / 换范围 都从 0 数（游标和计数都相对范围）
+    wrote = 0 if (cfg.get("force") or rchg) else int(st.get("count") or 0)
+    if cfg.get("force") or rchg:
         st["count"] = 0
     failed = int(st.get("failed") or 0)
     means = []
@@ -7862,6 +7911,8 @@ def _stage_do_mask(cfg: dict) -> dict:
     def _save(up_to: int, done: bool = False, extra: dict = None):
         node = {
             "done": bool(done), "done_frames": int(up_to), "total": total,
+            "range": {"start": int(rng["start"]), "end": int(rng["end"])},
+            "range_key": rkey, "range_total": int(total),
             "count": wrote, "failed": failed, "signature": sig,
             "mask_source": src.get("label") or src.get("source"),
             "mask_model": str(src.get("model") or ""),
@@ -7874,9 +7925,11 @@ def _stage_do_mask(cfg: dict) -> dict:
             "fallback_reason": fallback,      # 没上 TRT 的一句话原因（有引擎时为空）
             "size": 256, "inference": (src["source"] == "xseg"),
             "dir": str(mask_dir), "resumed_from": int(cursor),
-            "msg": ("遮罩完成：%d 张脸（来源 %s）"
-                    % (wrote, src.get("label") or src.get("source"))) if done
-                   else ("遮罩 %d/%d 张" % (up_to, total)),
+            "msg": ("遮罩完成：%d 张脸（第 %d..%d 帧 · 来源 %s）"
+                    % (wrote, int(rng["start"]), int(rng["end"]),
+                       src.get("label") or src.get("source"))) if done
+                   else ("遮罩 %d/%d 张（第 %d..%d 帧）"
+                         % (up_to, total, int(rng["start"]), int(rng["end"]))),
         }
         if extra:
             node.update(extra)
@@ -7952,7 +8005,9 @@ def _stage_do_mask(cfg: dict) -> dict:
               _stage_log("遮罩跳过 %s：%s" % (key, str(e)[:140]))
           el = max(0.001, time.time() - t0)
           _stage_progress("mask", 100.0 * (k + 1) / total,
-                          "遮罩 %d/%d 张 · %.1f 张/秒" % (k + 1, total, (k + 1 - cursor) / el),
+                          "遮罩 %d/%d 张（第 %d..%d 帧）· %.1f 张/秒"
+                          % (k + 1, total, int(rng["start"]), int(rng["end"]),
+                             (k + 1 - cursor) / el),
                           frames_done=k + 1, frames_total=total,
                           frame_fps=round((k + 1 - cursor) / el, 2))
     except _StageCancel:
@@ -7970,8 +8025,10 @@ def _stage_do_mask(cfg: dict) -> dict:
         "infer_ms_per_face": (round(t_infer * 1000.0 / done_n, 3)
                               if src["source"] == "xseg" else 0.0),
     })
-    _stage_log("遮罩完成：%d 张 · 失败 %d · %.2f s · %.1f 张/秒 · 后端 %s%s · 来源 %s%s"
-               % (total, failed, sec, (total - cursor) / sec if sec > 0 else 0.0,
+    _stage_log("遮罩完成：第 %d..%d 帧 · %d 张 · 失败 %d · %.2f s · %.1f 张/秒 · "
+               "后端 %s%s · 来源 %s%s"
+               % (int(rng["start"]), int(rng["end"]), total, failed, sec,
+                  (total - cursor) / sec if sec > 0 else 0.0,
                   backend, ("(%s)" % engine_file) if engine_file else "",
                   src.get("label") or src.get("source"),
                   (" · 推理 %.2f ms/张" % (t_infer * 1000.0 / done_n))
@@ -7980,6 +8037,7 @@ def _stage_do_mask(cfg: dict) -> dict:
             "mask_source": src.get("label") or src.get("source"),
             "signature": sig, "engine": engine, "backend": backend,
             "engine_file": engine_file,
+            "range": {"start": int(rng["start"]), "end": int(rng["end"])},
             "infer_ms_per_face": (round(t_infer * 1000.0 / done_n, 3)
                                   if src["source"] == "xseg" else 0.0)}
 
@@ -8053,12 +8111,19 @@ def _stage_do_merge(cfg: dict) -> dict:
     cache = Path(cfg["cache"])
     meta = cfg["meta"]
     st = meta["stages"].setdefault("merge", {})
-    frames = _stage_files(_stage_frames_dir(cache))
-    if not frames:
+    frames_all = _stage_files(_stage_frames_dir(cache))
+    if not frames_all:
         raise _BadInput("frames/ 里没有帧图 —— 先跑切帧", 409)
+    # 帧范围：只覆盖 [start, end] 里的帧（就地覆盖 frames/，别的帧一个都不碰）
+    rng = _stage_range(cfg)
+    rkey = str(cfg.get("range_key") or rng.get("key") or "")
+    rchg = bool(cfg.get("range_changed"))
+    frames = _stage_filter_range(rng, frames_all)
     total = len(frames)
-    if (not cfg["force"]) and st.get("done") and int(st.get("done_frames") or 0) >= total:
-        _stage_log("合成：复用已完成的结果（%d 帧，不重跑）" % total)
+    if ((not cfg["force"]) and not rchg and st.get("done")
+            and int(st.get("done_frames") or 0) >= total and total):
+        _stage_log("合成：复用已完成的结果（第 %d..%d 帧，不重跑）"
+                   % (int(rng["start"]), int(rng["end"])))
         return {"skipped": True, "count": total, "reason": "already-done"}
     for need, label in (("faces", "切脸"), ("pred", "换脸"), ("mask", "遮罩")):
         if not (meta["stages"].get(need) or {}).get("done"):
@@ -8076,23 +8141,29 @@ def _stage_do_merge(cfg: dict) -> dict:
     for ap in aligned:
         by_frame.setdefault(ap.stem.split("_")[0], []).append(ap)
 
-    cursor = int(st.get("done_frames") or 0)
-    if cfg["force"] and not meta.get("frame_swapped"):
-        cursor = 0
+    # 游标 **相对范围**：0..total
+    cursor = 0 if (rchg or (cfg["force"] and not meta.get("frame_swapped"))) \
+        else int(st.get("done_frames") or 0)
     cursor = max(0, min(cursor, total))
     if meta.get("frame_swapped") and cursor == 0 and int(st.get("done_frames") or 0) == 0:
         raise _BadInput("frames/ 已经是合成结果（frame_swapped=true），但 meta 里没有续跑位置 —— "
                         "只能重跑切帧 + 切脸 + 换脸 + 遮罩", 409)
+    if meta.get("frame_swapped") and rchg:
+        _stage_log("合成：frames/ 已经就地合成过，这次换到第 %d..%d 帧 —— 这一段会在已合成的帧上"
+                   "再合成一次；要绝对干净请先 force 重切帧"
+                   % (int(rng["start"]), int(rng["end"])))
     if cursor:
-        _stage_log("合成：从第 %d 帧续跑（前 %d 帧已经是合成结果）" % (cursor + 1, cursor))
+        _stage_log("合成：从范围内第 %d 帧续跑（前 %d 帧已经是合成结果）" % (cursor + 1, cursor))
 
     meta["frame_swapped"] = True
     comp_cfg = dict(cfg.get("config") or {})
     comp_cfg["mask_mode"] = int((cfg.get("settings") or {}).get("mask_mode", 6) or 0)
     threads = max(1, int(cfg.get("merge_threads") or 4))
     png_level = int(cfg.get("png_level") if cfg.get("png_level") is not None else 1)
-    _stage_log("合成（纯 CPU）：%d 帧 · 遮罩 %s/%s · ct=%s · blend=%s · %d 线程 · PNG level %d"
-               % (total, src.get("label") or src.get("source"),
+    _stage_log("合成（纯 CPU）：第 %d..%d 帧（%d 帧）· 遮罩 %s/%s · ct=%s · blend=%s · "
+               "%d 线程 · PNG level %d"
+               % (int(rng["start"]), int(rng["end"]), total,
+                  src.get("label") or src.get("source"),
                   comp_cfg.get("mask_mode"), comp_cfg.get("color_transfer_mode"),
                   comp_cfg.get("mode"), threads, png_level))
 
@@ -8116,6 +8187,9 @@ def _stage_do_merge(cfg: dict) -> dict:
     def _save(up_to: int, done: bool = False, extra: dict = None):
         node = {
             "done": bool(done), "done_frames": int(up_to), "frames": total,
+            "frames_all": len(frames_all),
+            "range": {"start": int(rng["start"]), "end": int(rng["end"])},
+            "range_key": rkey, "range_total": int(total),
             "swapped": swapped, "copied": copied, "no_face": no_face, "failed": failed,
             "resumed_from": int(start_cursor), "in_place": True,
             "aligned_faces": len(aligned), "pure_cpu": True,
@@ -8124,8 +8198,10 @@ def _stage_do_merge(cfg: dict) -> dict:
             "ct_mode": comp_cfg.get("color_transfer_mode"),
             "blend": comp_cfg.get("mode"),
             "profile": {k: round(float(v), 2) for k, v in prof.items()},
-            "msg": ("合成完成：%d 帧（换脸 %d · 原样 %d）" % (total, swapped, copied)) if done
-                   else ("合成 %d/%d 帧" % (up_to, total)),
+            "msg": ("合成完成：第 %d..%d 帧（%d 帧 · 换脸 %d · 原样 %d）"
+                    % (int(rng["start"]), int(rng["end"]), total, swapped, copied)) if done
+                   else ("合成 %d/%d 帧（第 %d..%d 帧）"
+                         % (up_to, total, int(rng["start"]), int(rng["end"]))),
         }
         if extra:
             node.update(extra)
@@ -8194,8 +8270,9 @@ def _stage_do_merge(cfg: dict) -> dict:
             n = max(1, prof["frames"] - cursor)
             _stage_progress(
                 "merge", 100.0 * prog["done"] / total,
-                "合成 %d/%d 帧 · %.1f 帧/秒（换脸 %d · 原样 %d）"
-                % (prog["done"], total, rate, swapped, copied),
+                "合成 %d/%d 帧（第 %d..%d 帧）· %.1f 帧/秒（换脸 %d · 原样 %d）"
+                % (prog["done"], total, int(rng["start"]), int(rng["end"]),
+                   rate, swapped, copied),
                 frames_done=prog["done"], frames_total=total,
                 frame_fps=round(rate, 2), eta_s=eta,
                 swapped=swapped, copied=copied, no_face=no_face,
@@ -8231,8 +8308,10 @@ def _stage_do_merge(cfg: dict) -> dict:
     }
     _save(total, done=True, extra={"seconds": sec, "profile": prof_out,
                                    "fps": fps, "inference_calls": infer_n})
-    _stage_log("合成完成：%d 帧（换脸 %d · 原样 %d，无人脸 %d · 失败 %d）· %.2f s · %.2f 帧/秒"
-               % (total, swapped, copied, no_face, failed, sec, fps))
+    _stage_log("合成完成：第 %d..%d 帧（%d 帧 · 换脸 %d · 原样 %d，无人脸 %d · 失败 %d）· "
+               "%.2f s · %.2f 帧/秒"
+               % (int(rng["start"]), int(rng["end"]), total, swapped, copied,
+                  no_face, failed, sec, fps))
     _stage_log("合成 profile（每帧 ms）：%s"
                % " · ".join("%s=%.2f" % (k, v) for k, v in per.items()))
     _stage_log("合成阶段推理调用：%d（必须为 0）· 显存 %s → %s MB"
@@ -8241,6 +8320,7 @@ def _stage_do_merge(cfg: dict) -> dict:
         _stage_log("警告：合成阶段发生了 %d 次推理 —— 违反「纯 CPU」约定" % infer_n)
     return {"count": total, "swapped": swapped, "copied": copied, "no_face": no_face,
             "failed": failed, "seconds": sec, "fps": fps,
+            "range": {"start": int(rng["start"]), "end": int(rng["end"])},
             "inference_calls": infer_n, "profile": per}
 
 
@@ -8256,18 +8336,27 @@ def _stage_do_encode(cfg: dict) -> dict:
     video = Path(cfg["video"])
     meta = cfg["meta"]
     st = meta["stages"].setdefault("encode", {})
-    frames = _stage_files(_stage_frames_dir(cache))
-    if not frames:
+    frames_all = _stage_files(_stage_frames_dir(cache))
+    if not frames_all:
         raise _BadInput("frames/ 里没有帧图 —— 先跑合成", 409)
+    # 帧范围：只编码 [start, end] 里的帧 -> 成片时长 = N / fps；音轨从源视频同一位置切
+    rng = _stage_range(cfg)
+    rkey = str(cfg.get("range_key") or rng.get("key") or "")
+    rchg = bool(cfg.get("range_changed"))
+    frames = _stage_filter_range(rng, frames_all)
     total = len(frames)
     out = Path(cfg["out"])
     if _same_path(out, video):
         raise _BadInput("输出不能是源视频本身：%s" % out)
-    if (not cfg["force"]) and st.get("done") and out.is_file() and out.stat().st_size > 0:
+    if ((not cfg["force"]) and not rchg and st.get("done")
+            and out.is_file() and out.stat().st_size > 0):
         _stage_log("导出：复用已有成片 %s（不重跑）" % out)
         return {"skipped": True, "count": total, "out": str(out), "reason": "already-done"}
     if not (meta["stages"].get("merge") or {}).get("done"):
         raise _BadInput("合成（merge）还没完成——现在导出会得到一版没换脸的成片。先跑合成", 409)
+    if not frames:
+        raise _BadInput("frames/ 里没有第 %d..%d 帧 —— 这个范围超出了已切好的帧"
+                        % (int(rng["start"]), int(rng["end"])), 409)
 
     fps = float(cfg.get("fps") or (meta.get("source") or {}).get("fps") or 30.0)
     try:
@@ -8278,20 +8367,32 @@ def _stage_do_encode(cfg: dict) -> dict:
 
     ffmpeg = str(_app_mod._ffmpeg_exe())
     pattern = str(_stage_frames_dir(cache) / "%06d.png")
+    # 范围内的第一帧帧号（frames/ 是 000001.png 起的定长序号）
+    start_no = (_stage_frame_index(frames[0].stem) or int(rng["start"])) if frames else int(rng["start"])
+    dur = (total / fps) if fps > 0 else 0.0
+    t0_audio = ((start_no - 1) / fps) if fps > 0 else 0.0
+    # 全片：命令和以前一模一样（回归靠它）；有范围才加 -start_number / -frames:v / -ss / -t
+    pre_img = ["-start_number", "1"] if rng["full"] else ["-start_number", str(int(start_no))]
+    pre_aud = [] if rng["full"] else ["-ss", "%.6f" % t0_audio, "-t", "%.6f" % dur]
+    lim = [] if rng["full"] else ["-frames:v", str(int(total))]
     cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-nostats", "-nostdin",
-           "-framerate", "%.6g" % fps, "-start_number", "1", "-i", pattern,
-           "-i", str(video),
+           "-framerate", "%.6g" % fps] + pre_img + ["-i", pattern] + \
+          pre_aud + ["-i", str(video),
            "-map", "0:v:0", "-map", "1:a?",
            # 奇数宽高在 yuv420p 下会被 x264 拒绝，垫一像素最省事；
            # PNG 帧是 full range，显式转 limited，否则成片会被标成 yuvj420p。
            "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2,scale=out_range=tv",
            "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p",
-           "-c:a", "copy"]
+           "-c:a", "copy"] + lim
     if out.suffix.lower() in (".mp4", ".mov", ".m4v"):
         cmd += ["-movflags", "+faststart"]
     cmd += ["-progress", "pipe:1", str(part)]
 
-    _stage_log("导出：%d 帧 @ %.6g fps -> %s" % (total, fps, out.name))
+    _stage_log("导出：第 %d..%d 帧（%d 帧 @ %.6g fps · 时长 %.4f s）-> %s"
+               % (int(start_no), int(start_no) + total - 1, total, fps, dur, out.name))
+    if not rng["full"]:
+        _stage_log("导出：音轨从源视频 %.4f s 起 copy、长 %.4f s（帧边界误差 ≤ 1 帧）"
+                   % (t0_audio, dur))
     t0 = time.time()
     err_path = None
     code = -1
@@ -8349,18 +8450,28 @@ def _stage_do_encode(cfg: dict) -> dict:
     mb = round(out.stat().st_size / 1048576.0, 2)
     meta["stages"]["encode"] = {
         "done": True, "count": total, "seconds": sec, "out": str(out), "mb": mb,
-        "fps": fps, "crf": 16, "pix_fmt": "yuv420p", "range": "tv", "audio": "copy",
+        "fps": fps, "crf": 16, "pix_fmt": "yuv420p",
+        # 老字段 range = **色彩范围**（tv），别和帧范围混：帧范围在 frame_range/range_key
+        "range": "tv", "color_range": "tv",
+        "frame_range": {"start": int(start_no), "end": int(start_no) + total - 1},
+        "range_key": rkey, "range_total": int(total),
+        "duration": round(dur, 6), "audio_ss": round(t0_audio, 6), "audio": "copy",
         "finished_at": time.time(),
-        "msg": "导出完成：%s（%.2f MB）" % (out.name, mb),
+        "msg": "导出完成：%s（%.2f MB · 第 %d..%d 帧 · %.3f s）" % (
+            out.name, mb, int(start_no), int(start_no) + total - 1, dur),
     }
     _stage_meta_save(cache, meta)
-    _stage_log("导出完成：%s（%.2f MB · %.2f s）" % (out, mb, sec))
+    _stage_log("导出完成：%s（%.2f MB · %.2f s · %d 帧 · 时长 %.4f s）"
+               % (out, mb, sec, total, dur))
     _stage_log("编码命令：%s" % " ".join('"%s"' % a if " " in str(a) else str(a) for a in cmd))
 
     # ---- cache 的一生：成功导出 = 这份缓存没用了，删干净 ----
     removed = _stage_drop_cache(cfg)
     _stage_set(cache_removed=removed)
     return {"count": total, "out": str(out), "seconds": sec, "mb": mb,
+            "duration": round(dur, 6), "start_frame": int(start_no),
+            "end_frame": int(start_no) + total - 1,
+            "range": {"start": int(rng["start"]), "end": int(rng["end"])},
             "cache_removed": removed}
 
 
@@ -8396,6 +8507,143 @@ _PRED_BATCH_DEFAULT = max(0, int(_PRED_BATCH_ENV)) if _PRED_BATCH_ENV.isdigit() 
 _MERGE_THREADS_DEFAULT = max(1, int(str(os.environ.get("DFL_MERGE_THREADS")
                                      or max(4, min(8, (os.cpu_count() or 4) // 4))).strip()))
 _MERGE_PNG_LEVEL = max(0, min(9, int(str(os.environ.get("DFL_MERGE_PNG_LEVEL") or "1").strip() or 1)))
+
+
+# ---------------- 帧范围（1 起、闭区间） ----------------
+# 方案 B：**切帧仍然整段**（索引完整、成本极低），后面五个阶段只处理 [start, end]。
+# 口径：都不传 = 全片；只给 start = start..结尾；只给 end = 1..end。
+# 为什么 frames 也记 range：界面/验收/续跑都要能一眼看出「这一段是哪一段」，
+# 而且下游阶段的指纹要带上范围 —— 改了范围，已经跑完的产物必须重跑。
+_RANGE_START_KEYS = ("start_frame", "frame_start")
+_RANGE_END_KEYS = ("end_frame", "frame_end")
+
+
+def _range_int(name: str, raw):
+    """帧范围里的一个数：None/空 -> None；不是整数 -> 422（不静默兜底）。"""
+    if raw is None:
+        return None
+    if isinstance(raw, str) and not raw.strip():
+        return None
+    text = str(raw).strip()
+    try:
+        return int(text, 10)
+    except (TypeError, ValueError):
+        pass
+    try:
+        f = float(text)
+    except (TypeError, ValueError):
+        raise _BadInput("帧范围的 %s 要是整数，收到 %r" % (name, raw), 422)
+    if not f.is_integer():
+        raise _BadInput("帧范围的 %s 要是整数，收到 %r" % (name, raw), 422)
+    return int(f)
+
+
+def _stage_range_raw(body: dict) -> tuple:
+    """请求体 -> (start_raw, end_raw)。认 start_frame/end_frame、frame_start/frame_end、range{}。"""
+    body = _as_dict(body)
+    s = e = None
+    nested = body.get("range")
+    if isinstance(nested, dict):
+        s = nested.get("start", nested.get("start_frame"))
+        e = nested.get("end", nested.get("end_frame"))
+    if s is None:
+        for k in _RANGE_START_KEYS:
+            if body.get(k) is not None:
+                s = body.get(k)
+                break
+    if e is None:
+        for k in _RANGE_END_KEYS:
+            if body.get(k) is not None:
+                e = body.get(k)
+                break
+    return s, e
+
+
+def _stage_range_norm(body: dict, total: int) -> dict:
+    """请求体 + 源视频总帧数 -> {"start","end","total","all","full","key"}（1 起、闭区间）。
+
+    非法输入一律 422，并说清楚是哪一条不对（调用方只负责把它原样回给界面）：
+      start < 1 / end < 1 / start > end / end > 源总帧数。
+    """
+    total = int(total or 0)
+    raw_s, raw_e = _stage_range_raw(body)
+    s = _range_int("start_frame", raw_s)
+    e = _range_int("end_frame", raw_e)
+    if s is None and e is None:
+        s, e = 1, (total if total > 0 else 0)
+    else:
+        if total <= 0:
+            raise _BadInput("拿不到源视频的总帧数，没法按帧范围校验（先确认这个视频能解码）", 422)
+        s = 1 if s is None else int(s)
+        e = total if e is None else int(e)
+        if s < 1:
+            raise _BadInput("start_frame 从 1 数起，收到 %d" % s, 422)
+        if e < 1:
+            raise _BadInput("end_frame 从 1 数起，收到 %d" % e, 422)
+        if s > e:
+            raise _BadInput("帧范围反了：start_frame=%d > end_frame=%d" % (s, e), 422)
+        if e > total:
+            raise _BadInput("end_frame=%d 超过源视频总帧数 %d" % (e, total), 422)
+    n = (int(e) - int(s) + 1) if (int(s) >= 1 and int(e) >= int(s)) else total
+    full = bool(total > 0 and int(s) <= 1 and int(e) >= total) or \
+        bool(total <= 0 and int(s) <= 1 and int(e) <= 0)
+    return {"start": int(s), "end": int(e), "total": int(n), "all": total,
+            "full": bool(full),
+            "key": ("%d-%d" % (int(s), int(e))) if int(e) >= int(s) else "all"}
+
+
+def _stage_range(cfg: dict) -> dict:
+    """cfg -> 这次的帧范围（老 cfg / 没配就是全片）。"""
+    r = cfg.get("range")
+    if isinstance(r, dict) and r.get("start") is not None:
+        return r
+    total = int(cfg.get("total") or 0)
+    return {"start": 1, "end": total, "total": total, "all": total,
+            "full": True, "key": "all"}
+
+
+def _stage_sync_range(cfg: dict, stage: str) -> bool:
+    """把「这个阶段上一次跑的范围 vs 这次要的范围」算清楚，写回 cfg["range_changed"]。
+
+    改了范围 = 阶段指纹变了：旧游标（相对旧范围数的）作废，这一段要重跑。
+    幂等：precheck（单阶段 API）和 worker（链式导出）都调用它，两边口径永远一致。
+    切帧永远整段，不存在「范围变了」。
+    """
+    rng = _stage_range(cfg)
+    rkey = str(cfg.get("range_key") or rng.get("key") or "")
+    st = ((cfg.get("meta") or {}).get("stages") or {}).get(stage) or {}
+    old = str(st.get("range_key") or "")
+    chg = bool(old) and old != rkey and stage != "frames"
+    cfg["range_changed"] = bool(chg)
+    return chg
+
+
+def _stage_frame_index(key) -> int:
+    """帧键（000123 / 000123_00 / Path）-> 1 起的帧号；认不出来返回 0。"""
+    name = key.stem if isinstance(key, Path) else str(key or "")
+    head = name.split("_")[0].strip()
+    try:
+        return int(head, 10)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _stage_in_range(rng: dict, key) -> bool:
+    """这一帧在范围内吗。帧号认不出来的一律**保留**（宁可多跑一次，别把产物漏掉）。"""
+    i = _stage_frame_index(key)
+    if i <= 0:
+        return True
+    return int(rng["start"]) <= i <= int(rng["end"])
+
+
+def _stage_filter_range(rng: dict, paths, keyfn=None) -> list:
+    """按帧范围过滤一列文件（默认用 stem，对齐脸传 keyfn 取 000123_00 的前半段）。"""
+    out = []
+    for p in paths:
+        k = keyfn(p) if keyfn else p
+        if _stage_in_range(rng, k):
+            out.append(p)
+    return out
 
 
 def _stage_dfm_pair(body: dict, need: bool):
@@ -8439,6 +8687,9 @@ def _stage_cfg(body: dict, stage: str, chain: bool = False) -> dict:
         raise _BadInput("cache 目录建不出来：%s（%s）" % (cache, e))
 
     probe = _vid_probe(video)
+    # 帧范围：1 起、闭区间；都不传 = 全片。非法（start>end / start<1 / end>总帧数）一律 422。
+    rng = _stage_range_norm(body, int(probe.get("frames") or 0))
+    rkey = str(rng["key"])
     settings = _settings_val(body.get("settings"))
     meta = _stage_meta_load(cache)
     if not meta:
@@ -8446,24 +8697,35 @@ def _stage_cfg(body: dict, stage: str, chain: bool = False) -> dict:
     meta = _stage_meta_ready(meta, video, probe)
     if settings:
         meta["settings"] = dict(settings)
+    # 范围进 meta（界面/验收/续跑都读它）；只有真的变了才写盘，别每次点都改 meta。
+    prev_rng = meta.get("range") if isinstance(meta.get("range"), dict) else {}
+    meta["range"] = {"start": int(rng["start"]), "end": int(rng["end"]),
+                     "total": int(rng["total"]), "frames": int(rng["all"]),
+                     "full": bool(rng["full"]), "key": rkey}
+    if (int(prev_rng.get("start") or 0) != int(rng["start"])
+            or int(prev_rng.get("end") or 0) != int(rng["end"])
+            or int(prev_rng.get("frames") or 0) != int(rng["all"])):
+        _stage_meta_save(cache, meta)
 
     fps = _float_val("fps", body.get("fps"), 1.0, 240.0, None)
     dfm, model_name = _stage_dfm_pair(body, need=(stage == "merge"))
     xseg = _xseg_of(body)
 
+    # 输出文件名带范围后缀（xxx_merged_0100-0200.mp4），免得把全片结果盖掉；全片不带。
+    tag = "" if rng["full"] else "_%04d-%04d" % (int(rng["start"]), int(rng["end"]))
     out_raw = str(body.get("output_dir") or body.get("output") or "").strip()
     if out_raw:
         op = _norm_path(out_raw)
         if op is None:
             raise _BadInput("output_dir 不合法：%s" % out_raw)
         if op.suffix.lower() == ".mp4":
-            out = op
+            out = op if not tag else op.with_name(op.stem + tag + op.suffix)
         else:
             if op.exists() and op.is_file():
                 raise _BadInput("输出路径是一个已存在的文件：%s（要目录或 .mp4）" % op)
-            out = op / (video.stem + "_merged.mp4")
+            out = op / (video.stem + "_merged" + tag + ".mp4")
     else:
-        out = video.parent / (video.stem + "_merged.mp4")
+        out = video.parent / (video.stem + "_merged" + tag + ".mp4")
     if out.is_dir():
         raise _BadInput("输出路径是个目录：%s（要 .mp4 文件）" % out)
 
@@ -8490,6 +8752,9 @@ def _stage_cfg(body: dict, stage: str, chain: bool = False) -> dict:
     return {
         "video": str(video), "cache": str(cache), "out": str(out),
         "total": int(probe.get("frames") or 0),
+        # 帧范围（1 起闭区间）：range_total = 后五个阶段真正要处理的帧数
+        "range": rng, "range_key": rkey, "range_total": int(rng["total"]),
+        "range_full": bool(rng["full"]), "range_changed": False,
         "fps": float(fps if fps else (probe.get("fps") or 0.0)),
         "probe": probe, "settings": dict(settings), "meta": meta,
         "force": bool(_bool_val(body.get("force"), False)),
@@ -8524,9 +8789,16 @@ def _stage_precheck(cfg: dict, stage: str) -> dict:
     cache = Path(cfg["cache"])
     meta = cfg["meta"]
     frames = _stage_files(_stage_frames_dir(cache))
-    aligned = _stage_files(_stage_aligned_dir(cache), (".jpg", ".jpeg"))
+    aligned_all = _stage_files(_stage_aligned_dir(cache), (".jpg", ".jpeg"))
+    # 帧范围：后五个阶段只认 [start, end] 里的帧；下面的 skip / 覆盖判定全按范围内的数算
+    rng = _stage_range(cfg)
+    frames_in = _stage_filter_range(rng, frames)
+    aligned = _stage_filter_range(rng, aligned_all, lambda p: p.stem.split("_")[0])
     st = meta["stages"].get(stage) or {}
     force = bool(cfg.get("force"))
+    # 上一次这个阶段跑的是另一段范围 -> 旧游标（相对旧范围数）作废：自动重跑，不是 409。
+    # 产物是按帧号落盘的，换了范围就把这段重算一遍 —— 日志里会说清楚（见 merge_stage）。
+    chg = _stage_sync_range(cfg, stage)
 
     def _need(stage_name: str, why: str = ""):
         if not (meta["stages"].get(stage_name) or {}).get("done"):
@@ -8534,6 +8806,20 @@ def _stage_precheck(cfg: dict, stage: str) -> dict:
                             % (_STAGE_LABEL.get(stage_name, stage_name),
                                _STAGE_LABEL.get(stage_name, stage_name), stage_name,
                                ("：" + why) if why else ""), 409)
+
+    def _gap(up: str, label: str):
+        """上游阶段只跑过某一段：盖不住这次要的范围就 409，并点名要重跑哪一个。"""
+        ust = meta["stages"].get(up) or {}
+        u = ust.get("range") if isinstance(ust.get("range"), dict) else {}
+        if not u or up == "frames":
+            return                       # frames 永远整段切；老 meta 没写范围 = 整段
+        us = int(u.get("start") or 1)
+        ue = int(u.get("end") or 0)
+        if us <= int(rng["start"]) and (ue <= 0 or ue >= int(rng["end"])):
+            return
+        raise _BadInput("%s只处理了第 %d..%d 帧，这次要第 %d..%d 帧 —— 先用同样的范围重跑%s"
+                        "（force=true），别拿别的范围的结果凑"
+                        % (label, us, ue, int(rng["start"]), int(rng["end"]), label), 409)
 
     if stage == "frames":
         # 「已经切完了」先判：续跑时 frames 往往已经被合成结果覆盖过，
@@ -8551,7 +8837,8 @@ def _stage_precheck(cfg: dict, stage: str) -> dict:
     if stage == "faces":
         if not frames:
             raise _BadInput("frames/ 是空的 —— 先跑切帧（POST /api/merge/stage/frames）", 409)
-        if (st.get("done") and not force and int(st.get("frames") or 0) == len(frames) and aligned):
+        if (st.get("done") and not force and not chg
+                and int(st.get("frames") or 0) == len(frames) and aligned_all):
             return {"skip": True, "reason": "already-done", "count": len(aligned)}
         return {"skip": False}
 
@@ -8559,18 +8846,23 @@ def _stage_precheck(cfg: dict, stage: str) -> dict:
         if not frames:
             raise _BadInput("frames/ 是空的 —— 先跑切帧（POST /api/merge/stage/frames）", 409)
         _need("faces")
+        _gap("faces", "切脸")
         if not aligned:
-            raise _BadInput("aligned/ 里没有对齐脸 —— 先跑切脸", 409)
+            raise _BadInput("aligned/ 里没有第 %d..%d 帧的对齐脸 —— 先用同样的范围跑切脸"
+                            % (int(rng["start"]), int(rng["end"])), 409)
         groups = len(_stage_face_rows(aligned))
-        if (st.get("done") and not force and int(st.get("done_frames") or 0) >= groups):
+        if (st.get("done") and not force and not chg and int(st.get("done_frames") or 0) >= groups):
             return {"skip": True, "reason": "already-done", "count": int(st.get("count") or 0)}
         return {"skip": False}
 
     if stage == "mask":
         _need("faces")
         _need("pred", "遮罩阶段要拿换脸结果去跑 XSeg")
+        _gap("faces", "切脸")
+        _gap("pred", "换脸")
         if not aligned:
-            raise _BadInput("aligned/ 里没有对齐脸 —— 先跑切脸", 409)
+            raise _BadInput("aligned/ 里没有第 %d..%d 帧的对齐脸 —— 先用同样的范围跑切脸"
+                            % (int(rng["start"]), int(rng["end"])), 409)
         src = _mask_src(cfg.get("settings"), cfg.get("mask_mode"))
         sig = _mask_signature(src, cfg)
         cfg["mask_src"] = src
@@ -8578,7 +8870,7 @@ def _stage_precheck(cfg: dict, stage: str) -> dict:
                 and int(st.get("done_frames") or 0) > 0):
             raise _BadInput("遮罩来源变了（%s → %s）：mask/ 里的东西已经失效，不能静默复用。"
                             "传 force=true 重跑遮罩阶段" % (st.get("signature"), sig), 409)
-        if (st.get("done") and not force and st.get("signature") == sig
+        if (st.get("done") and not force and not chg and st.get("signature") == sig
                 and int(st.get("done_frames") or 0) >= len(aligned)):
             return {"skip": True, "reason": "already-done", "count": int(st.get("count") or 0)}
         return {"skip": False}
@@ -8586,17 +8878,23 @@ def _stage_precheck(cfg: dict, stage: str) -> dict:
     if stage == "merge":
         if not frames:
             raise _BadInput("frames/ 是空的 —— 先跑切帧", 409)
+        if not frames_in:
+            raise _BadInput("frames/ 里没有第 %d..%d 帧 —— 这个范围超出了已切好的帧"
+                            % (int(rng["start"]), int(rng["end"])), 409)
         _need("faces")
         _need("pred")
         _need("mask")
+        _gap("faces", "切脸")
+        _gap("pred", "换脸")
+        _gap("mask", "遮罩")
         src = _mask_src(cfg.get("settings"), cfg.get("mask_mode"))
         sig = _mask_signature(src, cfg)
         mst = meta["stages"].get("mask") or {}
         if mst.get("signature") and mst.get("signature") != sig:
             raise _BadInput("遮罩来源变了（mask/ 是 %s 产出的，现在是 %s）—— 先重跑遮罩阶段"
                             "（force=true），别拿旧遮罩合成" % (mst.get("signature"), sig), 409)
-        if st.get("done") and not force:
-            return {"skip": True, "reason": "already-done", "count": len(frames)}
+        if st.get("done") and not force and not chg:
+            return {"skip": True, "reason": "already-done", "count": len(frames_in)}
         if meta.get("frame_swapped") and int(st.get("done_frames") or 0) == 0:
             raise _BadInput("frames/ 已经是合成结果（frame_swapped=true）但没有续跑位置 —— "
                             "只能重跑切帧 + 切脸 + 换脸 + 遮罩", 409)
@@ -8605,10 +8903,14 @@ def _stage_precheck(cfg: dict, stage: str) -> dict:
     if stage == "encode":
         if not frames:
             raise _BadInput("frames/ 是空的 —— 先跑切帧 + 合成", 409)
+        if not frames_in:
+            raise _BadInput("frames/ 里没有第 %d..%d 帧 —— 这个范围超出了已切好的帧"
+                            % (int(rng["start"]), int(rng["end"])), 409)
         _need("merge")
+        _gap("merge", "合成")
         out = Path(cfg["out"])
-        if st.get("done") and out.is_file() and out.stat().st_size > 0 and not force:
-            return {"skip": True, "reason": "already-done", "count": len(frames)}
+        if st.get("done") and out.is_file() and out.stat().st_size > 0 and not force and not chg:
+            return {"skip": True, "reason": "already-done", "count": len(frames_in)}
         return {"skip": False}
 
     return {"skip": False}
@@ -8665,6 +8967,10 @@ def _stage_brief_meta(cfg: dict, extra: dict = None) -> dict:
         "align_detector": str(cfg.get("det_align") or ""),
         "fps": float(cfg.get("fps") or 0.0),
         "total": int(cfg.get("total") or 0),
+        # 帧范围：range 是这次要处理的一段，range_total = 这一段多少帧（相对进度的分母）
+        "range": dict(cfg.get("range") or {}),
+        "range_total": int(cfg.get("range_total") or 0),
+        "range_changed": bool(cfg.get("range_changed")),
         "settings": dict(cfg.get("settings") or {}),
     }
     if extra:
@@ -8680,6 +8986,8 @@ def _stage_worker(cfg: dict):
     try:
         for stage in stages:
             _stage_check_cancel()
+            # 链式导出不走 precheck：范围指纹/游标失效必须在这里也算一遍（和单阶段口径一致）
+            _stage_sync_range(cfg, stage)
             _stage_log("===== 阶段 %s（%s）开始 =====" % (stage, _STAGE_LABEL.get(stage, stage)))
             t0 = time.time()
             res = _STAGE_FN[stage](cfg) or {}
@@ -8816,6 +9124,7 @@ def merge_stage_status(cache_dir: str = "", video: str = ""):
                 cache = str(cand)
     counts = _stage_counts(cache) if cache else {"frames": 0, "faces": 0}
     stages = _stage_stages_meta(meta)
+    rng_m = meta.get("range") if isinstance(meta.get("range"), dict) else {}
     out = {
         "ok": (True if running else ok), "success": (None if running else ok),
         "phase": phase, "running": running, "cancelled": cancelled,
@@ -8831,7 +9140,16 @@ def merge_stage_status(cache_dir: str = "", video: str = ""):
         "cache_exists": bool(cache) and Path(cache).exists(),
         "cache_removed": bool(snap.get("cache_removed")),
         "out_video": str(snap.get("out_video") or ""),
-        "frames_total": int(snap.get("frames_total") or counts["frames"] or 0),
+        # 帧范围 + **相对进度**：frames_total/frames_done 都是「这一段」里的数
+        "range": dict(rng_m),
+        "range_key": str(rng_m.get("key") or ""),
+        "range_total": int(rng_m.get("total") or 0),
+        # 每个阶段各自真正处理过的那一段（encode 的 range 是色彩范围，另给 frame_range）
+        "stage_ranges": {k: dict((v or {}).get("range") or {})
+                         for k, v in stages.items()
+                         if isinstance((v or {}).get("range"), dict)},
+        "frames_total": int(snap.get("frames_total") or rng_m.get("total")
+                            or counts["frames"] or 0),
         "frames_done": int(snap.get("frames_done") or 0),
         "frame_fps": float(snap.get("frame_fps") or 0.0),
         "eta_s": snap.get("eta_s"),
@@ -8922,6 +9240,8 @@ def merge_stage(name: str, body: dict = None):
                    pct=100, msg="%s 已完成，跳过" % _STAGE_LABEL.get(stage, stage),
                    video=str(cfg["video"]), cache_dir=str(cfg["cache"]),
                    out_video=str(cfg["out"]), meta=cfg["meta"],
+                   range=dict(cfg.get("range") or {}),
+                   frames_total=int(cfg.get("range_total") or 0),
                    stages_done=_stage_done_list(cfg["meta"]),
                    counts=_stage_counts(cfg["cache"]),
                    started_at=None, finished_at=time.time())
@@ -8929,6 +9249,9 @@ def merge_stage(name: str, body: dict = None):
                    skipped_why=str(plan.get("skipped_why") or ""),
                    **_stage_brief_meta(cfg))
 
+    # 线程起来之后 meta 会被 worker 改：范围日志要用的旧指纹先在这里取好
+    old_key = str(((cfg.get("meta") or {}).get("stages", {}).get(stage) or {})
+                  .get("range_key") or "all")
     with _STAGE_LOCK:
         _STAGE_JOB.update({
             "running": True, "ok": None, "cancelled": False, "error": "",
@@ -8936,7 +9259,10 @@ def merge_stage(name: str, body: dict = None):
             "stage_index": _STAGE_ORDER.index(stage), "stage_pct": 0, "pct": 0,
             "msg": "%s 启动…" % _STAGE_LABEL.get(stage, stage),
             "video": str(cfg["video"]), "cache_dir": str(cfg["cache"]),
-            "out_video": str(cfg["out"]), "frames_total": int(cfg.get("total") or 0),
+            "out_video": str(cfg["out"]),
+            # 进度一律**相对范围**：frames_total = 这一段要处理的帧数（frames 阶段才是全片）
+            "frames_total": int(cfg.get("range_total") or cfg.get("total") or 0),
+            "range": dict(cfg.get("range") or {}),
             "frames_done": 0, "frame_fps": 0.0, "eta_s": None, "swapped": 0,
             "copied": 0, "no_face": 0, "stages_done": _stage_done_list(cfg["meta"]),
             "log": [], "meta": cfg["meta"], "seconds": {}, "skipped": [],
@@ -8947,7 +9273,15 @@ def merge_stage(name: str, body: dict = None):
         })
     threading.Thread(target=_stage_worker, args=(cfg,), daemon=True,
                      name="merge-stage-%s" % stage).start()
+    rng = cfg.get("range") or {}
     _stage_log("阶段 %s 启动：%s -> %s" % (stage, cfg["video"], cfg["cache"]))
+    _stage_log("帧范围：第 %s..%s 帧（共 %s 帧）%s"
+               % (rng.get("start"), rng.get("end"), rng.get("total"),
+                  "· 全片" if rng.get("full") else "· 只处理这一段"))
+    if cfg.get("range_changed"):
+        _stage_log("范围变了：%s 上一次跑的是另一段范围（指纹 %s → %s），旧游标作废，"
+                   "本次从范围内第 1 帧重跑"
+                   % (_STAGE_LABEL.get(stage, stage), old_key, cfg.get("range_key")))
     return _ok(started=True, skipped=False, **_stage_brief_meta(cfg))
 
 def _start_video_export(body: dict):
@@ -8985,7 +9319,8 @@ def _start_video_export(body: dict):
             "phase": "running", "stage": "frames", "stage_index": 0, "stage_pct": 0,
             "pct": 0, "msg": "启动导出（分段）…", "video": str(cfg["video"]),
             "cache_dir": str(cfg["cache"]), "out_video": str(cfg["out"]),
-            "frames_total": int(cfg.get("total") or 0), "frames_done": 0,
+            "frames_total": int(cfg.get("range_total") or cfg.get("total") or 0),
+            "range": dict(cfg.get("range") or {}), "frames_done": 0,
             "frame_fps": 0.0, "eta_s": None, "swapped": 0, "copied": 0, "no_face": 0,
             "stages_done": _stage_done_list(cfg["meta"]), "log": [], "meta": cfg["meta"],
             "seconds": {}, "skipped": [], "cache_removed": False,
