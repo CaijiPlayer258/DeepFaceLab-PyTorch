@@ -166,7 +166,11 @@ staging（硬链接）→ 载入 DFM → 逐帧合成 → ffmpeg 编码 → 清�
 
 - **逐帧合成不另写一套**：走的就是单帧预览的 `_preview_job`（`routes_merge.py`），
   只把「从视频里按时刻取帧」换成「直接读 `<项目>/<帧名>`」。所以同一帧走预览
-  （`/api/merge/preview-frame`）和走导出，输出是同一份字节。
+  （`/api/merge/preview-frame`）和走项目导出，输出是同一份字节。
+  注意这条是**预览的一步式** `MergeMaskedFace`（不落盘、不读 cache），和六阶段视频
+  导出（`/api/merge/stage/*`，pred/mask 落盘 + 纯 CPU compose）不是同一条代码路径 ——
+  两边的像素差允许存在（无损对拍 mean 0.02~0.03；成片 vs 预览 ≈ 3.6~4 是编码往返），
+  见 `15-SIX-STAGES.md` 那一节。
 - **帧序**：以源帧文件名的字典序为准（= ffmpeg image2 的读取顺序）；`aligned/*.jpg` 只用来
   决定「这一帧有没有脸」和点名缺帧，认不出来的进 `missing_source`，不猜。
 - **断点续跑**：`merged/<帧名>` 存在且非空就跳过（`force: true` 才重做）。落盘是

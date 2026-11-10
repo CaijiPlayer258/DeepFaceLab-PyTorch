@@ -4287,156 +4287,36 @@ def _preview_multi(job: dict, frame, boxes, box_wh, timings, stage_fn, state) ->
             "swaps": len(plan), "skipped": skipped}
 
 
-def _stage_cache_for_video(video) -> Path:
-    """源视频旁边的 <名字>_cache（分段导出的沙箱）。没有就返回一个不存在的路径。"""
-    v = Path(str(video))
-    return v.parent / (v.stem + "_cache")
-
-
-def _preview_compose(job: dict, frame, boxes, timings: dict, stage_fn) -> dict:
-    """单帧预览的「所见即所得」路径：和 ⑤ 合成阶段**同一条** compose_frame。
-
-    以前预览走 MergeMaskedFace（seamless + 二次色彩迁移），导出走 4.0 视频那条
-    （_phase_merge_worker），两条算法不一样 —— 用户点预览和拿到的成片差 3.7 灰度，
-    那就是 bug。现在预览也走 pred → mask → compose：
-      · 有 <视频>_cache/ 且里面已经有 pred/mask（刚跑过分段导出/预览过）→ **直接读文件**，
-        和导出用的是同一份字节，合成结果逐像素相同（验收：diff = 0）；
-      · 没有缓存 → 现场跑一次 dfm + XSeg（和 ③④ 同一份函数），结果对下次预览可复用。
-    """
-    import cv2
-    import numpy as np
-    from ._merge_compose import compose_frame, ensure_engine_path
-    ensure_engine_path()
-    from facelib import FaceType
-    from facelib.LandmarksProcessor import get_transform_mat
-
-    cache = None
-    if job.get("video"):
-        cache = _stage_cache_for_video(job["video"])
-    elif job.get("cache_dir"):
-        cache = Path(str(job["cache_dir"]))
-    if cache is not None and not cache.is_dir():
-        cache = None
-    stem = str(job.get("frame_stem") or "")
-    cfg = dict(job.get("config") or {})
-    cfg["mask_mode"] = int(cfg.get("mask_mode", 6) or 0)
-    models = job.get("models") or None
-    single_dfm = str(job.get("dfm") or "")
-    xseg_path = str(job.get("xseg") or "")
-    xseg = _app_mod._get_xseg(None if not xseg_path else
-                             ("lite" if "lite" in Path(xseg_path).name.lower() else "xseg")) \
-        if xseg_path else None
-    fmt = str(job.get("fmt") or "jpg").strip().lower()
-    q = int(job.get("quality") or _PREVIEW_QUALITY)
-    state = job.get("state") or {}
-    hits = {"pred": 0, "mask": 0, "infer": 0}
-    faces_out, used, applied = [], [], []
-    tim = {"dfm_ms": 0.0, "xseg_ms": 0.0, "compose_ms": 0.0}
-
-    def _cached(path: Path):
-        if not path.is_file():
-            return None
-        try:
-            with open(str(path), "rb") as fh:
-                data = fh.read()
-        except OSError:
-            return None
-        return cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_UNCHANGED)
-
-    for i, b in enumerate(boxes or []):
-        state["stage"] = "compose"
-        if job.get("stop") is not None and job["stop"].is_set():
-            raise _BadInput("预览已取消", 499)
-        box_xyxy = [float(v) for v in (b.get("box") or ())]
-        x1, y1, x2, y2 = box_xyxy
-        _stage_lm = _frame_landmarks(frame, b, box_xyxy)
-        if _stage_lm is None:
-            continue
-        lm = np.asarray(_stage_lm, np.float32)
-        key = ("%s_%02d" % (stem, i)) if stem else ""
-        # 缓存里有这张脸的 DFLJPG 时，**用它的 68 点**（导出阶段用的就是这一份）。
-        # 现场重算 2D106 会差零点几个像素，脸的边缘就是几级灰度 —— 那就不是「所见即所得」了。
-        if cache is not None and key:
-            try:
-                from ._align import read_dfljpg_meta
-                _m = read_dfljpg_meta(cache / "aligned" / (key + ".jpg")) or {}
-                _lm = _m.get("source_landmarks") or _m.get("landmarks")
-                if _lm and len(_lm) == 68:
-                    lm = np.asarray(_lm, np.float32)
-            except Exception:                               # noqa: BLE001
-                pass
-        # 这张脸用哪个 dfm
-        dfm = single_dfm
-        name = ""
-        if models:
-            idx = _model_for_face(i, models)
-            if idx is not None and 0 <= idx < len(models):
-                dfm = str(models[idx].get("dfm") or single_dfm)
-                name = str(models[idx].get("name") or "")
-        pred = (_cached(cache / "pred" / (key + ".png"))
-                if (key and cache is not None) else None)
-        prd_dfm = dst_dfm = xprd = xdst = None
-        if key and pred is not None:
-            hits["pred"] += 1
-            prd_dfm = _cached(cache / "pred" / (key + "_prdm.png"))
-            dst_dfm = _cached(cache / "pred" / (key + "_dstdm.png"))
-            xprd = _cached(cache / "mask" / (key + "_xseg_prd.png"))
-            xdst = _cached(cache / "mask" / (key + "_xseg_dst.png"))
-            if xprd is not None:
-                hits["mask"] += 1
-        if pred is None:
-            # 缓存里没有：现场跑一次 dfm（和 ③ 同一条前向）
-            ent = _dfm_session(dfm) if (dfm and Path(dfm).is_file()) else None
-            if ent is None:
-                continue
-            size = int(ent[2])
-            fmat = get_transform_mat(lm, size, FaceType.WHOLE_FACE, scale=1.0)
-            crop = cv2.warpAffine(frame.astype(np.float32) / 255.0, fmat, (size, size),
-                                  flags=cv2.INTER_CUBIC)
-            t0 = time.time()
-            out = _dfm_run_batch(ent, np.clip(crop, 0, 1)[None])[0]
-            tim["dfm_ms"] += (time.time() - t0) * 1000.0
-            hits["infer"] += 1
-            face_f, prd_m, dst_m = out
-            pred = np.clip(face_f * 255.0, 0, 255).astype(np.uint8)
-            prd_dfm = None if prd_m is None else np.clip(prd_m * 255.0, 0, 255).astype(np.uint8)
-            dst_dfm = None if dst_m is None else np.clip(dst_m * 255.0, 0, 255).astype(np.uint8)
-        if xseg is not None and xprd is None:
-            t0 = time.time()
-            xprd = np.clip(xseg.mask(pred, out_size=256) * 255.0, 0, 255).astype(np.uint8)
-            dmat = get_transform_mat(lm, 256, FaceType.WHOLE_FACE, scale=1.0)
-            dface = cv2.warpAffine(frame, dmat, (256, 256), flags=cv2.INTER_CUBIC)
-            xdst = np.clip(xseg.mask(dface, out_size=256) * 255.0, 0, 255).astype(np.uint8)
-            _INFER_CALLS["xseg"] += 2
-            hits["infer"] += 2
-            tim["xseg_ms"] += (time.time() - t0) * 1000.0
-        _f = {"landmarks": lm, "pred": np.asarray(pred, np.float32) / 255.0,
-              "prd_dfm": None if prd_dfm is None else np.asarray(prd_dfm, np.float32) / 255.0,
-              "dst_dfm": None if dst_dfm is None else np.asarray(dst_dfm, np.float32) / 255.0,
-              "xseg_prd": None if xprd is None else np.asarray(xprd, np.float32) / 255.0,
-              "xseg_dst": None if xdst is None else np.asarray(xdst, np.float32) / 255.0}
-        t0 = time.time()
-        frame = compose_frame(frame, [_f], cfg, {}, roi=bool(job.get("roi", True)))
-        tim["compose_ms"] += (time.time() - t0) * 1000.0
-        applied.append(int(i))
-        used.append(name or Path(dfm).stem)
-        faces_out.append({"face": int(i), "dfm": name or Path(dfm).stem,
-                          "box": [int(round(v)) for v in (x1, y1, x2 - x1, y2 - y1)],
-                          "cached": bool(key and hits["pred"])})
-
-    if not applied:
-        return _plain_frame(job, frame, None, timings, note="这一帧没检出可换的脸",
-                            has_face=False, no_faces=True)
-    state["stage"] = "encode"
-    img = _img_bytes(frame, fmt, q)
-    timings = dict(timings or {})
-    timings.update({"compose_path": 1, "pred_cache_hits": hits["pred"],
-                    "mask_cache_hits": hits["mask"], "infer_calls": hits["infer"]})
-    timings.update({k: round(v, 1) for k, v in tim.items()})
-    return {"jpg": img, "img": img, "box": None, "has_face": True, "no_faces": False,
-            "swapped": True, "timings": timings, "faces": faces_out,
-            "models_used": sorted(set(used)), "swaps": len(applied),
-            "compose_path": 1, "note": ""}
+# ------------------------------------------------------------
+# 单帧预览：一步式 MergeMaskedFace（不碰 <视频>_cache/，不调 stage 函数）
+#
+# 这里以前放过另一条路：预览也走 ⑤ 合成 —— 先读 <视频>_cache/pred|mask（有就复用），
+# 没有就现场算 dfm + XSeg，再调 _merge_compose.compose_frame。它和导出的字节更接近，
+# 但代价是：① 预览开始依赖 cache 存在与否（有 cache 和没 cache 出图不一样，还会读到
+# 别人留下的半成品）；② 整帧 float32 的色彩迁移 + compose 比一步式慢一倍
+# （1080×1920 实测 10 帧端到端：改前 497ms/帧 → 改后 230ms/帧，见
+# app/tools/preview_fast_accept.py）；③ 一次 UI 预览把六阶段的代码路径也拉进了请求
+# 线程。整条已删掉，连同「从 <视频>_cache/frames 读帧」那一小段。
+#
+# 现在只有一条路：取帧 → worker → MergeMaskedFace（dfm 推理 + 遮罩 + 融合一次做完）
+# → 内存里的 JPEG/PNG 原路返回。**不读 cache、不写 cache、不创建 cache 目录，
+# 也不调用任何 _stage_* 函数**（本文件里 _stage_* 只服务六阶段导出）。
+# worker 自己的临时目录（%TEMP%/dfl41_merge_preview，只放 worker 脚本）不在素材目录
+# 或 cache 目录树里。
+#
+# 与导出的关系：算法等价、代码路径不同。
+#   · 预览：merger.MergeMaskedFace —— 一张脸从头到尾一次算完；4.0 在 seamless 之后
+#     还有一段「把结果 warp 回脸空间再做一次色彩迁移」，预览保留。
+#   · 导出：六阶段（stage6_accept.py 验的那条）—— pred/mask 先落盘，合成是纯 CPU 的
+#     _merge_compose.compose_frame，逐段对照 4.0 的 _phase_merge_worker。
+# 所以同一帧「预览」和「导出」的像素差是**允许存在**的，实测（stage6_accept 的 d 段）：
+#   · 预览 PNG vs 导出帧 PNG（同一帧、都无损）→ mean 0.02~0.03 / max 20~33：两条路的
+#     融合只差边缘那几级灰度；
+#   · 成片（crf16 yuv420p + 预览那侧 JPEG）vs 预览 → mean ≈ 3.6~4：这才是那 ~3.7 的来源，
+#     是编码往返，不是算法。
+# 不要为了「逐像素相同」再把预览接回 compose —— 那等于用一倍的耗时换一个用户看不出来
+# 的差值，还顺手把预览绑在 cache 上。
+# ------------------------------------------------------------
 
 
 def _preview_job(job: dict) -> dict:
@@ -4446,6 +4326,12 @@ def _preview_job(job: dict) -> dict:
     models 为空/缺省 = 老的单模型路径：只换「主角」那一张脸，行为一个字都不改；
     给了 models = 多模型（见 _preview_multi）。
     每个阶段之间都查 stop —— 超时/取消时调用方置位，这里尽快收手。
+
+    **预览只有一条路**：换脸/遮罩/融合全在 worker 里由 MergeMaskedFace 一次做完，
+    返回的图直接在内存里，任何中间量都不落盘、不读 <视频>_cache/。导出走的是六阶段
+    （pred/mask 落盘 + 纯 CPU compose_frame），两条路算法等价、代码路径不同，同一帧的
+    像素差允许存在（无损对拍 mean 0.02~0.03；成片 vs 预览 mean ≈ 3.6~4 是编码往返）——
+    详见 _preview_job 上面那段说明。
     """
     import cv2
     import numpy as np
@@ -4484,10 +4370,6 @@ def _preview_job(job: dict) -> dict:
     else:
         boxes = _detect_boxes(frame, job["detector"], job["thresh"])
         timings["detect_ms"] = round((time.time() - t0) * 1000.0, 1)
-
-    if job.get("compose"):
-        # 所见即所得：和分段导出的 ⑤ 合成走同一份 compose_frame
-        return _preview_compose(job, frame, boxes, timings, _stage)
 
     best = _pick_face(boxes)
     box_xyxy, box_wh = None, None
@@ -4563,6 +4445,10 @@ def merge_preview(body: dict):
     body 多认一个可选的 models: [{name, dfm, faces}]（见 _models_of）：给了就是
     多模型，一帧里检测到的每张脸按分配换，没分配的用第 0 个；不给就是老的单模型
     路径，行为一个字都不改。
+
+    链路固定为一步式：帧现场从视频取 → 检测 → 68 点 → worker 里 MergeMaskedFace
+    （dfm 推理 + 遮罩 + 融合一次做完）→ 内存里的 JPEG。**不读也不写 <视频>_cache/**，
+    不调用六阶段的任何 stage 函数；cache 在不在、里面有没有半成品都不影响这一枪。
     """
     t_start = time.time()
     body = _as_dict(body)
@@ -4633,21 +4519,8 @@ def merge_preview(body: dict):
     holder = {}
     done = threading.Event()
 
-    # 有 <视频>_cache/ 时：帧也直接从 cache/frames 读（和导出用的是同一张 PNG），
-    # 这一步就把「视频解码 vs ffmpeg 抽帧」那点像素差也消掉了。
-    cached_frame, frame_stem = None, ""
-    try:
-        fps_v = float((_vid_probe(video) or {}).get("fps") or 0.0)
-        if fps_v > 0:
-            idx = int(round(float(t) * fps_v)) + 1
-            cand = _stage_cache_for_video(video) / "frames" / ("%06d.png" % idx)
-            if cand.is_file():
-                cached_frame = _stage_read_frame(cand)
-                if cached_frame is not None:
-                    frame_stem = "%06d" % idx
-    except Exception:                                       # noqa: BLE001
-        cached_frame, frame_stem = None, ""
-
+    # 帧一律现场从视频里取：这里**不再**看 <视频>_cache/frames 有没有 —— 预览不能
+    # 因为「有没有 cache」出两张不同的图，更不能依赖别人留下的中间产物。
     def _run():
         try:
             job = {"video": video, "t": float(t), "dfm": dfm,
@@ -4655,13 +4528,8 @@ def merge_preview(body: dict):
                    "xseg": xseg, "config": cfg,
                    "detector": detector, "thresh": float(thresh),
                    "stop": stop, "state": state,
-                   "compose": not _bool_val(body.get("legacy"), False),
-                   "frame_stem": frame_stem,
-                   "roi": not _bool_val(body.get("no_roi"), False),
                    "no_swap": _face_ids_val(
                        "no_swap_faces", body.get("no_swap_faces"))}
-            if cached_frame is not None:
-                job["frame"] = cached_frame
             holder["r"] = _preview_job(job)
         except _BadInput as e:
             holder["e"] = e
@@ -4746,8 +4614,11 @@ def merge_preview_frame(body: dict):
     """一张**静态帧文件** -> 检测 -> 换脸 -> 遮罩 -> 合成 -> 图（data: URL）。
 
     和 /api/merge/preview 只差一点：帧不是按时刻从视频里取的，而是直接读一个
-    图片文件（项目模式就是 <项目>/000000.jpg）。检测 / 68 点 / 换脸 / 合成
-    仍然是 _preview_job 那一份 —— 同一帧走预览和走项目导出，输出是同一份字节。
+    图片文件（项目模式就是 <项目>/000000.jpg）。检测 / 68 点 / 换脸 / 遮罩 / 融合
+    仍然是 _preview_job 那一份 —— 一步式 MergeMaskedFace，**不读 <视频>_cache/**。
+    六阶段导出走的是另一条代码路径（pred/mask 落盘 + 纯 CPU compose_frame），
+    算法等价但像素差允许存在（无损对拍 mean 0.02~0.03；成片 vs 预览 ≈ 3.6~4 是编码
+    往返），别为了"同一份字节"把预览接回 compose。
     """
     t_start = time.time()
     body = _as_dict(body)
@@ -4782,15 +4653,8 @@ def merge_preview_frame(body: dict):
                         "xseg": xseg, "config": cfg, "detector": detector,
                         "thresh": float(thresh), "stop": stop, "state": state,
                         "fmt": fmt, "quality": int(quality),
-                        "compose": not _bool_val(body.get("legacy"), False),
-                        "frame_stem": str(body.get("frame_stem") or fp.stem),
-                        # cache 目录：显式给了就用（验收/外部调用把 ref 帧改名时靠它），
-                        # 否则从 <cache>/frames/xxx.png 的路径反推。
-                        "cache_dir": (str(_norm_path(body.get("cache_dir")) or "")
-                                      if str(body.get("cache_dir") or "").strip()
-                                      else (str(fp.parent.parent)
-                                            if fp.parent.name == "frames" else "")),
-                        "roi": not _bool_val(body.get("no_roi"), False),
+                        # 帧就是这张图本身；不再认 frame_stem / cache_dir —— 预览不读
+                        # <视频>_cache/ 里的 pred/mask/68 点（那是导出六阶段的中间产物）。
                         "no_swap": _face_ids_val("no_swap_faces",
                                                  body.get("no_swap_faces")),
                         "send_lossless": (fmt == "png")})

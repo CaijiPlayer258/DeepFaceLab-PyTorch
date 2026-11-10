@@ -554,14 +554,17 @@ def case_c_resume(video):
 def case_d_quality(video, out, settings, src, cache=None, refs=None):
     if cache is not None and refs:
         import numpy as np
-        worst = 0
+        worst_mean, worst_max = 0.0, 0
         for n, ref in sorted(refs.items()):
+            # 预览走一步式 MergeMaskedFace（worker 里 dfm + 遮罩 + 融合一次算完，
+            # 内存出图、不碰 <视频>_cache/），导出走六阶段（pred/mask 落盘 + 纯 CPU
+            # compose_frame）。两条路算法等价但**不是同一条代码路径**，所以这里量的是
+            # 「差值在容差内」而不是逐像素相同 —— 实测 mean 0.02~0.03 / max 20~33
+            # （融合只差脸边那几级灰度；用户说的 ~3.7 是成片编码往返，见下面的 g 段）。
+            # （以前这里靠 frame_stem+cache_dir 让预览读缓存里的 pred/mask，才凑出 0 差；
+            #   那条缝已经拆掉，预览永远不依赖 cache 存在与否。）
             st, pv = post("/api/merge/preview-frame",
                           {"frame_file": str(ref), "fmt": "png",
-                           # ref 是原名副本；frame_stem 指回 cache 里那张脸（pred/mask/68 点
-                           # 全从缓存读），这样「预览 vs 导出帧」才是逐像素 0 差
-                           "frame_stem": "%06d" % (n + 1),
-                           "cache_dir": str(cache),
                            "models": [{"name": DFM, "faces": []}],
                            "settings": settings}, timeout=300)
             got = read_png(pv.get("png") or "") if st == 200 else None
@@ -570,12 +573,15 @@ def case_d_quality(video, out, settings, src, cache=None, refs=None):
                 check(False, "a 第 %d 帧 预览取不到" % (n + 1), str((pv or {}).get("error"))[:120])
                 continue
             mean, p99, mx = diff(got, disk)
-            worst = max(worst, mx)
-            check(mean == 0.0 and mx == 0,
-                  "a 第 %d 帧 预览(compose) vs 导出帧 PNG 逐像素完全相同" % (n + 1),
-                  "mean=%.3f max=%d · 路径=%s" % (mean, mx,
-                                                  (pv.get("timings") or {}).get("compose_path")))
-        check(worst == 0, "a 预览与导出同算法（3 帧全 0 差）", "worst max=%d" % worst)
+            worst_mean = max(worst_mean, mean)
+            worst_max = max(worst_max, mx)
+            tm = pv.get("timings") or {}
+            check(mean <= TOL_VIDEO and bool(tm.get("swap_ms")) and "compose_path" not in tm,
+                  "a 第 %d 帧 预览(一步式) vs 导出帧（容差 %d，两条代码路径）" % (n + 1, TOL_VIDEO),
+                  "mean=%.2f p99=%.1f max=%d · swap_ms=%s" % (mean, p99, mx, tm.get("swap_ms")))
+        check(worst_mean <= TOL_VIDEO,
+              "a 三帧预览 vs 导出帧都在容差内（无损对拍实测 mean 0.02~0.03）",
+              "worst mean=%.2f max=%d" % (worst_mean, worst_max))
     picked = [5, 20, 45]
     ex = decode_all(out)
     fps = src["fps"] or 30.0
