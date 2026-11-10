@@ -3346,7 +3346,7 @@
       /* +0.5 让 2px 线正好压在像素格上，缩放后也是实心两象素、不发虚 */
       var rx = Math.round(ox + x1 * s) + 0.5, ry = Math.round(oy + y1 * s) + 0.5;
       var rw = Math.round((x2 - x1) * s), rh = Math.round((y2 - y1) * s);
-      var name = mgFaceModel(i);
+      var name = mgFaceChipModel(i);
       /* 被「点成原图」的那张脸：框线走虚线（其它框还是实线）——点一下就能看出
          「这张脸现在没换」。虚线只在框线上，框内一样一个像素都不落。 */
       var rawView = (typeof mgFaceIsRawView === "function") && mgFaceIsRawView(i);
@@ -3948,6 +3948,11 @@ function mgStageEmpty(on) {
       MG_ANCHOR = idx;
     }
     mgSyncFaces();
+    /* 选中项变了 = chip 上那个名字变了（单选显示它、多选显示「第一个 +N」、0 个显示
+       「选择模型」）。这里同步一次，不必等合成回包 —— 单模型回包只带 model/dfm、
+       不带 faces[]，等它反而会让 chip 停在旧名字上。 */
+    mgSyncFaceCards();
+    if (window.mvRedrawBoxes) window.mvRedrawBoxes();
     mgWarmSelected();
     mgSyncExportGate();                    /* 选中项变了 → 导出入口跟着启用/禁用 */
     /* 左栏换模型 = 换「整帧用哪个 dfm」：右边参数一动就会重算，这里以前不动，
@@ -4390,16 +4395,46 @@ function mgStageEmpty(on) {
   }
   window.mgFaceModel = mgFaceModel;
 
-  /* chip 上的字：模型名 > 不换脸 > 没匹配上 > 选择模型。
-     「没匹配」= 后端算完了但谁的组都不像（< 阈值），这张脸会被保持原像素。 */
+  /* 左栏「当前选中的模型」= 这一帧真正在用的那个 dfm（单选时整帧都归它）。
+     0 个选中 = 空串。顺序就是列表顺序（多选时第一个是 mgCmpBody 发出去的 model）。
+     **不**退回 MergePages.settings().model：那个是参数页的下拉值，用户在第 0 个选中时
+     看到的应该是「还没选」，不是一个他以为自己没选过的模型。 */
+  function mgFaceSelNames() {
+    try { return mgSelNames() || []; } catch (e) { return []; }
+  }
+  window.mgFaceSelNames = mgFaceSelNames;
+
+  /* chip 上那个模型名到底是谁（只用于上色 / 文案，不参与请求体）：
+     用户手动指定 > 后端自动判定(faces[]) > 左栏选中的第一个。都没有 = 空串（灰框）。 */
+  function mgFaceChipModel(i) {
+    var nm = mgFaceModel(i);
+    if (nm) return nm;
+    if (mgFaceIsNoSwap(i)) return "";
+    var a = MG_FACE_AUTO[i];
+    if (a && a.matched === false) return "";
+    var sel = mgFaceSelNames();
+    return sel.length ? String(sel[0] || "") : "";
+  }
+  window.mgFaceChipModel = mgFaceChipModel;
+
+  /* chip 上的字：手动指定 > 后端自动判定的 dfm > 不换脸 > 没匹配上 > 左栏选中的模型 > 选择模型。
+     「没匹配」= 后端算完了但谁的组都不像（< 阈值），这张脸会被保持原像素。
+     关键的一条：**后端没回 faces[] 不等于没有模型**。单模型预览/合成回包只带
+     model / dfm（那才是这一帧真正生效的 dfm），chip 以前只认 faces[]，于是一个模型
+     换得好好的画面，框上却写着「选择模型」（用户报的就是这个）。现在单选用左栏
+     选中的那个名字，多选用「第一个 + 剩余个数」。 */
   function mgFaceChipText(i) {
     var nm = mgFaceModel(i);
     if (nm) return nm;
     if (mgFaceIsNoSwap(i)) return "不换脸";
     var a = MG_FACE_AUTO[i];
     if (a && a.matched === false) return "没匹配";
+    var sel = mgFaceSelNames();
+    if (sel.length === 1) return String(sel[0] || "");
+    if (sel.length > 1) return String(sel[0] || "") + " +" + (sel.length - 1);
     return "选择模型";
   }
+  window.mgFaceChipText = mgFaceChipText;
 
   /* 「不换脸」= 契约里的 no_swap_faces：后端会把这张脸原样留在帧里（连一个像素都
      不动），而不是"没分配 → 兜给第 0 个模型"。序号就是检测顺序，从 0 起。 */
@@ -4895,7 +4930,9 @@ function mgStageEmpty(on) {
   }
 
   function mgMakeFaceCard(i, r) {
-    var mname = mgFaceModel(i);
+    /* 颜色跟着 chip 上显示的那个名字走：单选/多选时那一帧的全部脸确实都在用
+       左栏的 dfm，chip 不该是灰的（以前只有 MG_FACE_MODEL / faces[] 才算"已分配"）。 */
+    var mname = mgFaceChipModel(i);
     var color = mname ? mgModelColor(mname) : "";
 
     /* 零尺寸锚点落在「框的右上角」：left 要加宽度，否则 anchor 停在左边线，
@@ -5026,7 +5063,7 @@ function mgStageEmpty(on) {
         var dg = card.querySelector(".mgfdbg");
         if (dg) dg.style.top = Math.round(rc.h + 3) + "px";
       }
-      var nm = mgFaceModel(i);
+      var nm = mgFaceChipModel(i);
       var color = nm ? mgModelColor(nm) : "";
       var btn = card.querySelector(".mgfb");
       var tx = card.querySelector(".ddtxt");
