@@ -6305,19 +6305,19 @@ def _stage_meta_ready(meta: dict, video: Path, probe: dict) -> dict:
 
 # ---------------- 帧图读写（最高质量）----------------
 def _stage_imencode(img, ext=".png") -> bytes:
-    """帧图编码：png 走无损；jpg 走 **quality=100 + 4:4:4**（禁止默认 95/85）。"""
+    """帧图编码：png 走无损；jpg 走 **quality=100 + 4:4:4**（禁止默认 95/85）。
+
+    采样因子不再在这里手写：cv2 5.0 只认 ImwriteJPEGSamplingFactorParams 枚举，
+    裸数字会被拒并**静默**落成 4:2:0（见 _align.py 的 jpeg444_probe 注释）。
+    这里跟对齐脸共用同一份探测结果，一次探测、全进程一个策略。
+    """
     import cv2
     ext = str(ext or ".png").lower()
     if ext == ".png":
         ok, buf = cv2.imencode(".png", img, [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
     else:
-        params = [int(cv2.IMWRITE_JPEG_QUALITY), 100]
-        try:
-            params += [int(cv2.IMWRITE_JPEG_SAMPLING_FACTOR),
-                       int(cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444)]
-        except AttributeError:                       # 老 OpenCV 没有这个常量
-            pass
-        ok, buf = cv2.imencode(".jpg", img, params)
+        from ._align import jpeg_encode_params
+        ok, buf = cv2.imencode(".jpg", img, jpeg_encode_params(100, 0))
     if not ok:
         raise _BadInput("这一帧编不出图（%s）" % ext, 500)
     return buf.tobytes()
@@ -6612,7 +6612,10 @@ def _stage_do_frames(cfg: dict) -> dict:
         # 走 cv2.imencode PNG level 3。两条都是无损，差别只在文件大小/耗时。
         "format": "png", "extractor": str(cfg.get("_frames_via") or "opencv"),
         "png_compression": (1 if cfg.get("_frames_via") == "ffmpeg" else 3),
-        "jpeg_quality": 100, "jpeg_subsampling": "4:2:0（仅当 image_format=jpg 时才是 jpg）",
+        "jpeg_quality": 100,
+        # jpg 帧走 4:4:4（cv2 5.0 起必须用枚举，见 _stage_imencode）；写不出 4:4:4 的
+        # 机器由 _align.jpeg444_probe 启动时 WARN 一次，落成库默认的 4:2:0。
+        "jpeg_subsampling": "4:4:4（仅当 image_format=jpg 时才是 jpg）",
         "width": w, "height": h,
     }
     meta["frame_swapped"] = False

@@ -44,6 +44,7 @@ import io
 import os
 import pickle
 import struct
+import threading
 
 from pathlib import Path
 
@@ -478,19 +479,197 @@ def dfljpg_bytes(jpeg_data: bytes, meta: dict) -> bytes:
     return data[:sos] + app15 + data[sos:]
 
 
-def write_dfljpg(path, img_bgr, meta: dict, quality: int = 95, subsampling=None):
-    """写一张 DFLJPG（JPEG + APP15 元数据）。
+# ---------------- JPEG 4:4:4：一次探测，之后不再解释 ----------------
+#
+# 对齐脸是整个流水线的原始素材：色度在这里被抽稀，后面没有任何一步能长回来。
+# 4:2:0 把 Cb/Cr 各砍掉一半（每 2x2 只留一份），先糊的就是嘴唇、眼白边缘和肤色过渡。
+#
+# cv2 5.0 换了这条参数的写法：IMWRITE_JPEG_SAMPLING_FACTOR 只认
+# ImwriteJPEGSamplingFactorParams 枚举（IMWRITE_JPEG_SAMPLING_FACTOR_444 之类），
+# 老写法 `[..., IMWRITE_JPEG_SAMPLING_FACTOR, 0]` 会被**拒绝**：
+#
+#   [ WARN:0@0.053] grfmt_jpeg.cpp:809 cv::JpegEncoder::write The value(0) for
+#   IMWRITE_JPEG_SAMPLING_FACTOR must be one of ImwriteJPEGSamplingFactorParams.
+#   It is fallbacked to IMWRITE_JPEG_SAMPLING_FACTOR_420.
+#
+# 关键在于 imencode 照样返回 True、照样落盘 —— 静默变成 4:2:0。老代码那句
+# `except AttributeError` 兜不住它（常量在，值是错的），于是「切脸传了
+# subsampling=0」在 cv2 5.0 上从来没生效过：实测带不带这个参数编出来的字节
+# **一模一样**（同一张 256² 图都是 78070 字节，且 SOF 头是 (2,2)(1,1)(1,1)）。
+#
+# 所以现在的规矩是：
+#   1) 不硬编码枚举数字 —— 按 cv2 有没有这两个常量探测；
+#   2) 不信参数，**按落盘字节的 SOF 头核对**真的 4:4:4 才算数；
+#   3) 探测一次、缓存；之后不再刷日志。实在拿不到就 WARN 一次，并说清后果。
+_JPEG444_LOCK = threading.Lock()
+_JPEG444 = None          # 探测结果 dict；None = 还没探过（见 jpeg444_probe）
 
-    subsampling=None 时完全沿用老行为（libjpeg 默认 4:2:0）；分段导出的切脸阶段会传
-    quality=100 + subsampling=0（4:4:4），把「最高质量」写死在调用点上，不靠默认值。
+
+def _say(msg):
+    """打一条日志，永不让抽取挂掉（控制台是 GBK 时个别字符编不出来就降级）。"""
+    import sys
+    try:
+        print(msg, flush=True)
+    except UnicodeEncodeError:
+        enc = (getattr(sys.stdout, "encoding", "") or "utf-8")
+        print(msg.encode(enc, "replace").decode(enc, "replace"), flush=True)
+
+
+def jpeg_sof_sampling(blob):
+    """JPEG 字节 → [(h, v), ...]（Y/Cb/Cr 的采样因子）；不是 JPEG / 读不到返回 None。
+
+    这是**文件里的事实**，不是参数意图：4:4:4 = 三个分量都 (1,1)；
+    4:2:0 = 第一个 (2,2)、后两个 (1,1)。只看 SOFn 头，不解像素。
     """
+    data = bytes(blob or b"")
+    if data[:2] != b"\xff\xd8":
+        return None
+    i, n = 2, len(data)
+    while i + 3 < n:
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        m = data[i + 1]
+        if m == 0xFF:                       # 填充字节
+            i += 1
+            continue
+        if m == 0x01 or m == 0xD8 or 0xD0 <= m <= 0xD7:
+            i += 2
+            continue
+        if m == 0xD9:                       # 到 EOI 还没见到 SOF
+            return None
+        seglen = (data[i + 2] << 8) | data[i + 3]
+        if seglen < 2:
+            return None
+        if m in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+            nf = data[i + 9] if i + 9 < n else 0
+            p = i + 10
+            comps = []
+            for _ in range(nf):
+                if p + 1 >= n:
+                    return None
+                hv = data[p + 1]
+                comps.append((hv >> 4, hv & 0x0F))
+                p += 3
+            return comps or None
+        if m == 0xDA:                       # SOS 之后是熵编码数据
+            return None
+        i += 2 + seglen
+    return None
+
+
+def jpeg444_probe(force: bool = False) -> dict:
+    """探测一次：这台机器的 cv2 怎么写才**真的**产出 4:4:4（结果缓存在模块里）。
+
+    返回 dict：
+      cv2     —— cv2.__version__（日志和报告都要能写清是哪一版）
+      path    —— "enum444"（IMWRITE_JPEG_SAMPLING_FACTOR + _444 枚举，cv2 5.x/4.5.3+）
+                 "int0"    （老 cv2：常量在、只认裸整数 0）
+                 "none"    （两条都不行，库默认 4:2:0，已 WARN 过）
+      sf      —— 要追加进 imencode 的 [(id, value), ...]；空列表 = 不带采样参数
+      ok      —— True 表示「编出来的字节真的是 4:4:4」（按 SOF 头核对）
+      detail  —— 证据：哪条候选、编出来的分量采样因子
+
+    只探一次：第二条脸开始就是查缓存，不会再打日志，也不会重复编码。
+    """
+    global _JPEG444
+    with _JPEG444_LOCK:
+        if _JPEG444 is not None and not force:
+            return _JPEG444
+        import cv2
+        res = {"cv2": "?", "path": "none", "sf": [], "ok": False, "detail": ""}
+        try:
+            res["cv2"] = str(cv2.__version__)
+        except Exception:                              # noqa: BLE001
+            pass
+        # 16x16 样板图：采样因子写在文件头，与内容无关；但用彩色图能顺带确认编码
+        # 走的是普通 JPEG 路径（不是被某个分支截走）。
+        tile = np.zeros((16, 16, 3), np.uint8)
+        tile[:, :8] = (255, 0, 0)
+        tile[:, 8:] = (0, 0, 255)
+        q = int(getattr(cv2, "IMWRITE_JPEG_QUALITY", 1))
+        fid = getattr(cv2, "IMWRITE_JPEG_SAMPLING_FACTOR", None)
+        cands = []
+        if fid is not None and getattr(cv2, "IMWRITE_JPEG_SAMPLING_FACTOR_444", None) is not None:
+            cands.append(("enum444",
+                          [(int(fid), int(cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444))]))
+        if fid is not None:
+            cands.append(("int0", [(int(fid), 0)]))
+        notes = []
+        for name, sf in cands:
+            trial = [(q, 95)] + [(int(k), int(v)) for k, v in sf]
+            flat = [int(x) for pair in trial for x in pair]
+            try:
+                ok, enc = cv2.imencode(".jpg", tile, flat)
+            except Exception as e:                     # noqa: BLE001 —— 老 cv2 可能直接抛
+                notes.append("%s 抛异常（%s）" % (name, str(e).splitlines()[0][:60]))
+                continue
+            if not ok or enc is None:
+                notes.append("%s 返回失败" % name)
+                continue
+            comps = jpeg_sof_sampling(enc.tobytes())
+            if comps and len(comps) == 3 and all(tuple(c) == (1, 1) for c in comps):
+                res.update(path=name, sf=sf, ok=True,
+                           detail="%s 编码后 SOF 采样因子 %s" % (name, comps))
+                break
+            notes.append("%s 编出来是 %s" % (name, comps))
+        if res["ok"]:
+            _say("[align] JPEG 4:4:4 探测：cv2 %s → %s（%s）"
+                 % (res["cv2"], res["path"], res["detail"]))
+        else:
+            _say("[align] 警告：这台机器的 OpenCV 写不出 4:4:4（%s）。"
+                 "对齐脸只能按库默认 4:2:0 落盘 —— 色度被抽稀（每 2x2 只留一份 Cb/Cr），"
+                 "嘴唇/眼白边缘和肤色过渡的细节会永久丢失，后面训练再补不回来。"
+                 "本条只提示一次。" % ("；".join(notes) or "cv2 没有 SAMPLING_FACTOR 常量"))
+        _JPEG444 = res
+        return res
+
+
+def _subsampling_params(subsampling):
+    """老式整数 subsampling → 当前 cv2 真认的 [(id, value), ...]；[] = 不带采样参数。
+
+    0=4:4:4 / 1=4:2:2 / 2=4:2:0（老 cv2 的 IMWRITE_JPEG_SAMPLING_FACTOR 就是这套整数，
+    cv2 5.0 换成枚举后裸数字会被拒并静默降级）。只有 0 需要探测 + 验证，
+    其余按枚举名查，查不到就不带参数（不猜）。
+    """
+    import cv2
+    v = int(subsampling)
+    if v == 0:
+        probe = jpeg444_probe()
+        return [tuple(p) for p in probe["sf"]] if probe["ok"] else []
+    name = {1: "IMWRITE_JPEG_SAMPLING_FACTOR_422",
+            2: "IMWRITE_JPEG_SAMPLING_FACTOR_420"}.get(v)
+    fid = getattr(cv2, "IMWRITE_JPEG_SAMPLING_FACTOR", None)
+    enum = getattr(cv2, name, None) if name else None
+    if fid is None:
+        return []
+    if enum is not None:
+        return [(int(fid), int(enum))]
+    return [(int(fid), v)]                    # 老 cv2：裸整数就是这套语义
+
+
+def jpeg_encode_params(quality: int = 95, subsampling=0) -> list:
+    """imencode 参数表：质量 + （真能生效的）采样因子写法。subsampling=None = 不带。"""
     import cv2
     params = [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)]
     if subsampling is not None:
-        try:
-            params += [int(cv2.IMWRITE_JPEG_SAMPLING_FACTOR), int(subsampling)]
-        except AttributeError:                       # 老 OpenCV 没这个常量
-            params = [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)]
+        params += [int(x) for pair in _subsampling_params(subsampling) for x in pair]
+    return params
+
+
+def write_dfljpg(path, img_bgr, meta: dict, quality: int = 95, subsampling=0):
+    """写一张 DFLJPG（JPEG + APP15 元数据）。
+
+    默认 **4:4:4**（subsampling=0）：对齐脸是原始素材，色度在这里丢了就再长不回来。
+    4.1 以前默认是库默认的 4:2:0，切脸阶段虽然写了 subsampling=0，但在 cv2 5.0 上
+    那个 0 被拒绝、静默落成 4:2:0（见上面那段注释）—— 于是「最高质量」一直是假的。
+
+    subsampling=None → 一个采样参数都不带，库默认 4:2:0：只给对照 / 复现老产物用。
+    「传了 0」不等于「落盘是 4:4:4」：真正生效的写法由 jpeg444_probe() 一次探测决定。
+    """
+    import cv2
+    params = jpeg_encode_params(quality, subsampling)
     ok, enc = cv2.imencode(".jpg", img_bgr, params)
     if not ok:
         raise RuntimeError("JPEG 编码失败: %s" % path)
