@@ -6268,18 +6268,27 @@ def _stage_name(raw):
 
 # ---------------- 遮罩来源（决定 mask 阶段要不要跑） ----------------
 def _mask_src(settings, mask_mode=None) -> dict:
-    """settings（或 meta.settings）-> {"source": xseg|dfm, "model": lite|xseg|auto, "label"}。
+    """settings（或 meta.settings）-> {"source": xseg|dfm, "model": lite|xseg, "label", "model_from"}。
 
     两代口径都认，**显式 mask_source 优先**：
-      · 界面 seg 给的原文：DFM / XSeg / XSegLite（app.js 的 mgMergeSettings 把它折成
-        mask_mode 整数发出来，所以多数请求只剩下 mask_mode）；
+      · 界面 seg 给的原文：DFM / XSeg / XSegLite；
       · mask_mode 整数：6/7/8/9 = XSeg 系列（xseg-prd / xseg-dst / prd×dst / 全叠），
         0/1/2/3/4/5 = 模型自带遮罩（DFM）。
-    认不出来既不算 xseg 也不算 dfm 时按 dfm 走（= 与老行为一致：合成里现算遮罩）。
+
+    **为什么不返回 "auto" 了（用户报的 bug 的根因之一）**：
+      老前端（app.js 的 mgMergeSettings）把「遮罩来源」和「遮罩模式」折成一个 mask_mode
+      整数发出来，XSeg 和 XSegLite 都变成 6/7/8 —— 模型身份在传输里就丢了。这里以前
+      回 "auto"（谁在磁盘上就用谁，Lite 优先）并把 label 写死成 "XSeg"，于是：
+        · 界面显示 XSegLite、status 显示 XSeg、实际跑的是哪个看磁盘 —— 三者随时能不一致；
+        · _mask_signature 对 XSeg / XSegLite 都算出 "xseg:auto"，切模型**不会**让 mask/
+          失效，换模型后静默复用另一个模型算出来的遮罩。
+      现在：给了 mask_source 就只认它（且**不**退回另一个模型）；只给 mask_mode 时按
+      界面默认值 XSegLite 解析，并在 model_from="mask_mode" 里说明「这是推断的」，
+      label 与实际加载的模型永远一致。
     """
     settings = settings if isinstance(settings, dict) else {}
     raw = ""
-    for k in ("mask_source", "mask_seg", "seg_source", "seg", "mask_model"):
+    for k in ("mask_source", "mask_seg", "seg_source", "seg", "mask_model", "xseg_model"):
         v = settings.get(k)
         if v is not None and str(v).strip():
             raw = str(v).strip()
@@ -6292,21 +6301,32 @@ def _mask_src(settings, mask_mode=None) -> dict:
     except (TypeError, ValueError):
         mm = None
 
+    # ① 显式选择：只有它说了算（认不出就往下按 mask_mode 推，并标注 model_from）
     if key in ("dfm", "model", "learned", "learnedmask", "none", "off", "0"):
-        return {"source": "dfm", "model": "", "label": "DFM", "raw": raw}
+        return {"source": "dfm", "model": "", "label": "DFM", "raw": raw,
+                "model_from": "settings", "model_note": ""}
     if key in ("xseg", "xsegprddst", "xsegdst", "xsegprd", "1"):
-        return {"source": "xseg", "model": "xseg", "label": "XSeg", "raw": raw}
+        return {"source": "xseg", "model": "xseg", "label": "XSeg", "raw": raw,
+                "model_from": "settings", "model_note": ""}
     if key in ("xseglite", "lite", "xseglite2", "2"):
-        return {"source": "xseg", "model": "lite", "label": "XSegLite", "raw": raw}
+        return {"source": "xseg", "model": "lite", "label": "XSegLite", "raw": raw,
+                "model_from": "settings", "model_note": ""}
     if raw:
-        # 认不出的写法：不猜成 dfm，按 mask_mode（没有就按界面默认的 XSegLite）
-        pass
+        # 认不出的写法：不猜成 dfm，按 mask_mode（没有就按界面默认的 XSegLite）推断
+        _note = ("遮罩来源写了 %r，认不出来 —— 按 mask_mode 推断" % raw)
+    else:
+        _note = "请求里没有 mask_source（只有 mask_mode），模型按界面默认推断"
+
+    # ② 只有 mask_mode：XSeg 系列一律按界面默认的 XSegLite 解析，并标注「这是推断的」
     if mm is not None and mm >= 6:
-        return {"source": "xseg", "model": "auto", "label": "XSeg", "raw": raw}
+        return {"source": "xseg", "model": "lite", "label": "XSegLite", "raw": raw,
+                "model_from": "mask_mode", "model_note": _note}
     if mm is not None:
-        return {"source": "dfm", "model": "", "label": "DFM", "raw": raw}
-    # settings 里什么都没有：和界面默认一致（遮罩来源默认 XSegLite）
-    return {"source": "xseg", "model": "auto", "label": "XSegLite", "raw": raw}
+        return {"source": "dfm", "model": "", "label": "DFM", "raw": raw,
+                "model_from": "mask_mode", "model_note": ""}
+    # ③ settings 里什么都没有：和界面默认一致（遮罩来源默认 XSegLite）
+    return {"source": "xseg", "model": "lite", "label": "XSegLite", "raw": raw,
+            "model_from": "default", "model_note": _note}
 
 
 def _stage_files(dirp, exts=_STAGE_IMG_EXTS) -> list:
@@ -7095,16 +7115,160 @@ def _stage_pred_assign(cfg: dict, frame, metas: list) -> list:
     return out
 
 
+# ---------------- ③ 换脸（dfm 推理）：batch / 显存 / 流水线 ----------------
+def _vram_free_mb():
+    """(free, total) MB。先问 torch（和推理同一块卡），拿不到再问 nvidia-smi。"""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            free, total = torch.cuda.mem_get_info(0)
+            return int(free // (1 << 20)), int(total // (1 << 20))
+    except Exception:                                       # noqa: BLE001
+        pass
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.free,memory.total",
+                              "--format=csv,noheader,nounits"], capture_output=True,
+                             text=True, timeout=10,
+                             creationflags=getattr(_app_mod, "_NO_WINDOW", 0))
+        f, t = [int(x) for x in (out.stdout or "").strip().splitlines()[0].split(",")]
+        return f, t
+    except Exception:                                       # noqa: BLE001
+        return None, None
+
+
+_PRED_VRAM_SAFETY = 0.20      # 留 20% 余量：探测量打八折才是敢用的预算
+_PRED_BATCH_CAP = 32          # 上限（再大对单卡没意义，batch 16 起反而开始抖）
+
+
+def _pred_pick_batch(cfg: dict, ent) -> tuple:
+    """挑 batch：请求里写了就照用，没写就**把阶梯真跑一遍再决定**（不写死、也不猜）。
+
+    为什么不能写死 8，也不能只按显存估算：
+      · 8GB 卡上 8 是个好值，但同一张卡只剩 1.2GB 空闲时 8 就是一路 OOM 退到 1；
+      · 反过来，实测这台机上 batch 16/32 的每张耗时是 batch 1 的 5 倍以上
+        （ORT 的 arena 撑爆后整个进程都变慢，之后不再恢复）—— 光看「可用显存够不够」
+        会一路选到 32，然后整条链路崩掉。所以**耗时也要量**。
+
+    阶梯规则（全部实测，约 1s 的预热，同时也是真正的 warm-up）：
+      1. 依次跑 batch = 1 / 4 / 8 的空张量，记下「每张耗时」和「可用显存」；
+      2. 选「每张耗时 ≤ 最快值 × 1.05」里最大的那个 batch（本机：1/4/8 → 选 8）；
+      3. 只有在「8 比 1 快 2 倍以上（说明是小模型 + 大卡，批量真的有用）+ 还剩 ≥6GB
+         + 下一档塞得进 80% 预算」三条同时成立时，才继续试 16 / 32。
+         本机上 8 只比 1 快 1.3×，而 16 会把 8GB 顶到 7806/8151 MB 且并不更快，
+         还会让 ORT 的 arena 撑爆、之后整个进程掉到 15 张/秒 —— 所以老实停在 8；
+      4. 每一步都按实测单张开销核对 80% 显存预算，不够就停。
+    运行中还有两道保险：OOM → 8→4→2→1 退档；比历史最好慢 60% → 主动退半（见 _flush）。
+
+    返回 (batch, {"source","ladder","free_mb","total_mb","per_item_mb","best_per_face_ms"})
+    """
+    want = int(cfg.get("pred_batch") or 0)
+    if want > 0:
+        return max(1, min(64, want)), {"source": "request", "batch": int(want),
+                                       "ladder": [], "free_mb": None, "total_mb": None,
+                                       "per_item_mb": None, "best_per_face_ms": None}
+    import numpy as np
+    _sess, _name, size, _nchw, _prov = ent
+    size = int(size)
+    free0, total0 = _vram_free_mb()
+    ladder = [1, 4, 8]
+    rows = []
+    best_per = None
+    try:
+        i = 0
+        while i < len(ladder):
+            b = min(int(ladder[i]), _PRED_BATCH_CAP)
+            x = np.zeros((b, size, size, 3), np.float32)
+            t0 = time.perf_counter()
+            _dfm_run_batch(ent, x)
+            dt = (time.perf_counter() - t0) * 1000.0
+            per = dt / b
+            free_now, _t = _vram_free_mb()
+            rows.append({"batch": b, "ms": round(dt, 1), "per_face_ms": round(per, 2),
+                         "free_mb": free_now})
+            best_per = per if best_per is None else min(best_per, per)
+            # 显存：按实测单张开销核对 80% 预算
+            fits = None
+            if free_now is not None and total0:
+                per_item = max(size * size * 3 * 4 * 6 / 1048576.0,
+                               max(0.0, (free0 - free_now)) / float(max(1, b)))
+                budget = free_now * (1.0 - _PRED_VRAM_SAFETY)
+                fits = int(budget / per_item) if per_item > 0 else b
+                rows[-1]["per_item_mb"] = round(per_item, 1)
+                rows[-1]["budget_batch"] = fits
+                if fits <= b or free_now < 1024:
+                    break
+            # 大卡才继续往上探（两个条件都要满足）：
+            #   ① 8 张/批确实比单张快（GPU 跑满的机器不会踏进 16/32 那个坑）；
+            #   ② 下一档还塞得进 80% 显存预算 —— 否则试一次就把显存顶到墙，
+            #      整条流水线都会被拖慢（实测这台机 batch 16 每张 40ms → 峰值 7.3GB）。
+            if i == len(ladder) - 1 and b >= 8 and best_per is not None:
+                nxt = 16
+                first = float(rows[0]["per_face_ms"] or 0.0)
+                gain = (first / float(rows[-1]["per_face_ms"] or 1.0)) if first else 1.0
+                # 越过 8 要三个条件同时成立：批量确实带来 2× 以上的单张收益（说明是
+                # 小模型 + 大卡，批量有用）、显存至少还剩 6GB、下一档塞得进 80% 预算。
+                # 本机（416 dfm、8GB、批量收益 1.3×）三个都不满足 → 老实停在 8：
+                # 实测 batch 16 会把显存顶到墙，之后整个进程每张 40ms → 60ms，越试越慢。
+                if gain >= 2.0 and (free_now is None or free_now >= 6144)                         and (fits is None or fits >= nxt):
+                    ladder.extend([16, 32])
+                else:
+                    break
+            i += 1
+    except Exception as e:                                  # noqa: BLE001
+        _stage_log("换脸：batch 探测中断（%s）→ 用已测到的档位" % str(e)[:100])
+        if not rows:
+            return 4, {"source": "probe-failed", "batch": 4, "ladder": [],
+                       "free_mb": free0, "total_mb": total0,
+                       "per_item_mb": None, "best_per_face_ms": None}
+    if not rows:
+        return 4, {"source": "no-vram-info", "batch": 4, "ladder": [],
+                   "free_mb": free0, "total_mb": total0,
+                   "per_item_mb": None, "best_per_face_ms": None}
+    ok = [r for r in rows if r["per_face_ms"] <= best_per * 1.05]
+    pick = max(ok or rows[:1], key=lambda r: r["batch"])
+    meta = {"source": "auto", "batch": int(pick["batch"]), "ladder": rows,
+            "free_mb": free0, "total_mb": total0,
+            "per_item_mb": pick.get("per_item_mb"),
+            "best_per_face_ms": round(min(r["per_face_ms"] for r in rows), 2),
+            "safety": _PRED_VRAM_SAFETY}
+    _stage_log("换脸：batch 阶梯 %s → 选 %d"
+               % (" / ".join("B%d=%.1fms(%.2fms/张)" % (r["batch"], r["ms"], r["per_face_ms"])
+                             for r in rows), int(pick["batch"])))
+    return int(pick["batch"]), meta
+
+
+def _is_oom(e) -> bool:
+    s = str(e).lower()
+    return ("allocate" in s or "out of memory" in s or "memory" in s and "insufficient" in s)
+
+
 def _stage_do_pred(cfg: dict) -> dict:
     """阶段 3 · 换脸：frames/ + aligned/ -> pred/（换脸正脸 + dfm 自带两张遮罩）。
 
     语义照 4.0 export_pipeline.py:769（fo = warpAffine(frame, get_transform_mat(lm,
-    swap_sz, WHOLE_FACE)) → dfm 前向）。改动只有两处：
-      · 一次送 N 张（dfm 的 batch 维是动态的）—— 实测 N=1/4/8 是 25.5 / 22.2 / 27.7 张/秒；
-      · 推理就在 4.1 进程里跑（以前每帧 base64 PNG 往返 4.0 worker，编解码 + IPC 全砍掉）。
+    swap_sz, WHOLE_FACE)) → dfm 前向）。
+
+    **吞吐**：老实现是一条串行链（读帧 → warp → 攒 batch → 前向 → 写 3 张 PNG），
+    一张脸 = 22(读) + 8(float 转换) + 36(前向) + 21(三张 PNG 编码) ≈ 100ms，实测 9.6 张/秒，
+    而且 batch 从 1 加到 16 吞吐几乎不动 —— 说明瓶颈根本不在推理。
+    现在拆成三段，用队列连起来（谁慢谁是瓶颈，其它两段被完全藏住）：
+        读线程 ×N    PNG 解码 + 整帧 → float32 + 按 68 点 warp（1080p ≈ 30ms/帧，
+                      4 线程实测摊到 7.3ms/帧）
+        推理线程     攒够 batch 一次前向（416 dfm ≈ 36ms/张，GPU 99% 占用，是硬底）
+        写线程 ×M    PNG 编码 + 原子落盘（416×416 ×3 ≈ 21ms/张）
+    墙钟 ≈ max(三段)，而不是三段之和。
+
+    其它三处通用优化（都不是针对某台机器）：
+      · batch 按可用显存实测自动选（_pred_pick_batch），OOM / 明显变慢自动退档 8→4→2→1；
+      · 输入缓冲按 batch 预分配，每批只做一次 memcpy，不再是 np.stack(...).astype(float32)
+        的「分配 + 转换 + 再拷一遍」；
+      · 人脸库归组（embedding）仍然在主线程做 —— 它要用整帧，且非默认路径。
+
     多模型：有人脸库时按 embedding 归组，每组用各自的 dfm；不匹配的脸**不产出 pred**
     （⑤ 保持原像素）。游标 = meta.stages.pred.done_frames（帧数），取消可续。
     """
+    import queue
+    import sys as _sys
     import cv2
     import numpy as np
     from ._merge_compose import ensure_engine_path
@@ -7130,8 +7294,15 @@ def _stage_do_pred(cfg: dict) -> dict:
     dfm = str(cfg.get("dfm") or "")
     if not dfm or not Path(dfm).is_file():
         raise _BadInput("没有 .dfm 模型（换脸阶段要它）：%s" % (dfm or "空"), 409)
-    batch = max(1, int(cfg.get("pred_batch") or 8))
-    chunk_frames = max(1, int(cfg.get("pred_chunk") or max(2, batch // 2)))
+
+    ent0 = _dfm_session(dfm)                       # 先加载：batch 要按它的显存开销算
+    batch, bmeta = _pred_pick_batch(cfg, ent0)
+    size0 = int(ent0[2])
+    # 并行度：读线程按 CPU 核数给（PNG 解码在 OpenCV 里是放 GIL 的），写线程固定 2 个
+    readers = max(1, int(cfg.get("pred_readers")
+                         or min(4, max(1, (os.cpu_count() or 4) // 3))))
+    writers = max(1, int(cfg.get("pred_writers") or 2))
+    use_lib = bool(cfg.get("use_library") and cfg.get("library"))
 
     cursor = 0 if cfg["force"] else max(0, min(int(st.get("done_frames") or 0), total))
     if (not cfg["force"]) and st.get("done") and cursor >= total and total:
@@ -7139,22 +7310,43 @@ def _stage_do_pred(cfg: dict) -> dict:
         return {"skipped": True, "count": int(st.get("count") or 0), "reason": "already-done"}
     if cursor:
         _stage_log("换脸：从第 %d 帧续跑（前 %d 帧的 pred/ 已经在）" % (cursor + 1, cursor))
-    _stage_log("换脸：dfm=%s · batch=%d · %d 帧 / %d 张脸%s"
-               % (Path(dfm).name, batch, total, len(aligned),
-                  " · 人脸库归组" if cfg.get("library") else ""))
+    _stage_log("换脸：dfm=%s · batch=%d(%s) · %d 帧 / %d 张脸 · 读 %d 线程 / 写 %d 线程%s"
+               % (Path(dfm).name, batch, bmeta.get("source"), total, len(aligned),
+                  readers, writers, " · 人脸库归组" if use_lib else ""))
+    if bmeta.get("source") == "auto":
+        _stage_log("换脸：batch 自动选择 %d（可用显存 %s / 共 %s MB · 单张约 %s MB · "
+                   "留 %d%% 余量 · 最快 %s ms/张）"
+                   % (batch, bmeta.get("free_mb"), bmeta.get("total_mb"),
+                      bmeta.get("per_item_mb"), int(_PRED_VRAM_SAFETY * 100),
+                      bmeta.get("best_per_face_ms")))
 
     t0 = time.time()
-    done_faces = int(st.get("count") or 0)
+    # force 重跑时从 0 数起：以前会把上一轮的 count 累加（90 张脸跑完显示 180），
+    # 于是 faces_per_sec 一直偏大 —— 吞吐对比全是错的数
+    done_faces = 0 if cfg.get("force") else int(st.get("count") or 0)
+    if cfg.get("force"):
+        st["count"] = 0
     unmatched = int(st.get("unmatched") or 0)
     failed = int(st.get("failed") or 0)
     sizes = {}
+    prof = {"read_ms": 0.0, "prep_ms": 0.0, "infer_ms": 0.0, "write_ms": 0.0,
+            "faces": 0, "frames": 0}
+    plock = threading.Lock()
+
+    def _bump(ms_name: str, sec: float, n: int = 0):
+        with plock:
+            prof[ms_name] += sec * 1000.0
+            if n:
+                prof["faces"] += n
 
     def _save(up_to: int, done: bool = False, extra: dict = None):
         node = {
             "done": bool(done), "done_frames": int(up_to), "frames": total,
             "count": done_faces, "unmatched": unmatched, "failed": failed,
             "faces_total": len(aligned), "dfm": str(dfm), "model": Path(dfm).name,
-            "batch": int(batch), "sizes": dict(sizes), "pred_dir": str(pred_dir),
+            "batch": int(batch), "batch_source": str(bmeta.get("source") or ""),
+            "batch_meta": dict(bmeta), "sizes": dict(sizes), "pred_dir": str(pred_dir),
+            "readers": int(readers), "writers": int(writers),
             "resumed_from": int(cursor),
             "msg": ("换脸完成：%d 张脸 / %d 帧（未匹配 %d）" % (done_faces, total, unmatched))
                    if done else ("换脸 %d/%d 帧" % (up_to, total)),
@@ -7164,26 +7356,47 @@ def _stage_do_pred(cfg: dict) -> dict:
         meta["stages"]["pred"] = node
         _stage_meta_save(cache, meta)
 
-    def _run(use_dfm, keys, inputs):
-        """一个 dfm 的一批：前向 → 按 4.0 的命名写盘。"""
-        nonlocal done_faces, failed
-        if not keys:
-            return
-        ent = _dfm_session(use_dfm)
-        sizes[Path(use_dfm).name] = int(ent[2])
-        arr = np.stack(inputs, axis=0).astype(np.float32)
-        try:
-            outs = _dfm_run_batch(ent, arr)
-        except Exception as e:                              # noqa: BLE001
-            if "allocate" in str(e).lower() or "memory" in str(e).lower():
-                _stage_log("换脸：batch=%d 显存不够，退回逐张（%s）"
-                           % (len(keys), str(e)[:120]))
-                outs = []
-                for k in range(len(keys)):
-                    outs.extend(_dfm_run_batch(ent, arr[k:k + 1]))
+    # ---- 队列与共享状态 ----
+    q_frames = queue.Queue(maxsize=max(2, readers * 2))
+    q_write = queue.Queue(maxsize=max(4, batch * 2))
+    stop = threading.Event()
+    boss = {"exc": None}
+    pre = np.empty((batch, size0, size0, 3), np.float32)      # 预分配输入缓冲（NHWC）
+    pend, completed, plock2 = {}, set(), threading.Lock()
+    commit = {"n": cursor}
+
+    def _commit_upto():
+        with plock2:
+            n = commit["n"]
+            while n in completed:
+                completed.discard(n)
+                n += 1
+            commit["n"] = n
+            return n
+
+    def _pend_add(gi: int):
+        with plock2:
+            pend[gi] = int(pend.get(gi) or 0) + 1
+
+    def _pend_done(gi: int):
+        nonlocal failed
+        with plock2:
+            left = int(pend.get(gi) or 0) - 1
+            if left <= 0:
+                pend.pop(gi, None)
+                completed.add(gi)
             else:
-                raise
-        for key, (face, prd, dst) in zip(keys, outs):
+                pend[gi] = left
+
+    # ---- 写线程：PNG 编码 + 原子落盘 ----
+    def _writer():
+        nonlocal failed
+        while True:
+            item = q_write.get()
+            if item is None:
+                return
+            gi, key, face, prd, dst = item
+            tw = time.perf_counter()
             try:
                 _stage_write_atomic(
                     pred_dir / (key + ".png"),
@@ -7196,107 +7409,363 @@ def _stage_do_pred(cfg: dict) -> dict:
                     _stage_write_atomic(
                         pred_dir / (key + "_dstdm.png"),
                         _stage_imencode_png(np.clip(dst * 255.0, 0, 255).astype(np.uint8), 1))
-                done_faces += 1
             except Exception as e:                          # noqa: BLE001
                 failed += 1
                 _stage_log("换脸写盘失败 %s：%s" % (key, str(e)[:140]))
+            finally:
+                _bump("write_ms", time.perf_counter() - tw)
+                _pend_done(gi)
 
-    def _process_chunk(lo: int, hi: int) -> int:
-        """跑 [lo,hi) 这些帧：解码 → 每张脸 warp → 按 dfm 分组批处理。返回处理到的帧号。"""
-        from collections import OrderedDict as _OD
-        jobs = _OD()          # dfm -> ([keys], [inputs])
-        got = lo
-        for gi in range(lo, hi):
-            _stage_check_cancel()
-            key, paths = groups[gi]
-            fp = _stage_frame_path(frames_dir, key)
-            if fp is None:
-                _stage_log("换脸跳过 %s：frames/ 里没有这一帧" % key)
-                got = gi + 1
+    def _put_frame(item):
+        """带超时的 put：主线程没了（取消/异常）也别把读线程吊死在队列上。"""
+        while not stop.is_set():
+            try:
+                q_frames.put(item, timeout=0.2)
+                return
+            except queue.Full:
                 continue
-            frame = _stage_read_frame(fp)
-            if frame is None:
-                _stage_log("换脸跳过 %s：帧读不出来" % key)
-                got = gi + 1
-                continue
-            metas = []
-            for ap in paths:
-                m = read_dfljpg_meta(ap) or {}
-                lm = m.get("source_landmarks") or m.get("landmarks")
-                box = m.get("source_rect") or None
-                metas.append({"ap": ap, "lm": lm, "box": box})
-            plans = _stage_pred_assign(cfg, frame, metas)
-            fc = None
-            for meta_f, use_dfm in zip(metas, plans):
-                ap = meta_f["ap"]
-                lm = meta_f["lm"]
-                if not lm or len(lm) != 68:
-                    failed += 1
-                    _stage_log("换脸跳过 %s：没有 68 点" % ap.name)
+
+    # ---- 读线程：解码 + float + warp（不碰推理，也不碰写盘）----
+    def _reader(lo: int, hi: int):
+        try:
+            for gi in range(lo, hi):
+                if stop.is_set():
+                    break
+                key, paths = groups[gi]
+                fp = _stage_frame_path(frames_dir, key)
+                if fp is None:
+                    _put_frame((gi, key, False, None, None, None))
                     continue
-                if not use_dfm:
-                    unmatched += 1
+                tr = time.perf_counter()
+                frame = _stage_read_frame(fp)
+                _bump("read_ms", time.perf_counter() - tr)
+                if frame is None:
+                    _put_frame((gi, key, False, None, None, None))
                     continue
-                if fc is None:
+                fc = None
+                crops = None
+                if not use_lib:
+                    tp = time.perf_counter()
                     fc = frame.astype(np.float32) / 255.0
-                try:
-                    ent = _dfm_session(use_dfm)
-                    size = int(ent[2])
+                    crops = []
+                    for ap in paths:
+                        m = read_dfljpg_meta(ap) or {}
+                        lm = m.get("source_landmarks") or m.get("landmarks")
+                        if not lm or len(lm) != 68:
+                            crops.append((ap.stem, None, None))
+                            continue
+                        try:
+                            sz = size0
+                            fmat = get_transform_mat(np.asarray(lm, np.float32), sz,
+                                                     FaceType.WHOLE_FACE, scale=1.0)
+                            crop = cv2.warpAffine(fc, fmat, (sz, sz), flags=cv2.INTER_CUBIC)
+                            crops.append((ap.stem, np.clip(crop, 0, 1), None))
+                        except Exception as e:              # noqa: BLE001
+                            crops.append((ap.stem, None, str(e)[:100]))
+                    _bump("prep_ms", time.perf_counter() - tp)
+                    fc = None          # 整帧 float 副本用完就丢：别让队列里压着 8×25MB
+                # ok=True 才是「这一帧能处理」；frame 只在人脸库归组时才需要带回主线程
+                _put_frame((gi, key, True, frame if use_lib else None, fc, crops))
+        except Exception as e:                              # noqa: BLE001
+            boss["exc"] = boss["exc"] or e
+            stop.set()
+            try:
+                q_frames.put((None, None, False, None, None, None))
+            except Exception:                               # noqa: BLE001
+                pass
+
+    # ---- 一批：拷进预分配缓冲 → 一次前向 → 交给写线程 ----
+    jobs = {}          # dfm -> ([gi], [keys], [crops])
+    # best_ms 用阶梯探测的最好成绩起手：否则第一批（可能已经偏大）会被当成基准，
+    # 后面的退档守卫就永远不会触发
+    stat = {"best_ms": bmeta.get("best_per_face_ms") or None, "shrunk": 0}
+
+    def _flush(use_dfm: str, force: bool = False):
+        nonlocal batch, done_faces, failed
+        bucket = jobs.get(use_dfm)
+        if not bucket:
+            return
+        gis, keys, crops = bucket
+        while keys and (len(keys) >= batch or (force and keys)):
+            n = min(len(keys), batch)
+            ent = _dfm_session(use_dfm)
+            size = int(ent[2])
+            sizes[Path(use_dfm).name] = size
+            if size0 == size and pre.shape[0] >= n:
+                arr = pre[:n]
+            else:
+                arr = np.empty((n, size, size, 3), np.float32)
+            for i in range(n):
+                arr[i] = crops[i]
+            ti = time.perf_counter()
+            try:
+                outs = _dfm_run_batch(ent, arr)
+            except Exception as e:                          # noqa: BLE001
+                if not (_is_oom(e) and n > 1):
+                    raise
+                step = max(1, n // 2)
+                _stage_log("换脸：batch=%d 显存不够（%s）→ 退到 %d 再试"
+                           % (n, str(e)[:80], step))
+                batch = max(1, min(batch, step))
+                stat["shrunk"] += 1
+                outs = []
+                for i in range(0, n, step):
+                    outs.extend(_dfm_run_batch(ent, arr[i:i + step]))
+            dt = time.perf_counter() - ti
+            per_face = dt * 1000.0 / max(1, n)
+            _bump("infer_ms", dt, n)
+            # 变慢守卫：比历史最好成绩慢 60% 说明 batch 太大（显存抖动 / 换出），主动退档
+            if stat["best_ms"] is None or per_face < stat["best_ms"]:
+                stat["best_ms"] = per_face
+            elif n > 1 and per_face > stat["best_ms"] * 1.6 and stat["shrunk"] < 4:
+                half = max(1, n // 2)
+                _stage_log("换脸：batch=%d 时每张 %.1f ms（最好 %.1f ms）→ 退到 %d"
+                           % (n, per_face, stat["best_ms"], min(batch, half)))
+                batch = max(1, min(batch, half))
+                stat["shrunk"] += 1
+            for i in range(n):
+                q_write.put((gis[i], keys[i], outs[i][0], outs[i][1], outs[i][2]))
+                done_faces += 1
+            del gis[:n], keys[:n], crops[:n]
+
+    def _submit(gi: int, stem: str, use_dfm: str, crop):
+        _pend_add(gi)
+        bucket = jobs.setdefault(use_dfm, ([], [], []))
+        bucket[0].append(gi)
+        bucket[1].append(stem)
+        bucket[2].append(crop)
+        _flush(use_dfm)
+
+    _save(cursor)
+    threads = []
+    for i in range(writers):
+        t = threading.Thread(target=_writer, daemon=True, name="pred-w%d" % i)
+        t.start()
+        threads.append(t)
+    hi_all = total
+    for r in range(readers):
+        lo = cursor + (hi_all - cursor) * r // readers
+        hi = cursor + (hi_all - cursor) * (r + 1) // readers
+        if lo >= hi:
+            continue
+        t = threading.Thread(target=_reader, args=(lo, hi), daemon=True, name="pred-r%d" % r)
+        t.start()
+        threads.append(t)
+
+    k = cursor
+    try:
+        for gi in range(cursor, total):
+            _stage_check_cancel()
+            item = q_frames.get()
+            if item[0] is None:
+                break
+            gi2, key, ok, frame, fc, crops = item
+            if not ok:
+                _stage_log("换脸跳过 %s：frames/ 里没有这一帧（或读不出来）" % key)
+                with plock2:
+                    completed.add(gi2)
+            elif use_lib:
+                # 人脸库归组：要整帧 + embedding，只能在主线程做
+                metas = []
+                for ap in groups[gi2][1]:
+                    m = read_dfljpg_meta(ap) or {}
+                    metas.append({"ap": ap,
+                                  "lm": m.get("source_landmarks") or m.get("landmarks"),
+                                  "box": m.get("source_rect") or None})
+                plans = _stage_pred_assign(cfg, frame, metas)
+                fc2 = frame.astype(np.float32) / 255.0
+                for meta_f, use_dfm in zip(metas, plans):
+                    lm = meta_f["lm"]
+                    if not lm or len(lm) != 68:
+                        failed += 1
+                        _stage_log("换脸跳过 %s：没有 68 点" % meta_f["ap"].name)
+                        continue
+                    if not use_dfm:
+                        unmatched += 1
+                        continue
+                    size = int(_dfm_session(use_dfm)[2])
                     fmat = get_transform_mat(np.asarray(lm, np.float32), size,
                                              FaceType.WHOLE_FACE, scale=1.0)
-                    crop = cv2.warpAffine(fc, fmat, (size, size), flags=cv2.INTER_CUBIC)
-                    bucket = jobs.setdefault(use_dfm, ([], []))
-                    bucket[0].append(ap.stem)
-                    bucket[1].append(np.clip(crop, 0, 1))
-                except Exception as e:                      # noqa: BLE001
-                    failed += 1
-                    _stage_log("换脸跳过 %s：%s" % (ap.name, str(e)[:140]))
-            got = gi + 1
-            # 攒够一批就立刻发，别等整块：显存/吞吐都更稳
+                    crop = cv2.warpAffine(fc2, fmat, (size, size), flags=cv2.INTER_CUBIC)
+                    _submit(gi2, meta_f["ap"].stem, use_dfm, np.clip(crop, 0, 1))
+            else:
+                for stem, crop, err in (crops or []):
+                    if crop is None:
+                        failed += 1
+                        _stage_log("换脸跳过 %s%s" % (stem, ("：" + err) if err else "：没有 68 点"))
+                        continue
+                    _submit(gi2, stem, dfm, crop)
+            _commit_upto()
+            k = commit["n"]
+            el = max(0.001, time.time() - t0)
+            _stage_progress("pred", 100.0 * k / total,
+                            "换脸 %d/%d 帧 · %d 张脸 · %.1f 帧/秒 · %.1f 张/秒 · batch %d"
+                            % (k, total, done_faces, (k - cursor) / el,
+                               done_faces / el, batch),
+                            frames_done=k, frames_total=total,
+                            frame_fps=round((k - cursor) / el, 2))
+            if (gi - cursor) % 20 == 0:
+                _save(k)
+        else:
+            k = total
+    finally:
+        stop.set()
+        tidy = _sys.exc_info()[0] is None and boss.get("exc") is None
+        if tidy:
             for use_dfm in list(jobs):
-                keys, inputs = jobs[use_dfm]
-                while len(keys) >= batch:
-                    _run(use_dfm, keys[:batch], inputs[:batch])
-                    del keys[:batch], inputs[:batch]
-        for use_dfm in list(jobs):
-            keys, inputs = jobs[use_dfm]
-            if keys:
-                _run(use_dfm, keys, inputs)
-            jobs[use_dfm] = ([], [])
-        return got
-
-    gi = cursor
-    while gi < total:
-        _stage_check_cancel()
-        hi = min(total, gi + chunk_frames)
-        gi = _process_chunk(gi, hi)
-        el = max(0.001, time.time() - t0)
-        rate = (gi - cursor) / el
-        _stage_progress("pred", 100.0 * gi / total,
-                        "换脸 %d/%d 帧 · %d 张脸 · %.1f 帧/秒 · %.1f 张/秒"
-                        % (gi, total, done_faces, rate, done_faces / el),
-                        frames_done=gi, frames_total=total,
-                        frame_fps=round(rate, 2))
-        _save(gi)
+                _flush(use_dfm, force=True)
+        for _i in range(writers):
+            q_write.put(None)
+        if tidy:
+            # 等写盘排空：游标必须对得上磁盘上真的有的文件（否则续跑会跳过没写的帧）
+            t_wait = time.time()
+            while time.time() - t_wait < 600:
+                with plock2:
+                    left = sum(int(v) for v in pend.values())
+                if left <= 0:
+                    break
+                time.sleep(0.05)
+        _commit_upto()
+        for t in threads:
+            t.join(timeout=5.0)
+    if boss.get("exc") is not None:
+        raise boss["exc"]
     sec = round(time.time() - t0, 2)
+    prof_out = {"read_ms": round(prof["read_ms"], 1), "prep_ms": round(prof["prep_ms"], 1),
+                "infer_ms": round(prof["infer_ms"], 1), "write_ms": round(prof["write_ms"], 1),
+                "readers": int(readers), "writers": int(writers),
+                "per_face_ms": {
+                    "read": round(prof["read_ms"] / max(1, total - cursor), 2),
+                    "prep": round(prof["prep_ms"] / max(1, total - cursor), 2),
+                    "infer": round(prof["infer_ms"] / max(1, prof["faces"]), 2),
+                    "write": round(prof["write_ms"] / max(1, prof["faces"]), 2),
+                }}
     _save(total, done=True, extra={
         "seconds": sec, "finished_at": time.time(),
         "faces_per_sec": round(done_faces / sec, 2) if sec else None,
-        "frame_fps": round((total - cursor) / sec, 2) if sec else None})
-    _stage_log("换脸完成：%d 帧 · %d 张脸 · 未匹配 %d · 失败 %d · %.2f s · %.1f 张/秒"
+        "frame_fps": round((total - cursor) / sec, 2) if sec else None,
+        "profile": prof_out, "batch_final": int(batch)})
+    _stage_log("换脸完成：%d 帧 · %d 张脸 · 未匹配 %d · 失败 %d · %.2f s · %.1f 张/秒 "
+               "（batch %d · 读 %d/写 %d 线程 · 每张 读 %.1f + 预处理 %.1f + 推理 %.1f + 写 %.1f ms）"
                % (total, done_faces, unmatched, failed, sec,
-                  done_faces / sec if sec > 0 else 0.0))
+                  done_faces / sec if sec > 0 else 0.0, batch, readers, writers,
+                  prof_out["per_face_ms"]["read"], prof_out["per_face_ms"]["prep"],
+                  prof_out["per_face_ms"]["infer"], prof_out["per_face_ms"]["write"]))
     return {"count": done_faces, "frames": total, "unmatched": unmatched, "failed": failed,
-            "seconds": sec, "faces_per_sec": round(done_faces / sec, 2) if sec else None}
+            "seconds": sec, "faces_per_sec": round(done_faces / sec, 2) if sec else None,
+            "batch": int(batch), "lane": "pipeline"}
 
 
 # ---------------- ④ 遮罩推理 ----------------
+_XSEG_SESS = {}          # (model_key, onnx 路径) -> (_xseg.XSegMasker)
+_XSEG_SESS_LOCK = threading.RLock()
+
+
+def _engine_workspace():
+    """4.0 引擎仓的 workspace（模型历来也放那边）。拿不到就 None。"""
+    try:
+        from ._paths import engine_root
+        r = engine_root()
+        return r if r else None
+    except Exception:                                       # noqa: BLE001
+        return None
+
+
+def _xseg_resolve(model):
+    """按界面选择解析 XSeg / XSegLite 的 onnx（不加载，只给路径 + md5）。"""
+    from . import _xseg as _xseglib
+    return _xseglib.resolve(model, WORKSPACE, _engine_workspace())
+
+
 def _mask_signature(src: dict, cfg: dict = None) -> str:
-    """遮罩阶段的「来源指纹」：来源/模型变了，mask/ 就失效（不许静默复用）。"""
-    model = str(src.get("model") or "")
+    """遮罩阶段的「来源指纹」：来源/模型/模型文件变了，mask/ 就失效（不许静默复用）。
+
+    以前是 "xseg:auto" —— 对 XSeg / XSegLite 是同一个值，于是「界面从 XSegLite 切到
+    XSeg 再点合成」会拿到上一个模型算的遮罩，而且没有任何提示。现在把**实际会用到的
+    那个 onnx 的 md5 前 8 位**放进指纹：换模型、换文件、换目录都会让它失效。
+    """
     if src.get("source") == "dfm":
         return "dfm"
-    return "xseg:%s" % (model or "auto")
+    key = str(src.get("model") or "")
+    try:
+        res = _xseg_resolve(key)
+    except Exception:                                       # noqa: BLE001
+        return "xseg:%s" % (key or "auto")
+    if not res.get("key"):
+        return "xseg:%s" % (key or "auto")
+    return "xseg:%s:%s" % (res["key"], (res.get("md5") or "")[:8] or "nomd5")
+
+
+def _xseg_sess_alive(m) -> tuple:
+    """缓存的 masker 还能直接用吗：TRT 的引擎文件还在不在？onnx 还是原来那份？
+
+    为什么要查：用户重编引擎、删引擎、或者换了一个同名 onnx 之后，**不重启软件**再跑
+    遮罩阶段，必须如实重新加载并如实回显新的后端 —— 不能因为「对象还挂在缓存里」就
+    继续假装自己在用 TRT（这正是「引擎明明没了还在报 trt」的那类谎话）。
+    返回 (alive, 原因)。
+    """
+    info = getattr(m, "info", {}) or {}
+    if str(info.get("backend") or "") != "trt":
+        # 反向也要查一遍：上次是回落到 onnxruntime，后来用户把引擎编出来了 ——
+        # 下一次遮罩阶段就该用上 TRT，不能因为对象还挂在缓存里就一直跑 onnxruntime
+        try:
+            from . import _engines as _E
+            sm, tv = _E.sm_tag(), _E.trt_version()
+            md5 = info.get("md5") or _E.md5_fresh(str(info.get("name") or ""),
+                                                  str(info.get("onnx") or ""))
+            d = _E.engine_dir(WORKSPACE)
+            for prec in ("int8", "bf16"):
+                p = d / ("%s_%s_sm%s_trt%s.%s.engine"
+                         % (info.get("name"), md5, sm, tv, prec))
+                if p.is_file():
+                    return False, "TRT 引擎已经编出来了（%s）" % p.name
+        except Exception:                                   # noqa: BLE001
+            pass
+        return True, ""
+    ep = str(info.get("engine_path") or "")
+    if ep and not Path(ep).is_file():
+        return False, "引擎文件不在了（%s）" % Path(ep).name
+    try:
+        from ._engines import md5_fresh
+        cur = md5_fresh(str(info.get("name") or ""), str(info.get("onnx") or ""))
+        if cur and info.get("md5") and cur != str(info["md5"]):
+            return False, "onnx 变了（md5 %s → %s）" % (info["md5"], cur)
+    except Exception:                                       # noqa: BLE001
+        pass
+    return True, ""
+
+
+def _stage_xseg(model):
+    """④ 用的 XSeg 遮罩器：**按界面选择**加载，后端走 _engines.try_engine。
+
+    返回 (masker, res)；masker.info 里有 backend / engine / precision / reason。
+    这里不走 app._get_xseg 是有意的：那份缓存按「请求的 key」存，但内部会静默退到
+    另一个模型（Lite 丢了就跑 XSeg），遮罩阶段必须知道「选的和跑的到底是不是同一个」。
+    缓存按 (模型, onnx 路径) 存 —— 切模型不会重复加载同一个文件；每次复用前还要过一遍
+    _xseg_sess_alive（引擎被删/onnx 被换 → 重新加载，后端如实变化）。
+    """
+    from . import _xseg as _xseglib
+    res = _xseglib.resolve(model, WORKSPACE, _engine_workspace())
+    if not res.get("path"):
+        raise _BadInput("找不到 XSeg 模型（workspace/model/XSegLite/xseglite.onnx 或 "
+                        "workspace/model/XSeg/XSeg.onnx）—— 遮罩来源选了 %s 就必须有它；"
+                        "找过：%s" % (res.get("label") or model or "XSeg",
+                                     "、".join(res.get("candidates") or [])[:300]), 500)
+    key = (res["key"], str(res["path"]))
+    with _XSEG_SESS_LOCK:
+        hit = _XSEG_SESS.get(key)
+    if hit is not None:
+        alive, why = _xseg_sess_alive(hit)
+        if alive:
+            return hit, res
+        _stage_log("遮罩：缓存的遮罩器不能再用（%s）→ 重新加载并重新判定后端" % why)
+        with _XSEG_SESS_LOCK:
+            _XSEG_SESS.pop(key, None)
+    m = _xseglib.XSegMasker(str(res["path"]), workspace=WORKSPACE,
+                            engine_name=res["engine"])
+    with _XSEG_SESS_LOCK:
+        _XSEG_SESS[key] = m
+    return m, res
 
 
 def _stage_do_mask(cfg: dict) -> dict:
@@ -7346,31 +7815,47 @@ def _stage_do_mask(cfg: dict) -> dict:
         _stage_log("遮罩：复用已有 %d 张遮罩（不重跑；要重做传 force=true）" % total)
         return {"skipped": True, "count": int(st.get("count") or 0), "reason": "already-done"}
 
+    # ---- 按界面选择加载模型；后端 = TRT 有就用、没有就 onnxruntime（结论全部回显）----
     xseg = None
-    engine = "none"
+    backend = "none"
+    engine_file = ""
+    engine_prec = ""
+    fallback = ""
+    model_onnx = ""
+    model_label = str(src.get("label") or "")
     if src["source"] == "xseg":
-        xseg = _app_mod._get_xseg(src.get("model") or None)
-        if xseg is None:
-            raise _BadInput("找不到 XSeg 模型（workspace/model/XSegLite/xseglite.onnx 或 "
-                            "workspace/model/XSeg/XSeg.onnx）—— 遮罩来源选了 %s 就必须有它"
-                            % (src.get("label") or "XSeg"), 500)
-        provid = []
-        try:
-            provid = list(xseg.sess.get_providers())
-        except Exception:                                   # noqa: BLE001
-            provid = []
-        cls = type(xseg.sess).__name__.lower()
-        engine = "trt" if ("trt" in cls or not provid) else "ort"
+        xseg, res = _stage_xseg(src.get("model"))
+        info = dict(getattr(xseg, "info", {}) or {})
+        backend = str(info.get("backend") or "ort")
+        engine_file = str(info.get("engine") or "")
+        engine_prec = str(info.get("precision") or "")
+        fallback = str(info.get("reason") or "")
+        model_onnx = str(info.get("onnx") or res.get("path") or "")
+        model_label = res.get("label") or model_label
+        if backend == "trt":
+            _stage_log("遮罩：模型=%s（%s）· 后端=TRT(%s) · 引擎=%s"
+                       % (model_label, Path(model_onnx).name, engine_prec or "?", engine_file))
+        else:
+            _stage_log("遮罩：模型=%s（%s）· 后端=onnxruntime · 没有可用的 TRT 引擎 → 回落"
+                       "（原因：%s）" % (model_label, Path(model_onnx).name,
+                                        fallback or "未知"))
+    engine = backend          # 老字段（导出/验收还在用它）—— 语义就是 trt|ort|none
     cursor = 0 if cfg["force"] else max(0, min(int(st.get("done_frames") or 0), total))
     if cursor:
         _stage_log("遮罩：从第 %d 张续跑（前 %d 张已经在）" % (cursor + 1, cursor))
-    _stage_log("遮罩：来源=%s · 引擎=%s · %d 张对齐脸"
-               % (src.get("label") or src.get("source"), engine, total))
+    _stage_log("遮罩：来源=%s · 模型=%s · 引擎=%s%s · %d 张对齐脸%s"
+               % (src.get("label") or src.get("source"), model_label or "-", engine,
+                  ("(%s)" % engine_file) if engine_file else "", total,
+                  ("" if not src.get("model_note") else
+                   " · 注意：" + str(src.get("model_note")))))
 
     t0 = time.time()
-    wrote = int(st.get("count") or 0)
+    wrote = 0 if cfg.get("force") else int(st.get("count") or 0)   # 同上：force 从 0 数
+    if cfg.get("force"):
+        st["count"] = 0
     failed = int(st.get("failed") or 0)
     means = []
+    t_infer = 0.0          # 纯推理累计（两张 256 的 XSeg 前向，不含读图/写盘）
     frames_dir = _stage_frames_dir(cache)
     cache_frame = {"key": None, "img": None}
 
@@ -7379,7 +7864,14 @@ def _stage_do_mask(cfg: dict) -> dict:
             "done": bool(done), "done_frames": int(up_to), "total": total,
             "count": wrote, "failed": failed, "signature": sig,
             "mask_source": src.get("label") or src.get("source"),
-            "mask_model": str(src.get("model") or ""), "engine": engine,
+            "mask_model": str(src.get("model") or ""),
+            "mask_model_from": str(src.get("model_from") or ""),
+            "mask_onnx": model_onnx, "mask_label": model_label,
+            "engine": engine,                 # 老字段，语义 = backend
+            "backend": backend,               # trt | ort | none
+            "engine_file": engine_file,       # 实际加载的引擎文件名（trt 才有）
+            "engine_precision": engine_prec,  # int8 / bf16
+            "fallback_reason": fallback,      # 没上 TRT 的一句话原因（有引擎时为空）
             "size": 256, "inference": (src["source"] == "xseg"),
             "dir": str(mask_dir), "resumed_from": int(cursor),
             "msg": ("遮罩完成：%d 张脸（来源 %s）"
@@ -7423,11 +7915,15 @@ def _stage_do_mask(cfg: dict) -> dict:
                       failed += 1
                       _stage_log("遮罩跳过 %s：pred/ 里没有换脸结果（先跑换脸）" % key)
                   else:
+                      _ti = time.perf_counter()
                       mk = xseg.mask(pred, out_size=256)
+                      t_infer += time.perf_counter() - _ti
                       _INFER_CALLS["xseg"] += 1
                       _stage_write_atomic(
                           mask_dir / (key + "_xseg_prd.png"),
-                          _stage_imencode(np.clip(mk * 255.0, 0, 255).astype(np.uint8), ".png"))
+                          # PNG level=1（无损，只是少压一层）：掩码是二值化的灰度，level 3 每张多花 ~8ms，
+                          # TRT 把推理压到 6.6ms/张之后，编码就成了这一步的主要开销
+                          _stage_imencode_png(np.clip(mk * 255.0, 0, 255).astype(np.uint8), 1))
                       means.append(float(np.asarray(mk).mean()))
                       # dst 侧：原帧按 68 点正变换到 256，再跑一次 XSeg（4.0:790-797）
                       fkey = key.split("_")[0]
@@ -7443,12 +7939,13 @@ def _stage_do_mask(cfg: dict) -> dict:
                           dmat = get_transform_mat(lm, 256, FaceType.WHOLE_FACE, scale=1.0)
                           dface = cv2.warpAffine(frame, dmat, (256, 256),
                                                  flags=cv2.INTER_CUBIC)
+                          _ti = time.perf_counter()
                           mk2 = xseg.mask(dface, out_size=256)
+                          t_infer += time.perf_counter() - _ti
                           _INFER_CALLS["xseg"] += 1
                           _stage_write_atomic(
                               mask_dir / (key + "_xseg_dst.png"),
-                              _stage_imencode(np.clip(mk2 * 255.0, 0, 255).astype(np.uint8),
-                                              ".png"))
+                              _stage_imencode_png(np.clip(mk2 * 255.0, 0, 255).astype(np.uint8), 1))
                       wrote += 1
           except Exception as e:                              # noqa: BLE001
               failed += 1
@@ -7463,18 +7960,28 @@ def _stage_do_mask(cfg: dict) -> dict:
         _stage_log("遮罩取消：停在 %d/%d 张（游标已存）" % (k, total))
         raise
     sec = round(time.time() - t0, 2)
+    done_n = max(1, total - cursor)
     _save(total, done=True, extra={
         "seconds": sec, "finished_at": time.time(),
         "fps": round((total - cursor) / sec, 2) if sec else None,
         "mask_mean": (round(sum(means) / len(means), 4) if means else None),
+        # TRT vs ORT 的对比就靠这两个数：同一个视频、同一份模型、同一个预处理
+        "infer_seconds": round(t_infer, 3),
+        "infer_ms_per_face": (round(t_infer * 1000.0 / done_n, 3)
+                              if src["source"] == "xseg" else 0.0),
     })
-    _stage_log("遮罩完成：%d 张 · 失败 %d · %.2f s · %.1f 张/秒 · 来源 %s%s"
+    _stage_log("遮罩完成：%d 张 · 失败 %d · %.2f s · %.1f 张/秒 · 后端 %s%s · 来源 %s%s"
                % (total, failed, sec, (total - cursor) / sec if sec > 0 else 0.0,
+                  backend, ("(%s)" % engine_file) if engine_file else "",
                   src.get("label") or src.get("source"),
-                  (" · 遮罩均值 %.3f" % (sum(means) / len(means))) if means else ""))
+                  (" · 推理 %.2f ms/张" % (t_infer * 1000.0 / done_n))
+                  if src["source"] == "xseg" else ""))
     return {"count": wrote, "failed": failed, "total": total, "seconds": sec,
             "mask_source": src.get("label") or src.get("source"),
-            "signature": sig, "engine": engine}
+            "signature": sig, "engine": engine, "backend": backend,
+            "engine_file": engine_file,
+            "infer_ms_per_face": (round(t_infer * 1000.0 / done_n, 3)
+                                  if src["source"] == "xseg" else 0.0)}
 
 
 
@@ -7882,7 +8389,10 @@ _STAGE_FN = {
 # ---------------- 请求 -> cfg ----------------
 _STAGE_KEEP = str(os.environ.get("DFL_STAGE_KEEP") or "").strip().lower() in ("1", "true", "yes", "on")
 # ③ 换脸一批几张 / ⑤ 合成几个线程 / ⑤ 写 PNG 的压缩级别（1 = 体积换速度）
-_PRED_BATCH_DEFAULT = max(1, int(str(os.environ.get("DFL_PRED_BATCH") or "8").strip() or 8))
+# ③ 换脸一批几张：**0 = 按可用显存自动选**（_pred_pick_batch）；env 或请求体给了就照用。
+# 以前默认写死 8 —— 8GB 卡上 batch 16 会抖到 5 张/秒，12GB 空闲时 8 又浪费一半。
+_PRED_BATCH_ENV = str(os.environ.get("DFL_PRED_BATCH") or "").strip()
+_PRED_BATCH_DEFAULT = max(0, int(_PRED_BATCH_ENV)) if _PRED_BATCH_ENV.isdigit() else 0
 _MERGE_THREADS_DEFAULT = max(1, int(str(os.environ.get("DFL_MERGE_THREADS")
                                      or max(4, min(8, (os.cpu_count() or 4) // 4))).strip()))
 _MERGE_PNG_LEVEL = max(0, min(9, int(str(os.environ.get("DFL_MERGE_PNG_LEVEL") or "1").strip() or 1)))
@@ -7996,7 +8506,7 @@ def _stage_cfg(body: dict, stage: str, chain: bool = False) -> dict:
         "use_library": True, "chain": bool(chain), "stages": [stage],
         "library": library_raw, "face_threshold": face_thr,
         # ③ 的批大小 / ⑤ 的线程数与 PNG 压缩级别（都能从请求体或环境变量调）
-        "pred_batch": _int_val("batch", body.get("batch") or body.get("pred_batch"), 1, 64,
+        "pred_batch": _int_val("batch", body.get("batch") or body.get("pred_batch"), 0, 64,
                                _PRED_BATCH_DEFAULT),
         "merge_threads": _int_val("threads", body.get("threads") or body.get("merge_threads"),
                                   1, 32, _MERGE_THREADS_DEFAULT),
@@ -8341,6 +8851,21 @@ def merge_stage_status(cache_dir: str = "", video: str = ""):
         "mask_source": str((stages.get("mask") or {}).get("mask_source") or
                            (_mask_src(meta.get("settings")).get("label") or "")),
         "mask_signature": str((stages.get("mask") or {}).get("signature") or ""),
+        # ④ 到底跑在哪个后端上（用户报的「选了 XSegLite 却在跑 onnx」就是靠这几个字段对的）
+        "mask_backend": str((stages.get("mask") or {}).get("backend")
+                            or (stages.get("mask") or {}).get("engine") or ""),
+        "mask_engine": str((stages.get("mask") or {}).get("engine_file") or ""),
+        "mask_precision": str((stages.get("mask") or {}).get("engine_precision") or ""),
+        "mask_model": str((stages.get("mask") or {}).get("mask_model") or ""),
+        "mask_onnx": str((stages.get("mask") or {}).get("mask_onnx") or ""),
+        "mask_fallback": str((stages.get("mask") or {}).get("fallback_reason") or ""),
+        # ③ 的吞吐与 batch（batch_source = auto/request，ladder 是实测表）
+        "pred_batch": int((stages.get("pred") or {}).get("batch") or 0),
+        "pred_batch_source": str((stages.get("pred") or {}).get("batch_source") or ""),
+        "pred_ladder": list(((stages.get("pred") or {}).get("batch_meta") or {})
+                            .get("ladder") or []),
+        "pred_profile": dict((stages.get("pred") or {}).get("profile") or {}),
+        "pred_faces_per_sec": float((stages.get("pred") or {}).get("faces_per_sec") or 0.0),
         "pred": dict(stages.get("pred") or {}),
         "skipped_why": str((stages.get(str(snap.get("stage") or "")) or {})
                            .get("skipped_why") or ""),

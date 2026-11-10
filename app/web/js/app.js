@@ -5110,6 +5110,8 @@ function mgStageEmpty(on) {
       ct_mode: ct,
       blend: blend,
       mask_mode: maskInt,
+    /* 遮罩来源单独发：后端只认这个字段（mask_mode 整数分不清 XSeg 与 XSegLite） */
+    mask_source: mgSegVal("seg", "XSegLite"),
       mask_erode: erode,
       mask_blur: blur,
       /* —— 旧字段兜底：后端还是老版本时认这一组 —— */

@@ -206,8 +206,26 @@ def _trt_log(key, msg):
     print("[TRT] " + msg, flush=True)
 
 
-def try_engine(workspace, name, onnx_path, sm=None, precision="bf16", use_graph=True, graph_max_batch=None):
+def _note(info, **kw):
+    """把「用了哪个后端、为什么」写进调用方传进来的 dict（可观测性用，不参与控制流）。"""
+    if isinstance(info, dict):
+        try:
+            info.update(kw)
+        except Exception:                                      # noqa: BLE001
+            pass
+
+
+def try_engine(workspace, name, onnx_path, sm=None, precision="bf16", use_graph=True,
+               graph_max_batch=None, info=None):
     """有匹配的引擎（MD5 + SM + TRT 版本都对）就返回 TrtSession，否则 None。
+
+    info: 可选 dict，函数会往里写「这次到底用了什么、没命中是为什么」：
+        {"backend": "trt"|"ort", "engine": 引擎文件名, "engine_path": 绝对路径,
+         "precision": "int8"|"bf16"|"", "md5": onnx 的 md5 前 12 位, "sm": SM 编号,
+         "trt": TRT 版本串, "reason": 一句话原因, "providers": [...]}
+    遮罩阶段要把这些回显到 status / 日志里 —— 以前「明明是 onnxruntime 在跑」
+    只能靠 print 出来的一行 [TRT] 猜，接口上是看不见的。
+    老调用方不传 info 时行为完全不变。
 
     precision 可以是单个值或列表：按顺序找，先用 int8、没有再退 bf16。
     这是运行时的唯一入口：拿到 None 就继续走 onnxruntime。
@@ -216,17 +234,22 @@ def try_engine(workspace, name, onnx_path, sm=None, precision="bf16", use_graph=
     所以"int8 引擎明明躺在目录里却没生效"这种事没人发现得了）。
     """
     precs = [precision] if isinstance(precision, str) else list(precision)
+    _note(info, backend="ort", engine="", engine_path="", precision="", md5=None,
+          sm=None, trt=None, tried=[], name=str(name), onnx=str(onnx_path), reason="")
     try:
         sm = sm or sm_tag()
     except Exception as e:                                     # noqa: BLE001
+        _note(info, reason="取 SM 版本失败（%r）" % (e,))
         _trt_log((name, "sm"), "%s: 取 SM 版本失败（%r）→ 回退 onnxruntime" % (name, e))
         return None
     if sm is None:
+        _note(info, sm=None, reason="torch.cuda 不可用，拿不到 SM")
         _trt_log((name, "nogpu"), "%s: torch.cuda 不可用，拿不到 SM → 回退 onnxruntime" % name)
         return None
     try:
         md5 = md5_fresh(name, onnx_path)
     except Exception as e:                                     # noqa: BLE001
+        _note(info, sm=sm, reason="算 onnx MD5 失败（%r）" % (e,))
         _trt_log((name, "md5", str(onnx_path)),
                  "%s: 算 onnx MD5 失败（%r）→ 回退 onnxruntime" % (onnx_path, e))
         return None
@@ -234,9 +257,11 @@ def try_engine(workspace, name, onnx_path, sm=None, precision="bf16", use_graph=
     d = engine_dir(workspace)
     tried = []
     missed = []
+    _note(info, sm=sm, md5=md5, trt=trt_v, engine_dir=str(d))
     for prec in precs:
         p = d / ("%s_%s_sm%d_trt%s.%s.engine" % (name, md5, sm, trt_v, prec))
         tried.append(p.name)
+        _note(info, tried=list(tried))
         if not p.is_file():
             missed.append(prec)
             continue
@@ -244,6 +269,7 @@ def try_engine(workspace, name, onnx_path, sm=None, precision="bf16", use_graph=
             from ._trt_session import TrtSession
             sess = TrtSession(str(p), use_graph=use_graph)
         except Exception as e:                                 # noqa: BLE001
+            _note(info, reason="引擎 %s 加载失败（%r）" % (p.name, e))
             _trt_log((name, prec, p.name),
                      "%s: 引擎 %s 加载失败（%r）→ 试下一种精度" % (name, p.name, e))
             continue
@@ -252,6 +278,11 @@ def try_engine(workspace, name, onnx_path, sm=None, precision="bf16", use_graph=
                  % (name, prec, p.name, md5, sm, trt_v,
                     ("；%s 引擎不存在，已按顺序回退" % "/".join(missed)) if missed else ""))
         sess.precision = prec
+        _note(info, backend="trt", engine=p.name, engine_path=str(p), precision=prec,
+              md5=md5, sm=sm, trt=trt_v,
+              reason=("命中 %s 引擎 %s" % (prec, p.name))
+                     + ("；%s 引擎不存在，已按顺序回退" % "/".join(missed) if missed else ""),
+              providers=["TensorrtExecutionProvider"])
         return sess
 
     # 没命中：把"到底缺什么"说清楚（md5 变了？SM 变了？TRT 版本变了？文件还是旧命名？）
@@ -266,6 +297,10 @@ def try_engine(workspace, name, onnx_path, sm=None, precision="bf16", use_graph=
         detail = "；目录里同名的引擎：%s" % ", ".join(siblings[:4]) + ("" if len(siblings) <= 4 else " …")
     if legacy:
         detail += "（其中 %s 是旧命名，不含 md5/SM/trt，永远不会被命中）" % ", ".join(legacy[:3])
+    _note(info, backend="ort", engine="", engine_path="", precision="", md5=md5,
+          sm=sm, trt=trt_v,
+          reason=("没有 md5=%s sm=%d trt%s 的 %s 引擎（找过 %s）"
+                  % (md5, sm, trt_v, "/".join(precs), ", ".join(tried))) + detail)
     _trt_log((name, "miss", md5, sm, trt_v),
              "%s: 没有 md5=%s sm=%d trt%s 的 %s 引擎（找过 %s）%s → 回退 onnxruntime"
              % (name, md5, sm, trt_v, "/".join(precs), ", ".join(tried), detail))
