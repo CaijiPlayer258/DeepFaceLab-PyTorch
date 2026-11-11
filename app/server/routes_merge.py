@@ -6363,6 +6363,83 @@ def _stage_read_frame(path):
     return cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
 
 
+def _stage_dst_face_mat(meta: dict, size: int = 256):
+    """aligned/*.jpg → 合成画布(size) 的仿射矩阵（2×3）；元数据不全返回 None。
+
+    **为什么不是「直接 resize 到 256」**：aligned 是切脸阶段用 app 自己的 68 点模板
+    （_align.align_mat_from_68，padding 0.40 + 整脸中心下移 7%）裁出来的，而 ③ 换脸、
+    ⑤ 合成、XSeg 的 pred 分支用的都是 facelib 的 WHOLE_FACE 变换（get_transform_mat）。
+    两张矩阵实测不是同一张：68 点残差均值 6.1~7.2 px、缩放差 5.5%（0.562 vs 0.590）、
+    旋转差 1.2°、水平错位 5.7 px。这条链的「合成画布」是 facelib 那一套
+    （compose_frame 用 get_transform_mat 把 pred 反贴回原帧），所以 dst 遮罩必须落在
+    同一张画布上 —— 否则 mask_mode 8/7 的遮罩会整体错开 ~6 px（256 网格上），贴回原帧
+    就是边缘多一条挖进脸里的缝。
+
+    这里把 aligned 先按 image_to_face_mat 的逆变换放回原帧坐标，再用法线（facelib）
+    变换压到 size —— 一张矩阵、一次重采样，像素仍然来自 aligned 本身，不需要 1080p 原帧。
+    """
+    import numpy as np
+
+    if not isinstance(meta, dict):
+        return None
+    lm = meta.get("source_landmarks") or meta.get("landmarks")
+    mat_a = meta.get("image_to_face_mat")
+    if not lm or len(lm) != 68 or not mat_a:
+        return None
+    try:
+        from ._merge_compose import ensure_engine_path
+        ensure_engine_path()                    # facelib 在 4.0 引擎根里（_paths.engine_root）
+        from facelib import FaceType
+        from facelib.LandmarksProcessor import get_transform_mat
+
+        a = np.asarray(get_transform_mat(np.asarray(lm, np.float32), int(size),
+                                         FaceType.WHOLE_FACE, scale=1.0), np.float64)
+        a = np.vstack([a, [0.0, 0.0, 1.0]]) if a.shape == (2, 3) else a
+        b = np.asarray(mat_a, np.float64)
+        b = np.vstack([b, [0.0, 0.0, 1.0]]) if b.shape == (2, 3) else b
+        m = a @ np.linalg.inv(b)                # aligned -> 原帧 -> 画布
+        m = np.asarray(m, np.float64)[:2]
+        if m.shape != (2, 3) or not np.all(np.isfinite(m)):
+            return None
+        return m
+    except Exception:                                       # noqa: BLE001
+        return None
+
+
+def _stage_read_dst_face(path, size: int = 256):
+    """aligned/*.jpg（DFLJPG）→ (合成画布上的 (size,size) BGR uint8, 失败原因)。
+
+    成功时返回 (img, "")；失败时 (None, 一句话原因) —— 调用方按「跳过并计数」处理，
+    **绝不**退回读 1080p 原帧（那正是这一版删掉的东西）。
+
+    读图是裸读字节 + imdecode（DFLJPG 的 APP15 元数据段不影响 JPEG 解码，和
+    _stage_read_frame 同一条快路径，绕开 _imread_any 的兜底分支）。
+    """
+    import cv2
+    import numpy as np
+    from ._align import read_dfljpg_meta
+
+    try:
+        with open(str(path), "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None, "文件读不出来"
+    if not data:
+        return None, "文件是空的"
+    img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if img is None or getattr(img, "ndim", 0) != 3 or int(img.shape[2]) != 3:
+        return None, "JPEG 解不出来/坏图"
+    if int(img.shape[0]) < 32 or int(img.shape[1]) < 32:
+        return None, "图太小（%dx%d）" % (img.shape[1], img.shape[0])
+    m = _stage_dst_face_mat(read_dfljpg_meta(path) or {}, size)
+    if m is None:
+        return None, "DFLJPG 元数据缺 68 点 / image_to_face_mat"
+    out = cv2.warpAffine(img, m, (int(size), int(size)), flags=cv2.INTER_CUBIC)
+    if out is None or int(out.shape[0]) != size or int(out.shape[1]) != size:
+        return None, "映射到画布失败"
+    return out, ""
+
+
 def _stage_clear_dir(dirp, exts=_STAGE_IMG_EXTS, prefix="") -> int:
     """清掉目录里的阶段产物（只删指定后缀，别误伤 meta.json 之类）。"""
     n = 0
@@ -8133,31 +8210,46 @@ def _stage_xseg(model):
     return m, res
 
 
+# dst 遮罩的像素来源（写进 meta.stages.mask.dst_input）：aligned = aligned/*.jpg 里的
+# 对齐脸（再经一张补偿矩阵映射到 facelib 的合成画布）。老版本没有这个字段
+# （那时每次都要解码 1080p 原帧再对齐）。
+_MASK_DST_INPUT = "aligned"
+
+
 def _stage_do_mask(cfg: dict) -> dict:
-    """阶段 4 · 遮罩推理：pred/ + frames/ -> mask/（每个对齐脸两张灰图）。
+    """阶段 4 · 遮罩推理：aligned/ + pred/ -> mask/（每个对齐脸两张灰图）。
 
     语义照 4.0 export_pipeline.py:758-799（_phase_mask_worker）：
       · XSeg / XSegLite 来源：mask/<key>_xseg_prd.png = XSeg(pred)，
-        mask/<key>_xseg_dst.png = XSeg(warpAffine(frame, get_transform_mat(lm,256)))
+        mask/<key>_xseg_dst.png = XSeg(dst 对齐脸)
       · DFM 来源：遮罩就是 dfm 自带的那两条分支（③ 已经落盘 prdm/dstdm），这一步
         只把它们按 mask/ 的命名**落盘留档**（便于检查），不跑任何推理。
     两种来源都会把 dfm 的两张遮罩一起放进 mask/（mask_mode=9 全乘要用）。
     游标 = meta.stages.mask.done_frames（对齐脸张数）。
 
-    **吞吐**：这条链以前是纯串行（读 pred → 元数据 → warp 原帧 → XSeg(prd) → 写盘 →
+    **dst 输入 = aligned/<frame>_<fidx>.jpg：不读 frames/，只补一张几何补偿矩阵**
+      以前为了拿「dst 对齐脸」先解码 1080p 原帧（≈24 ms/张脸，同一帧多张脸还各解码一次），
+      再用 facelib 的 WHOLE_FACE 变换压到 256 —— 解码原帧这一步是纯浪费：同一张脸就在
+      aligned/*.jpg 里（切脸阶段 68 点仿射 _align.align_mat_from_68 的直接产物）。
+      现在读 aligned，再用一张补偿矩阵（image_to_face_mat⁻¹ × facelib WHOLE_FACE，见
+      _stage_dst_face_mat）映射到合成画布。**为什么要补偿**：app 的 68 点模板和 facelib
+      那张不是同一张（实测 68 点残差 6.1~7.2 px、缩放差 5.5%、旋转差 1.2°），而这条链的
+      合成画布是 facelib 的（③ pred、⑤ compose_frame 都用它）—— 直接 resize 会让 dst 遮罩
+      整体错开 ~6 px（256 网格），mask_mode 8/7 贴回原帧就是边缘一条挖进脸里的缝。
+      dst 输入整条读下来实测 5.6 ms/张（解码 3.4 + 元数据 0.6 + 矩阵 0.5 + 映射 1.1），
+      省掉的是 1080p 解码（≈24 ms）和每张脸重算一遍的 68 点变换。
+      读不出来 / 损坏的那一张**跳过并计数**（failed + 日志点名 + meta 的 dst_bad_aligned），
+      既不拿全帧兜底、也不算进成功数；一张都没成就报错。
+
+    **吞吐**：这条链以前是纯串行（读 pred → 元数据 → 读原帧 → XSeg(prd) → 写盘 →
     XSeg(dst) → 写盘 → 复制 dfm 遮罩），一台机器上 2059 张脸 ≈ 26 张/秒，而原生 TRT
     的 XSegLite 纯推理只要 1.44 ms/图（实测），也就是 92% 的时间不在推理上。现在拆成
     读 N 线程 / 推理 1 线程 / 写 M 线程三段（和 ③ 换脸同一套结构），墙钟从「各段相加」
-    变成「取最长的那段」，实测 25 → 75~115 张/秒（见 app/tools/stage_perf_profile.py）。
+    变成「取最长的那段」；dst 输入换成 aligned 之后读线程不再是瓶颈（口径见
+    app/tools/stage_perf_profile.py 与 %TEMP% 里的 before/after 基准）。
     """
     import sys as _sys
-    import cv2
     import numpy as np
-    from ._merge_compose import ensure_engine_path
-    ensure_engine_path()
-    from facelib import FaceType
-    from facelib.LandmarksProcessor import get_transform_mat
-    from ._align import read_dfljpg_meta
 
     cache = Path(cfg["cache"])
     meta = cfg["meta"]
@@ -8187,7 +8279,16 @@ def _stage_do_mask(cfg: dict) -> dict:
         raise _BadInput("遮罩来源变了（%s → %s）：mask/ 里的东西已经失效，"
                         "不能静默复用。传 force=true 重跑遮罩阶段"
                         % (st.get("signature"), sig), 409)
-    if (not cfg["force"]) and not rchg and st.get("done") and st.get("signature") == sig \
+    # 老版本（dst 输入 = 原帧重新对齐）算出来的 mask/ 不能静默复用：来源没变，但几何变了。
+    # 这里不报 409（挡的是「换了模型还复用旧遮罩」），直接当 force 整段重算并说清原因。
+    stale_dst = (bool(st.get("done")) and bool(st.get("inference"))
+                 and str(st.get("dst_input") or "") != _MASK_DST_INPUT)
+    if stale_dst:
+        _stage_log("遮罩：现有 mask/ 是「dst 输入 = 原帧重新对齐」那一版算的（dst_input=%s）"
+                   "→ 口径已改成 aligned/，几何变了，整段重算"
+                   % (st.get("dst_input") or "-",))
+    redo = bool(cfg["force"] or rchg or stale_dst)
+    if (not redo) and st.get("done") and st.get("signature") == sig \
             and int(st.get("done_frames") or 0) >= total:
         _stage_log("遮罩：复用已有 %d 张遮罩（第 %d..%d 帧，不重跑；要重做传 force=true）"
                    % (total, int(rng["start"]), int(rng["end"])))
@@ -8218,7 +8319,7 @@ def _stage_do_mask(cfg: dict) -> dict:
                        "（原因：%s）" % (model_label, Path(model_onnx).name,
                                         fallback or "未知"))
     engine = backend          # 老字段（导出/验收还在用它）—— 语义就是 trt|ort|none
-    cursor = 0 if (cfg["force"] or rchg) else max(0, min(int(st.get("done_frames") or 0), total))
+    cursor = 0 if redo else max(0, min(int(st.get("done_frames") or 0), total))
     if cursor:
         _stage_log("遮罩：从范围内第 %d 张续跑（前 %d 张已经在）" % (cursor + 1, cursor))
     _stage_log("遮罩：来源=%s · 模型=%s · 引擎=%s%s · 第 %d..%d 帧（%d 张对齐脸）%s"
@@ -8229,17 +8330,20 @@ def _stage_do_mask(cfg: dict) -> dict:
                    " · 注意：" + str(src.get("model_note")))))
 
     t0 = time.time()
-    # force / 换范围 都从 0 数（游标和计数都相对范围）
-    wrote = 0 if (cfg.get("force") or rchg) else int(st.get("count") or 0)
-    if cfg.get("force") or rchg:
+    # force / 换范围 / dst 输入口径变了 都从 0 数（游标和计数都相对范围）
+    wrote = 0 if redo else int(st.get("count") or 0)
+    if redo:
         st["count"] = 0
     failed = int(st.get("failed") or 0)
     means = []
     t_infer = 0.0          # 纯推理累计（两张 256 的 XSeg 前向，不含读图/写盘）
-    frames_dir = _stage_frames_dir(cache)
-    # 逐段打点（和 ③ 换脸同一套口径：读图 / 预处理 / 推理 / 写盘，各自累计 ms）
+    # 逐段打点（和 ③ 换脸同一套口径：读图 / 预处理 / 推理 / 写盘，各自累计 ms）。
+    # dst 输入改成 aligned 之后，几何映射并在读图段里（一次 558→256 的重采样）→ 预处理段
+    # prep_ms 恒为 0（保留这个打点名，是为了和上一版的 profile 直接对比）；
+    # 读图 = pred PNG 解码 + aligned JPEG 解码 + 补偿矩阵 + 映射到 256。
     prof = {"read_ms": 0.0, "prep_ms": 0.0, "infer_ms": 0.0, "write_ms": 0.0,
-            "faces": 0, "images": 0}
+            "faces": 0, "images": 0, "bad_aligned": 0}
+    bad_aligned = []       # 读不出来的 aligned 文件名（最多留 20 个，进 meta / 日志）
     plock = threading.Lock()
 
     def _bump(ms_name: str, sec: float, n: int = 0, images: int = 0):
@@ -8249,6 +8353,13 @@ def _stage_do_mask(cfg: dict) -> dict:
                 prof["faces"] += n
             if images:
                 prof["images"] += images
+
+    def _bad_aligned(name: str):
+        """记一张读不出来的 aligned 文件（计数 + 最多留 20 个名字）。"""
+        with plock:
+            prof["bad_aligned"] = int(prof.get("bad_aligned") or 0) + 1
+            if len(bad_aligned) < 20:
+                bad_aligned.append(str(name))
 
     def _save(up_to: int, done: bool = False, extra: dict = None):
         node = {
@@ -8266,6 +8377,10 @@ def _stage_do_mask(cfg: dict) -> dict:
             "engine_precision": engine_prec,  # int8 / bf16
             "fallback_reason": fallback,      # 没上 TRT 的一句话原因（有引擎时为空）
             "size": 256, "inference": (src["source"] == "xseg"),
+            # dst 遮罩的像素来源：aligned（aligned/*.jpg 本身）/ dfm（dfm 自带，不推理）。
+            # 老版本没有这个字段 —— _stage_do_mask 靠它认出「从原帧重建」那一版并重算。
+            "dst_input": (_MASK_DST_INPUT if src["source"] == "xseg" else "dfm"),
+            "dst_bad_aligned": int(prof.get("bad_aligned") or 0),
             "dir": str(mask_dir), "resumed_from": int(cursor),
             "msg": ("遮罩完成：%d 张脸（第 %d..%d 帧 · 来源 %s）"
                     % (wrote, int(rng["start"]), int(rng["end"]),
@@ -8293,17 +8408,18 @@ def _stage_do_mask(cfg: dict) -> dict:
         return n
 
     # ---- 串行链 → 三段流水线 ----
-    # 以前这里是一条串行链：读 pred PNG → 读 DFLJPG 元数据 → warp 原帧 →
-    # XSeg(prd) → 编码写盘 → XSeg(dst) → 编码写盘 → 复制 dfm 的两张遮罩。
+    # 以前这里是一条串行链：读 pred PNG → 读 DFLJPG 元数据 → 读 1080p 原帧 → 对齐到
+    # 256 → XSeg(prd) → 编码写盘 → XSeg(dst) → 编码写盘 → 复制 dfm 的两张遮罩。
     # 纯推理（原生 TRT int8，见 stage_perf_profile.py 的实测）只有 1.44 ms/张，
     # 两张也就 2.9 ms；2059 张脸却只有 26 张/秒（≈38 ms/张）—— 也就是 92% 的时间
     # 不在推理上，而且串行意味着「各段相加」。现在拆成三段用队列连起来：
-    #     读线程 ×N   pred PNG 解码 + DFLJPG 元数据 + warp 原帧到 256
+    #     读线程 ×N   pred PNG 解码 + aligned JPEG 解码并映射到 256（_stage_read_dst_face）
     #     推理线程    攒够 mask_batch 张脸，一次前向（ORT 动态 batch 或 TRT 逐张）
     #     写线程 ×M   PNG 编码 + 原子落盘 + dfm 两张遮罩的文件复制
     # 墙钟 ≈ max(三段) 而不是三段之和。
-    # 读线程要盖住「每帧解码一次 1080p PNG」这条硬开销（本机 17.7 ms/帧，8 线程并发时实测
-    # 摊到 ~7 ms）；写线程盖住「每张脸 4 个 PNG + 2 次文件复制」（本机 ~24 ms/张）。
+    # dst 输入换成 aligned 之后，读线程从「每张脸解码一张 1080p PNG（≈24 ms/张）」降到
+    # 「解码一张 558 的 JPEG 再映射到 256（≈4 ms/张）」，同一帧的多张脸也不再共用帧缓存
+    # （每张脸读自己那张 aligned）；写线程仍是「每张脸 4 个 PNG + 2 次文件复制」（~24 ms/张）。
     readers = max(1, int(cfg.get("mask_readers")
                          or min(6, max(2, (os.cpu_count() or 4) // 4))))
     writers = max(1, int(cfg.get("mask_writers")
@@ -8431,7 +8547,6 @@ def _stage_do_mask(cfg: dict) -> dict:
                 _pend_done(gi)
 
     def _reader(lo: int, hi: int):
-        cache = {"key": None, "img": None}
         try:
             for gi in range(lo, hi):
                 if stop.is_set():
@@ -8441,33 +8556,25 @@ def _stage_do_mask(cfg: dict) -> dict:
                 tr = time.perf_counter()
                 pm = pred_dir / (key + ".png")
                 pred = _stage_read_image(pm) if pm.is_file() else None
+                # dst 输入 = aligned/*.jpg（切脸阶段 68 点仿射的直接产物），只做一次「映射到
+                # 合成画布」的重采样：不读 1080p 原帧（见 _stage_read_dst_face）。
+                dst, why_dst = _stage_read_dst_face(ap)
                 _bump("read_ms", time.perf_counter() - tr)
+                why = ""
                 if pred is None:
-                    _put_prep((gi, key, None, None))
+                    why = "pred/ 里没有换脸结果（先跑换脸）"
+                elif dst is None:
+                    why = "aligned 用不了 %s：%s" % (ap.name, why_dst)
+                    _bad_aligned(ap.name)
+                if why:
+                    _put_prep((gi, key, None, None, why))
                     continue
-                tp = time.perf_counter()
-                dst = None
-                fkey = key.split("_")[0]
-                if cache["key"] != fkey:
-                    cache["key"] = fkey
-                    fp = _stage_frame_path(frames_dir, fkey)
-                    cache["img"] = _stage_read_frame(fp) if fp else None
-                frame = cache["img"]
-                if frame is not None:
-                    m = read_dfljpg_meta(ap) or {}
-                    lm = m.get("source_landmarks") or m.get("landmarks")
-                    if lm:
-                        dmat = get_transform_mat(np.asarray(lm, np.float32), 256,
-                                                 FaceType.WHOLE_FACE, scale=1.0)
-                        # 整帧是 uint8 → warp 一次 0.18ms（float 帧要 13ms）
-                        dst = cv2.warpAffine(frame, dmat, (256, 256), flags=cv2.INTER_CUBIC)
-                _bump("prep_ms", time.perf_counter() - tp)
-                _put_prep((gi, key, pred, dst))
+                _put_prep((gi, key, pred, dst, ""))
         except Exception as e:                              # noqa: BLE001
             boss["exc"] = boss["exc"] or e
             stop.set()
             try:
-                q_prep.put((None, None, None, None))
+                q_prep.put((None, None, None, None, None))
             except Exception:                               # noqa: BLE001
                 pass
 
@@ -8479,7 +8586,7 @@ def _stage_do_mask(cfg: dict) -> dict:
             n = min(len(jobs), mbatch)
             chunk = jobs[:n]
             imgs, slots = [], []
-            for i, (_gi, _k, pred, dst) in enumerate(chunk):
+            for i, (_gi, _k, pred, dst, _why) in enumerate(chunk):
                 imgs.append(pred)
                 slots.append((i, 0))
                 if dst is not None:
@@ -8499,7 +8606,7 @@ def _stage_do_mask(cfg: dict) -> dict:
                 else:
                     prd_m[i] = mk
                     means.append(float(np.asarray(mk).mean()))
-            for i, (gi, key, _p, _d) in enumerate(chunk):
+            for i, (gi, key, _p, _d, _w) in enumerate(chunk):
                 q_write.put((gi, key, _u8(prd_m[i]), _u8(dst_m[i])))
                 wrote += 1
             del jobs[:n]
@@ -8529,15 +8636,15 @@ def _stage_do_mask(cfg: dict) -> dict:
             if item[0] is None:
                 break
             got += 1
-            gi2, key, pred, dst = item
+            gi2, key, pred, dst, why = item
             if pred is None:
                 failed += 1
-                _stage_log("遮罩跳过 %s：pred/ 里没有换脸结果（先跑换脸）" % key)
+                _stage_log("遮罩跳过 %s：%s" % (key, why or "pred/ 里没有换脸结果（先跑换脸）"))
                 with plock2:
                     completed.add(gi2)
             else:
                 _pend_add(gi2)
-                jobs.append((gi2, key, pred, dst))
+                jobs.append((gi2, key, pred, dst, ""))
                 _flush()
             _commit_upto()
             k = commit["n"]
@@ -8576,6 +8683,12 @@ def _stage_do_mask(cfg: dict) -> dict:
         raise _StageCancel()
     if boss.get("exc") is not None:
         raise boss["exc"]
+    if total > 0 and int(prof["faces"]) == 0:
+        # 一张都没推理成功 → 别把空 mask/ 当「已完成」（下游合成会拿不到遮罩却以为跑过了）
+        raise _BadInput("遮罩：%d 张对齐脸一张都没推理成功（aligned 读不出来 %d 张 / pred 缺失？）"
+                        "—— 空 mask/ 不算成功。先看 aligned/ 和 pred/：%s"
+                        % (total, int(prof.get("bad_aligned") or 0),
+                           "、".join(bad_aligned[:5]) or "-"), 500)
     sec = round(time.time() - t0, 2)
     done_n = max(1, total - cursor)
     n_faces = max(1, prof["faces"])
@@ -8585,7 +8698,9 @@ def _stage_do_mask(cfg: dict) -> dict:
         "readers": int(readers), "writers": int(writers), "mask_batch": int(mbatch),
         "backend": backend, "engine_file": engine_file,
         "images": int(prof["images"]),
-        # 每张脸各段各花多少 ms（读图 / warp+元数据 / 2 次推理 / 编码+落盘）
+        "dst_input": _MASK_DST_INPUT, "bad_aligned": int(prof.get("bad_aligned") or 0),
+        "dst_mat": "image_to_face_mat⁻¹ · facelib WHOLE_FACE",
+        # 每张脸各段各花多少 ms（读图 / 预处理（这一版恒 0）/ 2 次推理 / 编码+落盘）
         "per_face_ms": {
             "read": round(prof["read_ms"] / max(1, total - cursor), 2),
             "prep": round(prof["prep_ms"] / max(1, total - cursor), 2),
@@ -8605,13 +8720,15 @@ def _stage_do_mask(cfg: dict) -> dict:
                               if src["source"] == "xseg" else 0.0),
         "profile": prof_out,
     })
-    _stage_log("遮罩完成：第 %d..%d 帧 · %d 张 · 失败 %d · %.2f s · %.1f 张/秒 · "
-               "后端 %s%s · 来源 %s · 每张 读 %.1f + 预处理 %.1f + 推理 %.1f"
+    _stage_log("遮罩完成：第 %d..%d 帧 · %d 张 · 失败 %d%s · %.2f s · %.1f 张/秒 · "
+               "后端 %s%s · 来源 %s · dst 输入 %s · 每张 读 %.1f + 预处理 %.1f + 推理 %.1f"
                "（%.2f ms/图 × %d 图）+ 写 %.1f ms（读 %d / 写 %d 线程 · batch %d）"
-               % (int(rng["start"]), int(rng["end"]), total, failed, sec,
+               % (int(rng["start"]), int(rng["end"]), total, failed,
+                  ("（其中 aligned 读不出来 %d）" % int(prof.get("bad_aligned") or 0))
+                  if int(prof.get("bad_aligned") or 0) else "", sec,
                   (total - cursor) / sec if sec > 0 else 0.0,
                   backend, ("(%s)" % engine_file) if engine_file else "",
-                  src.get("label") or src.get("source"),
+                  src.get("label") or src.get("source"), _MASK_DST_INPUT,
                   prof_out["per_face_ms"]["read"], prof_out["per_face_ms"]["prep"],
                   prof_out["per_face_ms"]["infer"], prof_out["per_image_ms"],
                   prof["images"], prof_out["per_face_ms"]["write"],
@@ -8619,7 +8736,8 @@ def _stage_do_mask(cfg: dict) -> dict:
     return {"count": wrote, "failed": failed, "total": total, "seconds": sec,
             "mask_source": src.get("label") or src.get("source"),
             "signature": sig, "engine": engine, "backend": backend,
-            "engine_file": engine_file,
+            "engine_file": engine_file, "dst_input": _MASK_DST_INPUT,
+            "bad_aligned": int(prof.get("bad_aligned") or 0),
             "range": {"start": int(rng["start"]), "end": int(rng["end"])},
             "mask_batch": int(mbatch), "profile": prof_out,
             "infer_ms_per_face": (round(t_infer * 1000.0 / done_n, 3)
