@@ -265,6 +265,10 @@
     }
     noSpell();
     bindDropPaths();
+    /* 路径框右侧那颗文件夹图标：以前只有数据处理页的 renderSteps 里绑过一次，
+       提取器 / 工具页进页面时压根没绑 —— 点图标什么都不发生。
+       每次切页补一次幂等绑定（box.dataset.pick 守卫），点下去走全局 pickFolderFor。 */
+    bindPickPaths();
     /* 同步工具子项高亮 */
     document.querySelectorAll("#toolFly .nav.sub").forEach(function (n) {
       n.classList.toggle("on", n.getAttribute("data-go") === key);

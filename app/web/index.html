@@ -119,17 +119,28 @@
         <div class="card" style="margin-bottom:14px">
           <div class="hd"><b>参数</b></div>
 
-          <div class="paths">
-            <div class="inp mono pathinp">
-              <span class="lb">输入</span>
-              <input class="pathval" id="exSrc" value="D:&#92;media&#92;raw&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
-              <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span>
-            </div>
-            <div class="inp mono pathinp">
-              <span class="lb">输出</span>
-              <input class="pathval" id="exDst" value="workspace&#92;_frames&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
-              <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span>
-            </div>
+          <!-- 路径行：与「导出设置页 · 输出目录 / 输出路径」完全同一套 ——
+               .cfgrow.cfgpathrow（左 .cl 定宽标签 + 右 .cc）
+               > .inp.mono.pathinp.cfgpath（可编辑 .pathval + 22px 文件夹图标）。
+               以前是 .paths 里两个整行大框：标签在框内、图标是独立方块、行高被撑到 52px。
+               图标点一下走全局 pickFolderFor（app.js 的 bindPickPaths）。 -->
+          <div class="cfgrow cfgpathrow">
+            <span class="cl" title="源视频文件或源图片目录">输入</span>
+            <span class="cc">
+              <div class="inp mono pathinp cfgpath">
+                <input class="pathval" id="exSrc" value="D:&#92;media&#92;raw&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
+                <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span>
+              </div>
+            </span>
+          </div>
+          <div class="cfgrow cfgpathrow">
+            <span class="cl" title="对齐后的帧 / 人脸输出目录">输出</span>
+            <span class="cc">
+              <div class="inp mono pathinp cfgpath">
+                <input class="pathval" id="exDst" value="workspace&#92;_frames&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
+                <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span>
+              </div>
+            </span>
           </div>
 
           <div class="cfgrow">
@@ -144,15 +155,11 @@
 
           <div class="cfgrow">
             <span class="cl">帧跳跃</span><span class="cd">每 N 帧取一张</span>
+            <!-- 与导出设置页「质量 / 并行进程」同一套：.inp.rng 数字框 + .unit 单位 -->
             <span class="cc">
-              <div style="display:flex;align-items:center;gap:8px">
-                <div class="num">
-                  <button class="nb" data-d="-1" title="少一帧">−</button>
-                  <input id="exSkip" value="1" inputmode="numeric" min="1" max="120" title="每 N 帧取一张">
-                  <button class="nb" data-d="1" title="多一帧">+</button>
-                </div>
-                <span style="font-size:12px;color:var(--ink-3)">帧</span>
-              </div>
+              <input class="inp rng" id="exSkip" type="number" min="1" max="120" value="1"
+                     title="每 N 帧取一张（1~120）">
+              <span class="unit">帧</span>
             </span>
           </div>
 

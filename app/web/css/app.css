@@ -365,8 +365,9 @@ input, textarea, [contenteditable="true"] {
   opacity: 1;
 }
 
-/* 提取器：路径行内标签 + 更矮的输入框 */
-.paths { display: grid; gap: 10px; }
+/* 路径框内标签 + 更矮的输入框。数据处理页 / 工具页的 .inp.mono.pathinp 仍走这套；
+   提取器页已改成 .cfgrow.cfgpathrow > .cfgpath（标签是行外的 .cl，不再有框内 .lb），
+   所以页面私有的 .paths 网格容器随之删掉。 */
 .inp.pathinp {
   min-height: 33px;
   padding: 4px 6px 4px 0;
@@ -5741,3 +5742,69 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   border-radius: 8px;
   font-size: 12.5px;
 }
+
+/* ============================================================================
+   提取器页（#p-extract）参数卡：与「合成器 · 导出设置页」逐像素同一套行样式
+   ----------------------------------------------------------------------------
+   用户口径（截图反馈）：提取器的参数卡还是「大号胶囊输入框 + 右侧独立方块图标」，
+   标签在框里、行高 52px，跟刚改好的导出设置页（左侧定宽标签 + 右侧 30px 控件 +
+   内嵌 22px 文件夹图标）完全不是一套。
+     · 每行 = .cfgrow（左 .cl 定宽 130 + 右 .cc），行高 45，控件 30；
+     · 输入/输出 = 导出页「输出目录 / 输出路径」那条 .cfgrow.cfgpathrow
+       （可编辑 .pathval + 22×22 文件夹图标，点击同样走 pickFolderFor）；
+     · 检测器 / 检测角度 = .seg；帧跳跃 = .inp.rng + .unit；
+     · 「开始提取」仍是整行主按钮，不动。
+   行结构 / 行高 / 悬停高亮全部沿用 app.css 的 .cfgrow 那套，这里只补两件事：
+   ① 导出页靠 :is(.mgpage, .mgview:not([data-view="main"])) 前缀才拿到的
+      30px 路径框 + 22px 图标（提取器不在 .mgview 里，落不到那两条）；
+   ② 本页私有的控件宽度。追加在文件末尾：同权重靠后写胜出。
+   ============================================================================ */
+
+/* 卡片左右各让 1px：导出设置页的卡片坐在 .mgset-scroll 里（padding: 1px），
+   提取器页的卡片直接贴 .page 内容区。补同样的 1px，两页的路径控件宽度才逐像素相等
+   （不补就差 2px：行宽 1258 → 控件 1088，而导出页是 1086）。 */
+#p-extract > .card { margin-left: 1px; margin-right: 1px; }
+
+/* ---------- 一、路径行：整行交给 .cfgpath（导出页 .cfgpathrow 的同一套） ---------- */
+#p-extract .cfgrow.cfgpathrow .cc {
+  flex: 1 1 320px;
+  min-width: 0;
+  padding-left: 28px;
+}
+#p-extract .cfgrow .cfgpath {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+}
+
+/* ---------- 二、路径框 30px + 图标 22px（导出页那两条 :is() 规则的等价物） ----------
+   .inp.mono.pathinp 全局是 38px 高（app.css:4141），会把行撑到 52px，这里压回 30。 */
+#p-extract .cfgrow .inp.pathinp {
+  height: 30px;
+  min-height: 30px;
+  padding: 0 4px 0 8px;
+  border-radius: 8px;
+  background: var(--panel);
+}
+#p-extract .cfgrow .inp.pathinp .pathval { font-size: 11.5px; }
+#p-extract .cfgrow .inp.pathinp .pill.iconpill {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  margin-left: auto;
+}
+#p-extract .cfgrow .inp.pathinp .pill.iconpill .ic { width: 14px; height: 14px; }
+
+/* ---------- 三、帧跳跃：数字框 + 单位（导出页「质量 / 并行进程」同一套） ---------- */
+#p-extract .cfgrow .cc .inp.rng {
+  width: 84px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+#p-extract .cfgrow .cc .unit {
+  font-size: 11px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
