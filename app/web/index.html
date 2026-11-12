@@ -119,28 +119,29 @@
         <div class="card" style="margin-bottom:14px">
           <div class="hd"><b>参数</b></div>
 
-          <!-- 路径行：与「导出设置页 · 输出目录 / 输出路径」完全同一套 ——
-               .cfgrow.cfgpathrow（左 .cl 定宽标签 + 右 .cc）
-               > .inp.mono.pathinp.cfgpath（可编辑 .pathval + 22px 文件夹图标）。
-               以前是 .paths 里两个整行大框：标签在框内、图标是独立方块、行高被撑到 52px。
-               图标点一下走全局 pickFolderFor（app.js 的 bindPickPaths）。 -->
+          <!-- 路径行：训练器「参数设置 → 数据集参数」里 src / dst / 预训练集 那三行的同一套
+               DOM（app.js:9092 renderCfg 的 t==="path" 分支，逐节点照抄）：
+                 .cfgrow.cfgpathrow
+                   > .inp.mono.pathinp.cfgpath[style=flex:1 1 auto;width:auto;min-width:0]
+                       > span.lb（框内标签，浅字 + 右侧 1px 分割线）
+                       > input.pathval（等宽路径，可直接改字）
+                       > span.pill.iconpill > svg.ic > use#i-folder（点一下走 pickFolderFor）
+               行里没有外层 .cl / .cc —— 标签在框内，整行就是这一个编辑框。
+               样式全部来自 app.css 的 .inp.mono.pathinp / .cfgrow.cfgpathrow / .inp.pathinp .lb，
+               本页不再有自己的覆盖（那是上一版「标签在框外」的残留）。 -->
           <div class="cfgrow cfgpathrow">
-            <span class="cl" title="源视频文件或源图片目录">输入</span>
-            <span class="cc">
-              <div class="inp mono pathinp cfgpath">
-                <input class="pathval" id="exSrc" value="D:&#92;media&#92;raw&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
-                <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span>
-              </div>
-            </span>
+            <div class="inp mono pathinp cfgpath" style="flex:1 1 auto;width:auto;min-width:0">
+              <span class="lb" title="源视频文件或源图片目录">输入</span>
+              <input class="pathval" id="exSrc" value="D:&#92;media&#92;raw&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
+              <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span>
+            </div>
           </div>
           <div class="cfgrow cfgpathrow">
-            <span class="cl" title="对齐后的帧 / 人脸输出目录">输出</span>
-            <span class="cc">
-              <div class="inp mono pathinp cfgpath">
-                <input class="pathval" id="exDst" value="workspace&#92;_frames&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
-                <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span>
-              </div>
-            </span>
+            <div class="inp mono pathinp cfgpath" style="flex:1 1 auto;width:auto;min-width:0">
+              <span class="lb" title="对齐后的帧 / 人脸输出目录">输出</span>
+              <input class="pathval" id="exDst" value="workspace&#92;_frames&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
+              <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span>
+            </div>
           </div>
 
           <div class="cfgrow">
@@ -935,19 +936,16 @@
                   <span class="cd">随 models[] 一起发出去</span>
                   <span class="cc"><div class="mgexp-models" id="mgSelModels"></div></span>
                 </div>
-                <!-- 输出目录：和下面「输出路径」同一套 pathinp 控件（可编辑 + 右侧文件夹图标）。
-                     以前是 readonly 的只读回显，看着像「展示」不像「能填」，用户反馈要能改。 -->
+                <!-- 输出目录 / 输出路径：训练器「数据集参数」src·dst·预训练集 那行的同一套 DOM
+                     （app.js:9092）：整行一个大框 .inp.mono.pathinp.cfgpath，标签 .lb 在框内，
+                     右边 25×25 文件夹图标。这里不再有行外 .cl / .cc —— 那是上一版的样子，
+                     标签在框外、框只剩右边一截，和训练页不是一套。 -->
                 <div class="cfgrow cfgpathrow">
-                  <span class="cl">输出目录</span>
-                  <span class="cc">
-                    <div class="inp mono pathinp cfgpath">
-                      <input class="pathval" id="mgDefOut" type="text" spellcheck="false"
-                             autocomplete="off" title="默认输出位置（可编辑；也可以点右边图标选目录）">
-                      <span class="pill iconpill" id="mgDefOutPick" title="选择输出目录">
-                        <svg class="ic"><use href="#i-folder"/></svg>
-                      </span>
-                    </div>
-                  </span>
+                  <div class="inp mono pathinp cfgpath" style="flex:1 1 auto;width:auto;min-width:0">
+                    <span class="lb" title="默认输出位置（可编辑；也可以点右边图标选目录）">输出目录</span>
+                    <input class="pathval" id="mgDefOut" type="text" spellcheck="false" autocomplete="off">
+                    <span class="pill iconpill" id="mgDefOutPick" title="选择输出目录"><svg class="ic"><use href="#i-folder"/></svg></span>
+                  </div>
                 </div>
                 <div class="cfgrow">
                   <span class="cl" title="默认全片。填了会随阶段请求带上 start_frame / end_frame。">帧范围</span>
@@ -990,16 +988,12 @@
                   </span>
                 </div>
                 <div class="cfgrow cfgpathrow">
-                  <span class="cl">输出路径</span>
-                  <span class="cc">
-                    <div class="inp mono pathinp cfgpath">
-                      <input class="pathval" id="mgOutPath" type="text" spellcheck="false" autocomplete="off"
-                             placeholder="留空 = 源视频名_result.mp4">
-                      <span class="pill iconpill" id="mgOutPick" title="选择输出目录">
-                        <svg class="ic"><use href="#i-folder"/></svg>
-                      </span>
-                    </div>
-                  </span>
+                  <div class="inp mono pathinp cfgpath" style="flex:1 1 auto;width:auto;min-width:0">
+                    <span class="lb" title="留空 = 源视频名_result.mp4">输出路径</span>
+                    <input class="pathval" id="mgOutPath" type="text" spellcheck="false" autocomplete="off"
+                           placeholder="留空 = 源视频名_result.mp4">
+                    <span class="pill iconpill" id="mgOutPick" title="选择输出目录"><svg class="ic"><use href="#i-folder"/></svg></span>
+                  </div>
                 </div>
               </div>
 

@@ -365,9 +365,9 @@ input, textarea, [contenteditable="true"] {
   opacity: 1;
 }
 
-/* 路径框内标签 + 更矮的输入框。数据处理页 / 工具页的 .inp.mono.pathinp 仍走这套；
-   提取器页已改成 .cfgrow.cfgpathrow > .cfgpath（标签是行外的 .cl，不再有框内 .lb），
-   所以页面私有的 .paths 网格容器随之删掉。 */
+/* 路径框内标签 + 更矮的输入框。数据处理页 / 工具页 / 训练器参数页 / 提取器 /
+   导出设置页的路径行都走这套：框 = .inp.mono.pathinp.cfgpath，框内左侧就是 .lb
+   （训练器「数据集参数」src/dst/预训练集 那三行是基准），三处不再各写各的。 */
 .inp.pathinp {
   min-height: 33px;
   padding: 4px 6px 4px 0;
@@ -2635,22 +2635,26 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
 :is(.mgpage, .mgview:not([data-view="main"])) .mgtiny { width: 58px; flex: 0 0 58px; height: 24px; text-align: center; }
 :is(.mgpage, .mgview:not([data-view="main"])) .mgunit { font-size: 10px; color: var(--ink-3); white-space: nowrap; }
 
-/* 输出路径行：压缩到与 seg/数字同高（.inp 默认 39px 太高） */
-:is(.mgpage, .mgview:not([data-view="main"])) .inp.pathinp {
+/* 输出路径行：压缩到与 seg/数字同高（.inp 默认 39px 太高）
+   :not(.cfgpath) —— 「导出设置页 · 输出目录 / 输出路径」那两行要与训练器
+   「数据集参数」src/dst/预训练集 逐像素同款（38px 框 / 12px 字 / 25×25 图标），
+   所以它们走 .inp.mono.pathinp 那条通用规则，不能被这套 30px 压缩版吃到。
+   本页其余 .inp.pathinp（合成器主界面那些）保持不变。 */
+:is(.mgpage, .mgview:not([data-view="main"])) .inp.pathinp:not(.cfgpath) {
   min-height: 30px;
   height: 30px;
   padding: 0 4px 0 8px;
   border-radius: 8px;
   background: var(--panel);
 }
-:is(.mgpage, .mgview:not([data-view="main"])) .inp.pathinp .pathval { font-size: 11.5px; }
-:is(.mgpage, .mgview:not([data-view="main"])) .inp.pathinp .pill.iconpill {
+:is(.mgpage, .mgview:not([data-view="main"])) .inp.pathinp:not(.cfgpath) .pathval { font-size: 11.5px; }
+:is(.mgpage, .mgview:not([data-view="main"])) .inp.pathinp:not(.cfgpath) .pill.iconpill {
   flex: 0 0 22px;
   width: 22px;
   height: 22px;
   margin-left: auto;
 }
-:is(.mgpage, .mgview:not([data-view="main"])) .inp.pathinp .pill.iconpill .ic { width: 14px; height: 14px; }
+:is(.mgpage, .mgview:not([data-view="main"])) .inp.pathinp:not(.cfgpath) .pill.iconpill .ic { width: 14px; height: 14px; }
 
 /* 选中态（.mgitem.on）：L1855 给的是紫底紫字，L3154 又用 !important 把它压成
    var(--sel) 中性底 + var(--ink-1) 字色 —— 而 --ink-1 这个 token 根本没定义（只有
@@ -5592,17 +5596,11 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 }
 /* 模型 chip 是只读回显：靠右排，和别的控件同一列 */
 #p-merge .mgset .cfgrow .cc .mgexp-models { justify-content: flex-end; }
-/* 路径行：整行给输入框（训练页 .cfgpathrow 的同一套），只是这里允许更宽 */
-#p-merge .mgset .cfgrow.cfgpathrow .cc {
-  flex: 1 1 320px;
-  min-width: 0;
-  padding-left: 28px;
-}
-#p-merge .mgset .cfgrow.cfgpathrow .cfgpath {
-  width: 100%;
-  min-width: 0;
-  max-width: none;
-}
+/* 路径行（输出目录 / 输出路径）：结构与类名已改成训练器「数据集参数」那一行，
+   行里只有 .cfgpath 一个子节点（标签 .lb 在框内），所以这里不再需要
+   「.cc 撑宽 + padding-left 28」那套补丁 —— 框的宽度/高度/图标尺寸全部由
+   .cfgpath（flex:1 1 auto）+ .inp.mono.pathinp（38px）+ .pill.iconpill（25×25）决定，
+   与训练页同源，因此逐像素相同。 */
 /* 底部动作条：与训练页 .cfgactions 同一条（吸底 + 上分隔线 + 右侧主按钮） */
 .mgset-acts { margin-top: 0; flex: 0 0 auto; }
 .mgset-acts .hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -5744,58 +5742,29 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 }
 
 /* ============================================================================
-   提取器页（#p-extract）参数卡：与「合成器 · 导出设置页」逐像素同一套行样式
+   提取器页（#p-extract）参数卡
    ----------------------------------------------------------------------------
-   用户口径（截图反馈）：提取器的参数卡还是「大号胶囊输入框 + 右侧独立方块图标」，
-   标签在框里、行高 52px，跟刚改好的导出设置页（左侧定宽标签 + 右侧 30px 控件 +
-   内嵌 22px 文件夹图标）完全不是一套。
-     · 每行 = .cfgrow（左 .cl 定宽 130 + 右 .cc），行高 45，控件 30；
-     · 输入/输出 = 导出页「输出目录 / 输出路径」那条 .cfgrow.cfgpathrow
-       （可编辑 .pathval + 22×22 文件夹图标，点击同样走 pickFolderFor）；
-     · 检测器 / 检测角度 = .seg；帧跳跃 = .inp.rng + .unit；
-     · 「开始提取」仍是整行主按钮，不动。
-   行结构 / 行高 / 悬停高亮全部沿用 app.css 的 .cfgrow 那套，这里只补两件事：
-   ① 导出页靠 :is(.mgpage, .mgview:not([data-view="main"])) 前缀才拿到的
-      30px 路径框 + 22px 图标（提取器不在 .mgview 里，落不到那两条）；
-   ② 本页私有的控件宽度。追加在文件末尾：同权重靠后写胜出。
+   「输入 / 输出」两行 = 训练器「参数设置 → 数据集参数」里 src / dst / 预训练集 那三行的
+   同一套 DOM 与类名（index.html 逐节点照抄 app.js:9092）：
+     .cfgrow.cfgpathrow
+       > .inp.mono.pathinp.cfgpath[style="flex:1 1 auto;width:auto;min-width:0"]
+           > span.lb（框内标签，浅字 + 右侧 1px 分割线）
+           > input.pathval（等宽路径，可改字）
+           > span.pill.iconpill（25×25，svg 16×16）
+   因此本页**一条样式都不用写**：框体来自 .inp.mono.pathinp（38px 高 / 圆角 8 /
+   1px var(--line-strong) / var(--surface) 底色 / 0 8px 0 12px 内距），标签来自
+   .inp.pathinp .lb + .cfgrow.cfgpathrow .cfgpath .lb（min-width 96），图标来自
+   .pill.iconpill。和训练器、导出设置页是同一批规则 → 逐像素相同。
+   上一版这里补过一套「30px 框 + 22px 图标 + 8px 左内距」的覆盖（照当时导出页抄的，
+   而当时导出页也不是训练页那样）—— 已整段删掉，留着只会让三处继续差 8px。
+   其它行（检测器 / 检测角度 / 帧跳跃）仍是「左标签 + 右侧控件」形态，不动。
    ============================================================================ */
 
 /* 卡片左右各让 1px：导出设置页的卡片坐在 .mgset-scroll 里（padding: 1px），
-   提取器页的卡片直接贴 .page 内容区。补同样的 1px，两页的路径控件宽度才逐像素相等
-   （不补就差 2px：行宽 1258 → 控件 1088，而导出页是 1086）。 */
+   提取器页的卡片直接贴 .page 内容区。补同样的 1px，两页的卡片内容宽才相等。 */
 #p-extract > .card { margin-left: 1px; margin-right: 1px; }
 
-/* ---------- 一、路径行：整行交给 .cfgpath（导出页 .cfgpathrow 的同一套） ---------- */
-#p-extract .cfgrow.cfgpathrow .cc {
-  flex: 1 1 320px;
-  min-width: 0;
-  padding-left: 28px;
-}
-#p-extract .cfgrow .cfgpath {
-  width: 100%;
-  min-width: 0;
-  max-width: none;
-}
-
-/* ---------- 二、路径框 30px + 图标 22px（导出页那两条 :is() 规则的等价物） ----------
-   .inp.mono.pathinp 全局是 38px 高（app.css:4141），会把行撑到 52px，这里压回 30。 */
-#p-extract .cfgrow .inp.pathinp {
-  height: 30px;
-  min-height: 30px;
-  padding: 0 4px 0 8px;
-  border-radius: 8px;
-  background: var(--panel);
-}
-#p-extract .cfgrow .inp.pathinp .pathval { font-size: 11.5px; }
-#p-extract .cfgrow .inp.pathinp .pill.iconpill {
-  flex: 0 0 22px;
-  width: 22px;
-  height: 22px;
-  margin-left: auto;
-}
-#p-extract .cfgrow .inp.pathinp .pill.iconpill .ic { width: 14px; height: 14px; }
-
-/* ---------- 三、帧跳跃：数字框 + 单位（导出页「质量 / 并行进程」同一套） ---------- */
+/* ---------- 帧跳跃：数字框 + 单位（导出页「质量 / 并行进程」同一套） ---------- */
 #p-extract .cfgrow .cc .inp.rng {
   width: 84px;
   text-align: center;
