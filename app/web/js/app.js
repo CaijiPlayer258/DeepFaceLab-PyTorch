@@ -6567,9 +6567,12 @@ function mgStageEmpty(on) {
           bits.push("导出完成");
           if (d.out_video || d.out) bits.push(String(d.out_video || d.out));
           if (d.cache_removed) bits.push("cache 已清理");
+          if (d.fused) bits.push("快速导出（融合流水线）· 未建 cache");
         } else if (d.phase === "cancelled") {
           bits.push("已取消");
-          bits.push("已完成的阶段留着，下次从这里接着跑");
+          /* 分段链有阶段游标、能接着跑；快速导出没有 —— 别把那句照抄过来 */
+          bits.push(d.fused ? "快速导出不支持续跑，需整段重跑"
+                            : "已完成的阶段留着，下次从这里接着跑");
         } else {
           bits.push("导出失败");
           if (d.error) bits.push(String(d.error).slice(0, 160));
@@ -6791,6 +6794,187 @@ function mgStageEmpty(on) {
     }
     window.mgStageExport = mgStageExport;
 
+    /* ============================================================
+       快速导出（融合流水线，后端 fused=1）—— 视频模式的**默认**导出路径
+       ------------------------------------------------------------
+       一次 POST /api/merge/export（body 带 fused:1），后端把
+       解码 → 检测 → 对齐/归组 → dfm → XSeg → 合成 → 编码 六段同时在内存里跑，
+       段间只有有界队列。和分段链的三个差别，界面都要如实说出来：
+         · 不建 <名字>_cache/（一个中间文件都不落，帧只在 %TEMP% 里经过）；
+         · **不支持续跑**：取消就是整段重跑（分段链才有阶段游标）；
+         · 进度没有"到第几步"这回事 —— 六段全程同时在跑，只有帧进度。
+       所以进度页走「六步都显示进行中 + 帧进度」这一档（用户给的两个选项之一）。
+       ============================================================ */
+    var MGP_FUSED_TIMER = null;
+    window.__mgFusedRunning = false;
+
+    function mgpFusedSteps(state) {
+      /* 六段并行：running 时全亮「进行中」；完成打勾；失败打叉。
+         没有第几步之说 —— 谁也不是在等谁。 */
+      var nodes = mgpNodes();
+      for (var k = 0; k < nodes.length; k++) {
+        var n = nodes[k], ic = n.querySelector(".cvic"), tip = n.querySelector(".cvtip");
+        n.className = "cvst " + (state === "done" ? "done" : (state === "err" ? "err" : "on"));
+        if (ic) ic.textContent = (state === "done" ? "✓" : (state === "err" ? "!" : String(k + 1)));
+        if (tip) {
+          tip.textContent = (state === "done" ? "" : (state === "err" ? "失败" : "并行中"));
+        }
+      }
+    }
+
+    function mgpFusedPaint(d) {
+      d = d || {};
+      var v = d.vid || {};
+      var total = Number(v.total || d.total || 0);
+      var done = Number(v.done || d.frames_done || 0);
+      var rate = Number(v.frame_fps || 0);
+      var wasCancel = !!d.cancelled && !d.ok;
+      var okAll = !!d.ok && !wasCancel;
+      var p = Math.max(0, Math.min(100, Number(d.pct) || 0));
+      if (!d.running && !okAll && !p) {
+        p = Math.max(0, Math.min(100, Number(d.pct_at_failure) || 0));
+      }
+      var shown = okAll ? 100 : Math.max(d.running ? 2 : 0, Math.min(99, p));
+      var fill = $("mgpFill"); if (fill) fill.style.width = shown + "%";
+      var pct = $("mgpPct"); if (pct) pct.textContent = shown + "%";
+
+      var fr = $("mgpFrames");
+      if (fr) {
+        if (total) {
+          fr.textContent = done + " / " + total + " 帧" +
+            (rate > 0 ? (" · " + rate.toFixed(1) + " 帧/秒") : "");
+        } else {
+          fr.textContent = d.msg || "准备中…";
+        }
+      }
+      var budget = (v.frame_budget != null) ? v.frame_budget : d.frame_budget;
+      var eta = $("mgpEta");
+      if (eta) {
+        if (d.running) {
+          var bits = [];
+          if (v.eta_s != null) bits.push("剩余 " + v.eta_s + " 秒");
+          else if (d.msg) bits.push(String(d.msg).slice(0, 40));
+          if (budget != null) bits.push("帧缓冲 " + budget);
+          eta.textContent = bits.join(" · ") || "剩余 —";
+        } else if (okAll) {
+          eta.textContent = "完成";
+        } else if (wasCancel) {
+          eta.textContent = "已取消（不支持续跑）";
+        } else {
+          eta.textContent = String(d.error || "已停").slice(0, 48);
+        }
+      }
+      /* 文件名栏：把「融合流水线」这件事直接写出来（六步全亮却不标一句会让人以为卡住） */
+      var fileEl = $("mgpFile");
+      if (fileEl && d.video) {
+        fileEl.textContent = String(d.video).split(/[\\/]/).pop() + " · 融合流水线";
+        fileEl.title = "六段同时在内存里跑，不建 <名字>_cache/；不支持续跑（取消即整段重跑）";
+      }
+      mgpFusedSteps(okAll ? "done" : (d.running ? "on" : (wasCancel ? "on" : "err")));
+    }
+
+    function mgFusedStopPoll() {
+      if (MGP_FUSED_TIMER) { clearInterval(MGP_FUSED_TIMER); MGP_FUSED_TIMER = null; }
+    }
+
+    function mgFusedPoll() {
+      mgFusedStopPoll();
+      MGP_FUSED_TIMER = setInterval(function () {
+        fetch("/api/merge/export/status").then(function (r) { return r.json(); })
+          .then(function (d) {
+            mgpFusedPaint(d);
+            if (d.running) return;
+            mgFusedStopPoll();
+            window.__mgFusedRunning = false;
+            window.__mergeExporting = false;
+            var wasCancel = !!d.cancelled && !d.ok;
+            var okAll = !!d.ok && !wasCancel;
+            var cb = $("mgpCancel");
+            if (cb) { cb.disabled = false; cb.textContent = "取消导出"; }
+            if (okAll) {
+              toast("导出完成", String(d.out || "").slice(-60), "success");
+            } else if (wasCancel) {
+              /* 关键差异：分段链说"接着跑"，快速导出只能说"整段重跑" */
+              toast("已取消导出", "快速导出不支持续跑，需整段重跑", "info");
+            } else {
+              toast("导出失败", String(d.error || d.msg || "").slice(0, 140), "error");
+            }
+            if (typeof window.mgpResultShow === "function") {
+              window.mgpResultShow(!!okAll, {
+                phase: okAll ? "done" : (wasCancel ? "cancelled" : "failed"),
+                out_video: d.out, out: d.out, cache_removed: false,
+                fused: true, error: d.error || d.msg || ""
+              });
+            }
+          }).catch(function () { /* 网络抖一下就等下一拍 */ });
+      }, 500);
+    }
+
+    function mgFusedExport(payload) {
+      payload = payload || {};
+      var video = mgVidPath();
+      if (!video) {
+        toast("没有素材", "先在工作台导入一段视频", "warn");
+        return;
+      }
+      if (window.__mergeExporting || window.__mgStageRunning) {
+        toast("正在导出", "上一次还没结束", "info");
+        return;
+      }
+      var body = {
+        video: video,
+        fused: 1,                       /* ★ 默认路径：融合流水线 */
+        faces_project: String(window.__mergeFaceLib || ""),
+        model: payload.model ||
+               (document.querySelector("#mgModels .mgitem.on .nm") || {}).textContent || "",
+        models: (window.mgExportModelsPayload ? window.mgExportModelsPayload() : mgModelsPayload()),
+        detector: payload.detector || "",
+        thresh: 0.5,
+        settings: mgMergeSettings(payload),
+        quality: payload.align_quality || "high"
+      };
+      if (payload.output_path && /^[A-Za-z]:[\\/]/.test(payload.output_path)) {
+        body.output_dir = payload.output_path;
+      }
+      var frameFrom = parseInt(payload.frame_from, 10);
+      if (!isNaN(frameFrom) && frameFrom > 0) body.start_frame = frameFrom;
+      var frameTo = parseInt(payload.frame_to, 10);
+      if (!isNaN(frameTo) && frameTo > 0) body.end_frame = frameTo;
+
+      window.__mergeExporting = true;
+      window.__mgFusedRunning = true;
+      window.__mgStageRunning = false;
+      mgpStopPoll();
+      mgpReset();
+      mgpResultHide();
+      if (window.mgStep) window.mgStep("progress");
+      var cb = $("mgpCancel");
+      if (cb) { cb.disabled = false; cb.textContent = "取消导出"; cb.hidden = false; }
+      mgpFusedPaint({ running: true, msg: "启动快速导出…", vid: {} });
+      document.dispatchEvent(new CustomEvent("merge:export-start", { detail: payload }));
+
+      fetch("/api/merge/export", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      }).then(function (r) {
+        return r.json().then(function (d) {
+          if (!r.ok || d.ok === false) throw new Error(d.error || d.detail || ("HTTP " + r.status));
+          return d;
+        });
+      }).then(function (d) {
+        if (d.fused === false) { mgpFusedPaint({ running: true, msg: "后端走了分段链…", vid: {} }); }
+        mgFusedPoll();
+      }).catch(function (e) {
+        window.__mergeExporting = false;
+        window.__mgFusedRunning = false;
+        mgFusedStopPoll();
+        toast("导出未启动", String((e && e.message) || e).slice(0, 140), "error");
+      });
+    }
+    window.mgFusedExport = mgFusedExport;
+    window.mgpFusedPaint = mgpFusedPaint;
+
+
     /* 演示：没有真任务时把四步动画跑一遍（保留给调试/截图用） */
     function mgDemoProgress() {
       if (window.__mergeExporting || window.__mgStageRunning) return;
@@ -6818,6 +7002,21 @@ function mgStageEmpty(on) {
       cancelBtn.addEventListener("click", function () {
         if (!window.__mergeExporting) { if (window.mgStep) window.mgStep("settings"); return; }
         cancelBtn.disabled = true;
+        /* 快速导出（融合流水线）：只有 /export/cancel 这一条取消路，
+           取消后清理临时帧、整段作废（没有游标可续）。 */
+        if (window.__mgFusedRunning) {
+          fetch("/api/merge/export/cancel", { method: "POST" })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+              toast(d.ok ? "正在取消" : "取消失败",
+                    d.ok ? "快速导出不支持续跑：取消后已写出的临时帧会被清掉，需整段重跑"
+                         : String(d.error || d.reason || ""),
+                    d.ok ? "info" : "error");
+            })
+            .catch(function () {})
+            .then(function () { setTimeout(function () { cancelBtn.disabled = false; }, 2500); });
+          return;
+        }
         if (window.__mgStageRunning) {
           fetch("/api/merge/stage/cancel", { method: "POST" })
             .then(function (r) { return r.json(); })
@@ -6890,8 +7089,12 @@ function mgStageEmpty(on) {
         return;
       }
       if (video && !inputDir) {
-        /* 视频模式：走分段链（切帧 → 切脸 → 合成 → 导出）。
-           每一步都是独立 API、独立产物，失败/取消能从断点接着跑 —— 不再一口气导出。 */
+        /* 视频模式，两条路：
+           · 快速导出（融合流水线，默认）：一次 POST /api/merge/export（fused=1），
+             后端六段同时在内存里跑 —— 不建 <名字>_cache/、快约 2.8 倍，但**不支持续跑**；
+           · 分段链（关掉「快速导出」才走）：切帧 → 切脸 → 换脸 → 遮罩 → 合成 → 导出，
+             每步独立 API/独立产物，失败/取消能从断点接着跑（排查、对照用这一条）。 */
+        if (payload.fast_export !== false) { mgFusedExport(payload); return; }
         mgStageExport(payload);
         return;
       }
@@ -11447,6 +11650,16 @@ function mgStageEmpty(on) {
            keep_cache —— 默认 false（成功导出后后端会删掉 <名字>_cache/，勾「保留」才留）；
            frame_from / frame_to —— 默认 0 / 空 = 全片，填了才随阶段请求带出去。 */
         keep_cache: String(this.readSeg('keep_cache') || '') === '1',
+        /* 快速导出（融合流水线，后端 fused=1）：**默认开**。
+           关掉 = 回退六阶段分段链（每步独立产物、可续跑），留给排查/对照。
+           老页面没有这一项时按「开」处理 —— 默认行为不能因为少了个控件就变。 */
+        fast_export: (function () {
+          var seg = document.querySelector('#p-merge .mgview .seg[data-k="fast_export"]');
+          if (!seg) return true;
+          var on = seg.querySelector('b.on');
+          var v = on ? on.getAttribute('data-v') : '';
+          return String(v === null ? '1' : v) !== '';
+        })(),
         frame_from: Math.max(0, parseInt(byId('mgFrameFrom'), 10) || 0),
         frame_to: Math.max(0, parseInt(byId('mgFrameTo'), 10) || 0)
       };

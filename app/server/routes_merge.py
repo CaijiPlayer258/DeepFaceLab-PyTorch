@@ -2181,6 +2181,11 @@ def merge_export_status():
 
     mode = str(snap.get("mode") or "")
     resp = {"ok": ok, "success": ok, "phase": phase, "running": running,
+            # active = worker 还活着（起单 → 收尾结束）。取消之后 running 立刻变 false
+            # （看门狗靠这条），所以「还能不能再点一次导出」要看 active。
+            # active = worker 线程还活着（从起单到收尾结束）。取消之后 running 立刻变
+            # false（看门狗靠这条），所以「能不能再点一次导出」要看 active。
+            "active": bool(snap.get("active")),
             "cancelled": cancelled, "stage": stage, "pct": pct,
             "pct_at_failure": snap.get("pct_at_failure"),
             "msg": str(snap.get("msg") or ""),
@@ -2195,13 +2200,32 @@ def merge_export_status():
     if mode == "video":
         # 视频模式多给一段明细：逐帧记录（每张脸用了谁）+ 计数 + 结束时的缓存状态。
         # 老前端不认识这些字段，多给不会影响它（缺字段才是坑）。
+        fused = bool(snap.get("fused"))
+        stats = dict(snap.get("stats") or {})
         resp["vid"] = {"video": str(snap.get("video") or ""),
                        "total": int(snap.get("total") or 0),
                        "done": int(snap.get("frames_done") or 0),
-                       "stats": dict(snap.get("stats") or {}),
+                       "stats": stats,
                        "cache": dict(snap.get("cache") or {}),
                        "encode": dict(snap.get("encode") or {}),
-                       "frames": list(snap.get("frames") or [])[-600:]}
+                       "frames": list(snap.get("frames") or [])[-600:],
+                       # 快速导出（融合流水线）专有：没有阶段概念，只有帧进度 + 帧预算
+                       "fused": fused,
+                       "resumable": (not fused),
+                       "frame_budget": (snap.get("frame_budget")
+                                        if snap.get("frame_budget") is not None
+                                        else stats.get("frame_budget")),
+                       "frame_fps": float(stats.get("fps") or 0.0),
+                       "eta_s": stats.get("eta_s"),
+                       "cache_dir": str(snap.get("cache_dir") or ""),
+                       "per_stage_ms": dict(stats.get("per_stage_ms") or {}),
+                       "stage_util_pct": dict(stats.get("stage_util_pct") or {}),
+                       "pipeline": dict(stats.get("pipeline") or {})}
+        # 顶层也给一份（前端不必再进 vid 里翻）
+        resp["fused"] = fused
+        resp["resumable"] = (not fused)
+        resp["frame_budget"] = resp["vid"]["frame_budget"]
+        resp["no_cache"] = bool(fused)
     return resp
 
 
@@ -6087,7 +6111,7 @@ def _vid_one(cfg: dict, frame, idx: int, scratch: Path, stop, state):
 # ============================================================
 _STAGE_ORDER = ("frames", "faces", "pred", "mask", "merge", "encode")
 _STAGE_LABEL = {"frames": "切帧", "faces": "切脸", "pred": "换脸", "mask": "遮罩",
-                "merge": "合成", "encode": "导出"}
+                "merge": "合成", "encode": "导出", "fused": "快速导出"}
 # 老 _merge_job["stage"] 的 7 段进度条（0..6）里没有「遮罩」，给它 2 就是和切脸同一格：
 # 老前端照样能看出「还在前面几步」，不会因为多插一步跳到 3 把 31% 显示成合成中。
 _STAGE_NUM = {"frames": 1, "faces": 2, "pred": 2, "mask": 2, "merge": 3, "encode": 6}
@@ -9116,6 +9140,98 @@ def _stage_do_merge(cfg: dict) -> dict:
 
 
 
+def _vid_cmd(pattern: str, dest: Path, video: Path, fps: float, img_start: int = 1,
+             audio_ss: float = None, audio_t: float = None, limit: int = None) -> list:
+    """一帧不差地构造导出用的 ffmpeg 命令（分段链和快速导出**共用这一份**）。
+
+    ```
+    ffmpeg -y ... -framerate FPS -start_number IMG_START -i <帧序列>
+           [-ss AUDIO_SS -t AUDIO_T] -i <源视频>
+           -map 0:v:0 -map 1:a?
+           -vf pad=ceil(iw/2)*2:ceil(ih/2)*2,scale=out_range=tv
+           -c:v libx264 -crf 16 -pix_fmt yuv420p -c:a copy [-frames:v LIMIT]
+           [-movflags +faststart] -progress pipe:1 <dest>
+    ```
+
+    三条不能动的口径（改了就成片不一致）：
+      · crf16 + yuv420p + out_range=tv：PNG 帧是 full range，不显式转 limited 会被标成 yuvj420p；
+      · 音轨 -c:a copy：不重编码、**不带 -shortest**（带上去会按视频/音轨较短的一边截断，
+        帧范围的片子就少一截音）；
+      · 奇数宽高先 pad 一像素，否则 x264 直接拒。
+    """
+    pre_img = ["-start_number", str(int(img_start))]
+    pre_aud = []
+    if audio_ss is not None:
+        pre_aud += ["-ss", "%.6f" % float(audio_ss)]
+    if audio_t is not None:
+        pre_aud += ["-t", "%.6f" % float(audio_t)]
+    lim = ["-frames:v", str(int(limit))] if limit else []
+    cmd = [str(_app_mod._ffmpeg_exe()), "-y", "-hide_banner", "-loglevel", "error",
+           "-nostats", "-nostdin", "-framerate", "%.6g" % fps] + pre_img + \
+          ["-i", str(pattern)] + pre_aud + ["-i", str(video),
+           "-map", "0:v:0", "-map", "1:a?",
+           "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2,scale=out_range=tv",
+           "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p",
+           "-c:a", "copy"] + lim
+    if Path(dest).suffix.lower() in (".mp4", ".mov", ".m4v"):
+        cmd += ["-movflags", "+faststart"]
+    cmd += ["-progress", "pipe:1", str(dest)]
+    return cmd
+
+
+def _vid_encode(cmd: list, part: Path, total: int, on_progress=None,
+                cancelled=None) -> dict:
+    """跑一条 ffmpeg 编码命令（cmd 末尾已经是 part 路径）→ {code, tail, seconds}。
+
+    取消时收掉进程树再抛 _StageCancel（分段链和快速导出都按「取消不是失败」处理）。
+    失败时**不动 dest**：.part 由调用方删 —— 半截文件绝不能看起来像成片。
+    """
+    cancelled = cancelled or _stage_cancelled
+    t0 = time.time()
+    err_path = None
+    code = -1
+    fh = tempfile.NamedTemporaryFile(delete=False, suffix=".ffmpeg.log")
+    err_path = fh.name
+    fh.close()
+    try:
+        with open(str(err_path), "wb") as errfp:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errfp,
+                                    text=True, encoding="utf-8", errors="replace",
+                                    creationflags=getattr(_app_mod, "_NO_WINDOW", 0))
+            try:
+                for line in proc.stdout:
+                    if cancelled():
+                        _kill_proc_tree(proc)
+                        raise _StageCancel()
+                    line = line.strip()
+                    if not line or "=" not in line:
+                        continue
+                    k, _eq, v = line.partition("=")
+                    if k != "frame":
+                        continue
+                    try:
+                        done = int(v)
+                    except ValueError:
+                        continue
+                    if on_progress is not None:
+                        on_progress(done)
+            finally:
+                code = proc.wait()
+    finally:
+        tail = ""
+        try:
+            with open(str(err_path), "rb") as rf:
+                tail = rf.read()[-4000:].decode("utf-8", "ignore").strip()
+        except OSError:
+            tail = ""
+        try:
+            os.unlink(str(err_path))
+        except OSError:
+            pass
+    return {"code": int(code), "tail": tail,
+            "seconds": round(time.time() - t0, 2), "part": str(part), "cmd": list(cmd)}
+
+
 def _stage_do_encode(cfg: dict) -> dict:
     """阶段 4 · 导出：frames/（已是合成结果）+ 源音轨 -> <视频名>_merged.mp4。
 
@@ -9156,76 +9272,32 @@ def _stage_do_encode(cfg: dict) -> dict:
         raise _BadInput("输出目录建不出来：%s（%s）" % (out.parent, e))
     part = out.with_name(out.stem + ".part" + out.suffix)
 
-    ffmpeg = str(_app_mod._ffmpeg_exe())
     pattern = str(_stage_frames_dir(cache) / "%06d.png")
     # 范围内的第一帧帧号（frames/ 是 000001.png 起的定长序号）
     start_no = (_stage_frame_index(frames[0].stem) or int(rng["start"])) if frames else int(rng["start"])
     dur = (total / fps) if fps > 0 else 0.0
     t0_audio = ((start_no - 1) / fps) if fps > 0 else 0.0
-    # 全片：命令和以前一模一样（回归靠它）；有范围才加 -start_number / -frames:v / -ss / -t
-    pre_img = ["-start_number", "1"] if rng["full"] else ["-start_number", str(int(start_no))]
-    pre_aud = [] if rng["full"] else ["-ss", "%.6f" % t0_audio, "-t", "%.6f" % dur]
-    lim = [] if rng["full"] else ["-frames:v", str(int(total))]
-    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-nostats", "-nostdin",
-           "-framerate", "%.6g" % fps] + pre_img + ["-i", pattern] + \
-          pre_aud + ["-i", str(video),
-           "-map", "0:v:0", "-map", "1:a?",
-           # 奇数宽高在 yuv420p 下会被 x264 拒绝，垫一像素最省事；
-           # PNG 帧是 full range，显式转 limited，否则成片会被标成 yuvj420p。
-           "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2,scale=out_range=tv",
-           "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p",
-           "-c:a", "copy"] + lim
-    if out.suffix.lower() in (".mp4", ".mov", ".m4v"):
-        cmd += ["-movflags", "+faststart"]
-    cmd += ["-progress", "pipe:1", str(part)]
+    # 全片：命令和以前**一模一样**（回归靠它）；有范围才加 -start_number / -frames:v / -ss / -t。
+    # 命令本身收敛在 _vid_cmd()：快速导出（fused）调的是同一个函数，参数不许各写一套。
+    cmd = _vid_cmd(pattern, part, video, fps,
+                   img_start=(1 if rng["full"] else int(start_no)),
+                   audio_ss=(None if rng["full"] else t0_audio),
+                   audio_t=(None if rng["full"] else dur),
+                   limit=(None if rng["full"] else int(total)))
 
     _stage_log("导出：第 %d..%d 帧（%d 帧 @ %.6g fps · 时长 %.4f s）-> %s"
                % (int(start_no), int(start_no) + total - 1, total, fps, dur, out.name))
     if not rng["full"]:
         _stage_log("导出：音轨从源视频 %.4f s 起 copy、长 %.4f s（帧边界误差 ≤ 1 帧）"
                    % (t0_audio, dur))
-    t0 = time.time()
-    err_path = None
-    code = -1
-    fh = tempfile.NamedTemporaryFile(delete=False, suffix=".ffmpeg.log")
-    err_path = fh.name
-    fh.close()
-    try:
-        with open(str(err_path), "wb") as errfp:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errfp,
-                                    text=True, encoding="utf-8", errors="replace",
-                                    creationflags=getattr(_app_mod, "_NO_WINDOW", 0))
-            try:
-                for line in proc.stdout:
-                    if _stage_cancelled():
-                        _kill_proc_tree(proc)
-                        raise _StageCancel()
-                    line = line.strip()
-                    if not line or "=" not in line:
-                        continue
-                    k, _eq, v = line.partition("=")
-                    if k != "frame":
-                        continue
-                    try:
-                        done = int(v)
-                    except ValueError:
-                        continue
-                    pct = (100.0 * done / total) if total else 0
-                    _stage_progress("encode", pct, "编码 %d/%d 帧" % (done, total),
-                                    frames_done=min(done, total), frames_total=total)
-            finally:
-                code = proc.wait()
-    finally:
-        tail = ""
-        try:
-            with open(str(err_path), "rb") as rf:
-                tail = rf.read()[-4000:].decode("utf-8", "ignore").strip()
-        except OSError:
-            tail = ""
-        try:
-            os.unlink(str(err_path))
-        except OSError:
-            pass
+
+    def _on_prog(done):
+        pct = (100.0 * done / total) if total else 0
+        _stage_progress("encode", pct, "编码 %d/%d 帧" % (done, total),
+                        frames_done=min(done, total), frames_total=total)
+
+    enc = _vid_encode(cmd, part, total, on_progress=_on_prog)
+    code, tail, sec = enc["code"], enc["tail"], enc["seconds"]
 
     if code != 0:
         try:
@@ -9237,7 +9309,7 @@ def _stage_do_encode(cfg: dict) -> dict:
     if not part.is_file() or part.stat().st_size <= 0:
         raise _BadInput("编码跑完了却没有产物：%s" % part, 500)
     os.replace(str(part), str(out))
-    sec = round(time.time() - t0, 2)
+    # sec 来自 _vid_encode（它自己量的墙钟）—— 这里不再重算，免得两处口径打架
     mb = round(out.stat().st_size / 1048576.0, 2)
     meta["stages"]["encode"] = {
         "done": True, "count": total, "seconds": sec, "out": str(out), "mb": mb,
@@ -9474,6 +9546,31 @@ def _stage_dfm_pair(body: dict, need: bool):
     return "", ""
 
 
+def _stage_out_path(video: Path, rng: dict, body: dict) -> Path:
+    """输出文件名：带范围后缀（xxx_merged_0100-0200.mp4），免得把全片结果盖掉；全片不带。
+
+    分段链（_stage_cfg）和快速导出（_fused_cfg）**同一条规则**：用户点的是同一个
+    「输出路径」，两条路不该给出不一样的文件名。
+    """
+    tag = "" if rng["full"] else "_%04d-%04d" % (int(rng["start"]), int(rng["end"]))
+    out_raw = str(body.get("output_dir") or body.get("output") or "").strip()
+    if out_raw:
+        op = _norm_path(out_raw)
+        if op is None:
+            raise _BadInput("output_dir 不合法：%s" % out_raw)
+        if op.suffix.lower() == ".mp4":
+            out = op if not tag else op.with_name(op.stem + tag + op.suffix)
+        else:
+            if op.exists() and op.is_file():
+                raise _BadInput("输出路径是一个已存在的文件：%s（要目录或 .mp4）" % op)
+            out = op / (video.stem + "_merged" + tag + ".mp4")
+    else:
+        out = video.parent / (video.stem + "_merged" + tag + ".mp4")
+    if out.is_dir():
+        raise _BadInput("输出路径是个目录：%s（要 .mp4 文件）" % out)
+    return out
+
+
 def _stage_cfg(body: dict, stage: str, chain: bool = False) -> dict:
     """请求体 -> 这一次阶段运行的 cfg（也会把 meta.json 读出来、缺字段补齐）。"""
     body = _as_dict(body)
@@ -9529,23 +9626,7 @@ def _stage_cfg(body: dict, stage: str, chain: bool = False) -> dict:
     dfm, model_name = _stage_dfm_pair(body, need=(stage == "merge"))
     xseg = _xseg_of(body)
 
-    # 输出文件名带范围后缀（xxx_merged_0100-0200.mp4），免得把全片结果盖掉；全片不带。
-    tag = "" if rng["full"] else "_%04d-%04d" % (int(rng["start"]), int(rng["end"]))
-    out_raw = str(body.get("output_dir") or body.get("output") or "").strip()
-    if out_raw:
-        op = _norm_path(out_raw)
-        if op is None:
-            raise _BadInput("output_dir 不合法：%s" % out_raw)
-        if op.suffix.lower() == ".mp4":
-            out = op if not tag else op.with_name(op.stem + tag + op.suffix)
-        else:
-            if op.exists() and op.is_file():
-                raise _BadInput("输出路径是一个已存在的文件：%s（要目录或 .mp4）" % op)
-            out = op / (video.stem + "_merged" + tag + ".mp4")
-    else:
-        out = video.parent / (video.stem + "_merged" + tag + ".mp4")
-    if out.is_dir():
-        raise _BadInput("输出路径是个目录：%s（要 .mp4 文件）" % out)
+    out = _stage_out_path(video, rng, body)
 
     snap = dict(_cache_snap())
     snap.update({"mode": "video", "path": str(video), "dir": "", "names": [], "srcdir": ""})
@@ -9917,6 +9998,9 @@ def _stage_worker(cfg: dict):
                     "error_detail": ("" if ok else "\n".join(_log_tail(
                         list(_merge_job.get("log") or []), 30))[:4000]),
                     "cache": cache_state,
+                    # active=false = 这一单真的收尾完了（分段/快速导出共用一个位，
+                    # 前端靠它决定「能不能再点一次导出」）
+                    "active": False,
                 })
             _vid_close_log()
 
@@ -10031,6 +10115,11 @@ def merge_stage_status(cache_dir: str = "", video: str = ""):
         "started_at": snap.get("started_at"), "finished_at": snap.get("finished_at"),
         "log": log[-80:],
         "meta": meta,
+        # 快速导出（融合流水线）：没有阶段概念，只有帧进度 + 帧预算；**不支持续跑**
+        "fused": bool(snap.get("fused")),
+        "resumable": (not bool(snap.get("fused"))),
+        "frame_budget": snap.get("frame_budget"),
+        "resumed": bool(snap.get("resumed")),
     }
     if running and out["frames_total"] and out["frames_done"]:
         rate = float(out["frame_fps"] or 0.0)
@@ -10124,17 +10213,1224 @@ def merge_stage(name: str, body: dict = None):
                    % (_STAGE_LABEL.get(stage, stage), old_key, cfg.get("range_key")))
     return _ok(started=True, skipped=False, **_stage_brief_meta(cfg))
 
-def _start_video_export(body: dict):
-    """POST /api/merge/export 的视频分支：**改成分段链**（切帧 → 切脸 → 合成 → 导出）。
+# ============================================================
+# 视频模式 · 快速导出（融合流水线 fused）
+# ------------------------------------------------------------
+# 口径（用户定的，实测见 app/tools/fused_pipeline_bench.py，同段 1080p 120 帧）：
+#   分段六阶段 7.20 帧/秒 · 六阶段合一**串行** 6.10（0.85x）· 合一**流水线** 20.55（2.85x）。
+# 这份生产实现的实测（app/tools/fused_export_accept.py，同一个样片 1080x1920 120 帧）：
+#   17.4~18.2 帧/秒（分段 7.20 → ≈2.5x）· quality=fast 20.9 帧/秒。
+#   差的那一点全在检测器：retinaface_10g 单帧 47~50ms = 约 20 帧/秒的硬底（它跑在
+#   onnxruntime 上，workspace/_engines 里的 retinaface TRT 引擎 app 层没接上）。
+# 所以视频模式默认走流水线（fused=1）；分段链保留成 fused=0 的对照/排障路径。
+# DFL 项目导出（/api/merge/export-project，iperov 语义、单模型、按 original_name 对帧）
+# 一个字都没动。
+#
+# 这里**不是第二套算法**，每一段调的都是现成的那一个函数：
+#   检测 _detect_boxes · 检测框→68 点→对齐 _align.*（和 ② 切脸同一串）·
+#   归组 _auto_face_plan（经 _vid_models_for_frame）· dfm _dfm_run_batch（session 走 _dfm_session、
+#   批大小走 _pred_pick_batch）· XSeg _stage_xseg().mask_batch · 合成 _merge_compose.compose_frame ·
+#   编码 _vid_cmd/_vid_encode（和 ⑥ 导出同一条命令）。
+# 差别只在**数据怎么走**：分段是「写出 PNG → 下一段读回来」，fused 是一帧的内存对象
+# 从检测一路带到合成，中间不落一个文件 —— 所以 <视频>_cache/ 一个都不建（_fused_run 里断言）。
+#
+# 像素为什么能和分段对得上（每一条都是"照抄"，不是"差不多"）：
+#   · 68 点/对齐：coarse_align_from_5 → 2D106 → landmarks68_in_source → align_face_68，
+#     和 ② 切脸同一串；compose 用的 source_landmarks 就是 align_face_68 里那份 round(4)
+#     的结果 —— DFLJPG 里存的也是它，所以 fused 和分段手里的 landmarks 逐位相同。
+#   · dfm 输入：get_transform_mat(lm, S, WHOLE_FACE) + INTER_CUBIC warp → /255，
+#     和 ③ 换脸同序（**uint8 整帧 warp 再 /255**，不是先转 float）。
+#   · dfm 输出：np.clip(face*255).astype(uint8) 之后**才** /255 —— 就是 PNG 往返那一步，
+#     只是不落盘；XSeg 的输入/输出同理（先 u8 再喂，遮罩也是 u8 量化后 /255）。
+#   · dst 遮罩输入：分段的输入是 aligned/*.jpg（q100 4:4:4，仍然是有损的），所以这里也做
+#     一次同样的 JPEG 往返再映射到 256 —— 省掉它 dst 遮罩就会差一点点。
+#   · 合成：compose_frame(原帧, faces, 同一份 cfg)，连 mask_mode 都取自同一处。
+#
+# 不支持续跑：帧是一次性的内存对象，没有游标可存。取消 = 整段作废（临时帧当场删掉），
+# 进度页会说清楚「快速导出不支持续跑，需整段重跑」；要续跑就切回分段（fused=0）。
+# ============================================================
+_FUSED_BUDGETS = (30, 16, 8)        # 帧缓冲预算阶梯（用户口径：30/16/8 自动降档）
+_FUSED_QDEPTH = 24                  # 段间有界队列深度（原型同值；>= dfm batch 才凑得满）
+_FUSED_RESERVE_MB = 1024            # 模型 + CUDA context 的固定占用（416 dfm 实测 ≈1GB）
+_FUSED_VRAM_SAFETY = 0.80           # 探测量打八折才是敢用的预算
+_FUSED_ENV_VRAM = "DFL_FUSED_VRAM_FREE_MB"     # 验收/排障：假装可用显存只有这么多
+_FUSED_ENV_BUDGET = "DFL_FUSED_BUDGET"         # 验收/排障：钉住帧预算（不走显存探测）
+_FUSED_ENV_DUMP = "DFL_FUSED_DUMP"             # 验收/排障：把这几帧的逐脸输入 dump 出来
+# 为什么要这个开关：「fused 和分段像素一致」这件事只能靠**同样的输入**证明，光看成片
+# 分不清差在 pred / 遮罩 / 几何 / 编码哪一层。DFL_FUSED_DUMP=41,80 时把那几帧的原帧、
+# 每张脸的 pred / prd / dst / xseg_prd / xseg_dst / 68 点全写成文件（<成片>.dump/），
+# 直接和分段 cache/ 里的同名产物逐位比。默认关（一个文件都不写）。
 
-    不再是一个循环里 decode→detect→swap→encode：真正干活的还是那四个阶段函数
-    （和 /api/merge/stage/* 是同一份代码），这里只负责把它们串起来，并把进度
-    镜像到 /api/merge/export/status —— 老前端和既有验收脚本继续能用。
-    产物：<视频名>_cache/（成功后删除）+ <视频名>_merged.mp4。
+
+def _fused_on(body) -> bool:
+    """这一单走不走融合流水线。**默认走**（fused=1）；fused=0 回退六阶段分段链。"""
+    if not isinstance(body, dict):
+        return True
+    return _bool_val(body.get("fused"), True)
+
+
+def _fused_vram_free():
+    """(free, total) MB。DFL_FUSED_VRAM_FREE_MB 可覆盖 free —— 只给验收/排障用。"""
+    fake = str(os.environ.get(_FUSED_ENV_VRAM) or "").strip()
+    if fake:
+        try:
+            return int(float(fake)), None
+        except (TypeError, ValueError):
+            pass
+    return _vram_free_mb()
+
+
+def _fused_frame_mb(size_px: int) -> float:
+    """一帧在飞时压在 GPU 上大约多少 MB：dfm 输入 + 输出脸 + prd + dst 四份 float32。"""
+    size_px = max(64, int(size_px or 416))
+    return max(4.0, (size_px * size_px * 3 * 4 * 4) / 1048576.0)
+
+
+def _fused_budget(want: int, free_mb, total_mb, size_px: int) -> dict:
+    """帧缓冲预算：请求值 → 显存装不下就沿 30/16/8 降档，**每一步都记账**（日志 + status）。
+
+    为什么帧预算和显存有关：在飞的每一帧都可能同时压着 dfm 的输入/输出/两张遮罩
+    （见 _fused_frame_mb），再加上常驻的模型 + CUDA context。可用显存不够时把在飞帧数
+    压下来，峰值就跟着下来；真正的硬底仍然是 dfm 批大小（_pred_pick_batch 自己会退档）。
+    拿不到显存信息（torch / nvidia-smi 都没答）时不降档 —— 不猜。
+    """
+    want = int(want or 0)
+    if want <= 0:
+        want = int(_FUSED_BUDGETS[0])
+    want = max(int(_FUSED_BUDGETS[-1]), min(64, want))
+    per = _fused_frame_mb(size_px)
+    ladder = sorted(set([want] + [int(b) for b in _FUSED_BUDGETS if int(b) <= want]),
+                    reverse=True)
+    steps = []
+    picked = int(want)
+    if free_mb is None:
+        steps.append({"budget": int(want), "fit": None,
+                      "why": "拿不到显存信息（torch / nvidia-smi 都没答）→ 不降档"})
+    else:
+        avail = max(0.0, float(free_mb) * _FUSED_VRAM_SAFETY - _FUSED_RESERVE_MB)
+        hit = None
+        for b in ladder:
+            need = float(b) * per
+            ok = bool(need <= avail)
+            steps.append({"budget": int(b), "need_mb": round(need, 1),
+                          "avail_mb": round(avail, 1), "fit": ok})
+            if ok:
+                hit = int(b)
+                break
+        if hit is None:
+            picked = int(_FUSED_BUDGETS[-1])
+            why = ("可用显存连最小档都装不下 → 压到 %d 帧照跑，OOM 由 dfm 批阶梯兜底"
+                   % picked)
+            if steps and int(steps[-1].get("budget") or 0) == picked:
+                steps[-1]["why"] = why        # 别把同一个档位记两遍
+            else:
+                steps.append({"budget": picked, "fit": False, "why": why})
+        else:
+            picked = int(hit)
+    return {"frame_budget": int(picked), "requested": int(want),
+            "downgraded": bool(picked < want),
+            "per_frame_mb": round(per, 2), "reserve_mb": int(_FUSED_RESERVE_MB),
+            "safety": float(_FUSED_VRAM_SAFETY),
+            "free_mb": (None if free_mb is None else int(free_mb)),
+            "total_mb": (None if total_mb is None else int(total_mb)),
+            "steps": steps}
+
+
+def _fused_cfg(body: dict) -> dict:
+    """请求体 → 快速导出的 cfg。
+
+    和 _stage_cfg 的差别只有一处：**不碰 <视频>_cache/** —— 不建目录、不读不写 meta.json。
+    快速导出没有中间产物，也就没有阶段标记/续跑游标，meta 只在内存里当个空壳。
     """
     body = _as_dict(body)
-    cfg = _stage_cfg(body, "frames", chain=True)
-    cfg["stages"] = list(_STAGE_ORDER)
+    video = _norm_path(body.get("video") or body.get("source_video"))
+    if video is None:
+        raise _BadInput("缺少 video：要一个视频文件路径")
+    if not video.is_file():
+        raise _BadInput("视频不存在：%s" % video, 404)
+    if video.suffix.lower() not in _VIDEO_EXT:
+        raise _BadInput("不是视频文件：%s（只认 %s）"
+                        % (video.suffix or "无扩展名", " ".join(sorted(_VIDEO_EXT))))
+
+    probe = _vid_probe(video)
+    rng = _stage_range_norm(body, int(probe.get("frames") or 0))
+    settings = _settings_val(body.get("settings"))
+    fps = _float_val("fps", body.get("fps"), 1.0, 240.0, None)
+    dfm, model_name = _stage_dfm_pair(body, need=True)
+    xseg = _xseg_of(body)
+    out = _stage_out_path(video, rng, body)
+    if _same_path(out, video):
+        raise _BadInput("输出不能是源视频本身：%s" % out)
+
+    snap = dict(_cache_snap())
+    snap.update({"mode": "video", "path": str(video), "dir": "", "names": [], "srcdir": ""})
+    library_raw = str(body.get("faces_project") or body.get("face_library")
+                      or body.get("library") or "").strip()
+    plan_payload = {"project": library_raw, "faces_project": library_raw}
+    face_thr = _float_val("face_threshold", body.get("face_threshold"), 0.0, 1.0, None)
+    if face_thr is not None:
+        plan_payload["face_threshold"] = float(face_thr)
+
+    models = []
+    if body.get("models"):
+        models = _models_of(body) or []
+    if not models and dfm:
+        models = [{"name": str(model_name), "dfm": str(dfm), "faces": [], "index": 0}]
+    if not models:
+        raise _BadInput("没有可用的 .dfm 模型：先在训练页把模型导出成 .dfm（%s）"
+                        % (Path(WORKSPACE) / "model"), 409)
+    if not model_name:
+        model_name = str(models[0].get("name") or "")
+
+    want = body.get("frame_budget")
+    if want is None:
+        want = _env_int(_FUSED_ENV_BUDGET, 0)
+    cfg = {
+        "video": str(video), "out": str(out), "fps": float(fps or probe.get("fps") or 0.0),
+        "probe": probe, "total": int(probe.get("frames") or 0),
+        "range": rng, "range_key": str(rng["key"]), "range_total": int(rng["total"]),
+        "range_full": bool(rng["full"]), "settings": dict(settings),
+        "detector": _detector_val(body.get("detector")),
+        "det_align": _stage_quality_detector(body.get("quality") or body.get("align_quality")),
+        "thresh": _float_val("thresh", body.get("thresh"), 0.0, 1.0, 0.5),
+        "align_thresh": _float_val("align_thresh", body.get("align_thresh"), 0.0, 1.0, 0.5),
+        "dfm": str(dfm), "model": str(model_name), "xseg": str(xseg),
+        "mask_mode": int((settings or {}).get("mask_mode", 6) or 0),
+        "mask_src": _mask_src(settings, (settings or {}).get("mask_mode")),
+        "config": dict(_merge_settings_to_config(settings)),
+        "snap": snap, "plan_payload": plan_payload, "single_models": models,
+        "use_library": True, "library": library_raw, "face_threshold": face_thr,
+        "pred_batch": _int_val("batch", body.get("batch") or body.get("pred_batch"), 0, 64,
+                               _PRED_BATCH_DEFAULT),
+        "merge_workers": _int_val(
+            "merge_workers",
+            body.get("merge_workers") if body.get("merge_workers") is not None
+            else (body.get("threads") if body.get("threads") is not None
+                  else body.get("merge_threads")),
+            1, 32, _MERGE_WORKERS_DEFAULT),
+        "merge_cv2_threads": _int_val("merge_cv2_threads", body.get("merge_cv2_threads"),
+                                      0, 64, _MERGE_CV2_THREADS_DEFAULT),
+        "png_level": _int_val("png_compression", body.get("png_compression"), 0, 9,
+                              _MERGE_PNG_LEVEL),
+        "pred_readers": _int_val("pred_readers", body.get("pred_readers"), 0, 16, 0),
+        "pred_writers": _int_val("pred_writers", body.get("pred_writers"), 0, 16, 0),
+        "frame_budget_want": int(want or 0),
+        # fused 专有：没有 cache / meta / 阶段游标
+        "fused": True, "cache": "", "meta": {}, "stages": ["fused"],
+        "chain": True, "force": True, "keep_cache": False, "range_changed": False,
+    }
+    return cfg
+
+
+_PNG_SIG = b"\x89PNG\r\n\x1a\n"
+
+
+def _fused_open_frames(video: Path, start_i: int):
+    """开一路「ffmpeg → PNG 帧流」，返回 (proc, 读一帧的函数)。
+
+    **为什么不用 rawvideo bgr24 那条路**（_app._open_video）：实测同一帧解出来和
+    「切帧」阶段落盘的 PNG 差 mean 0.89 / max 14 LSB —— 软件的 HEVC 解码 + swscale
+    两种输出（png 编码器 vs -pix_fmt bgr24）不是逐位相同的。而 fused 的验收口径是
+    「和分段产物逐像素一致」，只有走**同一条**编码/解码路径才做得到：
+        ffmpeg 解 HEVC → PNG（无损，-compression_level 1，和切帧同参）→ cv2.imdecode
+    区别只是这里 PNG 进了管道、不落盘。代价是每帧多一次 PNG 编解码（约 25ms），
+    而检测是 47ms/帧的硬底，这一段完全藏得住。
+
+    start_i > 1 时用 ffmpeg 的 select 滤镜跳帧（0 基：保留 n >= start-1），
+    跳过的帧不编码 PNG，比"读出来再丢"省得多；帧号仍然是绝对的。
+    """
+    import cv2
+    import numpy as np
+
+    ffmpeg = str(_app_mod._ffmpeg_exe())
+    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-nostats", "-nostdin",
+           "-i", str(video), "-map", "0:v:0", "-an"]
+    if int(start_i) > 1:
+        cmd += ["-vf", "select=gte(n\\,%d)" % (int(start_i) - 1)]
+    # -vsync 0：原样搬每一帧（不按时间戳丢/补），帧数 = 选中的帧数
+    cmd += ["-vsync", "0", "-f", "image2pipe", "-vcodec", "png",
+            "-compression_level", "1", "pipe:1"]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            creationflags=getattr(_app_mod, "_NO_WINDOW", 0))
+
+    def _read_png(fh):
+        """从管道里读一整张 PNG（按 chunk 读，8 字节签名 + 长度/类型/数据/CRC 到 IEND）。"""
+        head = fh.read(8)
+        if len(head) < 8 or head != _PNG_SIG:
+            return None
+        parts = [head]
+        while True:
+            ln = fh.read(4)
+            if len(ln) < 4:
+                return None
+            typ = fh.read(4)
+            if len(typ) < 4:
+                return None
+            size = int.from_bytes(ln, "big")
+            body = fh.read(size) if size else b""
+            crc = fh.read(4)
+            if (size and len(body) < size) or len(crc) < 4:
+                return None
+            parts.append(ln)
+            parts.append(typ)
+            parts.append(body)
+            parts.append(crc)
+            if typ == b"IEND":
+                return b"".join(parts)
+
+    def _next_frame():
+        """读下一帧 → BGR uint8；流结束返回 None。"""
+        blob = _read_png(proc.stdout)
+        if not blob:
+            return None
+        img = cv2.imdecode(np.frombuffer(blob, np.uint8), cv2.IMREAD_COLOR)
+        return img
+
+    return proc, _next_frame
+
+
+class _FusedFrame:
+    """一帧在流水线里的全部状态（帧对象从头带到合成，合成之后源帧就放掉）。"""
+
+    __slots__ = ("idx", "n", "frame", "boxes", "faces", "timings", "plan", "rec")
+
+    def __init__(self, idx, n, frame):
+        self.idx = int(idx)          # 源视频里的绝对帧号（1 起）
+        self.n = int(n)              # 本段里的序号（1..total，PNG 文件名用它）
+        self.frame = frame
+        self.boxes = None
+        self.faces = None
+        self.timings = {}
+        self.plan = None
+        self.rec = {"frame": int(idx), "detected": 0, "faces": 0, "swapped": 0,
+                    "no_face": False, "dfm": "", "branch": ""}
+
+
+class _FusedTicks:
+    """逐段累计耗时（和原型同一套口径：每段的总忙时间 / 帧数 = 每帧 ms）。"""
+
+    def __init__(self):
+        self.d = {}
+        self.lock = threading.Lock()
+
+    def add(self, k, dt):
+        with self.lock:
+            self.d[k] = float(self.d.get(k) or 0.0) + float(dt)
+
+    def raw(self, k):
+        with self.lock:
+            return float(self.d.get(k) or 0.0)
+
+    def dump(self, n):
+        with self.lock:
+            return {k: round(1000.0 * v / max(1, int(n)), 2) for k, v in self.d.items()}
+
+
+def _fused_cancelled() -> bool:
+    """取消：/export/cancel 和 /stage/cancel 都算（两条老取消路都能停掉快速导出）。"""
+    if _vid_cancelled():
+        return True
+    with _STAGE_LOCK:
+        return bool(_STAGE_JOB.get("cancelled"))
+
+
+def _fused_dump(cfg: dict, job, composed) -> None:
+    """DFL_FUSED_DUMP 点名的帧：把「合成前的每一份输入」落盘，和分段 cache/ 逐位比。
+
+    只给排障/验收用（默认一个文件都不写）。
+    """
+    import cv2
+    import numpy as np
+
+    try:
+        root = Path(str(cfg["out"])).with_suffix("")
+        root = Path(str(root) + ".dump")
+        root.mkdir(parents=True, exist_ok=True)
+        tag = "%06d" % int(job.n)
+        if composed is not None:
+            cv2.imwrite(str(root / (tag + "_composed.png")), composed)
+        for f in (job.faces or []):
+            sub = tag + "_%02d" % int(f.get("k"))
+            if f.get("pred_u8") is not None:
+                cv2.imwrite(str(root / (sub + "_pred.png")), f["pred_u8"])
+            for key, name in (("prd_u8", "prdm"), ("dstdfm_u8", "dstdm"),
+                              ("xseg_prd_u8", "xseg_prd"), ("xseg_dst_u8", "xseg_dst")):
+                arr = f.get(key)
+                if arr is not None:
+                    cv2.imwrite(str(root / (sub + "_" + name + ".png")), arr)
+            if f.get("dst_u8") is not None:
+                cv2.imwrite(str(root / (sub + "_dstin.png")), f["dst_u8"])
+            (root / (sub + "_lm.json")).write_text(
+                json.dumps(np.asarray(f["lm"]).tolist()), "utf-8")
+            (root / (sub + "_dfm.txt")).write_text(
+                "%s\n%s\n" % (Path(str(f.get("dfm") or "")).name, f.get("name") or ""),
+                "utf-8")
+    except Exception as e:                                     # noqa: BLE001
+        _vid_log("快速导出：dump 失败（%s）" % str(e)[:160])
+
+
+def _fused_run(cfg: dict) -> dict:
+    """融合流水线：解码 → 检测 → 对齐/归组 → dfm → XSeg → 合成 → 编码。
+
+    段间全是**有界**队列（depth=24）+ 一个**全局帧缓冲上限**（frame_budget 帧，
+    1080p 一帧 6.22MB）；谁忙都不空转，谁也堆不起来。允许乱序完成：编码好的 PNG 字节
+    进重排缓冲，写线程只按帧号顺序落盘；到写盘那一步才真正出现文件（问题 8 的断言：
+    这些文件在 %TEMP% 里，**不是** <视频>_cache/）。
+    """
+    import queue
+    import cv2
+    import numpy as np
+    from ._merge_compose import compose_frame, ensure_engine_path
+    ensure_engine_path()
+    from facelib import FaceType
+    from facelib.LandmarksProcessor import get_transform_mat
+    from ._align import (COARSE_SIZE, align_face_68, coarse_align_from_5,
+                         landmarks68_in_source)
+
+    video = Path(cfg["video"])
+    out = Path(cfg["out"])
+    rng = _stage_range(cfg)
+    start_i, end_i, total = int(rng["start"]), int(rng["end"]), int(rng["total"])
+    probe = cfg.get("probe") or {}
+    fps = float(cfg.get("fps") or probe.get("fps") or 30.0)
+    full = bool(rng["full"])
+    mask_src = _mask_src(cfg.get("settings"), cfg.get("mask_mode"))
+    comp_cfg = dict(cfg.get("config") or {})
+    comp_cfg["mask_mode"] = int((cfg.get("settings") or {}).get("mask_mode", 6) or 0)
+    need_xseg = str(mask_src.get("source") or "").lower() == "xseg"
+    need_dst = bool(need_xseg and int(comp_cfg["mask_mode"]) in (7, 8, 9))
+    det_name = str(cfg.get("det_align") or "retinaface_10g")
+    det_thresh = float(cfg.get("align_thresh") or 0.5)
+    png_level = int(cfg.get("png_level") if cfg.get("png_level") is not None else 1)
+    n_cmp = max(1, int(_merge_worker_count(cfg)))
+    # PNG 编码是这一条链上最贵的纯 CPU 活（1080p 实测 94ms/帧，cv2.imencode 会放 GIL，
+    # 多线程是真并行：2 线程 ≈2 倍、4 线程 ≈3.6 倍）。默认 3：detect（52.8ms/帧）才是硬底，
+    # 再往上加只会跟检测抢 CPU。
+    n_enc = max(1, int(cfg.get("pred_writers") or 3))
+    n_prep = max(1, int(cfg.get("pred_readers") or min(4, max(1, (os.cpu_count() or 4) // 3))))
+    qd = int(_FUSED_QDEPTH)
+    # cv2 的内部线程数（进程级）：合成阶段的口径是「worker 多了就别让 cv2 自己摊线程」，
+    # 但这条链的**硬底是检测**（retinaface_10g 单帧 52.8ms，其中 1080p→640 的 letterbox
+    # resize 是 cv2.resize）。合成那 8 个 worker 实测有 76% 是空等（见 profile 的 cmp_wait），
+    # 所以这里反过来：给 cv2 留几条线程，让检测的预处理能并行起来。
+    # 实测把它钉成 1 时 detect 从 52.8 涨到 65.8 ms/帧、整条线 12.1 帧/秒。
+    cv2_threads = max(2, min(8, int(os.cpu_count() or 8) // max(1, n_cmp)))
+
+    cache_dir = Path(str(video.parent / (video.stem + "_cache")))
+    cache_pre = cache_dir.is_dir()
+    dump_frames = set()
+    for _tok in str(os.environ.get(_FUSED_ENV_DUMP) or "").replace(";", ",").split(","):
+        _tok = _tok.strip()
+        if _tok.isdigit():
+            dump_frames.add(int(_tok))
+
+    # ---- 模型 / 显存 / 帧预算（起流水线之前，出问题要在这里就喊出来）----
+    lm = _landmarks_model()
+    if lm is None:
+        raise _BadInput("2D106 关键点模型不可用（weights/insightface_2d106.onnx）—— "
+                        "没有 68 点就跑不了快速导出", 500)
+    det = _detector(det_name)
+    ent0 = _dfm_session(str(cfg["dfm"]))
+    size_px = int(ent0[2])
+    free_mb, total_mb = _fused_vram_free()
+    bud = _fused_budget(int(cfg.get("frame_budget_want") or 0), free_mb, total_mb, size_px)
+    budget = int(bud["frame_budget"])
+    cfg["frame_budget"] = budget
+    cfg["budget"] = bud
+    xseg = None
+    xs_label = ""
+    if need_xseg:
+        xseg, xs_res = _stage_xseg(mask_src.get("model"))
+        xs_label = str(xs_res.get("label") or "")
+        info = dict(getattr(xseg, "info", {}) or {})
+        _vid_log("快速导出：遮罩 %s（%s）· 后端=%s%s"
+                 % (xs_label or "-", Path(str(info.get("onnx") or "")).name or "-",
+                    info.get("backend") or "?", ("(%s)" % info.get("precision"))
+                    if info.get("precision") else ""))
+    _vid_log("快速导出：dfm %s · %dx%d · %s · 检测器 %s thresh=%.2f"
+             % (Path(str(cfg["dfm"])).name, size_px, size_px,
+                (ent0[6] if len(ent0) > 6 else "?"), det_name, det_thresh))
+    _vid_log("快速导出：显存 %s/%s MB · 每帧预算 %.1f MB · 保留 %d MB · 安全系数 %.2f "
+             "→ 帧缓冲 %d（请求 %d%s）"
+             % (bud["free_mb"], bud["total_mb"], bud["per_frame_mb"], bud["reserve_mb"],
+                bud["safety"], budget, bud["requested"],
+                "，已降档" if bud["downgraded"] else ""))
+    for st in bud["steps"]:
+        if st.get("fit") is False or st.get("why"):
+            _vid_log("快速导出：帧预算 %s 帧 → %s"
+                     % (st.get("budget"),
+                        st.get("why") or ("要 %.1f MB > 可用 %.1f MB"
+                                          % (st.get("need_mb") or 0, st.get("avail_mb") or 0))))
+
+    frames_dir = Path(tempfile.mkdtemp(prefix="dfl_fused_"))
+    cfg["frames_dir"] = str(frames_dir)
+    _vid_log("快速导出：线程 检测1/解码1/对齐%d/GPU1/合成%d/编码%d · 队列 %d · cv2 %d 线程"
+             % (n_prep, n_cmp, n_enc, qd, cv2_threads))
+    _vid_log("快速导出：临时帧目录 %s（成功/取消都删；<视频>_cache/ 一个都不建）" % frames_dir)
+
+    END = object()
+    ticks = _FusedTicks()
+    stop = threading.Event()
+    errors = []
+    sem = threading.BoundedSemaphore(budget)
+    q_dec = queue.Queue(maxsize=max(2, qd))
+    q_det = queue.Queue(maxsize=max(2, qd))
+    q_gpu = queue.Queue(maxsize=max(qd, 64))
+    q_cmp = queue.Queue(maxsize=max(2, qd))
+    q_enc = queue.Queue(maxsize=max(2, qd))
+    cnt = {"prep": n_prep, "compose": n_cmp, "encode": n_enc}
+    cnt_lock = threading.Lock()
+    live = {"n": 0, "peak": 0}
+    live_lock = threading.Lock()
+    stat_lock = threading.Lock()
+    bstat = {"calls": 0, "faces": 0, "max": 0, "hist": {}}
+    rep = {"at": 0.0}
+    got = {"frames": 0, "swapped": 0, "copied": 0, "no_face": 0, "faces": 0, "skipped": 0}
+
+    def _fail(stage, exc):
+        errors.append("%s: %r" % (stage, exc))
+        stop.set()
+
+    def _put(q, item, timeout=0.2):
+        while not stop.is_set():
+            try:
+                q.put(item, timeout=timeout)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def _get(q, timeout=0.2):
+        while not stop.is_set():
+            try:
+                return q.get(timeout=timeout)
+            except queue.Empty:
+                continue
+        return END
+
+    def _report(done, force=False):
+        now = time.time()
+        if not force and (now - rep["at"]) < 0.25:
+            return
+        rep["at"] = now
+        el = max(0.001, now - t_all)
+        rate = float(done) / el
+        eta = int((total - done) / rate) if rate > 0 and 0 < done < total else None
+        pct = int(round(_VID_PCT_SWAP * float(done) / total)) if total else 0
+        _stage_progress(
+            "fused", min(100, pct),
+            "快速导出 %d/%d 帧（第 %d..%d 帧）· %.1f 帧/秒"
+            % (done, total, start_i, end_i, rate),
+            frames_done=int(done), frames_total=int(total),
+            frame_fps=round(rate, 2), eta_s=eta,
+            swapped=int(got["swapped"]), copied=int(got["copied"]),
+            no_face=int(got["no_face"]))
+        _vid_stats(done=int(done), total=int(total), fps=round(rate, 2), eta_s=eta,
+                   frame_budget=budget, fused=True, peak_live=int(live["peak"]))
+
+    # ---- 显存保护：dfm 批大小按 session 实测阶梯选（每个 dfm 一次）----
+    batch_of = {}
+    batch_lock = threading.Lock()
+
+    def _batch_for(dfm_path):
+        with batch_lock:
+            hit = batch_of.get(dfm_path)
+        if hit is not None:
+            return hit
+        ent = _dfm_session(dfm_path)
+        b, bmeta = _pred_pick_batch({**cfg, "pred_batch": int(cfg.get("pred_batch") or 0)}, ent)
+        with batch_lock:
+            batch_of[dfm_path] = int(b)
+        _vid_log("快速导出：dfm %s 批大小 %d（%s）· %dx%d"
+                 % (Path(dfm_path).name, int(b), bmeta.get("source"),
+                    int(ent[2]), int(ent[2])))
+        return int(b)
+
+    # ---- ① 解码：ffmpeg 的 PNG 帧流 → 帧缓冲（信号量卡死上限，满了解码就停，天然背压）----
+    # 走 PNG 而不是 rawvideo bgr24：见 _fused_open_frames 的注释（只有同一条编解码路径
+    # 才能和分段产物逐像素一致）。
+    gen = {}
+
+    def _decode():
+        proc = None
+        try:
+            proc, next_frame = _fused_open_frames(video, start_i)
+            gen["proc"] = proc
+            n = start_i - 1
+            while not stop.is_set():
+                if n >= end_i:
+                    break
+                t_rd = time.perf_counter()
+                frame = next_frame()
+                ticks.add("decode", time.perf_counter() - t_rd)
+                if frame is None:
+                    break
+                n += 1
+                t_wait = time.perf_counter()
+                while not stop.is_set():
+                    if sem.acquire(timeout=0.2):
+                        break
+                ticks.add("dec_wait", time.perf_counter() - t_wait)
+                if stop.is_set():
+                    break
+                with live_lock:
+                    live["n"] += 1
+                    if live["n"] > live["peak"]:
+                        live["peak"] = live["n"]
+                if not _put(q_dec, _FusedFrame(n, n - start_i + 1, frame)):
+                    break
+        except BaseException as e:                             # noqa: BLE001
+            _fail("decode", e)
+        finally:
+            _put(q_dec, END)
+
+    # ---- ② 检测：单线程（检测器是共享对象，本来就不能并发）----
+    def _detect():
+        try:
+            while True:
+                t_wait = time.perf_counter()
+                job = _get(q_dec)
+                ticks.add("det_wait", time.perf_counter() - t_wait)
+                if job is END:
+                    for _i in range(n_prep):
+                        _put(q_det, END)
+                    break
+                t = time.perf_counter()
+                try:
+                    boxes = _detect_boxes(job.frame, det_name, det_thresh)
+                except Exception as e:                         # noqa: BLE001
+                    _fail("detect", e)
+                    for _i in range(n_prep):
+                        _put(q_det, END)
+                    break
+                ticks.add("detect", time.perf_counter() - t)
+                # 和 ② 切脸同一个次序（按 x1 排）：脸序号 = 这个顺序，compose 也按它贴
+                job.boxes = sorted(list(boxes or []),
+                                   key=lambda b: float((b.get("box") or [0, 0, 0, 0])[0]))
+                job.rec["detected"] = len(job.boxes)
+                _put(q_det, job)
+        except BaseException as e:                             # noqa: BLE001
+            _fail("detect", e)
+
+    # ---- ③ 对齐/预处理 + 归组：68 点、dfm 输入、xseg 的 dst 画布、这一帧用哪个 dfm ----
+    def _prep():
+        try:
+            while True:
+                job = _get(q_det)
+                if job is END:
+                    return
+                t = time.perf_counter()
+                faces = []
+                for k, b in enumerate(job.boxes or []):
+                    box = b.get("box") or [0, 0, 0, 0]
+                    try:
+                        x1, y1, x2, y2 = [float(v) for v in box]
+                    except (TypeError, ValueError):
+                        continue
+                    bw = max(1.0, x2 - x1)
+                    bh = max(1.0, y2 - y1)
+                    side = int(round(max(bw, bh) * 2.0))
+                    side -= side % 2
+                    kps = b.get("kps") or []
+                    if len(kps) < 5 or side < 32:
+                        continue
+                    try:
+                        cmat = coarse_align_from_5(kps)
+                        coarse = cv2.warpAffine(job.frame, cmat,
+                                                (COARSE_SIZE, COARSE_SIZE),
+                                                flags=cv2.INTER_LINEAR,
+                                                borderMode=cv2.BORDER_CONSTANT,
+                                                borderValue=(0, 0, 0))
+                        lm68a = lm.landmarks68(coarse)
+                        if lm68a is None:
+                            continue
+                        pts = landmarks68_in_source(lm68a, cmat)
+                        crop, meta_f = align_face_68(
+                            job.frame, np.asarray(pts, np.float64),
+                            box=[int(round(x1)), int(round(y1)),
+                                 int(round(x2)), int(round(y2))], size=side)
+                    except Exception as e:                     # noqa: BLE001
+                        got["skipped"] += 1
+                        _vid_log("快速导出：第 %d 帧第 %d 张脸跳过：%s"
+                                 % (job.idx, k, str(e)[:100]))
+                        continue
+                    if crop is None or not meta_f:
+                        got["skipped"] += 1
+                        continue
+                    # compose 用的 landmarks = DFLJPG 里那份（align_face_68 已 round(4)）
+                    lm_f = np.asarray(meta_f["source_landmarks"], np.float32)
+                    xseg_dst = None
+                    if need_dst:
+                        # 分段的 dst 输入是 aligned/*.jpg（q100 4:4:4，仍然有损）→ 照抄这一步
+                        from ._align import jpeg_encode_params
+                        okj, buf = cv2.imencode(".jpg", crop, jpeg_encode_params(100, 0))
+                        if okj:
+                            dec = cv2.imdecode(np.frombuffer(buf.tobytes(), np.uint8),
+                                               cv2.IMREAD_COLOR)
+                            m = _stage_dst_face_mat(meta_f, 256)
+                            if dec is not None and m is not None:
+                                xseg_dst = cv2.warpAffine(dec, m, (256, 256),
+                                                          flags=cv2.INTER_CUBIC)
+                    faces.append({"k": int(k), "lm": lm_f, "meta": meta_f,
+                                  "crop": crop, "dst_u8": xseg_dst,
+                                  "dfm": "", "dfm_in": None, "pred_u8": None,
+                                  "prd_u8": None, "dstdfm_u8": None,
+                                  "xseg_prd_u8": None, "xseg_dst_u8": None})
+                ticks.add("align", time.perf_counter() - t)
+                # 归组（有人脸库才真的算 embedding；没库就是一次索引读）
+                t = time.perf_counter()
+                models, no_swap, plan = _vid_models_for_frame(cfg, job.frame, job.boxes,
+                                                              job.idx)
+                ticks.add("embed", time.perf_counter() - t)
+                job.plan = plan
+                if plan is not None and not models:
+                    job.faces = []          # 有库但这帧一张都不像：整帧保持原像素
+                    job.rec["branch"] = "library-none"
+                elif not faces:
+                    job.faces = []
+                    job.rec["branch"] = "copy"
+                else:
+                    job.rec["branch"] = "library" if plan is not None else "single"
+                    skip = set(int(i) for i in (no_swap or []))
+                    use = []
+                    for f in faces:
+                        i = int(f["k"])
+                        if i in skip:
+                            continue        # 谁都不像的脸：保持原像素，不兜给任何模型
+                        midx = _model_for_face(i, models)
+                        m = (models[midx] if models else {}) or {}
+                        f["dfm"] = str(m.get("dfm") or cfg["dfm"])
+                        f["name"] = str(m.get("name") or cfg["model"])
+                        # ③ 换脸那一刀的输入：同一条 get_transform_mat(lm, S, WHOLE_FACE)
+                        # + INTER_CUBIC warp + **uint8 整帧 warp 再 /255**（和 ③ 逐字同序）。
+                        # 模型尺寸按「这张脸归谁的 dfm」定（多模型时各不相同）。
+                        try:
+                            sz = int(_dfm_session(f["dfm"])[2])
+                            fmat = get_transform_mat(np.asarray(f["lm"], np.float32), sz,
+                                                     FaceType.WHOLE_FACE, scale=1.0)
+                            warped = cv2.warpAffine(job.frame, fmat, (sz, sz),
+                                                    flags=cv2.INTER_CUBIC)
+                            f["dfm_in"] = np.clip(warped.astype(np.float32) / 255.0, 0, 1)
+                        except Exception as e:                 # noqa: BLE001
+                            got["skipped"] += 1
+                            _vid_log("快速导出：第 %d 帧第 %d 张脸 warp 失败：%s"
+                                     % (job.idx, i, str(e)[:100]))
+                            continue
+                        use.append(f)
+                    job.faces = use
+                job.faces = job.faces or []
+                if not job.faces:
+                    _put(q_cmp, job)
+                else:
+                    # 每张脸都带上「这一帧一共几张」：GPU 段按 dfm 攒批，**可能先收到第 2 张、
+                    # 后收到第 1 张**（不同 dfm 分开 flush）。只有生产者知道总数，收到的张数
+                    # 凑齐才把这一帧交给合成 —— 否则 2 张脸的第一张一到就提前合成，
+                    # 第二张的脸就丢了（这是原型里没暴露、但生产上必须堵的洞）。
+                    nf = len(job.faces)
+                    for f in job.faces:
+                        if not _put(q_gpu, (job, f, nf)):
+                            break
+        except BaseException as e:                             # noqa: BLE001
+            _fail("prep", e)
+        finally:
+            with cnt_lock:
+                cnt["prep"] -= 1
+                last = cnt["prep"] == 0
+            if last:
+                _put(q_gpu, END)
+
+    # ---- ④ dfm + ⑤ XSeg：按 dfm 攒批，一次前向；回填到各自的帧 ----
+    def _gpu():
+        pend = {}
+        pend_frames = {}
+
+        def flush(only=None):
+            for dfm_path in (list(pend) if only is None else [only]):
+                part = pend.get(dfm_path) or []
+                if not part:
+                    continue
+                del pend[dfm_path]
+                b = _batch_for(dfm_path)
+                step = max(1, int(b))
+                i = 0
+                while i < len(part):
+                    chunk = part[i:i + step]
+                    i += step
+                    faces = [c[1] for c in chunk]
+                    sz = size_px_of(dfm_path)
+                    arr = np.empty((len(faces), sz, sz, 3), np.float32)
+                    for k, f in enumerate(faces):
+                        if f.get("dfm_in") is None:
+                            # 兜底：绝不让 None/NaN 进网络（早先漏算 warp 时就是靠这个
+                            # 变成一片糊的——静默穿过 TRT 再从合成里冒出来，极难查）
+                            raise _BadInput("第 %d 张脸没有 dfm 输入（warp 没做）"
+                                            % int(f.get("k") or 0), 500)
+                        arr[k] = f["dfm_in"]
+                    t = time.perf_counter()
+                    try:
+                        outs = _dfm_run_batch(_dfm_session(dfm_path), arr)
+                    except Exception as e:                     # noqa: BLE001
+                        if not (_is_oom(e) and len(faces) > 1):
+                            raise
+                        h = max(1, len(faces) // 2)
+                        _vid_log("快速导出：dfm batch=%d 显存不够（%s）→ 退到 %d 再试"
+                                 % (len(faces), str(e)[:80], h))
+                        with batch_lock:
+                            batch_of[dfm_path] = max(1, min(int(batch_of.get(dfm_path) or h), h))
+                        outs = []
+                        for j in range(0, len(faces), h):
+                            outs.extend(_dfm_run_batch(_dfm_session(dfm_path),
+                                                       arr[j:j + h]))
+                    ticks.add("dfm", time.perf_counter() - t)
+                    bstat["calls"] += 1
+                    bstat["faces"] += len(faces)
+                    bstat["max"] = max(bstat["max"], len(faces))
+                    key = str(len(faces))
+                    bstat["hist"][key] = int(bstat["hist"].get(key) or 0) + 1
+                    for k, f in enumerate(faces):
+                        prd, dst = outs[k][1], outs[k][2]
+                        f["pred_u8"] = np.clip(outs[k][0] * 255.0, 0, 255).astype(np.uint8)
+                        f["prd_u8"] = (None if prd is None
+                                       else np.clip(prd * 255.0, 0, 255).astype(np.uint8))
+                        f["dstdfm_u8"] = (None if dst is None
+                                          else np.clip(dst * 255.0, 0, 255).astype(np.uint8))
+                    t = time.perf_counter()
+                    if need_xseg:
+                        # 和 ④ 遮罩阶段同一个口径：一张脸一次 mask_batch([pred, dst])
+                        for f in faces:
+                            imgs = [f["pred_u8"]]
+                            if f.get("dst_u8") is not None:
+                                imgs.append(f["dst_u8"])
+                            try:
+                                masks = xseg.mask_batch(imgs, out_size=256) or []
+                            except Exception as e:             # noqa: BLE001
+                                raise _BadInput("遮罩推理失败：%s" % (str(e)[:160]), 500)
+                            f["xseg_prd_u8"] = (
+                                np.clip(masks[0] * 255.0, 0, 255).astype(np.uint8)
+                                if len(masks) > 0 and masks[0] is not None else None)
+                            f["xseg_dst_u8"] = (
+                                np.clip(masks[1] * 255.0, 0, 255).astype(np.uint8)
+                                if len(masks) > 1 and masks[1] is not None else None)
+                    ticks.add("xseg", time.perf_counter() - t)
+                    for job, _f in chunk:
+                        rec = pend_frames.get(id(job))
+                        if rec is not None:
+                            rec[0] -= 1
+                            if rec[0] <= 0:
+                                pend_frames.pop(id(job), None)
+                                _put(q_cmp, job)
+
+        def size_px_of(dfm_path):
+            return int(_dfm_session(dfm_path)[2])
+
+        try:
+            while True:
+                t_wait = time.perf_counter()
+                item = _get(q_gpu)
+                ticks.add("gpu_wait", time.perf_counter() - t_wait)
+                if item is END:
+                    flush()
+                    for _i in range(n_cmp):
+                        _put(q_cmp, END)
+                    break
+                job, f, nf = item
+                if id(job) not in pend_frames:
+                    # 生产者给的「这一帧一共几张脸」：收到的回填进度按它算（见 _prep 的说明）
+                    pend_frames[id(job)] = [int(nf)]
+                pend.setdefault(f["dfm"], []).append((job, f))
+                b = _batch_for(f["dfm"])
+                if len(pend[f["dfm"]]) >= max(1, b):
+                    flush(f["dfm"])
+        except BaseException as e:                             # noqa: BLE001
+            _fail("gpu", e)
+
+    # ---- ⑤ 合成（纯 CPU，就是 ⑤ 合成阶段那个 compose_frame）----
+    def _compose():
+        try:
+            while True:
+                t_wait = time.perf_counter()
+                job = _get(q_cmp)
+                ticks.add("cmp_wait", time.perf_counter() - t_wait)
+                if job is END:
+                    return
+                t = time.perf_counter()
+                args = []
+                for f in (job.faces or []):
+                    prd = f.get("prd_u8")
+                    dst = f.get("dstdfm_u8")
+                    xp = f.get("xseg_prd_u8")
+                    xd = f.get("xseg_dst_u8")
+                    args.append({
+                        "landmarks": f["lm"],
+                        "pred": f["pred_u8"].astype(np.float32) / 255.0,
+                        "prd_dfm": (None if prd is None
+                                    else prd.astype(np.float32) / 255.0),
+                        "dst_dfm": (None if dst is None
+                                    else dst.astype(np.float32) / 255.0),
+                        "xseg_prd": (None if xp is None
+                                     else xp.astype(np.float32) / 255.0),
+                        "xseg_dst": (None if xd is None
+                                     else xd.astype(np.float32) / 255.0),
+                    })
+                try:
+                    out_frame = compose_frame(job.frame, args, comp_cfg, job.timings)
+                except Exception as e:                         # noqa: BLE001
+                    raise _BadInput("第 %d 帧合成失败：%s" % (job.idx, str(e)[:160]), 500)
+                ticks.add("compose", time.perf_counter() - t)
+                if dump_frames and int(job.idx) in dump_frames:
+                    _fused_dump(cfg, job, out_frame)
+                job.rec["faces"] = len(args)
+                job.rec["swapped"] = len(args)
+                job.rec["no_face"] = not args
+                job.frame = None
+                _put(q_enc, (job, out_frame))
+        except BaseException as e:                             # noqa: BLE001
+            _fail("compose", e)
+        finally:
+            with cnt_lock:
+                cnt["compose"] -= 1
+                last = cnt["compose"] == 0
+            if last:
+                for _i in range(n_enc):
+                    _put(q_enc, END)
+
+    # ---- ⑥ PNG 编码 + 落盘（无损，level 同 ⑤ 合成阶段）----
+    # 为什么**不需要**重排/单写者：帧图是 `%06d.png` 定长序列，文件名自带帧号，
+    # 谁先写完都不影响 ffmpeg 读到的是第几帧（分段链的 merge 阶段也是多 worker 乱序写盘）。
+    # 之前那版照抄原型留了个"唯一写者按帧号顺序"的环节，代价是：写线程死等最慢的那一帧，
+    # 缓冲一满就把 encode 线程堵住、sem 不释放、解码停摆 —— 实测 detect 只有 61% 占用、
+    # 整条线 10.75 帧/秒（detect 单独跑是 52.8ms/帧 = 18.9 帧/秒的硬底）。
+    def _encode():
+        try:
+            while True:
+                t_wait = time.perf_counter()
+                item = _get(q_enc)
+                ticks.add("enc_wait", time.perf_counter() - t_wait)
+                if item is END:
+                    return
+                job, img = item
+                t = time.perf_counter()
+                data = _stage_imencode_png(img, png_level)
+                ticks.add("encode", time.perf_counter() - t)
+                t = time.perf_counter()
+                _stage_write_atomic(frames_dir / ("%06d.png" % job.n), data)
+                ticks.add("write", time.perf_counter() - t)
+                with live_lock:
+                    live["n"] -= 1
+                try:
+                    sem.release()
+                except ValueError:
+                    pass
+                with stat_lock:
+                    got["frames"] += 1
+                    if job.rec.get("no_face"):
+                        got["copied"] += 1
+                        got["no_face"] += 1
+                    else:
+                        got["swapped"] += 1
+                    got["faces"] += int(job.rec.get("faces") or 0)
+                    done = got["frames"]
+                _vid_record(job.rec)
+                _report(done)
+        except BaseException as e:                             # noqa: BLE001
+            _fail("encode", e)
+
+    # dfm 批大小阶梯（_pred_pick_batch）会真的跑几次空张量前向来量耗时：留在流水线里会让
+    # 开头 1~2 秒的 GPU 被它占着（120 帧的片子那是 15% 的开销）。单模型这条最常见的路
+    # 提前在这里跑掉 —— 既预热了 session，也让测速窗口干净。
+    try:
+        _batch_for(str(cfg["dfm"]))
+    except Exception as e:                                     # noqa: BLE001
+        _vid_log("快速导出：dfm 批大小探测失败（%s）→ 流水线里再试" % str(e)[:120])
+
+    cv2_prev = 0
+    cv2_set = 0
+    if cv2_threads > 0:
+        try:
+            cv2_prev = int(cv2.getNumThreads())
+            if cv2_prev != int(cv2_threads):
+                cv2.setNumThreads(int(cv2_threads))
+                cv2_set = int(cv2_threads)
+        except Exception:                                      # noqa: BLE001
+            cv2_prev, cv2_set = 0, 0
+
+    ths = {}
+    t_all = time.time()
+    try:
+        ths["decode"] = threading.Thread(target=_decode, name="fused-dec", daemon=True)
+        ths["detect"] = threading.Thread(target=_detect, name="fused-det", daemon=True)
+        for i in range(n_prep):
+            ths["prep%d" % i] = threading.Thread(target=_prep, name="fused-prep%d" % i,
+                                                 daemon=True)
+        ths["gpu"] = threading.Thread(target=_gpu, name="fused-gpu", daemon=True)
+        for i in range(n_cmp):
+            ths["cmp%d" % i] = threading.Thread(target=_compose, name="fused-cmp%d" % i,
+                                                daemon=True)
+        for i in range(n_enc):
+            ths["enc%d" % i] = threading.Thread(target=_encode, name="fused-enc%d" % i,
+                                                daemon=True)
+        # 从下游往上游起：先有消费者，生产者才不会一上来就撞满队列
+        for k in ["enc%d" % i for i in range(n_enc)] + \
+                ["cmp%d" % i for i in range(n_cmp)] + ["gpu"] + \
+                ["prep%d" % i for i in range(n_prep)] + ["detect", "decode"]:
+            ths[k].start()
+        # 全部线程退出 = 全片跑完；中途取消就置 stop 让所有段退出
+        while True:
+            if _fused_cancelled():
+                stop.set()
+                break
+            if not any(t.is_alive() for t in ths.values()):
+                break
+            time.sleep(0.1)
+    finally:
+        wall = time.time() - t_all
+        stop.set()
+        for k, th in ths.items():
+            try:
+                th.join(timeout=10.0)
+            except Exception:                                  # noqa: BLE001
+                pass
+        alive = [k for k, th in ths.items() if th.is_alive()]
+        try:
+            proc = gen.get("proc")
+            if proc is not None:
+                _kill_proc_tree(proc)
+        except Exception:                                      # noqa: BLE001
+            pass
+        if cv2_set:
+            try:
+                cv2.setNumThreads(cv2_prev)
+            except Exception:                                  # noqa: BLE001
+                pass
+
+    written = int(got["frames"] or 0)
+    if _fused_cancelled():
+        raise _StageCancel()
+    if errors:
+        raise _BadInput("快速导出失败（%s）" % (errors[0][:400],), 500)
+    if alive:
+        raise _BadInput("快速导出异常收尾：还有线程没退出（%s）" % "、".join(sorted(alive)), 500)
+    if written <= 0:
+        raise _BadInput("一帧都没解出来：%s" % video.name, 422)
+
+    sec = round(time.time() - t_all, 2)
+    rate = written / max(1e-6, sec)
+    per_stage = ticks.dump(written)
+    busy = {k: ticks.raw(k) for k in per_stage}
+    util = {
+        # 等待（背压）也算一列：某一段 100% 却整条线慢，看 *_wait 就知道谁在等谁
+        "dec_wait": round(100.0 * busy.get("dec_wait", 0.0) / max(1e-6, wall), 1),
+        "det_wait": round(100.0 * busy.get("det_wait", 0.0) / max(1e-6, wall), 1),
+        "gpu_wait": round(100.0 * busy.get("gpu_wait", 0.0) / max(1e-6, wall), 1),
+        "cmp_wait": round(100.0 * busy.get("cmp_wait", 0.0) / max(1e-6, wall * n_cmp), 1),
+        "enc_wait": round(100.0 * busy.get("enc_wait", 0.0) / max(1e-6, wall * n_enc), 1),
+        "decode": round(100.0 * busy.get("decode", 0.0) / max(1e-6, wall), 1),
+        "detect": round(100.0 * busy.get("detect", 0.0) / max(1e-6, wall), 1),
+        "align": round(100.0 * busy.get("align", 0.0) / max(1e-6, wall * n_prep), 1),
+        "embed": round(100.0 * busy.get("embed", 0.0) / max(1e-6, wall * n_prep), 1),
+        "dfm": round(100.0 * busy.get("dfm", 0.0) / max(1e-6, wall), 1),
+        "xseg": round(100.0 * busy.get("xseg", 0.0) / max(1e-6, wall), 1),
+        "compose": round(100.0 * busy.get("compose", 0.0) / max(1e-6, wall * n_cmp), 1),
+        "encode": round(100.0 * busy.get("encode", 0.0) / max(1e-6, wall * n_enc), 1),
+        "write": round(100.0 * busy.get("write", 0.0) / max(1e-6, wall), 1),
+    }
+    _vid_log("快速导出：流水线跑完 %d 帧 · %.2f s · %.2f 帧/秒 · 帧缓冲 %d（峰值在飞 %d 帧）"
+             % (written, sec, rate, budget, int(live["peak"])))
+    _vid_log("快速导出 profile（每帧 ms）：%s"
+             % " · ".join("%s=%.2f" % (k, v) for k, v in per_stage.items()))
+    _vid_log("快速导出 各段占用：%s"
+             % " · ".join("%s=%.0f%%" % (k, v) for k, v in util.items()))
+    _vid_log("快速导出 dfm 批次：调用 %d 次 / %d 张脸 / 平均 %.1f 张 · 最大 %d · 分布 %s"
+             % (bstat["calls"], bstat["faces"],
+                bstat["faces"] / max(1, bstat["calls"]), bstat["max"],
+                dict(sorted(bstat["hist"].items(), key=lambda kv: int(kv[0])))))
+    if written != total:
+        _vid_log("快速导出：实解出 %d 帧（源信息说 %d 帧）→ 按实解帧数编码"
+                 % (written, total))
+    _vid_stats(done=written, total=written, fps=round(rate, 2), eta_s=0,
+               frame_budget=budget, fused=True, per_stage_ms=per_stage,
+               stage_util_pct=util, batch=batch_of, pipeline={
+                   "threads": {"decode": 1, "detect": 1, "prep": n_prep, "gpu": 1,
+                               "compose": n_cmp, "encode": n_enc},
+                   "queue_depth": qd, "budget": budget, "cv2_threads": cv2_threads})
+    _stage_progress("fused", _VID_PCT_SWAP,
+                    "快速导出：%d 帧跑完，开始编码（%d 帧 @ %.6g fps）"
+                    % (written, written, fps),
+                    frames_done=written, frames_total=written,
+                    frame_fps=round(rate, 2))
+
+    # ---- ⑦ 编码：和 ⑥ 导出**同一个函数**（crf16 / yuv420p / tv-range / 音轨 copy）----
+    out.parent.mkdir(parents=True, exist_ok=True)
+    part = out.with_name(out.stem + ".part" + out.suffix)
+    dur = (written / fps) if fps > 0 else 0.0
+    t_audio = ((start_i - 1) / fps) if fps > 0 else 0.0
+    cmd = _vid_cmd(str(frames_dir / "%06d.png"), part, video, fps, img_start=1,
+                   audio_ss=(None if full else t_audio),
+                   audio_t=(None if full else dur),
+                   limit=(None if full else int(written)))
+
+    def _on_prog(done):
+        pct = _VID_PCT_SWAP + (100 - _VID_PCT_SWAP) * min(1.0, done / max(1, written))
+        _stage_progress("encode", pct, "编码 %d/%d 帧" % (done, written),
+                        frames_done=min(done, written), frames_total=written)
+
+    enc = _vid_encode(cmd, part, written, on_progress=_on_prog,
+                      cancelled=_fused_cancelled)
+    if enc["code"] != 0:
+        try:
+            if part.is_file():
+                part.unlink()
+        except OSError:
+            pass
+        raise _BadInput("编码失败（ffmpeg 退出码 %s）：%s"
+                        % (enc["code"], (enc["tail"] or "")[-600:]), 500)
+    if not part.is_file() or part.stat().st_size <= 0:
+        raise _BadInput("编码跑完了却没有产物：%s" % part, 500)
+    os.replace(str(part), str(out))
+    mb = round(out.stat().st_size / 1048576.0, 2)
+    _vid_log("快速导出：编码完成 %s（%.2f MB · %d 帧 · %.3f s · %.4f s 墙钟）"
+             % (out.name, mb, written, dur, enc["seconds"]))
+    _vid_log("快速导出 编码命令：%s"
+             % " ".join('"%s"' % a if " " in str(a) else str(a) for a in cmd))
+
+    # ---- 断言：全程没碰 <视频>_cache/（这是 fused 和分段的关键区别）----
+    if (not cache_pre) and cache_dir.exists():
+        raise _BadInput("快速导出不该创建 %s，但它出现了 —— 说明有代码偷偷写了 cache"
+                        % cache_dir, 500)
+    _vid_log("快速导出：<视频>_cache/ %s" % ("本来就在（没动它）" if cache_pre else "全程没建 ✔"))
+
+    return {"frames": written, "seconds": sec, "fps": round(rate, 2),
+            "encode_seconds": enc["seconds"], "mb": mb, "duration": round(dur, 6),
+            "out": str(out), "frame_budget": budget, "budget": bud,
+            "per_stage_ms": per_stage, "stage_util_pct": util,
+            "batch": dict(batch_of), "batch_actual": dict(bstat),
+            "peak_live": int(live["peak"]),
+            "cache_dir": str(cache_dir), "cache_created": False,
+            "audio_ss": (None if full else round(t_audio, 6)),
+            "range": {"start": start_i, "end": end_i, "total": total, "full": full},
+            "frames_dir": str(frames_dir), "threads": {"prep": n_prep, "compose": n_cmp,
+                                                      "encode": n_enc}}
+
+
+def _fused_worker(cfg: dict):
+    """跑一次快速导出，并把终态落到两个 status（老 /export/status + /stage/status）。"""
+    ok, err, cancelled = True, "", False
+    t0 = time.time()
+    frames_dir = ""
+    try:
+        _stage_progress("fused", 0, "快速导出启动…",
+                        frames_done=0, frames_total=int(cfg.get("range_total") or 0))
+        res = _fused_run(cfg) or {}
+        frames_dir = str(res.get("frames_dir") or cfg.get("frames_dir") or "")
+        with _merge_job_lock:
+            _merge_job["encode"] = {"seconds": res.get("encode_seconds"), "code": 0,
+                                    "out": str(res.get("out")), "mb": res.get("mb")}
+        cfg["_fused_result"] = res
+        _vid_log("快速导出完成：%s（%d 帧 · %.2f 帧/秒 · 编码 %.2fs）"
+                 % (res.get("out"), res.get("frames"), res.get("fps"),
+                    res.get("encode_seconds") or 0))
+    except _StageCancel:
+        ok, cancelled = False, True
+        err = "已取消（快速导出不支持续跑，需整段重跑）"
+    except _BadInput as e:
+        ok, err = False, str(e.msg)[:1200]
+    except Exception as e:                                     # noqa: BLE001
+        traceback.print_exc()
+        ok, err = False, "%s: %s" % (e.__class__.__name__, str(e)[:600])
+    finally:
+        # active 保持 true 直到下面的收尾全部做完（删临时帧 / 清半截成片 / 写终态）。
+        # 取消之后 /export/status 的 running 立刻变 false（既有语义，看门狗靠它），
+        # 所以「能不能再点一次导出」要看 active —— 临时帧还没删完就再起一单，
+        # 会在 %TEMP% 里留下一个没人管的 dfl_fused_* 目录。
+        pass
+        # 临时帧目录：成功、失败、取消**都删**（不存在续跑这回事）
+        tmp = str(cfg.get("frames_dir") or frames_dir or "")
+        removed = False
+        if tmp:
+            try:
+                shutil.rmtree(tmp, ignore_errors=True)
+                removed = not Path(tmp).exists()
+            except OSError:
+                removed = False
+            _vid_log("快速导出：临时帧目录 %s（%s）" % (tmp, "已删除" if removed else "没删干净"))
+        # 半截成片（.part）绝不能留着被当成结果
+        try:
+            op = Path(str(cfg.get("out") or ""))
+            if op.name:
+                p = op.with_name(op.stem + ".part" + op.suffix)
+                if p.is_file():
+                    p.unlink()
+                    _vid_log("快速导出：删掉半截成片 %s" % p.name)
+        except OSError:
+            pass
+        res = cfg.get("_fused_result") or {}
+        cache_state = clear_face_group_cache(
+            "快速导出完成" if ok else ("快速导出取消" if cancelled else "快速导出失败"))
+        wall = round(time.time() - t0, 2)
+        bud = (res.get("frame_budget") if res else None) or cfg.get("frame_budget")
+        with _STAGE_LOCK:
+            _STAGE_JOB.update({
+                "running": False, "ok": bool(ok), "cancelled": bool(cancelled),
+                "phase": ("done" if ok else ("cancelled" if cancelled else "failed")),
+                "finished_at": time.time(), "error": "" if ok else err,
+                "error_detail": "" if ok else "\n".join(
+                    list(_STAGE_JOB.get("log") or [])[-30:]),
+                "pct": (100 if ok else int(_STAGE_JOB.get("pct") or 0)),
+                "stage_pct": (100 if ok else int(_STAGE_JOB.get("stage_pct") or 0)),
+                "stage": "fused", "stage_index": -1,
+                "msg": ("快速导出完成：%d 帧 · %.2f 帧/秒"
+                        % (int(res.get("frames") or 0), float(res.get("fps") or 0.0))
+                        if ok else ("已取消（快速导出不支持续跑）" if cancelled
+                                    else "失败：" + err[:80])),
+                "out_video": str(res.get("out") or cfg.get("out") or ""),
+                "cache_dir": "", "cache_removed": removed, "cache": cache_state,
+                "frame_budget": bud, "resumed": False, "seconds": {"fused": wall},
+                "counts": {"frames": int(res.get("frames") or 0), "faces": 0,
+                           "pred": 0, "masks": 0},
+                "meta": {},
+            })
+        with _merge_job_lock:
+            _merge_job.update({
+                "running": False, "ok": bool(ok) and not cancelled,
+                "cancelled": bool(cancelled), "finished_at": time.time(),
+                "pct": (100 if ok else int(_merge_job.get("pct") or 0)),
+                "pct_at_failure": (None if ok else int(_merge_job.get("pct") or 0)),
+                "stage": (6 if ok else -1),
+                "msg": ("合成完成" if ok else
+                        ("已取消（快速导出不支持续跑，需整段重跑）" if cancelled else "合成失败")),
+                "error": ("" if ok else err),
+                "error_detail": ("" if ok else "\n".join(_log_tail(
+                    list(_merge_job.get("log") or []), 30))[:4000]),
+                "cache": cache_state, "frame_budget": bud, "active": False,
+            })
+        _vid_log("快速导出结束：%s · %.2f s%s"
+                 % ("成功" if ok else ("已取消" if cancelled else "失败"), wall,
+                    ("（不支持续跑）" if cancelled else "")))
+        _vid_close_log()
+
+
+def _start_video_export(body: dict):
+    """POST /api/merge/export 的视频分支。**两条路，按 fused 选**：
+
+      · fused=1（默认，快速导出）：_fused_run 的全内存流水线 —— 解码 → 检测 → 对齐/归组
+        → dfm → XSeg → 合成 → 编码 同时跑，段间只有有界队列，**不落中间产物**
+        （<视频名>_cache/ 一个都不建）。原型（app/tools/fused_pipeline_bench.py）同段
+        1080p 120 帧量到 20.55 帧/秒（分段 7.20）；这份生产实现的验收见
+        app/tools/fused_export_accept.py：同一段片 18.21 帧/秒（分段 7.20 → 2.5x），
+        换 fast 档检测器 20.87 —— 硬底是 retinaface_10g 单帧 47~50ms（它跑在
+        onnxruntime 上，workspace/_engines 里那个 retinaface TRT 引擎 app 层没接）。
+        代价：不支持续跑（取消就整段重跑）。
+      · fused=0（分段链）：切帧 → 切脸 → 换脸 → 遮罩 → 合成 → 导出，每步独立产物、
+        可单跑可续跑（<视频名>_cache/ 成功后删除）。留给排查和对照。
+
+    两条路的进度都镜像到 /api/merge/export/status（老前端和既有验收脚本继续能用），
+    fused 还额外回显 frame_budget / 逐段耗时。
+    """
+    body = _as_dict(body)
+    fused = _fused_on(body)
+    cfg = _fused_cfg(body) if fused else _stage_cfg(body, "frames", chain=True)
+    if not fused:
+        cfg["stages"] = list(_STAGE_ORDER)
     with _STAGE_LOCK:
         if _STAGE_JOB.get("running"):
             raise _BadInput("已经有阶段在跑（%s）—— 等它结束或点取消"
@@ -10145,37 +11441,76 @@ def _start_video_export(body: dict):
             raise _BadInput("已经在导出（%s）—— 等它结束或点取消"
                             % (_merge_job.get("out") or "上一个任务"), 409)
         _merge_job.update({
-            "running": True, "log": [], "ok": None, "error": None, "error_detail": "",
-            "out": str(cfg["out"]), "pct": 0, "msg": "启动导出…", "stage": 0,
+            "running": True, "active": True,
+            "log": [], "ok": None, "error": None, "error_detail": "",
+            "out": str(cfg["out"]), "pct": 0,
+            "msg": ("启动快速导出（融合流水线）…" if fused else "启动导出…"),
+            "stage": 0,
             "cancelled": False, "pct_at_failure": None, "started_at": started,
             "finished_at": None, "fps": float(cfg.get("fps") or 0.0), "workers": 1,
             "encoder": "libx264", "hwaccel": "", "dfm": str(cfg["dfm"]),
             "mode": "video", "video": str(cfg["video"]), "total": int(cfg.get("total") or 0),
             "frames_done": 0, "frames": [], "stats": {}, "cache": {}, "encode": {},
+            "fused": bool(fused), "frame_budget": None, "cache_dir": str(cfg.get("cache") or ""),
         })
     with _STAGE_LOCK:
         _STAGE_JOB.update({
             "running": True, "ok": None, "cancelled": False, "error": "", "error_detail": "",
-            "phase": "running", "stage": "frames", "stage_index": 0, "stage_pct": 0,
-            "pct": 0, "msg": "启动导出（分段）…", "video": str(cfg["video"]),
-            "cache_dir": str(cfg["cache"]), "out_video": str(cfg["out"]),
+            "phase": "running",
+            "stage": ("fused" if fused else "frames"),
+            "stage_index": (-1 if fused else 0), "stage_pct": 0,
+            "pct": 0,
+            "msg": ("启动快速导出（融合流水线）…" if fused else "启动导出（分段）…"),
+            "video": str(cfg["video"]),
+            "cache_dir": str(cfg.get("cache") or ""), "out_video": str(cfg["out"]),
             "frames_total": int(cfg.get("range_total") or cfg.get("total") or 0),
             "range": dict(cfg.get("range") or {}), "frames_done": 0,
             "frame_fps": 0.0, "eta_s": None, "swapped": 0, "copied": 0, "no_face": 0,
-            "stages_done": _stage_done_list(cfg["meta"]), "log": [], "meta": cfg["meta"],
+            "stages_done": ([] if fused else _stage_done_list(cfg["meta"])),
+            "log": [], "meta": ({} if fused else cfg["meta"]),
             "seconds": {}, "skipped": [], "cache_removed": False,
-            "counts": _stage_counts(cfg["cache"]), "started_at": started,
+            "counts": ({"frames": 0, "faces": 0, "pred": 0, "masks": 0} if fused
+                       else _stage_counts(cfg["cache"])),
+            "started_at": started,
             "finished_at": None, "chain": True,
             "keep_cache": bool(cfg.get("keep_cache")), "force": bool(cfg.get("force")),
-            "frames": [],
+            "frames": [], "fused": bool(fused), "frame_budget": None, "resumed": False,
         })
     cfg["log_file"] = _vid_open_log(Path(cfg["out"]).with_suffix(".log"))
+    if fused:
+        threading.Thread(target=_fused_worker, args=(cfg,), daemon=True,
+                         name="merge-export-fused").start()
+        _vid_log("导出链路（快速导出 · 融合流水线）：%s -> %s"
+                 % (cfg["video"], cfg["out"]))
+        _vid_log("中间产物：不落 <视频>_cache/（帧只在 %%TEMP%% 里经过，成功/取消都删）")
+        _vid_log("续跑：不支持 —— 取消就是整段重跑；要续跑请把「快速导出」关掉走分段链")
+        _vid_log("帧范围：第 %d..%d 帧（%d 帧）%s"
+                 % (int((cfg.get("range") or {}).get("start") or 1),
+                    int((cfg.get("range") or {}).get("end") or 0),
+                    int(cfg.get("range_total") or 0),
+                    "· 全片" if cfg.get("range_full") else "· 只处理这一段"))
+        return _ok(mode="video", fused=True, staged=False, stages=["fused"],
+                   video=str(cfg["video"]), output=str(cfg["out"]),
+                   output_dir=str(cfg["out"]), cache_dir="",
+                   no_cache=True, resumable=False,
+                   frame_budget=None, frame_budget_want=int(cfg.get("frame_budget_want") or 0),
+                   dfm=str(cfg["dfm"]), model=str(cfg["model"]),
+                   settings=dict(cfg.get("settings") or {}),
+                   detector=str(cfg["detector"]), thresh=float(cfg.get("thresh") or 0.5),
+                   xseg=str(cfg["xseg"]), fps=float(cfg.get("fps") or 0.0),
+                   range=dict(cfg.get("range") or {}),
+                   range_key=str(cfg.get("range_key") or ""),
+                   face_threshold=cfg.get("face_threshold"),
+                   library=cfg.get("library") or "",
+                   models=[{"name": m.get("name"), "dfm": m.get("dfm"),
+                            "faces": list(m.get("faces") or [])}
+                           for m in cfg["single_models"]])
     threading.Thread(target=_stage_worker, args=(cfg,), daemon=True,
                      name="merge-export-video").start()
     _vid_log("导出链路（分段）：%s -> 切帧 -> 切脸 -> 合成 -> 导出 -> %s"
              % (cfg["video"], cfg["out"]))
     _vid_log("cache：%s（导出成功后整目录删除）" % cfg["cache"])
-    return _ok(mode="video", staged=True, stages=list(_STAGE_ORDER),
+    return _ok(mode="video", fused=False, staged=True, stages=list(_STAGE_ORDER),
                video=str(cfg["video"]), output=str(cfg["out"]),
                output_dir=str(cfg["out"]), cache_dir=str(cfg["cache"]),
                dfm=str(cfg["dfm"]), model=str(cfg["model"]),

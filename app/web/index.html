@@ -1044,6 +1044,21 @@
                     </div>
                   </span>
                 </div>
+                <!-- 快速导出（融合流水线，fused=1）：视频模式**默认走它**。
+                     六段（解码/检测/对齐/dfm/遮罩/合成）在内存里同时跑，段间只有有界队列，
+                     不建 <名字>_cache/（这是它和分段链的关键区别），实测 ~2.8x。
+                     代价：没有阶段游标 → **不支持续跑**，取消就是整段重跑。
+                     关掉 = 回退六阶段分段链（可单跑、可续跑），留给排查和对照。 -->
+                <div class="cfgrow">
+                  <span class="cl">快速导出</span>
+                  <span class="cd">六段并行 · 不建 cache · 不可续跑</span>
+                  <span class="cc">
+                    <div class="seg" data-k="fast_export">
+                      <b class="on" data-v="1" title="六段同时在内存里跑：不建 &lt;名字&gt;_cache/，快约 2.8 倍；取消即整段重跑">开</b>
+                      <b data-v="" title="回退六阶段分段链（切帧→切脸→换脸→遮罩→合成→导出）：每步独立产物、可续跑">关</b>
+                    </div>
+                  </span>
+                </div>
               </div>
             </div>
 

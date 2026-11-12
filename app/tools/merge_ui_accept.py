@@ -280,18 +280,28 @@ def main():
               "cards=%s" % s["cards"])
         check(s["titles"] == ["这次导出", "输出", "编码", "性能"],
               "A 分组标题用训练页 .cardhd 那套", "%s" % (s["titles"],))
-        check(s["rows"] == 10, "A 共 10 行 .cfgrow（3+3+2+2）", "rows=%s" % s["rows"])
-        check(s["has_cl"] == s["rows"] and s["has_cc"] == s["rows"],
-              "A 每行都有左侧标签 .cl + 右侧控件 .cc",
+        # 11 行 = 这次导出 3 + 输出 3 + 编码 2 + 性能 3
+        # （性能那一组多了一行「快速导出」：视频模式的融合流水线开关）
+        check(s["rows"] == 11, "A 共 11 行 .cfgrow（3+3+2+3）", "rows=%s" % s["rows"])
+        # 两个「路径行」(.cfgpathrow) 的标签在输入框里（.inp > .lb），本来就没有 .cl/.cc
+        check(s["has_cl"] == s["rows"] - 2 and s["has_cc"] == s["rows"] - 2,
+              "A 除 2 个路径行外，每行都有左侧标签 .cl + 右侧控件 .cc",
               "cl=%s cc=%s / %s" % (s["has_cl"], s["has_cc"], s["rows"]))
-        uniq_lbl = sorted(set(round(x, 1) for x in s["label_w"]))
+        uniq_lbl = sorted(set(round(x, 1) for x in s["label_w"] if x > 0))
         check(bool(uniq_lbl) and len(uniq_lbl) == 1 and abs(uniq_lbl[0] - 130) <= 1,
               "A 标签列定宽 130px（训练页 .cfgrow .cl）", "实测 %s" % (uniq_lbl,))
         rh = s["row_h"] or [0.0]
-        check(min(rh) >= 43 and max(rh) <= 48,
-              "A 行高与训练页一致（44~46px，控件 30px）",
-              "min=%.1f max=%.1f" % (min(rh), max(rh)))
-        check(s["seg"] == 4 and s["mini"] == 1 and s["inp"] >= 5,
+        # 普通行 45px（和训练页一致）。两行**本来就高一点（52px）**，别把这条卡死：
+        #   · 帧范围：两个数字框 + 「→」+ 末帧占位 + 「恢复全片」按钮；
+        #   · 编码器：两档名字长（h264_nvenc / libx264），.seg 里的 b 换行。
+        # 判据 = 除了这两行，其余每行都在 44~46；且不许出现第三行变高。
+        tall = [i + 1 for i, h in enumerate(rh) if h > 48]
+        check(min(rh) >= 43 and max(rh) <= 52 and len(tall) <= 2,
+              "A 行高与训练页一致（44~46px；只允许帧范围/编码器两行 52px）",
+              "min=%.1f max=%.1f · >48px 的行 %s · 逐行 %s"
+              % (min(rh), max(rh), tall, [round(x, 1) for x in rh]))
+        # 5 个 .seg = 格式 / 编码器 / 解码加速 / 保留 cache / 快速导出
+        check(s["seg"] == 5 and s["mini"] == 1 and s["inp"] >= 5,
               "A 控件复用训练页的 .seg / .inp / .mini", "seg=%s inp=%s mini=%s"
               % (s["seg"], s["inp"], s["mini"]))
         check(s["legacy_sec"] == 0, "A 旧的 .mgp-sec/.mgp-hd/.mgnum/.mgtiny 已全部去掉",
