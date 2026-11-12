@@ -6324,9 +6324,22 @@ def _stage_imencode(img, ext=".png") -> bytes:
 
 
 def _stage_imencode_png(img, level: int = 1) -> bytes:
-    """PNG 编码，压缩级别可指定。合成写回默认 level=1（体积换速度）。"""
+    """PNG 编码，压缩级别可指定。合成写回默认 level=1（体积换速度）。
+
+    压缩策略用 **Z_RLE**：PNG 是无损格式，策略只影响压缩后的字节流，解码出来的
+    像素逐位不变（实测 np.array_equal ✔）。1080×1920 实测（单线程）：
+        level 1 + DEFAULT：编码 68.95ms · 解码 21.21ms · 1.48MB
+        level 1 + RLE    ：编码 60.52ms · 解码 22.56ms · 1.35MB
+    —— 每帧省 7ms、文件还小 9%（写盘和后面 ffmpeg 读盘都跟着省）。level 0 虽然编得
+    更快（35ms），但体积翻 4 倍（6.2MB），实测整体反而更慢（12.32 vs 13.56 帧/秒）。
+    """
     import cv2
-    ok, buf = cv2.imencode(".png", img, [int(cv2.IMWRITE_PNG_COMPRESSION), int(level)])
+    params = [int(cv2.IMWRITE_PNG_COMPRESSION), int(level)]
+    strat = getattr(cv2, "IMWRITE_PNG_STRATEGY", None)
+    rle = getattr(cv2, "IMWRITE_PNG_STRATEGY_RLE", None)
+    if strat is not None and rle is not None:
+        params += [int(strat), int(rle)]
+    ok, buf = cv2.imencode(".png", img, params)
     if not ok:
         raise _BadInput("这一帧编不出 PNG", 500)
     return buf.tobytes()
@@ -8794,6 +8807,48 @@ def _stage_merge_face_inputs(cache, ap, cfg) -> dict:
     }
 
 
+def _merge_worker_count(cfg: dict) -> int:
+    """这次合成开几个 worker（默认 8；请求体 / 环境变量可覆盖，1..32）。"""
+    for key in ("merge_workers", "merge_threads", "threads"):
+        raw = cfg.get(key)
+        if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+            continue
+        try:
+            return max(1, min(32, int(raw)))
+        except (TypeError, ValueError):
+            continue
+    return max(1, min(32, int(_MERGE_WORKERS_DEFAULT or 8)))
+
+
+def _merge_cv2_threads(cfg: dict, workers: int) -> int:
+    """每个 worker 里该给 OpenCV 留几条内部线程（0 = 这一版不去动 cv2 的设置）。
+
+    OpenCV 的 parallel_for 线程池是**进程级**的：不显式设，每个 worker 里的
+    warpAffine / seamlessClone / GaussianBlur 都会各自摊到全部 32 条线程上
+    （cv2.getNumThreads() 默认 = cpu 数），8 个 worker 一起跑就是 256 条线程抢 16 核，
+    每帧的 cv2 调用从 6ms 涨到 20-40ms —— 这正是「8 线程只有 31% CPU」的主因之一。
+    核少、活多的时候（workers <= 1）反过来：让 cv2 自己把**一帧**切到多核才划算
+    （实测 1 worker：cv2=32 时 4.27 帧/秒，cv2=1 时 2.86 帧/秒）。
+    """
+    raw = cfg.get("merge_cv2_threads")
+    if raw is None:
+        raw = _MERGE_CV2_THREADS_DEFAULT
+    try:
+        want = int(raw or 0)
+    except (TypeError, ValueError):
+        want = 0
+    if want > 0:
+        return min(64, want)
+    cpu = os.cpu_count() or 4
+    if int(workers) <= 1:
+        return max(1, min(cpu, 8))
+    # worker 一多就**别**再让 OpenCV 自己摊线程：1080×1920 · seamless · 8 worker 实测
+    #   cv2=1 → 13.56 帧/秒 · 7.4 核      cv2=8 → 12.89 帧/秒 · 8.7 核
+    # 同样的吞吐，cv2=1 少烧 1.3 个核（用户要留给训练/预览）。只有「核相对 worker
+    # 还很富余」时才给 cv2 留内部线程。
+    return max(1, min(4, cpu // (4 * max(1, int(workers)))))
+
+
 def _stage_do_merge(cfg: dict) -> dict:
     """阶段 5 · 合成：**纯 CPU**。frames/ + aligned/ + pred/ + mask/ -> 就地覆盖 frames/。
 
@@ -8860,14 +8915,15 @@ def _stage_do_merge(cfg: dict) -> dict:
     meta["frame_swapped"] = True
     comp_cfg = dict(cfg.get("config") or {})
     comp_cfg["mask_mode"] = int((cfg.get("settings") or {}).get("mask_mode", 6) or 0)
-    threads = max(1, int(cfg.get("merge_threads") or 4))
+    threads = _merge_worker_count(cfg)
+    cv2_threads = _merge_cv2_threads(cfg, threads)
     png_level = int(cfg.get("png_level") if cfg.get("png_level") is not None else 1)
     _stage_log("合成（纯 CPU）：第 %d..%d 帧（%d 帧）· 遮罩 %s/%s · ct=%s · blend=%s · "
-               "%d 线程 · PNG level %d"
+               "%d 线程（每个 cv2 %d 线程）· PNG level %d"
                % (int(rng["start"]), int(rng["end"]), total,
                   src.get("label") or src.get("source"),
                   comp_cfg.get("mask_mode"), comp_cfg.get("color_transfer_mode"),
-                  comp_cfg.get("mode"), threads, png_level))
+                  comp_cfg.get("mode"), threads, cv2_threads, png_level))
 
     prof = dict(_stage_profile_blank())
     for k in ("read_ms", "prep_ms", "mask_ms", "ct_ms", "paste_ms", "blend_ms", "encode_ms",
@@ -8912,6 +8968,9 @@ def _stage_do_merge(cfg: dict) -> dict:
 
     def _one(fp):
         """一帧：读图 → 逐脸合成 → PN G编码 → 写盘。返回 (rec, 各段耗时)。"""
+        if stop.is_set():
+            # 取消后不再开新帧（排队里的那些也直接放掉，别让 shutdown 干等）。
+            return {"key": fp.stem, "ok": True, "no_face": True, "skipped": True}, {}
         t = time.time()
         tim = {}
         frame = _stage_read_frame(fp)
@@ -8940,54 +8999,84 @@ def _stage_do_merge(cfg: dict) -> dict:
     from concurrent.futures import ThreadPoolExecutor
     chunk = max(threads * 2, 8)
     prog = {"done": cursor}
+
+    def _report():
+        """进度 + meta（每 chunk 一次；和以前同一个口径）。"""
+        el = max(0.001, time.time() - t0)
+        rate = (prog["done"] - start_cursor) / el
+        eta = int((total - prog["done"]) / rate) if rate > 0 and prog["done"] < total else None
+        n = max(1, prof["frames"] - cursor)
+        _stage_progress(
+            "merge", 100.0 * prog["done"] / total,
+            "合成 %d/%d 帧（第 %d..%d 帧）· %.1f 帧/秒（换脸 %d · 原样 %d）"
+            % (prog["done"], total, int(rng["start"]), int(rng["end"]),
+               rate, swapped, copied),
+            frames_done=prog["done"], frames_total=total,
+            frame_fps=round(rate, 2), eta_s=eta,
+            swapped=swapped, copied=copied, no_face=no_face,
+            profile={"per_frame_ms":
+                     {k: round(float(prof.get(k) or 0.0) / n, 2)
+                      for k in ("read_ms", "prep_ms", "mask_ms", "ct_ms", "paste_ms",
+                                "blend_ms", "encode_ms", "write_ms", "frame_ms")},
+                     "fps": round(rate, 2)})
+        _save(prog["done"])
+
+    # cv2 内部线程数：跟 worker 数一起调（见 _merge_cv2_threads 的注释）。
+    cv2_prev = 0
+    cv2_set = 0
+    if cv2_threads > 0:
+        try:
+            cv2_prev = int(cv2.getNumThreads())
+            if cv2_prev != int(cv2_threads):
+                cv2.setNumThreads(int(cv2_threads))
+                cv2_set = int(cv2_threads)
+        except Exception:                                         # noqa: BLE001
+            cv2_prev, cv2_set = 0, 0
+    pool = None
     try:
-        while prog["done"] < total:
+        # **整段一个池**：以前是每个 chunk 重建一次 ThreadPoolExecutor，
+        # 每个 chunk 末尾都有一道隐式栅栏（shutdown(wait=True)）—— 最后一批 worker
+        # 空等，下一批才开工。8 worker / chunk=16 时白丢 6~12% 吞吐。
+        pool = ThreadPoolExecutor(max_workers=threads, thread_name_prefix="merge")
+        done_in_chunk = 0
+        # 一次性把所有帧提交进池：worker 干完一帧立刻拿下一帧，没有 chunk 边界。
+        for rec, tim in pool.map(_one, frames[cursor:]):
             if _stage_cancelled():
                 stop.set()
                 raise _StageCancel()
-            lo = prog["done"]
-            hi = min(total, lo + chunk)
-            batch = frames[lo:hi]
-            with ThreadPoolExecutor(max_workers=threads) as pool:
-                for rec, tim in pool.map(_one, batch):
-                    if _stage_cancelled():
-                        stop.set()
-                        raise _StageCancel()
-                    if not rec.get("ok"):
-                        failed += 1
-                        _stage_log("合成跳过 %s：%s" % (rec.get("key"), rec.get("why")))
-                    elif rec.get("no_face"):
-                        copied += 1
-                        no_face += 1
-                    else:
-                        swapped += 1
-                    prof["frames"] += 1
-                    prof["faces"] += int(rec.get("faces") or 0)
-                    for kk, vv in tim.items():
-                        prof[kk] = float(prof.get(kk) or 0.0) + float(vv or 0.0)
-            prog["done"] = hi
-            el = max(0.001, time.time() - t0)
-            rate = (prog["done"] - start_cursor) / el
-            eta = int((total - prog["done"]) / rate) if rate > 0 and prog["done"] < total else None
-            n = max(1, prof["frames"] - cursor)
-            _stage_progress(
-                "merge", 100.0 * prog["done"] / total,
-                "合成 %d/%d 帧（第 %d..%d 帧）· %.1f 帧/秒（换脸 %d · 原样 %d）"
-                % (prog["done"], total, int(rng["start"]), int(rng["end"]),
-                   rate, swapped, copied),
-                frames_done=prog["done"], frames_total=total,
-                frame_fps=round(rate, 2), eta_s=eta,
-                swapped=swapped, copied=copied, no_face=no_face,
-                profile={"per_frame_ms":
-                         {k: round(float(prof.get(k) or 0.0) / n, 2)
-                          for k in ("read_ms", "prep_ms", "mask_ms", "ct_ms", "paste_ms",
-                                    "blend_ms", "encode_ms", "write_ms", "frame_ms")},
-                         "fps": round(rate, 2)})
-            _save(prog["done"])
+            if rec.get("skipped"):
+                continue                  # 取消尾巴：不算帧、不动游标
+            if not rec.get("ok"):
+                failed += 1
+                _stage_log("合成跳过 %s：%s" % (rec.get("key"), rec.get("why")))
+            elif rec.get("no_face"):
+                copied += 1
+                no_face += 1
+            else:
+                swapped += 1
+            prof["frames"] += 1
+            prof["faces"] += int(rec.get("faces") or 0)
+            for kk, vv in tim.items():
+                prof[kk] = float(prof.get(kk) or 0.0) + float(vv or 0.0)
+            prog["done"] += 1
+            done_in_chunk += 1
+            if done_in_chunk >= chunk:
+                done_in_chunk = 0
+                _report()
+        _report()                     # 收尾也报一次（进度到 100%），和以前每 chunk 末尾一致
     except _StageCancel:
         _save(prog["done"])
         _stage_log("合成取消：停在 %d/%d 帧（游标已存）" % (prog["done"], total))
         raise
+    finally:
+        if pool is not None:
+            # 取消时别等已经排队的帧：置 stop + cancel_futures，worker 下一帧开头就退出。
+            pool.shutdown(wait=not stop.is_set(), cancel_futures=True)
+        if cv2_set:
+            try:
+                cv2.setNumThreads(cv2_prev)
+            except Exception:                                     # noqa: BLE001
+                pass
 
     sec = round(time.time() - t0, 2)
     n = max(1, prof["frames"] - cursor)
@@ -9206,8 +9295,35 @@ _STAGE_KEEP = str(os.environ.get("DFL_STAGE_KEEP") or "").strip().lower() in ("1
 # 以前默认写死 8 —— 8GB 卡上 batch 16 会抖到 5 张/秒，12GB 空闲时 8 又浪费一半。
 _PRED_BATCH_ENV = str(os.environ.get("DFL_PRED_BATCH") or "").strip()
 _PRED_BATCH_DEFAULT = max(0, int(_PRED_BATCH_ENV)) if _PRED_BATCH_ENV.isdigit() else 0
-_MERGE_THREADS_DEFAULT = max(1, int(str(os.environ.get("DFL_MERGE_THREADS")
-                                     or max(4, min(8, (os.cpu_count() or 4) // 4))).strip()))
+def _env_int(name, default=0):
+    """环境变量里的整数；没设/写坏了就用 default（不抛、不猜）。"""
+    raw = str(os.environ.get(name) or "").strip()
+    try:
+        return int(raw, 10)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+# ⑤ 合成的并发度：**默认 8**（用户口径：8 个 worker，其余核留给训练/预览）。
+#
+# 以前这里写的是 max(4, min(8, cpu//4)) —— 在 16 核 32 线程上恰好也是 8，但在 8 核机
+# 上是 4、在 64 线程服务器上还是 8：和核数无关的常数。现在**默认明确钉在 8**，只是想
+# 换就能换（环境变量 / 请求体），别再去改代码。
+#
+# 线程数只是故事的一半：OpenCV 每个进程默认开 32 条内部线程，8 个 worker × 32 =
+# 256 条可运行线程抢 16 个核。实测（1080×1920 · seamless · 120 帧，见 ⑤ 阶段报告）
+# process_cpu 8.5 核、吞吐 11 帧/秒，而同样这堆活用 8 个独立进程只花 ~4.5 核就跑到
+# 11.4 帧/秒 —— 一半的 CPU 在 OpenCV 的 spin-wait 里空转。所以两个旋钮必须一起给：
+#   DFL_MERGE_WORKERS / body.merge_workers        worker 数（默认 8）
+#   DFL_MERGE_CV2_THREADS / body.merge_cv2_threads
+#                                                每个 worker 里 OpenCV 的线程数
+#                                                （不设 = 自动：cpu//workers，上限 4）
+_MERGE_WORKERS_DEFAULT = max(1, _env_int("DFL_MERGE_WORKERS",
+                                         _env_int("DFL_MERGE_THREADS", 8)))
+_MERGE_WORKERS_DEFAULT = min(32, _MERGE_WORKERS_DEFAULT)
+# 兼容老名字（别的地方/老脚本还在用 _MERGE_THREADS_DEFAULT）
+_MERGE_THREADS_DEFAULT = _MERGE_WORKERS_DEFAULT
+_MERGE_CV2_THREADS_DEFAULT = max(0, _env_int("DFL_MERGE_CV2_THREADS", 0))
 _MERGE_PNG_LEVEL = max(0, min(9, int(str(os.environ.get("DFL_MERGE_PNG_LEVEL") or "1").strip() or 1)))
 
 
@@ -9475,8 +9591,24 @@ def _stage_cfg(body: dict, stage: str, chain: bool = False) -> dict:
         # ③ 的批大小 / ⑤ 的线程数与 PNG 压缩级别（都能从请求体或环境变量调）
         "pred_batch": _int_val("batch", body.get("batch") or body.get("pred_batch"), 0, 64,
                                _PRED_BATCH_DEFAULT),
-        "merge_threads": _int_val("threads", body.get("threads") or body.get("merge_threads"),
-                                  1, 32, _MERGE_THREADS_DEFAULT),
+        # ⑤ 的并发度：默认 8（用户口径），请求体 merge_workers / 老名字 threads、
+        # merge_threads 都认；环境变量 DFL_MERGE_WORKERS / DFL_MERGE_THREADS 兜底。
+        "merge_workers": _int_val(
+            "merge_workers",
+            body.get("merge_workers") if body.get("merge_workers") is not None
+            else (body.get("threads") if body.get("threads") is not None
+                  else body.get("merge_threads")),
+            1, 32, _MERGE_WORKERS_DEFAULT),
+        # 每个 worker 里 OpenCV 的线程数（0 = 按核数/worker 数自动算）
+        "merge_cv2_threads": _int_val("merge_cv2_threads", body.get("merge_cv2_threads"),
+                                      0, 64, _MERGE_CV2_THREADS_DEFAULT),
+        # 兼容：老代码/老日志还读 merge_threads
+        "merge_threads": _int_val(
+            "merge_threads",
+            body.get("merge_workers") if body.get("merge_workers") is not None
+            else (body.get("threads") if body.get("threads") is not None
+                  else body.get("merge_threads")),
+            1, 32, _MERGE_WORKERS_DEFAULT),
         "png_level": _int_val("png_compression", body.get("png_compression"), 0, 9,
                               _MERGE_PNG_LEVEL),
         # ③④ 两条流水线的并行度（0 = 自动；验收/测速脚本可以点名覆盖）

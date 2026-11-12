@@ -238,26 +238,42 @@ def _match_tone_roi(src, trg, mask):
     s_crop = src[bb]
     t_crop = trg[bb]
     w = None if mask is None else np.asarray(mask, np.float32)[bb]
-    if w is not None and w.ndim == 2:
-        w = w[..., None]
-    if w is not None and w.shape[2] == 1:
-        w = np.repeat(w, src.shape[2], axis=2)
+    nch = int(src.shape[2])
+    if w is not None:
+        if w.ndim == 2:
+            w = w[..., None]                 # (H,W,1)
+        # **先摊成 (N,C) 再广播到 (N,3)**，而不是 np.repeat 出真实的 (N,3)：
+        # numpy 沿 axis=0 归约 (N,1) 和 (N,3) 的求和顺序不同（(N,1) 实测 63277.77，
+        # (N,3) 63277.88，差 2.6e-8 相对），会顺着统计量一路放大到 0.12 的像素差；
+        # 而 np.broadcast_to 出来的 0 步长 (N,3) 视图走的是与真实 (N,3) 完全相同的
+        # 归约路径 —— 实测逐个 bit 相同，且不占内存（省掉 1MB/帧的临时数组）。
+        w = (w.reshape(-1, 1) if w.shape[2] == 1 else w.reshape(-1, w.shape[2]))
 
     def _stats(x):
-        flat = x.reshape(-1, x.shape[2])
+        flat = x.reshape(-1, nch)
         if w is None:
             return flat.mean(axis=0), flat.std(axis=0)
-        wf = w.reshape(-1, x.shape[2])
-        ws = wf.sum(axis=0) + 1e-8
-        mean = (flat * wf).sum(axis=0) / ws
-        var = ((flat - mean) ** 2 * wf).sum(axis=0) / ws
+        wf = np.broadcast_to(w, flat.shape)
+        ws = wf.sum(axis=0) + 1e-8                       # (3,)
+        mean = (flat * wf).sum(axis=0) / ws              # (3,)
+        # (flat-mean)**2*wf：以前是 3 个临时数组，这里 1 个 + 原地三连（逐位等价）
+        d = np.subtract(flat, mean, dtype=np.float32)
+        np.multiply(d, d, out=d)                         # == d**2
+        np.multiply(d, wf, out=d)
+        var = d.sum(axis=0) / ws
         return mean, np.sqrt(var + 1e-6)
 
     s_mean, s_std = _stats(s_crop)
     t_mean, t_std = _stats(t_crop)
     scale = t_std / (s_std + 1e-6)
-    out = (src - s_mean.reshape(1, 1, -1)) * scale.reshape(1, 1, -1) + t_mean.reshape(1, 1, -1)
-    return np.clip(out, 0.0, 1.0).astype(np.float32)
+    # (src - mean)*scale + mean 的三个临时数组 → 一个 out 缓冲 + 原地三连。
+    # 运算顺序、dtype 一个都没动，所以逐位一致（对拍见 tools 里的数值等价测试）。
+    out = np.empty_like(src)
+    np.subtract(src, s_mean.reshape(1, 1, -1), out=out)
+    np.multiply(out, scale.reshape(1, 1, -1), out=out)
+    np.add(out, t_mean.reshape(1, 1, -1), out=out)
+    np.clip(out, 0.0, 1.0, out=out)
+    return out
 
 def _color_transfer(fo, dw, wrk_mask, code: int, timings: dict):
     """fo / dw 都是 0..1 float32 的 S×S 脸；返回迁移后的 fo。语义照 4.0:907-928。
@@ -372,31 +388,40 @@ def _blend_layer(src, fw, mw, mode: str, dst_u8=None):
     非 seamless 只在 mw>0 的包围盒里动 —— 盒外 mw==0，像素按定义不变。
     """
     import cv2
-    if "seamless" in mode:
-        try:
-            mw_bin = np.clip(mw * 255, 0, 255).astype(np.uint8)
-            fw_u8 = np.clip(fw * 255, 0, 255).astype(np.uint8)
-            m2 = mw_bin[..., 0] if mw_bin.ndim == 3 else mw_bin
-            coords = cv2.findNonZero(m2)
-            if coords is None:
-                return src * (1 - mw) + fw * mw
-            bx, by, bw_, bh_ = cv2.boundingRect(coords)
-            center = (bx + bw_ // 2, by + bh_ // 2)
-            dst_u8 = (np.clip(src * 255.0, 0, 255).astype(np.uint8)
-                      if dst_u8 is None else dst_u8)
-            sc = cv2.seamlessClone(fw_u8, dst_u8, mw_bin, center,
-                                   cv2.NORMAL_CLONE).astype(np.float32) / 255.0
-            return src * (1 - mw) + sc * mw
-        except Exception:                                      # noqa: BLE001
-            return src * (1 - mw) + fw * mw
+    # 融合只在「遮罩非零」的包围盒里做：盒外 mw==0，混合式退化成 src*1 + x*0，
+    # 而 u8 -> f32(/255) -> *255 -> u8 这一趟实测对 0..255 全部 256 个值**逐位无损**
+    # （74.6M 像素实测 0 个不一致），所以盒外一个 bit 都不会变。省掉的是：整块 ROI
+    # 的 float 转换、5 次整块浮点乘加、再整块转回 u8（实测约 4ms/帧）。
     m2 = mw[..., 0] if mw.ndim == 3 else mw
     nz = cv2.findNonZero((m2 > 0).astype(np.uint8))
     if nz is None:
         return src
     bx, by, bw_, bh_ = cv2.boundingRect(nz)
     r = (slice(by, by + bh_), slice(bx, bx + bw_))
-    out = src.copy()
     m_roi = mw[r] if mw.ndim == 3 else mw[r][..., None]
+    if "seamless" in mode:
+        try:
+            mw_bin = np.clip(mw * 255, 0, 255).astype(np.uint8)
+            fw_u8 = np.clip(fw * 255, 0, 255).astype(np.uint8)
+            m2b = mw_bin[..., 0] if mw_bin.ndim == 3 else mw_bin
+            coords = cv2.findNonZero(m2b)
+            if coords is None:
+                # u8 遮罩整块为 0（只有 mw<1/255 的软边）：沿用旧式的整块混合，
+                # 不给自己省这一步 —— 差别理论上 ≤1 LSB，但没必要赌。
+                return src * (1 - mw) + fw * mw
+            # center 与 4.0/旧版**逐字节相同**：仍然取 u8 遮罩的包围盒中心
+            # （mw>0 的包围盒比它大一圈：mw < 1/255 的软边像素进不了 u8 遮罩）。
+            cbx, cby, cbw, cbh = cv2.boundingRect(coords)
+            center = (cbx + cbw // 2, cby + cbh // 2)
+            dst_u8 = (np.clip(src * 255.0, 0, 255).astype(np.uint8)
+                      if dst_u8 is None else dst_u8)
+            sc = cv2.seamlessClone(fw_u8, dst_u8, mw_bin, center, cv2.NORMAL_CLONE)
+            out = src.copy()
+            out[r] = src[r] * (1 - m_roi) + (sc[r].astype(np.float32) / 255.0) * m_roi
+            return out
+        except Exception:                                      # noqa: BLE001
+            return src * (1 - mw) + fw * mw
+    out = src.copy()
     out[r] = src[r] * (1 - m_roi) + fw[r] * m_roi
     return out
 
