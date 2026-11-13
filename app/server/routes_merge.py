@@ -8672,6 +8672,138 @@ def _vram_reclaim(why: str = "导出") -> dict:
             "want_mb": round(want, 1), "recycled": bool(recycled), "why": ""}
 
 
+# ---------------- 进程内存（工作集 / 提交）：导出前后差，用户看的就是这两个数 ----
+def _fmt_mb(v):
+    return "?" if v is None else "%.1f" % float(v)
+
+
+def _proc_mem_mb() -> dict:
+    """本进程内存（MB）：rss = 工作集（任务管理器「内存」那一列）·
+    private = 提交（「已提交」那一列）· peak_* = 峰值。
+
+    为什么不用 psutil：后端不是到处都装了它，而 psapi 就在 kernel32 旁边 ——
+    和任务管理器同源，打进日志的数字能和用户截图对上（不然「日志 800MB、任务管理器
+    1.3GB」又是一轮谁也说不清的对话）。
+
+    两个数说的不是一回事：**提交**包含压到页面文件里的、以及 WDDM 上由显存兜着的
+    那部分；**工作集**才是当下真占着物理内存的量。用户看到的「内存 13/15.2」是
+    工作集口径，「已提交 37/129」是提交口径 —— 拿提交去喊内存泄漏是错的。
+    """
+    try:
+        import ctypes
+        if sys.platform.startswith("win"):
+            class _PMC(ctypes.Structure):
+                _fields_ = [("cb", ctypes.c_ulong),
+                            ("PageFaultCount", ctypes.c_ulong),
+                            ("PeakWorkingSetSize", ctypes.c_size_t),
+                            ("WorkingSetSize", ctypes.c_size_t),
+                            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                            ("PagefileUsage", ctypes.c_size_t),
+                            ("PeakPagefileUsage", ctypes.c_size_t)]
+            pmc = _PMC()
+            pmc.cb = ctypes.sizeof(pmc)
+            k32 = ctypes.WinDLL("kernel32.dll")
+            k32.GetCurrentProcess.restype = ctypes.c_void_p
+            psapi = ctypes.WinDLL("psapi.dll")
+            psapi.GetProcessMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                                   ctypes.c_ulong]
+            if psapi.GetProcessMemoryInfo(ctypes.c_void_p(k32.GetCurrentProcess()),
+                                          ctypes.byref(pmc), ctypes.sizeof(pmc)):
+                return {"rss": round(pmc.WorkingSetSize / 1048576.0, 1),
+                        "private": round(pmc.PagefileUsage / 1048576.0, 1),
+                        "peak_rss": round(pmc.PeakWorkingSetSize / 1048576.0, 1),
+                        "peak_private": round(pmc.PeakPagefileUsage / 1048576.0, 1)}
+    except Exception:                                       # noqa: BLE001
+        pass
+    try:                                          # 非 Windows：只有 rss 这一列
+        with open("/proc/self/statm", "r", encoding="ascii") as f:
+            pages = int((f.read() or "0 0").split()[1])
+        return {"rss": round(pages * 4096 / 1048576.0, 1), "private": None,
+                "peak_rss": None, "peak_private": None}
+    except Exception:                                       # noqa: BLE001
+        return {}
+
+
+def _mem_delta(m0: dict, m1: dict) -> str:
+    """「导出前后」那一行：RSS 差 / 提交差 + 峰值 RSS。取不到的项写 ?，不抛。"""
+    def _n(d, k):
+        v = (d or {}).get(k)
+        return None if v is None else float(v)
+
+    a, b = _n(m0, "rss"), _n(m1, "rss")
+    c, d = _n(m0, "private"), _n(m1, "private")
+    out = "RSS %s → %s MB" % (_fmt_mb(a), _fmt_mb(b))
+    if a is not None and b is not None:
+        out += "（差 %+.1f）" % (b - a)
+    out += " · 提交 %s → %s MB" % (_fmt_mb(c), _fmt_mb(d))
+    if c is not None and d is not None:
+        out += "（差 %+.1f）" % (d - c)
+    pk = _n(m1, "peak_rss") or _n(m0, "peak_rss")
+    if pk is not None:
+        out += " · 峰值 RSS %.1f MB" % pk
+    return out
+
+
+def _trim_ws(why: str = "") -> dict:
+    """把本进程的**工作集**还给系统（EmptyWorkingSet），返回前后读数。
+
+    解决的是「谁都没在跑，任务管理器还显示 1.x GB」：Python/NT 堆把刚释放的页留在
+    进程里（已提交 ≠ 驻留），系统压力不大就不主动回收。**它只降工作集，不降提交**
+    —— 提交要等对象真的被释放才降，所以日志里两个数都打，不许拿工作集下降冒充
+    「泄漏修好了」。
+
+    代价：下次访问这些页要重新缺页（预览第一帧慢几十毫秒量级）。默认开，
+    DFL_FUSED_TRIM_WS=0 可关。
+    """
+    m0 = _proc_mem_mb()
+    if str(os.environ.get("DFL_FUSED_TRIM_WS") or "1").strip().lower() in (
+            "0", "false", "no", "off"):
+        return {"did": False, "before": m0, "after": m0, "why": "DFL_FUSED_TRIM_WS=0"}
+    try:
+        import ctypes
+        if not sys.platform.startswith("win"):
+            return {"did": False, "before": m0, "after": m0, "why": "非 Windows"}
+        k32 = ctypes.WinDLL("kernel32.dll")
+        k32.GetCurrentProcess.restype = ctypes.c_void_p
+        k32.SetProcessWorkingSetSize.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+                                                 ctypes.c_size_t]
+        ok = k32.SetProcessWorkingSetSize(ctypes.c_void_p(k32.GetCurrentProcess()),
+                                          ctypes.c_size_t(-1), ctypes.c_size_t(-1))
+        return {"did": bool(ok), "before": m0, "after": _proc_mem_mb(), "why": why}
+    except Exception as e:                                  # noqa: BLE001
+        return {"did": False, "before": m0, "after": m0, "why": "%r" % (e,)}
+
+
+def _free_preview_sessions(why: str = "") -> dict:
+    """让**预览 worker** 把它常驻的 dfm / XSeg 卸掉（进程留着，下次预览懒加载）。
+
+    为什么导出收尾必须做这一下：导出用的是**后端进程自己**的会话，预览 worker
+    那份是另开的一份 —— 用户实测「导出完了还占着」，占的就是它（一张 384 dfm：
+    worker 侧实测 2.3 GB 显存 / 1.3 GB 工作集 / 5.7 GB 提交）。
+    _vram_release_inproc 只放本进程，管不到子进程；这里补上。
+
+    worker 没起过（alive()=False）就什么都不做 —— **绝不能**为了「卸一下」把一个
+    已经退出的 worker 叫醒（call() 会 _spawn）。
+    """
+    try:
+        if not _WORKER.alive():
+            return {"ok": True, "did": False, "why": "worker 没起（不需要卸）"}
+    except Exception:                                       # noqa: BLE001
+        return {"ok": True, "did": False, "why": "worker 状态读不到"}
+    t0 = time.time()
+    try:
+        r = _WORKER.unload("")
+    except Exception as e:                                  # noqa: BLE001
+        return {"ok": False, "did": False,
+                "why": "%s: %s" % (e.__class__.__name__, str(e)[:160])}
+    return {"ok": bool((r or {}).get("ok", True)), "did": True,
+            "unloaded": int((r or {}).get("unloaded") or 0),
+            "ms": round((time.time() - t0) * 1000.0, 1), "why": why}
+
+
 def _vram_release_inproc(reason: str = "任务收尾") -> dict:
     """把**本进程**常驻的 dfm / XSeg 会话放掉（导出收尾时用，成功/失败/取消都放）。
 
@@ -12558,6 +12690,200 @@ _FUSED_PREP_DEFAULT = max(1, min(16, _env_int("DFL_FUSED_PREP", 4)))
 _FUSED_CMP_DEFAULT = max(1, min(32, _env_int("DFL_FUSED_CMP", 8)))
 
 
+# ---------------- 异构推理池：n×GPU + m×CPU（探测 / 微基准 / 配比 / 调度）----------------
+# 设计在 server/_sess.py（探测、基准、derive、策略、Pool）；这里只做三件事：
+#   · 把「这台机器的事实」喂给它（显存那本账已经算好了，别自己再猜一次）
+#   · 把微基准的结果**缓存到磁盘**（同一份模型只量一次，跨进程复用）
+#   · 把推出来的配比写进日志/status（用户问「为什么是这个配比」要能答）
+#
+# 为什么默认只给**检测**段开池：检测是这条链的硬底（实测 48.9 ms/帧、96~98% 占用），
+# 只有瓶颈段多开一路才有净收益；dfm 70% / xseg 13% / 合成 21% 加一路只会抢 CPU
+# （数据见 docs/sess_pool_bench.md）。要开也只是一个环境变量的事。
+from . import _sess        # 异构池（探测 / 微基准 / 配比 / 调度），见 server/_sess.py
+
+_SESS_LOCK = threading.Lock()
+_SESS_BUSY = {}          # kind -> 上一轮实测的段占用（0..1）：derive 的输入
+_SESS_BENCH = {}         # key -> {"gpu_ms","cpu_ms",...}（进程内缓存）
+_SESS_PLAN_LAST = {}     # kind -> plan（status 回显）
+_DET_EP = {}             # (name, ep) -> 检测器实例（GPU 那份走 app 的缓存）
+
+
+def _sess_bench_path() -> Path:
+    return Path(WORKSPACE) / "_sess_bench.json"
+
+
+def _sess_bench_load() -> dict:
+    try:
+        p = _sess_bench_path()
+        if p.is_file():
+            d = json.loads(p.read_text("utf-8", "ignore") or "{}")
+            if isinstance(d, dict):
+                return d
+    except Exception:                                       # noqa: BLE001
+        pass
+    return {}
+
+
+def _sess_bench_put(key: str, row: dict):
+    with _SESS_LOCK:
+        _SESS_BENCH[str(key)] = dict(row)
+    try:
+        d = _sess_bench_load()
+        d[str(key)] = dict(row)
+        _sess_bench_path().write_text(json.dumps(d, ensure_ascii=False, indent=1), "utf-8")
+    except Exception:                                       # noqa: BLE001
+        pass
+
+
+def _sess_bench_get(key: str) -> dict:
+    with _SESS_LOCK:
+        hit = _SESS_BENCH.get(str(key))
+    if hit:
+        return dict(hit)
+    row = _sess_bench_load().get(str(key)) or {}
+    return dict(row) if isinstance(row, dict) else {}
+
+
+def _sess_model_key(kind: str, path) -> str:
+    """模型身份 = 类型 + 文件名 + 体积 + mtime。换权重 / 重编引擎都会让它失效。"""
+    try:
+        st = Path(str(path)).stat()
+        return "%s:%s:%d:%d" % (kind, Path(str(path)).name, int(st.st_size),
+                                int(st.st_mtime))
+    except Exception:                                       # noqa: BLE001
+        return "%s:%s" % (kind, Path(str(path)).name)
+
+
+def _sess_ensure(key: str) -> dict:
+    """读一遍磁盘缓存（跨进程复用，同一份模型只量一次）。"""
+    row = _sess_bench_get(key)
+    if row.get("gpu_ms") is not None or row.get("cpu_ms") is not None:
+        with _SESS_LOCK:
+            _SESS_BENCH[key] = row
+    return row
+
+
+def _detect_for(name, ep="gpu"):
+    """按 EP 取一个检测器。GPU 那份复用 app 的缓存（别建第二份显存）；CPU 那份单独建。"""
+    key = (str(name), str(ep))
+    with _SESS_LOCK:
+        hit = _DET_EP.get(key)
+    if hit is not None:
+        return hit
+    det = None
+    if ep == "gpu":
+        det = _detector(name)            # 复用 app 的缓存（别为同一份权重占第二块显存）
+    elif ep == "gpu2":
+        try:                             # 第二份 CUDA session：显存够时才能多开一路
+            from .app import _DET_ONNX, _detector_path
+            from ._ortcuda import providers as _prov
+            canon = _detector_val(name)
+            p = _detector_path(_DET_ONNX[canon])
+            if p is None:
+                return None
+            from ._detect import RetinaFaceDet, TinyMogDet
+            if canon == "tinymog":
+                det = TinyMogDet(str(p), workspace=WORKSPACE, providers=list(_prov()))
+            else:
+                det = RetinaFaceDet(p, 640)          # 自带 CUDA providers
+        except Exception as e:                              # noqa: BLE001
+            _stage_log("异构池：第二份 GPU 检测器起不来（%s）" % str(e)[:160])
+            return None
+    else:
+        # CPU 那一路：**RetinaFaceDet 没有 providers 通道**（它自己去问
+        # _ortcuda.providers()，那里只要有 CUDA 就给 CUDA），所以先按原样造好、
+        # 再把 sess 换成 CPU EP 那份 —— 不动那两个类的签名，预览/导出那 6 个
+        # 调用点就都不受影响（也就没有回归面）。
+        try:
+            from .app import _DET_ONNX, _detector_path
+            import onnxruntime as ort
+            canon = _detector_val(name)
+            p = _detector_path(_DET_ONNX[canon])
+            if p is None:
+                return None
+            from ._detect import RetinaFaceDet, TinyMogDet
+            so = ort.SessionOptions()
+            so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            nthr = _sess.int_env(_sess.ENV_THREADS, 0)
+            if nthr > 0:
+                so.intra_op_num_threads = int(nthr)
+                so.inter_op_num_threads = 1
+            if canon == "tinymog":
+                det = TinyMogDet(str(p), workspace=WORKSPACE, providers=["CPUExecutionProvider"])
+            else:
+                det = RetinaFaceDet(p, 640)
+            det.sess = ort.InferenceSession(str(p), sess_options=so,
+                                            providers=["CPUExecutionProvider"])
+            det.input_name = det.sess.get_inputs()[0].name
+        except Exception as e:                              # noqa: BLE001
+            _stage_log("异构池：CPU 检测器起不来（%s）" % str(e)[:160])
+            return None
+    with _SESS_LOCK:
+        _DET_EP[key] = det
+    return det
+
+
+def _detect_on(det, frame, thresh: float) -> list:
+    """用**指定**的检测器跑一帧（不碰共享实例上的 thresh 字段，可并发）。"""
+    det.thresh = float(thresh)
+    return det.detect(frame) or []
+
+
+def _detect_bench(name, w: int, h: int) -> dict:
+    """检测段的微基准：GPU / CPU 各 2 张取中位（1080p 真尺寸的零图）。
+
+    为什么用 1080p 而不是 640 的方块：这一步里有一大块是 **cv2 的 letterbox resize**
+    （1080p → 640），那部分不管在哪个 EP 上都吃 CPU —— 只量模型会把 CPU 那一路
+    算得偏快，配比就偏激进。
+    """
+    import numpy as np
+    key = "detect:%s:%dx%d" % (_detector_val(name), int(w or 1080), int(h or 1920))
+    row = _sess_ensure(key)
+    if row.get("gpu_ms") and row.get("cpu_ms"):
+        return row
+    frame = np.zeros((int(h or 1920), int(w or 1080), 3), np.uint8)
+    out = {"key": key, "at": round(time.time(), 1)}
+    for ep in ("gpu", "cpu"):
+        det = None
+        try:
+            det = _detect_for(name, ep)
+        except Exception as e:                              # noqa: BLE001
+            out["%s_err" % ep] = str(e)[:160]
+        if det is None:
+            out["%s_ms" % ep] = None
+            continue
+        try:
+            ms = _sess.bench(lambda: _detect_on(det, frame, 0.5), n=2, warmup=1)
+        except Exception as e:                              # noqa: BLE001
+            out["%s_err" % ep] = str(e)[:160]
+            ms = None
+        out["%s_ms" % ep] = ms
+    _sess_bench_put(key, out)
+    return out
+
+
+def _fused_det_plan(det_name, w, h, over=None) -> dict:
+    """检测池的配比：探测 → 微基准 → derive。over = 请求体覆盖（sess_gpu/sess_cpu/…）。"""
+    b = _detect_bench(det_name, w, h)
+    gp = _sess.probe(*(_vram_free_mb()[:2]))
+    # 验收/复现用：把「机器档位」换成低配/中配/高配的**事实**（不改真探测，
+    # 只影响这一次推导 —— 生产路径上没人设 DFL_SESS_LEVEL，一行都不走）。
+    lv = str((over or {}).get("level") or os.environ.get("DFL_SESS_LEVEL")
+             or "").strip().lower()
+    if lv:
+        gp.update(_sess.level_cfg(lv))
+        gp["level"] = lv
+    # 检测器很小（retinaface 22 MB / tinymog 5 MB），一份 session 的显存 ≈ 权重 + 300MB
+    # workspace/arena（日志里那个「检测/遮罩 300 MB/份」就是它）。
+    mem_gpu = float(_vram_model_mb(det_name if str(det_name).endswith(".onnx")
+                                   else "") or 0.0) + 300.0
+    plan = _sess.derive("detect", gp, b.get("gpu_ms"), b.get("cpu_ms"),
+                        mem_per_gpu_mb=mem_gpu, mem_per_cpu_mb=260.0,
+                        stage_busy=_SESS_BUSY.get("detect"), over=over)
+    plan["bench"] = b
+    return plan
+
+
 def _fused_on(body) -> bool:
     """这一单走不走融合流水线。**默认走**（fused=1）；fused=0 回退六阶段分段链。"""
     if not isinstance(body, dict):
@@ -12702,6 +13028,14 @@ def _fused_cfg(body: dict) -> dict:
                                         body.get("fused_batch_wait_ms"), 0, 60000,
                                         _FUSED_BATCH_WAIT_MS),
         "frame_budget_want": int(want or 0),
+        # 异构 session 池的覆盖（0/空 = 自动推导，见 _fused_det_plan / server/_sess.py）
+        "sess_gpu": (None if body.get("sess_gpu") in (None, "")
+                     else _int_val("sess_gpu", body.get("sess_gpu"), 0, 8, 0)),
+        "sess_cpu": (None if body.get("sess_cpu") in (None, "")
+                     else _int_val("sess_cpu", body.get("sess_cpu"), 0, 16, 0)),
+        "sess_strategy": (str(body.get("sess_strategy") or "").strip().lower() or None),
+        # 验收/复现用：把「机器档位」按 low / mid / high 伪造（只影响配比推导）
+        "sess_level": (str(body.get("sess_level") or "").strip().lower() or None),
         # fused 专有：没有 cache / meta / 阶段游标
         "fused": True, "cache": "", "meta": {}, "stages": ["fused"],
         "chain": True, "force": True, "keep_cache": False, "range_changed": False,
@@ -12983,6 +13317,7 @@ def _fused_run(cfg: dict) -> dict:
 
     video = Path(cfg["video"])
     out = Path(cfg["out"])
+    mem0 = _proc_mem_mb()          # 流水线起点的本进程内存（收尾要和它比）
     rng = _stage_range(cfg)
     start_i, end_i, total = int(rng["start"]), int(rng["end"]), int(rng["total"])
     probe = cfg.get("probe") or {}
@@ -13258,20 +13593,28 @@ def _fused_run(cfg: dict) -> dict:
         finally:
             _put(q_dec, END)
 
-    # ---- ② 检测：单线程（检测器是共享对象，本来就不能并发）----
-    def _detect():
+    # ---- ② 检测：默认 1 路（检测器是共享对象，本来就不能并发）；异构池时 N 路 ----
+    # 多路的由来：检测是这条链的硬底（实测 48.9 ms/帧 = 20.4 帧/秒，占用 96~98%），
+    # 只靠一路 GPU 就把整条线钉死了。多开的那几路各拿**自己的** session（CPU EP 或
+    # 第二份 CUDA），帧从 q_dec 里抢着取 —— 谁空谁拿，天然就是「最短队列优先」。
+    def _detect(k=0, det_obj=None, n_workers=1):
         try:
             while True:
                 t_wait = time.perf_counter()
                 job = _get(q_dec)
                 ticks.add("det_wait", time.perf_counter() - t_wait)
                 if job is END:
+                    # 毒丸只放了一颗：谁吃到谁负责传下去（n_workers-1 颗），
+                    # 最后各自退出 —— 不然其余几路会在 _get 里等到天荒地老。
+                    for _i in range(max(0, int(n_workers) - 1)):
+                        _put(q_dec, END)
                     for _i in range(n_prep):
                         _put(q_det, END)
                     break
                 t = time.perf_counter()
                 try:
-                    boxes = _detect_boxes(job.frame, det_name, det_thresh)
+                    boxes = (_detect_on(det_obj, job.frame, det_thresh) if det_obj is not None
+                             else _detect_boxes(job.frame, det_name, det_thresh))
                 except Exception as e:                         # noqa: BLE001
                     _fail("detect", e)
                     for _i in range(n_prep):
@@ -13694,11 +14037,46 @@ def _fused_run(cfg: dict) -> dict:
         except Exception:                                      # noqa: BLE001
             cv2_prev, cv2_set = 0, 0
 
+    # ---- 异构 session 池：探测 → 微基准 → 配比（见 server/_sess.py）----
+    # 默认走池（n_det = plan.gpu + plan.cpu）；DFL_SESS_PLAN=0 退回单路老行为。
+    det_sess = []
+    det_plan = {}
+    if _sess.enabled():
+        try:
+            det_plan = _fused_det_plan(det_name, probe.get("w"), probe.get("h"), {
+                "gpu": cfg.get("sess_gpu"), "cpu": cfg.get("sess_cpu"),
+                "strategy": cfg.get("sess_strategy"), "level": cfg.get("sess_level")})
+            for _i in range(max(0, int(det_plan.get("gpu") or 0))):
+                _o = _detect_for(det_name, "gpu" if _i == 0 else "gpu2")
+                if _o is not None:
+                    det_sess.append(("gpu", _o))
+            for _j in range(max(0, int(det_plan.get("cpu") or 0))):
+                _o = _detect_for(det_name, "cpu")
+                if _o is not None:
+                    det_sess.append(("cpu", _o))
+            _vid_log("快速导出 检测池：%s" % _sess.plan_line(det_plan))
+            _vid_log("快速导出 检测池 基准：GPU %s ms / CPU %s ms（1080p 零图，2 张取中位）"
+                     "· 实际起来 %d 路（GPU %d / CPU %d）"
+                     % ((det_plan.get("bench") or {}).get("gpu_ms"),
+                        (det_plan.get("bench") or {}).get("cpu_ms"), len(det_sess),
+                        sum(1 for _e, _o in det_sess if _e.startswith("gpu")),
+                        sum(1 for _e, _o in det_sess if _e == "cpu")))
+        except Exception as e:                                 # noqa: BLE001
+            det_sess = []
+            _vid_log("快速导出 检测池：推导失败（%s）→ 退回单路" % str(e)[:160])
+    n_det = len(det_sess) or 1
+
     ths = {}
     t_all = time.time()
     try:
         ths["decode"] = threading.Thread(target=_decode, name="fused-dec", daemon=True)
-        ths["detect"] = threading.Thread(target=_detect, name="fused-det", daemon=True)
+        if n_det <= 1:
+            ths["detect"] = threading.Thread(target=_detect, name="fused-det", daemon=True)
+        else:
+            for _i, (_ep, _o) in enumerate(det_sess):
+                ths["detect%d" % _i] = threading.Thread(
+                    target=_detect, args=(_i, _o, n_det), name="fused-det%d-%s" % (_i, _ep),
+                    daemon=True)
         for i in range(n_prep):
             ths["prep%d" % i] = threading.Thread(target=_prep, name="fused-prep%d" % i,
                                                  daemon=True)
@@ -13710,9 +14088,11 @@ def _fused_run(cfg: dict) -> dict:
             ths["enc%d" % i] = threading.Thread(target=_encode, name="fused-enc%d" % i,
                                                 daemon=True)
         # 从下游往上游起：先有消费者，生产者才不会一上来就撞满队列
-        for k in ["enc%d" % i for i in range(n_enc)] + \
-                ["cmp%d" % i for i in range(n_cmp)] + ["gpu"] + \
-                ["prep%d" % i for i in range(n_prep)] + ["detect", "decode"]:
+        _det_keys = (["detect"] if n_det <= 1
+                     else ["detect%d" % i for i in range(n_det)])
+        for k in (["enc%d" % i for i in range(n_enc)]
+                  + ["cmp%d" % i for i in range(n_cmp)] + ["gpu"]
+                  + ["prep%d" % i for i in range(n_prep)] + _det_keys + ["decode"]):
             ths[k].start()
         # 全部线程退出 = 全片跑完；中途取消就置 stop 让所有段退出
         while True:
@@ -13788,12 +14168,39 @@ def _fused_run(cfg: dict) -> dict:
              "timeout=超时 · end=收尾）"
              % (batch_target, int(round(batch_wait * 1000.0)),
                 dict(sorted((bstat.get("why") or {}).items()))))
+    mem1 = _proc_mem_mb()
+    _vid_log("快速导出 内存（本进程）：流水线前 RSS %s / 提交 %s MB → 流水线后 RSS %s / 提交 %s MB"
+             " · 峰值 RSS %s MB（帧缓冲 %d 帧 × %.2f MB = %.0f MB 是设计内的常驻，"
+             "ORT 建会话时那 1.5GB 权重要过一遍内存，是峰值的主要来源）"
+             % (_fmt_mb(mem0.get("rss")), _fmt_mb(mem0.get("private")),
+                _fmt_mb(mem1.get("rss")), _fmt_mb(mem1.get("private")),
+                _fmt_mb(mem1.get("peak_rss")), budget, _fused_frame_mb(size_px),
+                budget * _fused_frame_mb(size_px)))
     if written != total:
         _vid_log("快速导出：实解出 %d 帧（源信息说 %d 帧）→ 按实解帧数编码"
                  % (written, total))
+    # 把这一轮实测的「段占用」留给下一轮的 derive()（这就是「按实测调配比」的回路）
+    try:
+        _SESS_BUSY["detect"] = round(float(util.get("detect") or 0.0) / 100.0, 3)
+        _SESS_PLAN_LAST["detect"] = dict(det_plan or {})
+        # 顺带学一次「加 CPU session 值不值」：cpu=0 那次是基线，cpu>0 且净增 ≥5%
+        # 才允许自动档开 CPU（见 _sess.record_gain）。第一次导出就把基线记下来。
+        _g = _sess.record_gain("detect", int((det_plan or {}).get("cpu") or 0), rate,
+                               WORKSPACE)
+        if _g.get("gain_pct") is not None:
+            _vid_log("快速导出 检测池 实测增益：%s%%（基线 %.2f → %s %.2f 帧/秒 · CPU×%s）→ "
+                     "自动档%s"
+                     % (_g.get("gain_pct"), float(_g.get("base") or 0),
+                        "现在", float(rate), int(_g.get("hybrid_cpu") or 0),
+                        ("会开 CPU session" if _g.get("auto_cpu_ok")
+                         else "仍然只开 GPU（净增 <5%）")))
+    except Exception:                                       # noqa: BLE001
+        pass
     _vid_stats(done=written, total=written, fps=round(rate, 2), eta_s=0,
                frame_budget=budget, fused=True, per_stage_ms=per_stage,
                stage_util_pct=util, batch=batch_of, batch_actual=dict(bstat),
+               sess_plan={"detect": dict(det_plan or {}), "n_detect": int(n_det),
+                          "sessions": [{"ep": _e} for _e, _o in det_sess]},
                pipeline={
                    "threads": {"decode": 1, "detect": 1, "prep": n_prep, "gpu": 1,
                                "compose": n_cmp, "encode": n_enc},
@@ -13877,6 +14284,7 @@ def _fused_worker(cfg: dict):
     """跑一次快速导出，并把终态落到两个 status（老 /export/status + /stage/status）。"""
     ok, err, cancelled = True, "", False
     t0 = time.time()
+    mem0 = _proc_mem_mb()          # 导出前（起线程之前那一刻）：收尾要拿它做差
     frames_dir = ""
     try:
         _stage_progress("fused", 0, "快速导出启动…",
@@ -14000,6 +14408,46 @@ def _fused_worker(cfg: dict):
             _vram_release_inproc("快速导出结束")
         except Exception:                                   # noqa: BLE001
             pass
+        # ---- 内存收尾（三步，顺序有讲究）----
+        # ① 预览 worker 那份会话：导出结束后它就是纯占着的东西（显存 2.1~2.4GB /
+        #    内存 1.3GB），而导出用的是本进程那份 —— 两份互不相干，必须分开还。
+        #    DFL_FUSED_FREE_PREVIEW=0 可保留（下一次预览更快，代价是显存一直占着）。
+        try:
+            _rel = ({"did": False, "why": "DFL_FUSED_FREE_PREVIEW=0"}
+                    if str(os.environ.get("DFL_FUSED_FREE_PREVIEW") or "1").strip().lower()
+                    in ("0", "false", "no", "off") else _free_preview_sessions("快速导出结束"))
+        except Exception as e:                              # noqa: BLE001
+            _rel = {"did": False, "why": repr(e)}
+        # ② 断完引用先收一遍垃圾：循环引用（闭包/异常栈）只有 gc 能收，光 drop 不够
+        try:
+            import gc as _gc
+            _gc.collect()
+            _gc.collect()
+        except Exception:                                   # noqa: BLE001
+            pass
+        # ③ 先量「收尾后、回收前」—— 这才是**真的还剩下的**（对象都释放了，但堆把页
+        #    攥在进程里）；再把工作集交给系统。两笔分开打，谁也不许拿回收冒充释放。
+        mem1 = _proc_mem_mb()
+        _vid_log("快速导出 内存（收尾后 · 回收前）：%s" % _mem_delta(mem0, mem1))
+        try:
+            _trim = _trim_ws("快速导出收尾")
+        except Exception as e:                              # noqa: BLE001
+            _trim = {"did": False, "why": repr(e)}
+        mem2 = _proc_mem_mb()
+        _vid_log("快速导出 内存（导出前后 · 最终）：%s" % _mem_delta(mem0, mem2))
+        if (_trim or {}).get("did"):
+            _vid_log("快速导出 内存：工作集回收 RSS %s → %s MB（提交 %s → %s MB）—— 回收只还"
+                     "工作集，提交只随对象释放而降；两者不是一回事"
+                     % (_fmt_mb((_trim.get("before") or {}).get("rss")),
+                        _fmt_mb((_trim.get("after") or {}).get("rss")),
+                        _fmt_mb((_trim.get("before") or {}).get("private")),
+                        _fmt_mb((_trim.get("after") or {}).get("private"))))
+        if (_rel or {}).get("did"):
+            _vid_log("快速导出 内存：预览 worker 已卸下常驻 dfm（%d 个 · %.0f ms）—— 那是另开的"
+                     "一份会话，导出用不到它"
+                     % (int(_rel.get("unloaded") or 0), float(_rel.get("ms") or 0)))
+        else:
+            _vid_log("快速导出 内存：预览 worker 未卸（%s）" % str((_rel or {}).get("why") or "-")[:120])
         _vid_close_log()
 
 
