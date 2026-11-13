@@ -8370,13 +8370,13 @@ def _vram_probe(ttl: float = None) -> tuple:
     if not _hook_on:                                     # 生产环境不读这个文件（否则工作区里一个文本就能改显存判断）
         ff = None
     try:
-        if ff.is_file():
+        if ff is not None and ff.is_file():
             txt = ff.read_text("utf-8", "ignore").strip().splitlines()[0].strip()
             return int(float(txt)), None, "file:" + ff.name
     except Exception:                                       # noqa: BLE001
         # 文件在、但这一拍读不出来（正好被改写/内容不是数字）：**不许退回旧缓存**
         # —— 那会让"刚刚改成 1400"读成上一次的 8000。这里改成强制重新探测一次。
-        if ff.is_file():
+        if ff is not None and ff.is_file():
             ttl = 0.0
     old = str(os.environ.get(_FUSED_ENV_VRAM) or "").strip()   # 老开关继续认（既有验收脚本在用）
     if old:
