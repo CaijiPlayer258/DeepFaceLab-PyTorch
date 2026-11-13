@@ -64,16 +64,37 @@
 
 | 开关 | 默认 | 作用 |
 |---|---|---|
-| workers（请求体）/ DFL_PROJ_WORKERS | **2** | worker 进程数 = 几份 dfm session |
-| batch（请求体）/ DFL_PROJ_BATCH | **2** | 一条请求带几帧 = worker 内几线程 |
+| workers（请求体）/ DFL_PROJ_WORKERS | **按模型体量**：≥1GB → 1 · ≤600MB → 2 · 中间 → 预算砍 | worker 进程数 = 几份 dfm session |
+| batch（请求体）/ DFL_PROJ_BATCH | **4 // workers**（1→4、2→2、3+→1） | 一条请求带几帧 = worker 内几线程 |
 | DFL_PROJ_SEND | raw | 传帧格式（jpg 退回 q95 JPEG，逐字节还原改造前的输入） |
 | DFL_PROJ_OUT | raw | .png 帧的出图路径（png = 交回 worker 编） |
 
-所以**默认档 = 2 进程 × 2 线程**（= 2×2）。改这个数是 ROI 之后的实测结论，不是口味：
-2×2 与原来的 2×4 **帧速同档**（重跑数据见五节），但显存稳定少 0.7~1.0GB
-（6881 vs 7701MB）—— 8GB 卡上 2×4 已经贴到 7.5~7.7GB，再往上一档就是 spill。
-请求体里传 `workers` / `batch` 或设环境变量照样能覆盖；显存装不下时先砍的是**进程数**
-（`_vram_plan` 的 procs 封顶，口径见 `16-VRAM-BUDGET.md`），batch 不参与降档。
+**默认档不再是一律 2×2 —— 它按模型体量走**（这一条是用户那一单逼出来的）：
+
+| 权重（ONNX initializer） | 默认 worker | 默认线程 | 实测（1080×1920 · 120 帧真项目 · 空载卡） |
+|---|---|---|---|
+| ≥1GB（张元英.dfm · **1567MB** · 410.8M 参数 · 输入 384） | **1** | **4** | 改前 2×2：4.79 帧/秒 / 7732MB（94.9%，WDDM 换页）；改后 1×4：**9.1~11.0 帧/秒（中位 10.0）/ 6118~6234MB（75~77%）**，每张有脸帧 107~118ms |
+| ≤600MB（阿証…-416.dfm · **514MB** · 134.8M 参数 · 输入 416） | **2** | **2** | 13.38~13.79 帧/秒 / 6242~6382MB（77~78%）—— 与 ROI 之后那一轮（13.42）一致，每张有脸帧 86~92ms |
+
+| 600MB~1GB（中间档） | 先要 2，由 `_vram_plan` 用 free + 一份会话的实测峰值砍 | 同上 | 见 `16-VRAM-BUDGET.md` §2.3 |
+
+> 体量**按权重字节**判（`_dfm_info` 扫 ONNX initializer），不看文件名、也不看分辨率：
+> 名字里带 416 的那份反而更小（0.5GB），名字不带数字的 张元英.dfm 是 1.5GB 且输入 **384**
+> —— 老代码 `_dfm_size_hint()` 按名字取不到就直接退回 416，预算里的帧/批两项一直算偏。
+
+* 线程数取 `4 // workers`：**同时在飞的帧数锁在 4 左右**，那是实测的甜点。384 上
+  1×2 = 9.7 / 1×4 = 9.1~11.0（中位 10.0）/ 1×5 = 9.4~11.2（一轮就 89.2%）/ **1×8 = 4.44（7747MB，
+  swap p50 1906ms）** —— 单 worker 时线程是唯一能把 GPU 喂饱的旋钮，2 个不够、8 个换页。
+* 这一档的**天花板**是 4 / swap_p50 ≈ 10.5~11.1 帧/秒（一个进程一份会话就这么快，
+  再多线程就换页）。所以「快过 10 帧/秒」不是配置问题，是这块卡 + 这个 1.5GB 模型的
+  上限；稳赢的是显存（95% → 77%）和 swap（1335 → 365ms）。
+* 「2 份会话」比「1 份会话 + 4 线程」多背一份权重和一整套 arena：384 上就是 94.9% vs 77%
+  的差 —— 少一个 worker 反而快一倍。
+* 降档顺序（用户定的）：**先减 worker → 再降线程（batch）→ 最后才拒绝**。以前只砍进程数、
+  batch 永远按 1 算，于是「1 个 worker 也装不下」时直接 400，其实降一档线程就够。
+* 请求体里传 `workers` / `batch` 或设环境变量照样覆盖；手动要的档位装不下时**降级并
+  提示**（`[warn] 显存预算只装得下 N 个 worker（请求 M）→ 实际按 N 开` + 一行
+  `[project]` 决定说明），连 1×1 都装不下才是 HTTP 400 + 数字。
 
 传帧改用裸 BGR 是**过了像素门**才切的：同一帧、同参数对拍（1080x1920 真项目帧）
 q95 JPEG 往返 vs 裸字节 = mean 0.1506 LSB / 差异像素 12.60% / max 5 LSB，在 0.5 LSB 门内。
@@ -131,6 +152,7 @@ q95 JPEG 往返 vs 裸字节 = mean 0.1506 LSB / 差异像素 12.60% / max 5 LSB
 
     runtime\server\Scripts\python.exe app\tools\proj_pool_accept.py            # 全跑（约 8 分钟）
     runtime\server\Scripts\python.exe app\tools\proj_pool_accept.py --cases a,c  # 只跑协议/对拍
+    runtime\server\Scripts\python.exe app\tools\proj_default_accept.py         # 默认档按模型体量（大 1×4 / 小 2×2 / 手动 2 降级 / 像素 / 实测会话体量）
 
 它自己组项目（/api/merge/stage/frames + /faces）、起后端、扫 workers×batch、逐像素对拍、
 跑一次「取消 → 续跑」。全部 PASS 才算过；沙箱在 %TEMP%\dfl_pool_accept。

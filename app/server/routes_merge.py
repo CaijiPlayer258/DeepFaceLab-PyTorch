@@ -3907,13 +3907,27 @@ _WORKER = _PreviewWorker()
 # 「一份 session + 一条 JSON 协议」的独立进程，把它复制成 N 份即可：像素路径
 # 原样不动，多出来的只有并行度。
 # ------------------------------------------------------------
-def _proj_workers_default() -> int:
-    """项目模式默认并行度：2（DFL_PROJ_WORKERS 可覆盖）。
+# 默认 worker 数的两条线（**按模型体量**，不是按核数，也不是「一律 2」）
+_PROJ_BIG_MB = 1024.0       # ≥1GB 权重：一份会话真跑起来 ≈ 3.4GB，2 个必撞墙
+_PROJ_SMALL_MB = 600.0      # ≤600MB：两份会话（≈2.2GB/份）仍在 8GB 卡的预算里
 
-    一份 dfm session 实测 2.07GB；8GB 卡上 2 份就是 ~4.2GB，第 3 份开始 spill
-    （显存不够时驱动把 CUDA 页换到主存，单帧直接掉到 900ms+，实测 3 进程 1.32 帧/秒）。
-    所以默认不再"按核数往上堆"—— 真正的旋钮是**每进程的线程数**
-    （_proj_batch_default，ROI 之后 2 线程正好：再往上就是几个线程抢同一台机器的 CPU）。
+
+def _proj_workers_default(model_mb=None) -> int:
+    """项目模式默认并行度：**先按模型体量**（DFL_PROJ_WORKERS 可覆盖）。
+
+    老口径是「一律 2」（按核数 // 4 封顶），而那正是用户这一单的病根：默认值**没有按
+    模型体量收缩**，于是 1.53GB 的 384 模型也开 2 个 worker → 2×3470 ≈ 6.9GB + 检测/
+    遮罩 → 整卡 7732/8151 = 94.9% → WDDM 换页 → swap p50 1338ms / **3.61 帧/秒**；
+    同一台机器换成 0.5GB 的 416 模型就是 13.42 帧/秒（那组数字是这么来的，不是 worker
+    数变了，是模型变了）。
+
+    现在分三档（实测见 16-VRAM-BUDGET.md / 17-PROJ-BATCH.md 与本轮 bench）：
+      · 大模型（≥1GB 权重）→ **1**：一份会话 ≈ 3.4GB，2 份就把 8GB 卡顶到 95%；
+        单 worker × 4 线程实测 10.87 帧/秒 / 峰值 6160MB（75.6%），2×2 只有 4.79。
+      · 小模型（≤600MB）→ **2**：一份 ≈ 2.2GB，2×2 实测 10.5~13.4 帧/秒 / 峰值 6430MB。
+      · 中间档（600MB~1GB）→ 先要 **2**，由 _vram_plan 用「free + 实测会话峰值」
+        （_vram_sess_peak_mb：标定值 max 上一单量到的值）砍到真装得下的个数 ——
+        不在这里另造一套判据，砍完的顺序仍是「worker → 线程 → 拒绝」。
     """
     try:
         n = int(str(os.environ.get("DFL_PROJ_WORKERS") or "").strip() or 0)
@@ -3921,14 +3935,29 @@ def _proj_workers_default() -> int:
         n = 0
     if n > 0:
         return max(1, min(16, n))
+    mb = float(model_mb or 0.0)
+    if mb >= _PROJ_BIG_MB:
+        return 1
+    if 0.0 < mb <= _PROJ_SMALL_MB:
+        return 2
     cpu = os.cpu_count() or 8
     return max(1, min(2, cpu // 4))
 
 
-def _proj_batch_default() -> int:
-    """一次请求带几帧 = worker 内部同时跑几帧：默认 2（DFL_PROJ_BATCH 可覆盖）。
+def _proj_batch_default(workers=None) -> int:
+    """一次请求带几帧 = worker 内部同时跑几帧：默认 **4 // workers**（DFL_PROJ_BATCH 可覆盖）。
 
-    这个默认值是**跟着 ROI 化重定的**（见 18-MERGE-ROI.md）：合成单帧从 288ms 砍到
+    也就是说 1 个 worker → 4 线程、2 个 worker → 2 线程（老默认）、3+ 个 → 1 线程：
+    同时在飞的帧数始终锁在 4 左右 —— 那是本机实测的甜点（8 帧在飞就换页了）。
+
+    为什么单 worker 时必须是 4 而不是 2（384 模型、1080x1920 真项目、120 帧，本轮实测）：
+        1×2  8.73 帧/秒  峰值 4612MB  swap p50 208ms   ← 线程不够，GPU 喂不饱
+        1×4 10.87        峰值 6160MB  swap p50 362ms   ← 甜点
+        1×8  4.44        峰值 7747MB  swap p50 1906ms  ← 换页，掉回 3.61 那一档
+    见 %TEMP%/dfl_projplan/bench_prefix384.json。
+
+    **2 个 worker 时仍取 2 线程**（= 老默认）：那个数是**跟着 ROI 化重定的**（见
+    18-MERGE-ROI.md）—— 合成单帧从 288ms 砍到
     137ms、每帧的 CPU 活少了一半之后，「几个线程抢同一台机器的 CPU」开始亏。同一台
     机器、同一个真项目（1080x1920、416 的 dfm，proj_pool_accept 沙箱）重跑扫描表：
 
@@ -3939,8 +3968,8 @@ def _proj_batch_default() -> int:
     那一轮 2×2 最快（13.61 vs 2×4 的 12.62），后来的重跑则显示这两档**帧速同档**：
     2×2 稳在 13.5~14.5，2×4 在 13.2~16.5 之间大跳（4 个线程抢 CPU，时快时慢）；每次
     都成立的差别是**显存少 0.7~1.0GB**。默认取 2 买的就是这 1GB 余量（8GB 卡上 2×4
-    已经贴到 7.5~7.7GB，再往上一档 2×8/3×4 直接 spill 到 2 帧/秒）。显存装不下时仍由
-    _vram_plan 先砍**进程数**（merge_export_project 的 procs 封顶），这个值不兜底。
+    已经贴到 7.5~7.7GB，再往上一档 2×8/3×4 直接 spill 到 2 帧/秒）。显存装不下时由
+    _vram_plan 先砍**进程数**、再砍线程数（procs → batch，见 _vram_cands），这个值不兜底。
     """
     try:
         n = int(str(os.environ.get("DFL_PROJ_BATCH") or "").strip() or 0)
@@ -3948,7 +3977,65 @@ def _proj_batch_default() -> int:
         n = 0
     if n > 0:
         return max(1, min(_PREVIEW_MAX_BATCH, n))
-    return 2
+    w = max(1, int(workers or 2))
+    return max(1, min(_PREVIEW_MAX_BATCH, 4 // w))
+
+
+def _proj_plan_note(model_mb, plan: dict, label: str = "[project]") -> str:
+    """一句话说清这一单的并行度决定（server.log 与 job.log 都写它）。
+
+    形状（用户口径；括号里那截就是「为什么减」）：
+        [project] 模型 1.53GB · 可用 6.49GB（空闲 6.83GB − 预留 0.34GB）
+        · 一份会话 3.30GB · 计划 1 worker(s) × 4 线程
+        （2 个要 7.0GB = 88% —— 95% 是换页线，已减）
+
+    数字全部取这份计划自己的账（sess/aux/batch_mb/avail/total），不另算一套 —— 日志里
+    那句话和拒绝消息 / status 里那几个数必须互相对得上。
+    """
+    plan = dict(plan or {})
+    sess = float(plan.get("sess_mb") or 0.0)
+    aux = float(plan.get("aux_mb") or 0.0)
+    bmb = float(plan.get("batch_mb") or 0.0)
+    procs = max(1, int(plan.get("procs") or 1))
+    batch = max(1, int(plan.get("batch") or 1))
+    req_p = max(1, int(plan.get("requested_procs") or procs))
+    req_b = max(1, int(plan.get("requested_batch") or batch))
+    total = plan.get("total_mb")
+    avail = plan.get("avail_mb")
+    params_m = plan.get("params_m")
+    size_px = int(plan.get("size_px") or 0)
+    head = "%s 参数量 %s" % (label, ("%.1fM" % float(params_m)) if params_m else "?")
+    head += " · 权重 %s" % (("%.1fGB（%.0fMB）" % (float(model_mb or 0.0) / 1024.0,
+                                                  float(model_mb or 0.0)))
+                            if model_mb else "?")
+    if size_px:
+        head += " · 输入 %d" % size_px
+    bits = [head]
+    if avail is not None:
+        avail_txt = "可用 %.2fGB" % (float(avail) / 1024.0)
+        if plan.get("free_mb") is not None:
+            avail_txt += ("（空闲 %.2fGB − 预留 %.2fGB）"
+                          % (float(plan.get("free_mb") or 0.0) / 1024.0,
+                             float(plan.get("reserve_mb") or 0.0) / 1024.0))
+        bits.append(avail_txt)
+    if sess > 0:
+        bits.append("一份会话 %.2fGB" % (sess / 1024.0))
+    bits.append("计划 %d worker(s) × %d 线程" % (procs, batch))
+    why = []
+    if req_p > procs:
+        need = float(req_p) * (sess + bmb) + aux
+        if total:
+            why.append("%d 个要 %.2fGB = %d%%（95%% 是换页线，已减）"
+                       % (req_p, need / 1024.0,
+                          int(round(100.0 * need / float(total)))))
+        else:
+            why.append("%d 个要 %.2fGB > 可用 %.2fGB（已减）"
+                       % (req_p, need / 1024.0, float(avail or 0.0) / 1024.0))
+    if req_b > batch:
+        why.append("线程 %d→%d（worker 数已经减到 1，仍不够）" % (req_b, batch))
+    if not why:
+        why.append("按预算装得下，没减")
+    return " · ".join(bits) + "（" + "；".join(why) + "）"
 
 
 def _proj_send_raw() -> bool:
@@ -5966,6 +6053,9 @@ def _proj_run(cfg: dict):
     if vplan:
         for _ln in _vram_log_lines(vplan, "项目导出"):
             _proj_log(_ln)
+        # 并行度那一行（模型多大 / 可用多少 / 计划几个 worker × 几线程 / 减了没有）
+        if vplan.get("worker_note"):
+            _proj_log(str(vplan["worker_note"]))
     want_workers = int(cfg.get("workers") or _proj_workers_default())
     # 显存计划给的是**上限**：真起不来的仍有 prewarm 兜底（那才是这台机器的实测），
     # 但没理由在计划已经说「只装得下 1 个」的时候还去起 4 个进程试运气。
@@ -5976,15 +6066,23 @@ def _proj_run(cfg: dict):
                        % (int(vplan["procs"]), int(vplan.get("requested_procs") or 0),
                           int(vplan["procs"])))
     want_workers = max(1, min(int(want_workers), int(total) or 1, 16))
-    # 批量默认 = 2（= 默认档 2×2；DFL_PROJ_BATCH / 请求体 batch 都能覆盖）。
-    # 显存不够时先砍进程数（vplan.procs），不砍 batch —— 砍 batch 只会让每进程更闲。
-    batch = int(cfg.get("batch") or _proj_batch_default())
+    # 线程数（= 一条请求 k 帧）：默认 4 // workers（见 _proj_batch_default），
+    # DFL_PROJ_BATCH / 请求体 batch 都能覆盖。显存不够时**先砍进程数、再砍它**
+    # （vplan.procs → vplan.batch，_vram_cands 的阶梯），两样都到最小才拒绝。
+    batch = int(cfg.get("batch") or _proj_batch_default(want_workers))
     batch = max(1, min(int(batch), _PREVIEW_MAX_BATCH, int(total) or 1))
 
     # 一个 worker 也走池子：批量协议（一次请求 k 帧，worker 里 k 个线程）在 N=1 时
     # 照样有效；workers=1 + batch=1 就是"一帧一请求"的老语义（逐像素基准那一档）。
     pool = _PreviewWorkerPool(want_workers)
     _dfms = [m["dfm"] for m in (models or []) if m.get("dfm")] or [str(cfg["dfm"])]
+    # 开跑前的整卡占用（含预热时的加载）—— 这一单结束要拿「峰值 − 这个数」反推一份会话多大
+    base_used = None
+    try:
+        _bf, _bt, _bu = _vram_free_smi(fresh=True)
+        base_used = _bu
+    except Exception:                                   # noqa: BLE001
+        base_used = None
     t_warm = time.time()
     n_ok = 0
     try:
@@ -6002,6 +6100,24 @@ def _proj_run(cfg: dict):
                    % (want_workers - n_ok, n_ok))
     n_workers = int(n_ok)
     _proj_set(workers=int(n_workers), batch=int(batch))
+    # ---- 显存采样：这一单整卡峰到多少（喂 _proj_record_sess_peak）----
+    # 每 2 秒一次 nvidia-smi（80ms，无窗口），开销可以忽略；峰值只在正常跑完时才采纳。
+    samp = {"peak": 0, "total": 0}
+    samp_stop = threading.Event()
+
+    def _vram_sampler():
+        while not samp_stop.is_set():
+            try:
+                _f2, _t2, _u2 = _vram_free_smi(fresh=True)
+                if _u2 is not None:
+                    samp["peak"] = max(int(samp["peak"]), int(_u2))
+                    samp["total"] = int(_t2 or 0)
+            except Exception:                           # noqa: BLE001
+                pass
+            samp_stop.wait(2.0)
+
+    threading.Thread(target=_vram_sampler, daemon=True,
+                     name="proj-vram-sampler").start()
     # 帧速从**预热之后**开始算：预热是建 session / 加载模型，不是干活
     t_swap = time.time()
     swap_ms = []            # 每帧 worker 内部的换脸耗时（p50 进 status，扫描表要用）
@@ -6185,6 +6301,7 @@ def _proj_run(cfg: dict):
                       % (done, total, swapped, copied, skipped, len(failed_frames),
                          p50 if p50 is not None else "-"))
 
+    cancelled = False               # finally 里要读它（记账那一拍：取消的单不采纳峰值）
     try:
         # ---- 三段流水：准备（读帧/检测/68 点）→ 换脸（worker 里 k 帧并行）→ 落盘 ----
         # 主线程只干三件事：切批、按**提交顺序**收结果、记账 —— 落盘顺序因此和串行时
@@ -6204,7 +6321,6 @@ def _proj_run(cfg: dict):
         batch_q = collections.deque()
         writes = collections.deque()
         it = iter(frames)
-        cancelled = False
 
         with ThreadPoolExecutor(max_workers=prep_n,
                                 thread_name_prefix="proj-prep") as prep_pool, \
@@ -6269,8 +6385,13 @@ def _proj_run(cfg: dict):
             if cancelled:
                 raise _ProjCancel()
     finally:
+        samp_stop.set()          # 采样线程：这一单的峰值到这里为止
         if pool is not None:
             pool.close()
+    # 把「一份 worker 会话真跑起来多大」记下来（下一单的预算用它；取消/掉帧/贴墙的不记）
+    _proj_record_sess_peak(_dfms, n_workers, batch, base_used, samp.get("peak"),
+                           samp.get("total"), size_px=_dfm_size_hint(_dfms[0]),
+                           ok=(not cancelled) and not failed_frames)
     if face_miss:
         _proj_warn("%d 帧有对齐脸但没检出人脸，已按原帧落盘：%s"
                    % (len(face_miss), "、".join(face_miss[:6])))
@@ -6405,14 +6526,21 @@ def merge_export_project(body: dict):
                     —— 和 /api/merge/export、/api/merge/preview 同一套协议
       force         可选，true = 忽略 merged 里已有的帧，全部重做
       quality       可选，jpg 帧的编码质量（默认 92，和单帧预览一致）
-      workers       可选，并行 worker 进程数（默认 2）。每个 worker 是一份独立的
-                    dfm session（一份 ~2.07GB），显存装不下几个就只用几个，
+      workers       可选，并行 worker 进程数。**默认按模型体量**（不是一律 2）：
+                    大模型（≥1GB 权重，例如 384 那份 1.53GB）→ 1；小模型（≤600MB，
+                    例如 416 那份 0.5GB）→ 2；中间档先要 2，再由显存预算按「free +
+                    一份会话的实测峰值」砍（见 _proj_workers_default）。每个 worker
+                    是一份独立的 dfm session，而那份会话**真跑起来**的峰值是 3.4GB
+                    （384）/ 2.2GB（416）—— 不是文件体积那 1.5GB / 0.5GB。
                     实际值回在 status.workers 里。
-      batch         可选，一条请求里带几帧（默认 2）。worker 内部用同样多个线程并行
-                    处理这一批，主进程每个 worker 维持 batch 个在飞槽位；
+      batch         可选，一条请求里带几帧 = worker 内部同时跑几帧。默认 **4 // workers**
+                    （1 worker → 4 线程、2 worker → 2 线程），同时在飞的帧数因此锁在
+                    4 左右 —— 那是实测的甜点（8 帧在飞就换页）。384 模型实测：1×2 8.73
+                    帧/秒、1×4 10.87、1×8 4.44，所以单 worker 时线程必须给到 4。
                     workers×batch = 同时在飞的帧数，实际值回在 status.batch 里。
-                    默认档因此是 **2×2**（与 2×4 帧速同档、显存少 0.7~1.0GB，
-                    扫描表与重跑数据见 17-PROJ-BATCH.md 四/五）。
+
+      显存不够时的退档顺序（用户定的）：**先减 worker → 再降线程（batch）→ 最后才拒绝**
+      （拒绝是 HTTP 400 + need_mb/avail_mb/suggest 等结构化字段）。
     """
     body = _as_dict(body)
     project = _norm_path(body.get("project_dir") or body.get("project"))
@@ -6451,18 +6579,54 @@ def merge_export_project(body: dict):
     force = bool(body.get("force"))
     # 并行度：N 个 worker 进程，各持自己的 dfm session（iperov stage4 的同一个语义）；
     # batch = 一条请求里带几帧（= worker 内部同时跑几帧）。
-    workers = int(_int_val("workers", body.get("workers"), 1, 16,
-                           _proj_workers_default()))
-    batch = int(_int_val("batch", body.get("batch"), 1, _PREVIEW_MAX_BATCH,
-                         _proj_batch_default()))
-    # ---- 显存预算：能开几个 worker 就开几个（1/2/3），一个都开不了就明确拒绝 ----
-    # 每多一个 worker 就多一份「会话 + CUDA context」（416 实测 1166MB/份），
-    # 以前是「先起 4 个进程、看谁崩」，崩了再退 —— 那一步本身就会把卡顶到 OOM。
+    # 默认值**按模型体量**：大模型（≥1GB 权重）1 个、小模型（≤600MB）2 个（见
+    # _proj_workers_default）；线程数 = 4 // workers（见 _proj_batch_default）。
     plan_paths = [m["dfm"] for m in (models or []) if m.get("dfm")] or [str(dfm)]
+    model_mb = _vram_models_mb(plan_paths)
+    workers = int(_int_val("workers", body.get("workers"), 1, 16,
+                           _proj_workers_default(model_mb)))
+    batch = int(_int_val("batch", body.get("batch"), 1, _PREVIEW_MAX_BATCH,
+                         _proj_batch_default(workers)))
+    # ---- 显存预算：能开几个 worker 就开几个，装不下就按 worker → 线程 → 拒绝 的顺序退 ----
+    # 每多一个 worker 就多一份「会话 + CUDA context」，而且那份会话**真跑起来还要再长一块**
+    # （384 实测 ≈3.4GB/份，不是「权重 + context」那 2.08GB）—— 所以这里喂进去的是
+    # _vram_sess_peak_mb 的实测峰值（没量过就按标定值），不是文件体积推算。
+    # 以前是「先起 4 个进程、看谁崩」，崩了再退 —— 那一步本身就会把卡顶到 OOM。
+    ses = _vram_sess_peak_mb(plan_paths)
+    minfo = _dfm_info(plan_paths[0]) if plan_paths else {}
     plan = _vram_guard(plan_paths, {"mode": "procs", "max_procs": int(workers),
-                                    "aux": True}, label="项目导出")
+                                    "batch": int(batch), "aux": True,
+                                    "sess_mb": float(ses["sess_mb"]),
+                                    "sess_src": str(ses["src"]),
+                                    "model_info": minfo}, label="项目导出")
     if int(plan.get("procs") or 1) < int(workers):
         workers = max(1, int(plan.get("procs") or 1))
+    if int(plan.get("batch") or 1) < int(batch):
+        batch = max(1, int(plan.get("batch") or 1))
+    # 这一行是排障第一现场（server.log + job.log 各一份）：模型多大 / 可用多少 /
+    # 计划几个 worker × 几线程 / 减了没有、为什么减。
+    plan["worker_note"] = _proj_plan_note(model_mb, plan)
+    print(plan["worker_note"], flush=True)
+    # ---- 起 worker **之前**先把本进程的死重放掉 ----
+    # 项目导出的 worker 是独立进程（各持自己的 dfm session），所以本进程里缓存的
+    # dfm/XSeg 会话、以及常驻预览 worker 里那份模型，在这一单里都是**一点用没有**的
+    # 死重 —— 而它们正好吃掉「峰值 ≤85%」的那 15% 余量：实测同一单（384 · 1×4）
+    # 卡干净的峰值是 6140MB（75.3%），先跑过阶段链、父进程还留着 dfm/XSeg 时会顶到
+    # 7488MB（91.9%）。没有别的任务在跑时才动（有任务在跑时放掉会话等于锯它的腿）。
+    plan["released"] = {}
+    if not _merge_job.get("running") and not _STAGE_JOB.get("running"):
+        try:
+            rel = _vram_release_inproc("项目导出开始前")
+            rec = _vram_reclaim("项目导出开始前")
+            plan["released"] = {"inproc": list((rel or {}).get("released") or []),
+                                "preview_mb": round(float((rec or {}).get("freed_mb") or 0.0), 1)}
+            if plan["released"]["inproc"] or plan["released"]["preview_mb"]:
+                print("[project] 起 worker 前先放掉死重：本进程会话 %s · 预览模型 %.0f MB"
+                      % ("、".join(plan["released"]["inproc"]) or "无",
+                         plan["released"]["preview_mb"]), flush=True)
+        except Exception as e:                          # noqa: BLE001
+            print("[project] 起 worker 前放死重失败（不影响这一单）：%s: %s"
+                  % (e.__class__.__name__, str(e)[:160]), flush=True)
 
     # ---- 原视频 / fps / 分辨率：读不到就报错，不猜 ----
     video, why = _proj_source_video(body.get("video") or body.get("source_video"),
@@ -8458,8 +8622,40 @@ _VRAM_ARENA_MB = 140                       # ORT CUDA arena：会话建好后比
 _VRAM_AUX_MB = 300                         # 检测器 + 2D106 关键点 + XSeg（用户口径 0.3GB）
 _VRAM_CPU_SLOW = 17.0                       # 回落 CPU 的代价（416 实测 527ms vs 31ms/张）
 _VRAM_BASE_PX = 416                         # 下面两张表都是按 416 量的，其它尺寸按 (s/416)² 缩放
-# 416 dfm 的批成本（整卡增量 − 会话本身）：台阶不是直线，所以查表 + 分段线性
+# dfm 批的成本**按模型各量一张表**（用户口径：同一个 batch，大网络和小网络多占的不是
+# 一个数）。点集 = ((batch, 相对同一份会话 batch=1 时多占的 MB), ...)，台阶不是直线（ORT 的
+# arena 在 batch 4 换池子），所以查表 + 分段线性。
+# 实测（本机 RTX 5070 Laptop 8GB · 1080x1920 真项目 120 帧 · 1 个 worker · 整卡 nvidia-smi
+# 峰值，空载基线 450MB；见 %TEMP%/dfl_projplan/bench_steps.json）：
+#   384（权重 1567MB · 输入 384）：b1 3184 / b2 4858（+1674）/ b4 6160（+2976）/ b8 7736（+4552）
+#   416（权重  514MB · 输入 416）：b1 1990 / b2 3469（+1479）/ b4 4040（+2050）/ b8 7322（+5332）
+# 注意两件事：
+#   · 增量主要由**帧尺寸**（合成那一路的整帧张量）决定，不是由 dfm 大小 —— 所以两张表
+#     差不多，但 384 那份在 batch 4 明显更贵（+2976 vs +2050）；
+#   · batch 8 两张表都超过 +4500MB，这时候已经在换页（实测 swap p50 1906~2266ms）。
+_VRAM_BATCH_PTS_416 = ((1, 0.0), (2, 1479.0), (4, 2050.0), (8, 5332.0))
+_VRAM_BATCH_PTS_384 = ((1, 0.0), (2, 1674.0), (4, 2976.0), (8, 4552.0))
+# (权重上限 MB, 量的那个输入边长, 点集)：权重 ≤900MB 用 416 那张，更大的用 384 那张
+_VRAM_BATCH_TABLES = ((900.0, 416, _VRAM_BATCH_PTS_416),
+                      (1e9, 384, _VRAM_BATCH_PTS_384))
+# fused（帧预算那条路）的 dfm 批台阶是**另一个量**：那条路一次只让 dfm 前向 k 张，
+# 不背「整帧合成 + 落盘」的 k 份缓冲，所以它比项目导出便宜得多。老表就是在那条路上量的
+# （416 实测：+80/+160/+1100/+1150/+5200），保留给 frames / none 两条路；项目导出用上面
+# 那两张按模型各量的表。混用会把 fused 的降档判据整体抬高一倍（实测：30 帧/批 1 从
+# 1644MB 变成 3232MB，fused_export_accept 的 C 段当场从「降到 16 帧」变成「照跑 30 帧」）。
 _VRAM_BATCH_PTS = ((1, 80.0), (2, 160.0), (4, 1100.0), (8, 1150.0), (16, 5200.0))
+# 项目导出 worker 的**运行时工作集**：会话建好、再真跑起来之后 ORT/CuDNN 还会多占一块，
+# 而这一块**不在**「权重 + context」里。实测（本机 8GB，1080x1920 真项目 120 帧，
+# 1 个 worker、整卡 nvidia-smi 峰值、空载基线 450MB，见 %TEMP%/dfl_projplan/bench_steps.json）：
+#   · 384（权重 1567MB · 输入 384）batch=1 整卡 3184MB → 一份会话
+#       = 3184 − 450(桌面) − 300(检测/遮罩) − 0(batch 1) = **2434MB**
+#       = 1567 权重 + 512 context + **355 运行时**；
+#   · 416（权重  514MB · 输入 416）batch=1 整卡 1990MB → 一份会话 = **1240MB**
+#       = 514 + 512 + **214 运行时**。
+# 取 320MB（两次实测的中间偏上）。**batch 的成本不在这里**：它按模型各有一张表
+# （_VRAM_BATCH_TABLES），因为 384 那份 batch 4 要多 2976MB、416 只要 2050MB。
+# 最早那版把这个常数写成 1300，是把 dfm 批那一项重复算进了「会话」里，已修正。
+_VRAM_SESS_RUNTIME_MB = 320
 _VRAM_PROBE_TTL = 4.0                       # 预览每拖一次都要问：nvidia-smi 80ms 不能每次都跑
 _VRAM_PROBE = {"at": 0.0, "free": None, "total": None, "src": ""}
 _VRAM_MODEL_CACHE = {}
@@ -8925,29 +9121,189 @@ def _vram_probe(ttl: float = None) -> tuple:
     return free, total, src
 
 
-def _vram_model_mb(path) -> float:
-    """一份 .dfm 的**权重**体量（MB）= 文件体积。
+# ------------------------------------------------------------
+# .dfm 到底是什么：它就是一份 **ONNX ModelProto**（_dfm_session 直接
+# ort.InferenceSession(dfm)）。所以「模型体量」要问图里要，**别看文件名、也别看分辨率**：
+# 用户那一单里「416」那份权重只有 0.5GB、「384」那份 1.5GB —— 名字里的数字只是输入边长，
+# 参数量由网络宽度决定，两者没有可比性。
+#
+# 这里按 protobuf 线格式扫一遍（mmap + 只读头，raw_data 只跳不读）：
+#   ModelProto.graph = 7 · GraphProto.initializer = 5 (TensorProto)
+#   TensorProto.dims = 1 / data_type = 2 / raw_data = 9
+#   GraphProto.input = 11 → ValueInfoProto.type(2).tensor_type(1).shape(2).dim(1).dim_value(1)
+# 不依赖 onnx 包（这台机器没装），也不建 session、不加载权重 —— 实测两份模型合计 < 0.2s。
+# ------------------------------------------------------------
+_DFM_INFO = {}
+_DFM_INFO_LOCK = threading.RLock()
+_PB_DT_SIZE = {1: 4, 2: 1, 3: 1, 4: 2, 5: 2, 6: 4, 7: 8, 8: 8, 9: 1, 10: 2, 11: 8, 12: 4,
+               13: 8, 14: 4, 15: 8, 16: 2}
 
-    dfm 里就是前向用的那一份权重（fp32）：实测 416 —— 会话建好 1161MB 里，
-    512 是 CUDA context、135 是 ORT arena，剩下正好是 514（= 文件体积）。
-    文件读不到就按 0 算（不拦任务，只是预算里少算模型 —— 这种情况日志会写出来）。
+
+def _pb_varint(buf, i, end):
+    shift = val = 0
+    while True:
+        b = buf[i]
+        i += 1
+        val |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return val, i
+        shift += 7
+
+
+def _pb_fields(buf, i, end):
+    """遍历 protobuf 字段：(fno, wire, value)；wire=0 → int、wire=2 → (start, n)。"""
+    while i < end:
+        key, i = _pb_varint(buf, i, end)
+        fno, wt = key >> 3, key & 7
+        if wt == 0:
+            v, i = _pb_varint(buf, i, end)
+            yield fno, wt, v
+        elif wt == 2:
+            n, i = _pb_varint(buf, i, end)
+            yield fno, wt, (i, n)
+            i += n
+        elif wt == 5:
+            yield fno, wt, int.from_bytes(buf[i:i + 4], "little")
+            i += 4
+        elif wt == 1:
+            yield fno, wt, int.from_bytes(buf[i:i + 8], "little")
+            i += 8
+        else:
+            raise ValueError("wire type %d" % wt)
+
+
+def _pb_tensor(buf, s, e):
+    """一个 TensorProto → (字节数, 元素数, data_type)。"""
+    dims, dt, raw = [], None, None
+    for fno, wt, v in _pb_fields(buf, s, e):
+        if fno == 1:
+            if wt == 0:
+                dims.append(int(v))
+            elif wt == 2:
+                i, end = v[0], v[0] + v[1]
+                while i < end:
+                    d, i = _pb_varint(buf, i, end)
+                    dims.append(int(d))
+        elif fno == 2 and wt == 0:
+            dt = int(v)
+        elif fno == 9 and wt == 2:
+            raw = int(v[1])                    # 只记长度，不读内容（1.5GB 权重在这儿）
+    n = 1
+    for d in dims:
+        n *= int(d)
+    nbytes = raw if raw is not None else n * int(_PB_DT_SIZE.get(dt or 0, 0))
+    return int(nbytes), int(n), dt
+
+
+def _pb_input_px(buf, s, e):
+    """ValueInfoProto → 输入边长（取 shape 里最大的那个空间维，动态维跳过）。"""
+    for fno, wt, v in _pb_fields(buf, s, e):
+        if fno != 2 or wt != 2:                # type
+            continue
+        for f2, w2, v2 in _pb_fields(buf, v[0], v[0] + v[1]):
+            if f2 != 1 or w2 != 2:             # tensor_type
+                continue
+            for f3, w3, v3 in _pb_fields(buf, v2[0], v2[0] + v2[1]):
+                if f3 != 2 or w3 != 2:         # shape
+                    continue
+                dims = []
+                for f4, w4, v4 in _pb_fields(buf, v3[0], v3[0] + v3[1]):
+                    if f4 != 1 or w4 != 2:     # dim
+                        continue
+                    for f5, w5, v5 in _pb_fields(buf, v4[0], v4[0] + v4[1]):
+                        if f5 == 1 and w5 == 0:
+                            dims.append(int(v5))
+                if dims:
+                    return int(max(dims[1:])) if len(dims) > 1 else int(max(dims))
+    return 0
+
+
+def _dfm_info(path) -> dict:
+    """一份 .dfm 的**真实**体量：权重字节（initializer 之和）/ 参数量 / 输入边长 / 非权重字节。
+
+    返回 {weights_mb, params, params_m, size_px, file_mb, non_weight_mb, init, src}；
+    读不出来（不是 ONNX / 用了 external data）→ weights_mb=0 + src 写明原因，调用方回退文件体积。
+    """
+    key = str(path or "")
+    if not key:
+        return {"weights_mb": 0.0, "params": 0, "params_m": 0.0, "size_px": 0,
+                "file_mb": 0.0, "non_weight_mb": 0.0, "init": 0, "src": "空路径"}
+    try:
+        st = os.stat(key)
+        sig = (int(st.st_size), int(st.st_mtime))
+    except OSError:
+        return {"weights_mb": 0.0, "params": 0, "params_m": 0.0, "size_px": 0,
+                "file_mb": 0.0, "non_weight_mb": 0.0, "init": 0, "src": "文件读不到"}
+    with _DFM_INFO_LOCK:
+        hit = _DFM_INFO.get(key)
+    if hit and hit.get("sig") == sig:
+        return dict(hit)
+    info = {"sig": sig, "weights_mb": 0.0, "params": 0, "params_m": 0.0, "size_px": 0,
+            "file_mb": round(st.st_size / 1048576.0, 1), "non_weight_mb": 0.0,
+            "init": 0, "src": ""}
+    try:
+        import mmap
+        with open(key, "rb") as fh:
+            buf = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
+            try:
+                graph = None
+                for fno, wt, v in _pb_fields(buf, 0, len(buf)):
+                    if fno == 7 and wt == 2:          # ModelProto.graph
+                        graph = v
+                        break
+                if graph is None:
+                    info["src"] = "不是 ONNX（找不到 graph）→ 退回文件体积"
+                else:
+                    nbytes = params = init = 0
+                    px = 0
+                    for fno, wt, v in _pb_fields(buf, graph[0], graph[0] + graph[1]):
+                        if fno == 5 and wt == 2:      # initializer
+                            b, n, _dt = _pb_tensor(buf, v[0], v[0] + v[1])
+                            nbytes += b
+                            params += n
+                            init += 1
+                        elif fno == 11 and wt == 2 and not px:
+                            px = _pb_input_px(buf, v[0], v[0] + v[1])
+                    if nbytes <= 0:
+                        info["src"] = "initializer 是 external data → 退回文件体积"
+                    else:
+                        info.update({"weights_mb": round(nbytes / 1048576.0, 1),
+                                     "params": int(params),
+                                     "params_m": round(params / 1e6, 2),
+                                     "size_px": int(px), "init": int(init),
+                                     "non_weight_mb":
+                                         round((st.st_size - nbytes) / 1048576.0, 1),
+                                     "src": "ONNX initializer 实测"})
+            finally:
+                buf.close()
+    except Exception as e:                        # noqa: BLE001
+        info["src"] = "ONNX 解析失败（%s）→ 退回文件体积" % str(e)[:80]
+    with _DFM_INFO_LOCK:
+        _DFM_INFO[key] = dict(info)
+    return dict(info)
+
+
+def _vram_model_mb(path) -> float:
+    """一份 .dfm 的**权重**体量（MB）—— 取 ONNX initializer 之和，不是文件体积、更不是名字。
+
+    实测（本机两份真模型，_dfm_info 直接扫图）：
+        张元英.dfm        输入 384 · 权重 **1566.9MB**（410.76M 参数 · 94 个 initializer）
+        阿証証証証-416.dfm 输入 416 · 权重 **514.2MB**（134.79M 参数 · 78 个 initializer）
+    两份的「文件体积 − 权重」分别是 0.0 / 0.1MB（dfm 里没有别的数据），所以文件体积在这两
+    份上是准的 —— 但**口径**必须是权重：外部权重、带训练残留、或将来换成 fp16 时，体积就
+    不再等于权重了。读不出图（不是 ONNX / external data）才退回文件体积，并在日志里写明。
     """
     key = str(path or "")
     if not key:
         return 0.0
-    try:
-        st = os.stat(key)
+    info = _dfm_info(key)
+    mb = float(info.get("weights_mb") or 0.0)
+    if mb > 0:
+        return mb
+    try:                                        # 兜底：文件体积（src 里已写明原因）
+        return max(0.0, os.stat(key).st_size / 1048576.0)
     except OSError:
         return 0.0
-    sig = (int(st.st_size), int(st.st_mtime))
-    with _VRAM_LOCK:
-        hit = _VRAM_MODEL_CACHE.get(key)
-    if hit and hit[0] == sig:
-        return hit[1]
-    mb = max(0.0, st.st_size / 1048576.0)
-    with _VRAM_LOCK:
-        _VRAM_MODEL_CACHE[key] = (sig, mb)
-    return mb
 
 
 def _vram_models_mb(paths) -> float:
@@ -8963,10 +9319,181 @@ def _vram_models_mb(paths) -> float:
     return best
 
 
-def _dfm_size_hint(dfm) -> int:
-    """这个 .dfm 的输入边长（416/512/…）——**不加载模型**就要知道，因为预算要在加载前算。
+# ------------------------------------------------------------
+# 项目导出：**一份 worker 会话**真跑起来占多少（实测优先，标定值兜底）
+# ------------------------------------------------------------
+# 为什么要单独记这一笔：同一份 .dfm，「会话建好」和「跑了几十帧」不是一个数 ——
+# 前者是权重 + context（384：2079MB），后者还要加 ORT/CuDNN 那截会长大的工作集
+# （实测 384 一份 ≈ 3470MB、416 一份 ≈ 2220MB，见 _VRAM_SESS_RUNTIME_MB 的注释）。
+# 预算按前者算就会放行装不下的 worker 数 → WDDM 换页 → 帧速崩到 3.61。
+#
+# 口径：跑完一单就把「整卡峰值 − 开跑前的整卡占用」摊到每个 worker 上，记进
+# <WORKSPACE>/_vram_sess_peak.json（和 _sess_bench.json 一个套路）；下一次算账就用
+# max(标定值, 实测值) —— 实测只能把预估**抬高**（更保守），不会把已经放行的单子
+# 悄悄放宽。峰值贴到 88% 以上的那一单（已经在换页了）不记：那种数是被墙压扁的。
+_VRAM_SESS_PEAK = {}
+_VRAM_SESS_LOCK = threading.RLock()
+_VRAM_SESS_PAGE_PCT = 0.88
+# 记账口径的版本号：口径一变（比如 dfm 批改成「按模型查表 + 乘进程数」），旧文件里那些
+# 按旧口径反推出来的会话体量就是错的（它把批成本吞进了会话里），必须整批判掉。
+_VRAM_SESS_VER = 2
 
-    先看文件名（本仓库导出的模型都带边长，例如 阿証証証証-416.dfm），再退回 416。
+
+def _vram_sess_key(dfm_path) -> str:
+    """模型身份 = 名字 + 体积 + mtime：换模型 / 重训导出之后实测值自动失效。"""
+    key = str(dfm_path or "")
+    if not key:
+        return ""
+    try:
+        st = os.stat(key)
+        return "%s|%d|%d" % (Path(key).name, int(st.st_size), int(st.st_mtime))
+    except OSError:
+        return "%s|0|0" % Path(key).name if key else ""
+
+
+def _vram_sess_path() -> Path:
+    return Path(WORKSPACE) / "_vram_sess_peak.json"
+
+
+def _vram_sess_load() -> dict:
+    try:
+        p = _vram_sess_path()
+        if p.is_file():
+            d = json.loads(p.read_text("utf-8", "ignore") or "{}")
+            if isinstance(d, dict):
+                return d
+    except Exception:                                       # noqa: BLE001
+        pass
+    return {}
+
+
+def _vram_sess_put(key: str, row: dict):
+    """记一笔实测（内存 + 工作区 json；写不进去只影响下一次的预估，不影响这一单）。"""
+    if not key:
+        return
+    with _VRAM_SESS_LOCK:
+        _VRAM_SESS_PEAK[str(key)] = dict(row)
+    try:
+        d = _vram_sess_load()
+        d[str(key)] = dict(row)
+        _vram_sess_path().write_text(json.dumps(d, ensure_ascii=False, indent=1), "utf-8")
+    except Exception:                                       # noqa: BLE001
+        pass
+
+
+def _vram_sess_get(key: str) -> dict:
+    if not key:
+        return {}
+    with _VRAM_SESS_LOCK:
+        hit = _VRAM_SESS_PEAK.get(str(key))
+    if hit is None:
+        hit = _vram_sess_load().get(str(key))
+    if not isinstance(hit, dict):
+        return {}
+    if int(hit.get("v") or 0) != int(_VRAM_SESS_VER):   # 旧口径记的：整批判掉
+        return {}
+    return dict(hit)
+
+
+def _vram_sess_peak_mb(paths) -> dict:
+    """一份项目导出 worker 会话的**峰值**（MB）—— 多模型时取最大的那一份。
+
+    返回 {"sess_mb", "src", "model_mb", "measured_mb", "estimate_mb", "key", "row"}：
+      · estimate = 权重 + context + _VRAM_SESS_RUNTIME_MB（实测标定的运行时工作集）；
+      · measured = 上一单真跑出来的「整卡峰值增量 / worker 数」（没有就空）；
+      · 采用 max(estimate, measured) —— 实测只抬高、不放松（见上面那一段）。
+    """
+    paths = [str(p) for p in (paths or []) if str(p or "")]
+    model_mb = _vram_models_mb(paths)
+    est = float(model_mb) + float(_VRAM_CTX_MB) + float(_VRAM_SESS_RUNTIME_MB)
+    best_mb, best_row = 0.0, {}
+    for p in paths:
+        row = _vram_sess_get(_vram_sess_key(p))
+        try:
+            mb = float(row.get("sess_mb") or 0.0)
+        except (TypeError, ValueError):
+            mb = 0.0
+        if mb > best_mb:
+            best_mb, best_row = mb, row
+    sess = max(est, best_mb) if best_mb > 0 else est
+    # 兜底上限：实测值再离谱也不许超过整卡的 60%（那是「读数坏了」而不是这台机器）
+    try:
+        _free, total, _src = _vram_probe()
+        if total:
+            sess = min(sess, float(total) * 0.6)
+    except Exception:                                       # noqa: BLE001
+        pass
+    return {"sess_mb": round(float(sess), 1),
+            "src": ("实测 max(标定 %.0f, 量到 %.0f)" % (est, best_mb)) if best_mb > 0
+                   else ("标定 %.0f = 权重 %.0f + context %d + 运行时 %d"
+                         % (est, model_mb, int(_VRAM_CTX_MB), int(_VRAM_SESS_RUNTIME_MB))),
+            "model_mb": round(float(model_mb), 1),
+            "measured_mb": round(float(best_mb), 1), "estimate_mb": round(est, 1),
+            "key": _vram_sess_key(paths[0]) if paths else "", "row": dict(best_row)}
+
+def _proj_record_sess_peak(dfms, n_workers: int, batch: int, base_used_mb,
+                           peak_used_mb, total_mb, size_px=None,
+                           ok: bool = True) -> dict:
+    """把这一单**实测**的「一份 worker 会话峰值」记下来（下一单的预算直接用它）。
+
+    口径：ours = 整卡峰值 − 开跑前的整卡占用（含预热那几秒）；一份 = ours / worker 数。
+    不采纳的四种情形（宁可不记，也不许把预算带偏）：
+      · 这一单不是正常跑完的（取消/有失败帧）—— 峰值没跑到；
+      · 峰值贴到整卡 88% 以上 —— 已经在换页，读数是墙压出来的（正是要修的病症）；
+      · 量出来的比权重还小 —— 读数坏了（探测到的是别人的进程在退）；
+      · 多模型项目（LRU 换进换出，摊不到单份上）。
+    """
+    model_mb = _vram_models_mb(dfms)
+    try:
+        base = float(base_used_mb or 0.0)
+        peak = float(peak_used_mb or 0.0)
+        total = float(total_mb or 0.0)
+    except (TypeError, ValueError):
+        return {}
+    if not ok or len([p for p in (dfms or []) if str(p or "")]) != 1:
+        return {}
+    if peak <= 0 or base <= 0 or peak <= base:
+        return {}
+    if total and peak >= total * float(_VRAM_SESS_PAGE_PCT):
+        print("[project] 峰值 %.0f/%.0f MB = %.0f%% 已经贴墙（换页），这一次的会话体量不记账"
+              % (peak, total, 100.0 * peak / total), flush=True)
+        return {}
+    per = (peak - base) / float(max(1, int(n_workers)))
+    # 把预算里**单列的那两项**扣回去，否则同一笔钱记两遍：
+    #   · dfm 批（这一档线程数）—— 下一单按它自己的 batch 再加；
+    #   · 检测/遮罩（_VRAM_AUX_MB）—— 多 worker 时它只算一份，摊到每份头上就是白记。
+    # 剩下的才是「一份会话」：权重 + context + 运行时工作集 + 本进程那点 torch context。
+    try:
+        per -= float(_vram_batch_mb(int(size_px or _VRAM_BASE_PX), int(batch),
+                                    model_mb, "procs"))
+        per -= float(_VRAM_AUX_MB)
+    except Exception:                                   # noqa: BLE001
+        pass
+    # 实测只用来**纠偏**：抬到标定值的 1.5 倍以上就不像话了（多半是本进程那份 torch
+    # context / 别人的进程在那一拍抖了一下），按 1.5 倍记。
+    est = float(model_mb or 0.0) + float(_VRAM_CTX_MB) + float(_VRAM_SESS_RUNTIME_MB)
+    per = min(float(per), est * 1.5)
+    if per < float(model_mb or 0.0):
+        return {}
+    row = {"v": int(_VRAM_SESS_VER), "sess_mb": round(float(per), 1),
+           "workers": int(n_workers), "batch": int(batch), "base_used_mb": round(base, 1),
+           "peak_used_mb": round(peak, 1), "total_mb": round(total, 1),
+           "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    key = _vram_sess_key(dfms[0])
+    _vram_sess_put(key, row)
+    print("[project] 实测一份 worker 会话 %.2fGB（整卡峰值 %.0f − 开跑前 %.0f，%d 个 worker）"
+          "→ 记进 _vram_sess_peak.json，下一单的预算按它算"
+          % (per / 1024.0, peak, base, int(n_workers)), flush=True)
+    return row
+
+
+def _dfm_size_hint(dfm) -> int:
+    """这个 .dfm 的输入边长（384/416/…）——**不加载模型**就要知道，因为预算要在加载前算。
+
+    口径：**问图要**（ONNX 的 graph.input 形状，_dfm_info），不问文件名 —— 文件名里的数字
+    会骗人（本仓库两份真模型：名字里带 416 的那份输入确实是 416，不带数字的 张元英.dfm
+    其实是 **384**，老代码按名字取不到就退回 416，预算里的帧/批两项因此一直算偏）。
+    名字只作为最后的兜底，再不行才 416。
     真正喂给 session 的尺寸仍由 session 自己决定：_fused_run 加载后会拿实测尺寸
     把这个预算**再算一遍**（不一样就按新尺寸重新判一次）。
     """
@@ -8975,7 +9502,11 @@ def _dfm_size_hint(dfm) -> int:
         hit = _VRAM_SIZE_CACHE.get(key)
     if hit:
         return int(hit)
-    size = 0
+    size = int((_dfm_info(key) or {}).get("size_px") or 0)
+    if size:
+        with _VRAM_LOCK:
+            _VRAM_SIZE_CACHE[key] = int(size)
+        return int(size)
     try:
         stem = Path(key).stem
         cand = [int(m) for m in re.findall(
@@ -9000,13 +9531,34 @@ def _vram_frame_mb(size_px: int) -> float:
     return max(4.0, (size_px * size_px * 3 * 4 * 4) / 1048576.0)
 
 
-def _vram_batch_mb(size_px: int, batch) -> float:
-    """dfm 一次前向喂 batch 张时的额外占用（查 _VRAM_BATCH_PTS，按 (size/416)² 缩放）。"""
+def _vram_batch_table(model_mb=None, mode: str = "frames"):
+    """挑那张批台阶表 → (量的输入边长, 点集)。
+
+    · `mode == "procs"`（项目导出）：按**权重体量**挑 —— ≤900MB 用 416 那张
+      （阿証…-416.dfm，514MB），更大的用 384 那张（张元英.dfm，1567MB）；
+    · 其它（fused 帧预算 / 预览）：老表 `_VRAM_BATCH_PTS`（量的是「dfm 前向 k 张」，
+      不是项目那条路的「k 帧合成 + 落盘」）；基准边长 416。
+    """
+    if str(mode) != "procs":
+        return int(_VRAM_BASE_PX), _VRAM_BATCH_PTS
+    mb = float(model_mb or 0.0)
+    for lim, base_px, pts in _VRAM_BATCH_TABLES:
+        if mb <= float(lim):
+            return int(base_px), pts
+    return int(_VRAM_BATCH_TABLES[-1][1]), _VRAM_BATCH_TABLES[-1][2]
+
+
+def _vram_batch_mb(size_px: int, batch, model_mb=None, mode: str = "frames") -> float:
+    """dfm 一次前向喂 batch 张时**多占**的显存（相对同一份会话 batch=1）。
+
+    点集按模型体量挑（_vram_batch_table），再按 (size/基准边长)² 缩放：基准边长就是
+    那张表量的时候那个模型的输入（384 表在 384 上量的，416 表在 416 上量的）。
+    """
     b = int(batch or 0)
     if b <= 0:
         return 0.0
-    k = (max(64, int(size_px or _VRAM_BASE_PX)) / float(_VRAM_BASE_PX)) ** 2
-    pts = _VRAM_BATCH_PTS
+    base_px, pts = _vram_batch_table(model_mb, mode)
+    k = (max(64, int(size_px or base_px)) / float(base_px)) ** 2
     if b <= pts[0][0]:
         return pts[0][1] * k
     for i in range(1, len(pts)):
@@ -9089,15 +9641,22 @@ def _vram_cands(mode: str, want_frames: int, want_batch: int,
 
     · frames —— fused 视频导出：先保帧预算（流水线的重叠靠它），再降 dfm 批
       （416 上 B1/B4/B8 每张耗时几乎一样，所以降批几乎不花钱）；
-    · procs  —— 项目导出：降的是 worker 进程数（每份 session + 一个 CUDA context），
-      帧/批固定（那一路一次只算一帧一张脸）；
+    · procs  —— 项目导出：先降 worker 进程数（每份 session + 一个 CUDA context），
+      减到 1 个之后再降 worker 内的线程数（batch=几帧并行）；两样都到最小才拒绝；
     · none   —— 预览：只问「一份会话装不装得下」。
     """
     if mode == "none":
         return [{"frames": 0, "batch": 1, "procs": max(1, int(procs))}]
     if mode == "procs":
-        return [{"frames": 0, "batch": 1, "procs": n}
-                for n in range(max(1, int(want_procs)), 0, -1)]
+        # 降档顺序是用户定的：**先减 worker（每份 = 一整套会话 + 一个 CUDA context），
+        # 减到 1 个之后才降 worker 内的线程数（batch），两样都到最小还装不下才拒绝**。
+        # 以前只列 procs、batch 永远按 1 算 —— 于是「1 个 worker 也装不下」时
+        # 直接 400，而其实把 2 线程降到 1 线程就够（dfm 批那一项 160 → 80MB 也是钱）。
+        procs_ladder = [{"frames": 0, "batch": int(want_batch), "procs": n}
+                        for n in range(max(1, int(want_procs)), 0, -1)]
+        batches = sorted({int(b) for b in (want_batch, 4, 2, 1)
+                          if 1 <= int(b) < int(want_batch)}, reverse=True)
+        return procs_ladder + [{"frames": 0, "batch": int(b), "procs": 1} for b in batches]
     frames_ladder = sorted({int(f) for f in (want_frames, int(_FUSED_BUDGETS[1]),
                                              int(_FUSED_BUDGETS[2]), int(_FUSED_BUDGETS[-1]))
                             if 1 <= int(f) <= int(want_frames)}, reverse=True) \
@@ -9122,10 +9681,12 @@ def _vram_need_mb(cand: dict) -> float:
     """
     procs = max(1, int(cand.get("procs") or 1))
     new_sess = max(0, procs - max(0, int(cand.get("resident") or 0)))
+    # dfm 批是**每个进程各自**的（worker 里 k 个线程同时前向），所以要乘进程数 ——
+    # 只在外面加一次会漏掉「2 个 worker × 2 线程」的那份（实测差 1.4GB）。
     return (float(cand.get("sess_mb") or 0.0) * new_sess
+            + float(cand.get("batch_mb") or 0.0) * procs
             + float(cand.get("aux_mb") or 0.0)
-            + int(cand.get("frames") or 0) * float(cand.get("frame_mb") or 0.0)
-            + float(cand.get("batch_mb") or 0.0))
+            + int(cand.get("frames") or 0) * float(cand.get("frame_mb") or 0.0))
 
 
 def _vram_plan(model_mb, opts: dict = None) -> dict:
@@ -9145,6 +9706,9 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
                  导出闸门开它 —— 用户「预览过一帧再点导出」被拒的病根就在这里
       resident   本进程**已经**持有这份会话了（fused 加载后重算那一拍）：会话那一项
                  不再计入需求，否则等于把一个已经吃掉的 2GB 又算一遍 → 必被拒
+      sess_mb / sess_src  **一份会话的峰值**直接给（项目导出用）：给了就不再用
+                 「权重 + context」推 —— 那条路一份会话真跑起来还要多 1.3GB，
+                 见 _vram_sess_peak_mb / _VRAM_SESS_RUNTIME_MB 的实测注释
 
     返回 dict（关键字见下面 plan = {...}）。**ok=False 的调用方必须拒绝**：
     _vram_plan 只算账，不抛异常（拒绝的样子由 _vram_guard / 调用点决定）。
@@ -9165,10 +9729,25 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
     # 只对「同一进程、同一份会话」成立，而且只在重算那一拍用（见 _fused_run）。
     resident = 1 if opts.get("resident") else 0
     model_mb = max(0.0, float(model_mb or 0.0))
-    # 一份会话 = 权重 + 它自己的 CUDA context。ORT 的 arena（416 实测 +135MB）不单列
-    # —— 它由「空闲的 20% + 512MB」那份预留吸收；单列的话 384 模型会算成 2219MB/份，
-    # 把实测「8GB 卡上 2 个 worker 行、3 个 spill」误判成「只装得下 1 个」。
-    sess_mb = model_mb + float(_VRAM_CTX_MB)
+    # 模型身份（参数量 / 权重 / 输入边长）：由调用方从 .dfm 的图里读出来（_dfm_info），
+    # 这里只负责挂到 plan 上，让 status/日志/拒绝消息都能说清「凭什么按这一档」。
+    minfo = dict(opts.get("model_info") or {})
+    # 一份会话 = 权重 + 它自己的 CUDA context。ORT 的 arena（416 建好时 +135MB）不单列
+    # —— 它由「空闲的 5% + 256MB」那份预留吸收。但**项目导出**那条路上会话跑起来还要
+    # 再长一块（实测 +1190 / +1390MB，见 _VRAM_SESS_RUNTIME_MB）：那一块必须明着算，
+    # 否则 384 模型 2 个 worker 会被算成 4538MB（≤ 可用）放行，真跑起来顶到 94.9%
+    # → WDDM 换页 → 3.61 帧/秒。调用方给了 sess_mb（实测值）就照给的算。
+    sess_override = opts.get("sess_mb")
+    if sess_override is not None:
+        sess_mb = max(float(sess_override or 0.0), model_mb)
+        sess_src = str(opts.get("sess_src") or "调用方给的实测值")
+    else:
+        sess_mb = model_mb + float(_VRAM_CTX_MB)
+        sess_src = "权重 + context"
+        if mode == "procs":
+            sess_mb += float(_VRAM_SESS_RUNTIME_MB)
+            sess_src = ("权重 + context + 运行时工作集 %dMB（标定值）"
+                        % int(_VRAM_SESS_RUNTIME_MB))
     frame_mb = _vram_frame_mb(size_px)
     # 先**按现状**探测（不回收）：预览常驻着模型时先照常算一遍，只有真装不下才回收
     # 再算第二遍（两遍算账，见下面「装不下才回收」）。理由：前端每改一次参数都会打
@@ -9184,7 +9763,8 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
         # 需求里只剩**增量**：检测/遮罩 + 帧缓冲 + dfm 批。
         cand = {"sess_mb": round(sess_mb, 1), "aux_mb": round(aux, 1),
                 "frame_mb": round(frame_mb, 2), "frames": int(frames),
-                "batch": int(batch), "batch_mb": round(_vram_batch_mb(size_px, batch), 1),
+                "batch": int(batch),
+                "batch_mb": round(_vram_batch_mb(size_px, batch, model_mb, mode), 1),
                 "procs": int(nproc), "resident": int(resident),
                 "resident_mb": round(float(sess_mb) * min(int(nproc), int(resident)), 1)}
         cand["need_mb"] = round(_vram_need_mb(cand), 1)
@@ -9196,6 +9776,17 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
     plan = {
         "ok": False, "cpu": False, "mode": mode, "label": label, "size_px": int(size_px),
         "model_mb": round(model_mb, 1), "sess_mb": round(sess_mb, 1),
+        # 模型体量的来路：参数量 / 权重 MB / 输入边长（全部来自 ONNX 图，不看文件名）
+        "params_m": (round(float(minfo.get("params_m") or 0.0), 2)
+                     if minfo.get("params_m") else None),
+        "params": (int(minfo["params"]) if minfo.get("params") else None),
+        "model_mb_src": str(minfo.get("src") or "文件体积（没读到图）"),
+        "file_mb": float(minfo.get("file_mb") or 0.0) or None,
+        "non_weight_mb": round(float(minfo.get("non_weight_mb") or 0.0), 1),
+        "size_px_src": ("ONNX 图输入" if minfo.get("size_px") else "文件名/默认"),
+        # 一份会话里「权重 + context」之外的那截（项目导出的运行时工作集 / 实测值）
+        "sess_src": sess_src,
+        "sess_extra_mb": round(max(0.0, float(sess_mb) - model_mb - float(_VRAM_CTX_MB)), 1),
         "ctx_mb": int(_VRAM_CTX_MB), "arena_mb": int(_VRAM_ARENA_MB),   # arena 只在日志里提一句
         "aux_mb": round(aux, 1), "frame_mb": round(frame_mb, 2),
         # 预留：随空闲缩放（free×5%，底线 256MB、上限 768MB），见 _vram_reserve_mb
@@ -9215,8 +9806,9 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
         "reclaimable_mb": None, "other_mb": None, "preview_models": [],
         "free_torch_mb": None, "free_smi_mb": None, "resident_mb": round(floor["resident_mb"], 1),
         "frames": int(want_frames if mode != "procs" else 0),
-        "batch": int(want_batch if mode != "procs" else 1),
-        "batch_mb": round(_vram_batch_mb(size_px, want_batch if mode != "procs" else 1), 1),
+        # procs 模式下 batch = worker 内的线程数（几帧并行），已经是预算的一部分了
+        "batch": int(want_batch),
+        "batch_mb": round(_vram_batch_mb(size_px, want_batch, model_mb, mode), 1),
         "requested_frames": int(want_frames), "requested_batch": int(want_batch),
         "requested_procs": int(max_procs if mode == "procs" else procs),
         "downgraded": False, "steps": [], "reason": "", "msg": "", "suggest": [],
@@ -9330,12 +9922,15 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
                 avail = _avail_for(0.0)
                 hit = _pick(avail)
     if hit is not None:
+        # 降档只看**这条路真的有旋钮**的那几维：procs 模式帧预算恒为 0（requested_frames
+        # 却有个默认 30），照老写法比一下永远「降了档」，status 里那句「已降档」就成了噪音。
+        _down = bool(hit["batch"] < plan["requested_batch"]
+                     or hit["procs"] < plan["requested_procs"])
+        if mode != "procs":
+            _down = _down or bool(hit["frames"] < plan["requested_frames"])
         plan.update({"ok": True, "frames": int(hit["frames"]), "batch": int(hit["batch"]),
                      "procs": int(hit["procs"]), "batch_mb": hit["batch_mb"],
-                     "peak_mb": hit["need_mb"],
-                     "downgraded": bool(hit["frames"] < plan["requested_frames"]
-                                        or hit["batch"] < plan["requested_batch"]
-                                        or hit["procs"] < plan["requested_procs"])})
+                     "peak_mb": hit["need_mb"], "downgraded": _down})
         plan["frame_budget"] = int(plan["frames"])
         plan["reason"] = ("装得下：请求 (帧 %d / 批 %d / 进程 %d) → 实际 (帧 %d / 批 %d / 进程 %d)"
                           % (plan["requested_frames"], plan["requested_batch"],
@@ -9512,6 +10107,11 @@ def _vram_refuse_msg(plan: dict, what: str = "这个任务") -> str:
              % (int(plan.get("ctx_mb") or _VRAM_CTX_MB) / 1024.0,
                 max(1, min(nproc, int(plan.get("procs") or 1)))),
              "检测/遮罩 %.2f GB" % (float(plan.get("aux_mb") or 0.0) / 1024.0)]
+    if float(plan.get("sess_extra_mb") or 0.0) > 0:
+        parts.append("运行时工作集 %.2f GB × %d（%s）"
+                     % (float(plan.get("sess_extra_mb") or 0.0) / 1024.0,
+                        max(1, min(nproc, int(plan.get("procs") or 1))),
+                        plan.get("sess_src") or "标定值"))
     if int(plan.get("frames") or 0):
         parts.append("帧缓冲 %d×%.2f MB"
                      % (int(plan.get("frames") or 0),
@@ -9542,7 +10142,13 @@ def _vram_log_lines(plan: dict, tag: str = "") -> list:
     src = str(plan.get("source") or "?")
     if plan.get("free_mb") is None:
         return ["%s：显存探不到（%s）→ %s" % (tag, src, plan.get("reason") or "不降档")]
-    lines = ["%s：显存 空闲 %s / 共 %s MB（%s）· 预算 %.0f MB = 空闲 − 预留 %.0f MB"
+    lines = ["%s：模型 参数量 %s · 权重 %.0f MB（%s）· 输入 %s px（%s）· 非权重 %.1f MB"
+             % (tag, ("%.1fM" % float(plan.get("params_m")))
+                if plan.get("params_m") else "?",
+                float(plan.get("model_mb") or 0), str(plan.get("model_mb_src") or "?"),
+                plan.get("size_px") or "?", str(plan.get("size_px_src") or "?"),
+                float(plan.get("non_weight_mb") or 0.0)),
+             "%s：显存 空闲 %s / 共 %s MB（%s）· 预算 %.0f MB = 空闲 − 预留 %.0f MB"
              "（max(%d MB, 空闲×%d%%)）+ 可回收 %.0f MB"
              % (tag, plan.get("free_mb"), plan.get("total_mb") or "?", src,
                 float(plan.get("avail_mb") or 0.0),
@@ -9562,17 +10168,22 @@ def _vram_log_lines(plan: dict, tag: str = "") -> list:
                  else "（已回收 %.0f MB / %.0fms）"
                       % (float(plan.get("reclaimed_mb") or 0.0),
                          float(plan.get("reclaim_ms") or 0.0)))),
-             "%s：需求拆项 模型 %.0f + context %d%s + 检测/遮罩 %.0f MB/份"
+             "%s：需求拆项 模型 %.0f + context %d%s%s + 检测/遮罩 %.0f MB/份"
              " + 帧 %d×%.2f + dfm 批 %s MB（ORT arena %d MB 含在预留里）"
              % (tag, float(plan.get("model_mb") or 0), int(plan.get("ctx_mb") or 0),
                 ("（本进程已持有，不计入）" if plan.get("resident_mb") else ""),
+                ((" + 运行时工作集 %.0f（%s）" % (float(plan.get("sess_extra_mb") or 0),
+                                                 plan.get("sess_src") or ""))
+                 if float(plan.get("sess_extra_mb") or 0) > 0 else ""),
                 float(plan.get("aux_mb") or 0),
                 int(plan.get("frames") or 0), float(plan.get("frame_mb") or 0.0),
                 plan.get("batch_mb") if plan.get("batch_mb") is not None else "?",
                 int(plan.get("arena_mb") or 0))]
     if plan.get("mode") == "procs":
-        lines.append("%s：计划 %d 个 worker（请求 %d）· 预计峰值 %.0f MB"
-                     % (tag, int(plan.get("procs") or 1), int(plan.get("requested_procs") or 1),
+        lines.append("%s：计划 %d 个 worker × %d 线程（请求 %d × %d）· 预计峰值 %.0f MB"
+                     % (tag, int(plan.get("procs") or 1), int(plan.get("batch") or 1),
+                        int(plan.get("requested_procs") or 1),
+                        int(plan.get("requested_batch") or 1),
                         float(plan.get("peak_mb") or plan.get("need_mb") or 0)))
     else:
         lines.append("%s：计划 帧预算 %d / dfm 批 %d%s · 预计峰值 %s（可用 %.0f MB）%s"
