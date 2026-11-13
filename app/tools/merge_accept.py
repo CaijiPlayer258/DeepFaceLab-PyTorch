@@ -367,8 +367,14 @@ SNAP_JS = r"""
   var vid = q("#mgPreview");
   var frm = st ? st.querySelector("img.mgfrm") : null;
   var videoMode = !!(window.mgVideoMode && window.mgVideoMode());
-  var cur = videoMode ? vid : frm;
-  var other = videoMode ? frm : vid;
+  /* 舞台上其实有两层：
+       #mgPreview（= vid）—— 合成结果，盖在上面；
+       img.mgfrm    —— 底图（原片），帧目录 / DFL 项目模式走它。
+     「当前真正在画的那张」= 合成层有图就它，否则底图。旧脚本按「视频模式→合成层、
+     项目模式→底图」二选一，于是项目模式下合成成功也看不出来（断言盯着底图）。 */
+  var ovShown = !!(vid && vid.src && vid.style.display !== "none");
+  var cur = ovShown ? vid : frm;
+  var other = ovShown ? frm : vid;
   var cv = st ? st.querySelector("canvas.mgovl") : null;
   var ink = -1;
   if (cv && cv.width && cv.height) {
@@ -383,7 +389,9 @@ SNAP_JS = r"""
     var nm = x.querySelector(".nm");
     return { n: nm ? String(nm.textContent||"").trim() : "",
              on: x.classList.contains("on"),
-             dfm: !!x.querySelector(".tag.ok") };
+             /* 「已导出 .dfm」的判定：以前挂 .tag.ok 徽标，徽标删掉后改挂行类名
+                has-dfm（renderMerge 里写的）。两个都认，旧版前端也不会误判成没有。 */
+             dfm: !!(x.classList.contains("has-dfm") || x.querySelector(".tag.ok")) };
   });
   var s = {};
   try {
@@ -408,10 +416,20 @@ SNAP_JS = r"""
     frameInput: (document.getElementById("mtlFrame")||{}).value || "",
     tlFrame: (window.MergeTimeline && window.MergeTimeline.getFrame) ? window.MergeTimeline.getFrame() : null,
     rawFaces: (window.mgFaceNoSwapIds ? window.mgFaceNoSwapIds() : []),
-    imgWhich: videoMode ? "#mgPreview" : "img.mgfrm",
+    imgWhich: ovShown ? "#mgPreview" : (frm ? "img.mgfrm" : "none"),
     imgLen: cur ? String(cur.src||"").length : -1,
     imgSig: cur ? String(cur.src||"").slice(0, 72) : "",
     otherLen: other ? String(other.src||"").length : -1,
+    /* 两层分开报：底图跟帧（时间轴）、合成层出图（预览）各断言各的 */
+    baseLen: frm ? String(frm.src||"").length : -1,
+    baseSig: frm ? String(frm.src||"").slice(0, 72) : "",
+    ovLen: vid ? String(vid.src||"").length : -1,
+    ovSig: vid ? String(vid.src||"").slice(0, 72) : "",
+    ovShown: ovShown,
+    view: ovShown ? "composed" : (frm ? "raw" : "none"),
+    canStartExport: (function(){ var b = document.getElementById("mgStartExport");
+      return !!(b && !b.disabled && b.offsetParent !== null); })(),
+    errs: (window.__mgAcceptErr || []).slice(-4),
     ink: ink,
     ovl: cv ? [cv.width, cv.height] : null,
     hint: hintEl ? (hintEl.style.display === "none" ? "" : String(hintEl.textContent||"").trim()) : "",
@@ -434,6 +452,23 @@ HOOK_JS = r"""
   if (window.__mgAcceptHooked) return 1;
   window.__mgAcceptHooked = 1;
   window.__mgAcceptNet = [];
+  /* 页面未捕获异常：window.onerror + unhandledrejection 全留栈。
+     CDP 的 Runtime.exceptionThrown 只来得及进 browser.console（限长 300 字符），
+     这里把完整 stack 存下来，FAIL 时随快照一起打。 */
+  window.__mgAcceptErr = [];
+  window.addEventListener("error", function(ev){
+    var e = ev && ev.error;
+    window.__mgAcceptErr.push({ kind: "error", msg: String((ev && ev.message) || e || ""),
+      where: String((ev && ev.filename) || "") + ":" + ((ev && ev.lineno) || 0) + ":" + ((ev && ev.colno) || 0),
+      stack: (e && e.stack) ? String(e.stack).slice(0, 800) : "" });
+    window.__mgAcceptErr = window.__mgAcceptErr.slice(-8);
+  });
+  window.addEventListener("unhandledrejection", function(ev){
+    var r = ev && ev.reason;
+    window.__mgAcceptErr.push({ kind: "unhandledrejection", msg: String((r && r.message) || r || ""),
+      where: "", stack: (r && r.stack) ? String(r.stack).slice(0, 800) : "" });
+    window.__mgAcceptErr = window.__mgAcceptErr.slice(-8);
+  });
   var of = window.fetch;
   window.fetch = function(u, o){
     var url = String((u && u.url) ? u.url : u);
@@ -513,6 +548,7 @@ class Round:
         self.opt = opt
         self.fh = log_fh
         self.items = []
+        self.browser = None          # FAIL 时把页面 console 一起打出来（见 _emit）
 
     def _emit(self, status, what, detail="", ctx=None):
         # 项目名里本来就有「：」，明细用 " · " 隔开，别出现「：：」
@@ -522,7 +558,13 @@ class Round:
         self.fh.write(head + "\n")
         print(head)
         if ctx is not None and status != "PASS":
-            line = "     实际：%s" % _short(ctx, 900)
+            if status == "FAIL" and self.browser is not None:
+                ctx = dict(ctx) if isinstance(ctx, dict) else {"ctx": ctx}
+                try:
+                    ctx["page_console"] = list(self.browser.console)[-4:]
+                except Exception:                       # noqa: BLE001
+                    pass
+            line = "     实际：%s" % _short(ctx, 1400)
             self.fh.write(line + "\n")
             print(line)
         self.fh.flush()
@@ -616,6 +658,7 @@ def run_round(idx, opt, log_fh):
 
         t_boot = time.time()
         browser = Browser(edge)
+        r.browser = browser                 # FAIL 时打页面 console（_emit 里用）
         if not browser.goto("http://127.0.0.1:%d/" % port):
             r.fail("打开界面", "readyState 一直不到 complete（%ds）" % T_PAGE,
                    {"url": "http://127.0.0.1:%d/" % port, "console": browser.console[-4:]})
@@ -699,14 +742,21 @@ def run_round(idx, opt, log_fh):
         # ---------- 4 时间轴：定位帧 ----------
         base = browser.js(SNAP_JS)
         _set_frame(browser, f1c)
+        # 断言看**底图**（img.mgfrm = 这一帧的原片）：合成层可能比底图晚到几百毫秒，
+        # 用它当「出图」证据会把「底图根本没跟帧」这个 bug 藏起来（旧版就是这样）。
+        # 只比 baseSig 不够：PNG 前 72 字符是签名 + IHDR，同尺寸的两帧一模一样
+        # （实测帧 0→600 长度 1468114→1608406，签名却完全相同）→ 必须连长度一起比。
         ok, s, dt = wait_snap(browser,
-                              lambda x: (x.get("imgLen") or -1) > 0 and
-                                        (x.get("imgSig") != base.get("imgSig") or x.get("imgLen") != base.get("imgLen")),
+                              lambda x: (x.get("baseLen") or -1) > 1000 and
+                                        (x.get("baseLen") != base.get("baseLen") or
+                                         x.get("baseSig") != base.get("baseSig")),
                               T_FRAME * opt.scale, 0.25)
-        r.ok(ok, "时间轴：定位帧", "帧 %d 出图（%s 长度 %s→%s · view=%s · %.2fs）"
-             % (f1c, (s or {}).get("imgWhich"), base.get("imgLen"), (s or {}).get("imgLen"),
+        r.ok(ok, "时间轴：定位帧", "帧 %d 底图换图（img.mgfrm 长度 %s→%s · view=%s · %.2fs）"
+             % (f1c, base.get("baseLen"), (s or {}).get("baseLen"),
                 (s or {}).get("view"), dt),
-             ctx=None if ok else {"snap": s, "frame": f1c, "base": base})
+             ctx=None if ok else {"snap": s, "frame": f1c, "base": base,
+                                  "clicked": "#mtlFrame change → MergeTimeline.setFrame(变帧)",
+                                  "expected": "img.mgfrm.src 换成第 %d 帧" % f1c})
 
         # ---------- 5 检测：出框 ----------
         # 前置：这一帧得真有脸，「不出框」才轮得到怪界面。用 /api/merge/detect 探
@@ -753,12 +803,14 @@ def run_round(idx, opt, log_fh):
         before = browser.js(SNAP_JS)
         _set_frame(browser, f2c)
         ok, s, dt = wait_snap(browser,
-                              lambda x: (x.get("imgLen") or -1) > 1000 and
-                                        (x.get("imgSig") != before.get("imgSig") or x.get("imgLen") != before.get("imgLen")),
+                              lambda x: (x.get("baseLen") or -1) > 1000 and
+                                        (x.get("baseLen") != before.get("baseLen") or
+                                         x.get("baseSig") != before.get("baseSig")),
                               T_FRAME * opt.scale, 0.25)
-        r.ok(ok, "时间轴：换帧换图", "帧 %d→%d · %s 换图（长度 %s→%s · %.2fs）"
-             % (f1c, f2c, (s or {}).get("imgWhich"), before.get("imgLen"), (s or {}).get("imgLen"), dt),
-             ctx=None if ok else {"snap": s, "before": before})
+        r.ok(ok, "时间轴：换帧换图", "帧 %d→%d · 底图换图（img.mgfrm 长度 %s→%s · %.2fs）"
+             % (f1c, f2c, before.get("baseLen"), (s or {}).get("baseLen"), dt),
+             ctx=None if ok else {"snap": s, "before": before,
+                                  "expected": "img.mgfrm.src 换成第 %d 帧" % f2c})
 
         # ---------- 7 预览：合成视图 ----------
         outs = [project.parent / (project.name + "_merged.mp4"), project / "merged.mp4"]
@@ -768,20 +820,25 @@ def run_round(idx, opt, log_fh):
         else:
             before = browser.js(SNAP_JS)
             idx_swap = int(before.get("tlFrame") if before.get("tlFrame") is not None else f2c)
-            # 没有「合成 / 原图」按钮了：让这一帧现算一次合成结果
+            # 合成结果贴在 #mgPreview 这一层（底图 img.mgfrm 是原片，永远不该有合成内容）。
+            # 先把这一层收掉，再让界面现算一次：能重新贴回来才算「合成视图」通了 ——
+            # 只盯着 src 有没有变是不够的（同帧同参数重算，字节一模一样，永远不会变）。
+            browser.eval('window.mgShowOverlay && window.mgShowOverlay(""), 1')
+            cleared = browser.js(SNAP_JS)
             browser.eval('window.mgCmpNow && window.mgCmpNow(), 1')
             ok, s, dt = wait_snap(browser,
-                                  lambda x: (x.get("imgLen") or -1) > 10000 and
-                                            (x.get("imgSig") != before.get("imgSig") or x.get("imgLen") != before.get("imgLen")),
+                                  lambda x: bool(x.get("ovShown")) and (x.get("ovLen") or 0) > 10000,
                                   T_PREVIEW * opt.scale, 0.25)
             api = browser.js(_js_fetch("/api/merge/merged/%d?w=900" % idx_swap))
             abody = (api or {}).get("body") or {}
-            r.ok(ok, "预览：合成视图", "帧 %d 显示成片（%s 长度 %s→%s · API %s/%d 字节 · %.2fs）"
-                 % (idx_swap, (s or {}).get("imgWhich"), before.get("imgLen"), (s or {}).get("imgLen"),
+            api_ok = (api or {}).get("status") == 200 and len(str(abody.get("png") or "")) > 10000
+            r.ok(ok and api_ok, "预览：合成视图",
+                 "帧 %d 合成层回填（#mgPreview 清空后 %s → %s · API %s/%d 字节 · %.2fs）"
+                 % (idx_swap, (cleared or {}).get("ovLen"), (s or {}).get("ovLen"),
                     (api or {}).get("status"), len(str(abody.get("png") or "")), dt),
-                 ctx=None if ok else {"merged_api": {"status": (api or {}).get("status"),
+                 ctx=None if (ok and api_ok) else {"merged_api": {"status": (api or {}).get("status"),
                                                      "error": abody.get("error")},
-                                      "snap": s, "hint": (s or {}).get("hint")})
+                                      "snap": s, "cleared": cleared, "hint": (s or {}).get("hint")})
 
         # ---------- 8 合成参数可采集 ----------
         st = (browser.js(SNAP_JS).get("settings")) or {}
@@ -799,7 +856,18 @@ def run_round(idx, opt, log_fh):
             r.skip("导出：取消已停止", "同上")
             return r.items
 
-        browser.eval('document.getElementById("mgStartExport2").click(), 1')
+        # 「开始导出」在工作台那颗（#mgExport）之后的导出设置页里（#mgStartExport）。
+        # 旧脚本点的是 #mgStartExport2 —— 那个按钮改版时已经删了，index.html 里查不到，
+        # getElementById 回 null → null.click() → 页面 Uncaught TypeError（整轮随之崩）。
+        ok, s, dt = wait_snap(browser, lambda x: bool(x.get("canStartExport")), T_MERGE_UI, 0.2)
+        if not ok:
+            r.fail("导出：任务已启动",
+                   "导出设置页没有可点的「开始导出」（#mgStartExport 缺失或被禁用 —— 0 个模型？）",
+                   {"snap": s})
+            r.skip("导出：进度推进", "见上一条")
+            r.skip("导出：取消已停止", "见上一条")
+            return r.items
+        browser.eval('document.getElementById("mgStartExport").click(), 1')
         ctrl = "/api/merge/export/status"
 
         def _ctx(b, extra=None):

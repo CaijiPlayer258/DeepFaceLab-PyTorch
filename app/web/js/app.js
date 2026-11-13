@@ -5342,6 +5342,38 @@ function mgStageEmpty(on) {
     }).catch(function () { return window.mvFrame(n); });
   };
 
+  /* ---------- 底图跟帧：项目 / 帧目录模式下一帧一发原图 ----------
+     底图是 img.mgfrm（原片），合成结果贴在上面的 #mgPreview。以前底图只在本帧
+     「无人脸」时才换（mgNoFaceFrame → mgRawFrame）：有人脸就只贴合成层，于是
+       · 合成慢一拍（项目模式 300~500ms）时画面钉在上一帧；
+       · 合成失败 / 没选模型 / 被取消时，画面**永远**停在上一帧 —— 看起来就是
+         「点时间轴不刷新」；
+       · 时间轴播放时更彻底：播放中本来就不发合成，整屏冻在第一帧。
+     现在底图和合成解耦：帧一变先换底图（只解码 + 缩放 + 编码，不检测不换脸），
+     合成到了再盖上去。单发在飞时只记「最新目标」，回来补最后一帧 —— 拖时间轴
+     连发几十帧也只补最后一张，不会排队排到画面走远。 */
+  var MG_BASE = { want: -1, busy: false };
+  function mgBaseFrame(n) {
+    if (mgVidPath()) return;                  /* 视频模式底图是 <video> 自己 */
+    MG_BASE.want = Math.max(0, parseInt(n, 10) || 0);
+    if (MG_BASE.busy) return;                 /* 在飞：记下最新目标，回来再补 */
+    mgBasePump();
+  }
+  function mgBasePump() {
+    if (MG_BASE.want < 0) return;
+    var n = MG_BASE.want;
+    MG_BASE.want = -1;
+    MG_BASE.busy = true;
+    function done() {
+      MG_BASE.busy = false;
+      if (MG_BASE.want >= 0) mgBasePump();
+    }
+    var p = null;
+    try { p = window.mgRawFrame(n); } catch (e) { p = null; }
+    if (p && p.then) p.then(done, done); else done();
+  }
+  window.mgBaseFrame = mgBaseFrame;
+
   /* ---------- 帧变化编排：清框 → 检测（画框）→ 合成（只换底图） ----------
      一条帧变化只从这里走。三件事，不是两次等待：
        ① 同步清框（canvas 描边 + chip 层），这一代检测一并作废；
@@ -5413,6 +5445,13 @@ function mgStageEmpty(on) {
 
     /* ① 帧要变了：先把框清干净（同步，不等任何回包） */
     window.mgInvalidateBoxes(opt.why || "frame", n);
+
+    /* ①-b 底图立刻跟到这一帧。合成还在路上（或根本不会来：无人脸 / 没模型 /
+       失败 / 播放中）时，画面也必须先动 —— 否则时间轴点了像没点。 */
+    if (!mgVidPath()) {
+      mgHideOverlay();                       /* 上一帧的合成图不能盖着新底图 */
+      mgBaseFrame(n);
+    }
 
     /* 播放中：只清框 + 一发「在飞就跳过」的检测，绝不发合成。
        一帧一发 4 秒的合成会把 worker 队列塞死（原来项目模式播放就是这样），
