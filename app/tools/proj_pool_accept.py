@@ -5,6 +5,7 @@ r"""项目模式（DFL 项目导出）批量协议的验收：真后端 + 真项
 
   a) 协议形状：一条请求带 k 帧、帧走裸字节块（不再 base64）、worker 用 k 个线程消费；
      status 里能读到 workers / batch / swap_p50，帧速从**预热之后**算。
+     这一段的请求体**不带** workers/batch —— 验的就是后端默认档（2×2）。
   b) 扫描表：workers × batch = 1×1 / 1×4 / 2×2 / 2×4 / 2×8 / 3×4
      → 每个档位的 帧/秒、显存峰值、worker 单帧 p50。
   c) 逐像素对拍：每档产物 vs 1×1 基准档 → mean LSB / 最大差 / 差异像素比例。
@@ -350,8 +351,13 @@ def run_export(clip, dfm, workers, batch, tag, force=True, cancel_after=None,
     body = {"project_dir": str(PROJ), "frames_dir": str(PROJ),
             "aligned_dir": str(PROJ / "aligned"), "merged_dir": str(md),
             "video": str(clip), "out_video": str(out), "model": Path(str(dfm)).stem,
-            "settings": dict(SETTINGS), "quality": 92, "force": bool(force),
-            "workers": int(workers), "batch": int(batch)}
+            "settings": dict(SETTINGS), "quality": 92, "force": bool(force)}
+    # workers/batch = None → **请求体里不带这两个键**，让后端走自己那份默认档
+    # （A 段就是靠这个证明「默认 = 2×2」，而不是脚本把 2×2 塞进去）。
+    if workers is not None:
+        body["workers"] = int(workers)
+    if batch is not None:
+        body["batch"] = int(batch)
     t0 = time.time()
     with VramWatch() as vw:
         st, d = post("/api/merge/export-project", body)
@@ -377,7 +383,14 @@ def run_export(clip, dfm, workers, batch, tag, force=True, cancel_after=None,
             time.sleep(0.6)
         peak = vw.peak
     files = frames_in(md)
-    return {"tag": tag, "workers": int(workers), "batch": int(batch),
+    return {"tag": tag,
+            # 实际并行度以 status 回显为准（不传时就是服务端默认档）
+            "workers": int(snap.get("workers") if snap.get("workers") is not None
+                           else (workers or 0)),
+            "batch": int(snap.get("batch") if snap.get("batch") is not None
+                         else (batch or 0)),
+            "req_workers": workers, "req_batch": batch,
+            "log": list(snap.get("log") or []),
             "fps": snap.get("frame_fps"), "done": int(snap.get("done") or 0),
             "swap_p50": snap.get("swap_p50"), "swap_elapsed": snap.get("swap_elapsed"),
             "elapsed": snap.get("elapsed"), "phase": snap.get("phase"),
@@ -428,8 +441,8 @@ def cmp_dirs(a, b):
 # A · 协议形状 / 默认档
 # ============================================================
 def case_a(clip, dfm, nframes):
-    head("A · 协议形状：一次请求 k 帧 + 裸字节 + worker 内 k 线程（默认 2×4）")
-    r = run_export(clip, dfm, 2, 4, "a_default")
+    head("A · 协议形状：一次请求 k 帧 + 裸字节 + worker 内 k 线程（默认档 2×2）")
+    r = run_export(clip, dfm, None, None, "a_default")     # 不传 workers/batch = 默认档
     check(not r.get("error"), "A 默认档跑完", r.get("error") or "phase=%s" % r.get("phase"))
     check(r.get("phase") == "done" and r.get("files") == nframes,
           "A 产物帧数对", "%s 帧（源 %d）" % (r.get("files"), nframes))
@@ -439,9 +452,12 @@ def case_a(clip, dfm, nframes):
            r.get("swap_p50")))
     # ---- 协议形状的三条硬证据 ----
     # 1) status 回显 workers/batch（_proj_set 写进作业状态，跑完仍在）
-    check(int(r.get("workers") or 0) == 2 and int(r.get("batch") or 0) == 4,
-          "A status 回显 workers=2 / batch=4",
+    check(int(r.get("workers") or 0) == 2 and int(r.get("batch") or 0) == 2,
+          "A status 回显默认档 workers=2 / batch=2（2×2，请求体没带这两个键）",
           "workers=%s batch=%s" % (r.get("workers"), r.get("batch")))
+    # 默认档的进度日志必须写着 2×2（排障时第一眼要看的就是这一行）
+    pline = next((x for x in (r.get("log") or []) if "个 worker 进程" in str(x)), "")
+    check("每进程 2 帧并行" in str(pline), "A 默认档日志写着 2×2", pline or "没找到「并行：」日志")
     # 2) 真正落盘的那份 worker 脚本里同时有「批量 + 裸字节块」两件事
     scripts = sorted((TEMP / "dfl41_merge_preview").glob("preview_worker_*.py"),
                      key=lambda x: x.stat().st_mtime)
@@ -506,6 +522,23 @@ def case_b(clip, dfm, base_row=None):
     check(float(best.get("fps") or 0) >= float(slow.get("fps") or 0),
           "B 最优档不是 1×1（批处理确实赚到了）",
           "最优 %s vs 最慢 %s" % (best.get("tag"), slow.get("tag")))
+    # 默认档就是这张表选出来的（2×2）。但要分清哪一维是硬的：
+    #   · 帧速：两档会在 ~7% 的轮间抖动里**互相反超**（实测 2×2 13.5~14.5 / 2×4 13.3~14.7，
+    #     1×1 与 1×4 两档倒一直很稳）—— 所以只报数字，不钉谁第一；
+    #   · 显存：每次都是 2×2 低（6881 vs 7701、7062 vs 7720、5689 vs 7751）—— 钉这个。
+    def _row(w, b):
+        return next((x for x in rows if int(x.get("workers") or 0) == w
+                     and int(x.get("batch") or 0) == b), None)
+    r22, r24 = _row(2, 2), _row(2, 4)
+    if r22 and r24 and r22.get("vram_peak_mb") and r24.get("vram_peak_mb"):
+        say("默认档 2×2 vs 2×4：%.2f vs %.2f 帧/秒（抖动内互有反超）· 显存 %s vs %s MB"
+            % (float(r22.get("fps") or 0), float(r24.get("fps") or 0),
+               r22.get("vram_peak_mb"), r24.get("vram_peak_mb")))
+        check(int(r22["vram_peak_mb"]) < int(r24["vram_peak_mb"]),
+              "B 默认档 2×2 显存低于 2×4（换默认的硬理由：8GB 卡留余量）",
+              "%s MB vs %s MB（低 %d MB）"
+              % (r22["vram_peak_mb"], r24["vram_peak_mb"],
+                 int(r24["vram_peak_mb"]) - int(r22["vram_peak_mb"])))
     return rows
 
 
@@ -547,10 +580,10 @@ def case_c(rows):
 # ============================================================
 def case_d(clip, dfm, nframes):
     head("D · 断点续跑：中途取消 → 游标正确 → 续跑产物与一次跑完一致")
-    full = run_export(clip, dfm, 2, 4, "d_full")
+    full = run_export(clip, dfm, None, None, "d_full")
     check(full.get("phase") == "done" and full.get("files") == nframes,
           "D 一次跑完（基准）", "%s 帧 · %.2f 帧/秒" % (full.get("files"), float(full.get("fps") or 0)))
-    cut = run_export(clip, dfm, 2, 4, "d_cut", cancel_after=max(4, nframes // 3))
+    cut = run_export(clip, dfm, None, None, "d_cut", cancel_after=max(4, nframes // 3))
     check(cut.get("phase") == "cancelled", "D 取消落地（终态 cancelled）",
           "phase=%s done=%s files=%s" % (cut.get("phase"), cut.get("done"), cut.get("files")))
     check(int(cut.get("done") or 0) == int(cut.get("files") or 0),
@@ -565,7 +598,7 @@ def case_d(clip, dfm, nframes):
     prefix_ok = bool(nums) and nums == list(range(nums[0], nums[0] + len(nums)))
     check(prefix_ok, "D 取消后留下的是前缀（编号连续、没有洞）",
           "%s…%s（%d 帧）" % (names[:1], names[-1:], len(names)))
-    resumed = run_export(clip, dfm, 2, 4, "d_resumed", force=False)
+    resumed = run_export(clip, dfm, None, None, "d_resumed", force=False)
     check(resumed.get("phase") == "done" and resumed.get("files") == nframes,
           "D 续跑补齐到满", "%s 帧（跳过 %s）" % (resumed.get("files"), nframes - len(names)))
     d = cmp_dirs(Path(full["dir"]), Path(resumed["dir"]))

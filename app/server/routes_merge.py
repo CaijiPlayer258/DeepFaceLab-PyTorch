@@ -3858,7 +3858,8 @@ def _proj_workers_default() -> int:
 
     一份 dfm session 实测 2.07GB；8GB 卡上 2 份就是 ~4.2GB，第 3 份开始 spill
     （显存不够时驱动把 CUDA 页换到主存，单帧直接掉到 900ms+，实测 3 进程 1.32 帧/秒）。
-    所以默认不再"按核数往上堆"—— 往上堆的是**每进程的线程数**（_proj_batch_default）。
+    所以默认不再"按核数往上堆"—— 真正的旋钮是**每进程的线程数**
+    （_proj_batch_default，ROI 之后 2 线程正好：再往上就是几个线程抢同一台机器的 CPU）。
     """
     try:
         n = int(str(os.environ.get("DFL_PROJ_WORKERS") or "").strip() or 0)
@@ -3871,11 +3872,21 @@ def _proj_workers_default() -> int:
 
 
 def _proj_batch_default() -> int:
-    """一次请求带几帧 = worker 内部同时跑几帧：默认 4（DFL_PROJ_BATCH 可覆盖）。
+    """一次请求带几帧 = worker 内部同时跑几帧：默认 2（DFL_PROJ_BATCH 可覆盖）。
 
-    实测（一份 session、1080x1920、真项目 A/frames、fmt=png）：k=1 507ms/帧、
-    k=4 244、k=8 223 —— 4 已经吃掉大部分重叠收益，再往上只是把内存带宽摊薄
-    （本机 numpy 逐元素运算 8 线程相对单线程只有 1.27x 聚合）。所以 k=4。
+    这个默认值是**跟着 ROI 化重定的**（见 18-MERGE-ROI.md）：合成单帧从 288ms 砍到
+    137ms、每帧的 CPU 活少了一半之后，「几个线程抢同一台机器的 CPU」开始亏。同一台
+    机器、同一个真项目（1080x1920、416 的 dfm，proj_pool_accept 沙箱）重跑扫描表：
+
+        1×1  8.21 帧/秒  2470MB        1×4 11.66  4626MB
+        2×2 13.61        6881MB   ← 最优，显存还更低
+        2×4 12.62        7701MB   （改造前的默认档）
+
+    那一轮 2×2 最快（13.61 vs 2×4 的 12.62），后来的重跑则显示这两档**帧速同档**：
+    2×2 稳在 13.5~14.5，2×4 在 13.2~16.5 之间大跳（4 个线程抢 CPU，时快时慢）；每次
+    都成立的差别是**显存少 0.7~1.0GB**。默认取 2 买的就是这 1GB 余量（8GB 卡上 2×4
+    已经贴到 7.5~7.7GB，再往上一档 2×8/3×4 直接 spill 到 2 帧/秒）。显存装不下时仍由
+    _vram_plan 先砍**进程数**（merge_export_project 的 procs 封顶），这个值不兜底。
     """
     try:
         n = int(str(os.environ.get("DFL_PROJ_BATCH") or "").strip() or 0)
@@ -3883,7 +3894,7 @@ def _proj_batch_default() -> int:
         n = 0
     if n > 0:
         return max(1, min(_PREVIEW_MAX_BATCH, n))
-    return 4
+    return 2
 
 
 def _proj_send_raw() -> bool:
@@ -5911,6 +5922,8 @@ def _proj_run(cfg: dict):
                        % (int(vplan["procs"]), int(vplan.get("requested_procs") or 0),
                           int(vplan["procs"])))
     want_workers = max(1, min(int(want_workers), int(total) or 1, 16))
+    # 批量默认 = 2（= 默认档 2×2；DFL_PROJ_BATCH / 请求体 batch 都能覆盖）。
+    # 显存不够时先砍进程数（vplan.procs），不砍 batch —— 砍 batch 只会让每进程更闲。
     batch = int(cfg.get("batch") or _proj_batch_default())
     batch = max(1, min(int(batch), _PREVIEW_MAX_BATCH, int(total) or 1))
 
@@ -6341,9 +6354,11 @@ def merge_export_project(body: dict):
       workers       可选，并行 worker 进程数（默认 2）。每个 worker 是一份独立的
                     dfm session（一份 ~2.07GB），显存装不下几个就只用几个，
                     实际值回在 status.workers 里。
-      batch         可选，一条请求里带几帧（默认 4）。worker 内部用同样多个线程并行
+      batch         可选，一条请求里带几帧（默认 2）。worker 内部用同样多个线程并行
                     处理这一批，主进程每个 worker 维持 batch 个在飞槽位；
                     workers×batch = 同时在飞的帧数，实际值回在 status.batch 里。
+                    默认档因此是 **2×2**（与 2×4 帧速同档、显存少 0.7~1.0GB，
+                    扫描表与重跑数据见 17-PROJ-BATCH.md 四/五）。
     """
     body = _as_dict(body)
     project = _norm_path(body.get("project_dir") or body.get("project"))

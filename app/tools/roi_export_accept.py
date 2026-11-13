@@ -4,7 +4,7 @@ r"""ROI 版项目导出的端到端验收：真后端 + 真项目 + 两档并行
 验的是「合成器只算 ROI」这件事在**整条链路**上也成立：
   P) 组一个真项目（切帧 + 切脸走仓库自己的 stage 接口，默认 120 帧）
   X) 1×1（一帧一请求）：DFL_MERGE_ROI=0 vs =1 → merged/ 逐字节/逐像素对比 + 帧率
-  Y) 2×4（2 进程 × 4 线程）：同上（这是默认档）
+  Y) 2×4（2 进程 × 4 线程）：同上（改默认档之前的默认档，留着做前后对照）
   Z) 断点续跑：ROI=1 跑到一半取消 → 续跑 → 与一次跑完逐字节一致
   W) 汇总表：档位 · 帧/秒 · 单帧 p50 · 像素结论
 
@@ -453,7 +453,7 @@ def main():
                  a.get("swap_p50"), b.get("swap_p50")))
 
     if "Y" in cases:
-        head("Y · 2×4（默认档）：像素与帧率")
+        head("Y · 2×4（改默认档之前的默认档）：像素与帧率")
         a, b = rows.get("roi0_2x4"), rows.get("roi1_2x4")
         check(a and b and a.get("phase") == "done" and b.get("phase") == "done",
               "Y 两档都跑完", "%s / %s" % (a.get("phase"), b.get("phase")))
