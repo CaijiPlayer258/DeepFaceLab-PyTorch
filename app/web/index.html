@@ -975,18 +975,11 @@
                     </div>
                   </span>
                 </div>
-                <div class="cfgrow">
-                  <span class="cl">质量</span>
-                  <!-- MISSING: 4.0 后端 ExportStartRequest 没有质量字段，
-                       _stage1_extract_frames 固定 -q:v 2（export_pipeline.py:1272）；
-                       这里只按设计稿占位，禁用且不随导出请求提交 -->
-                  <span class="cd">4.0 固定 -q:v 2，无此参数</span>
-                  <span class="cc">
-                    <input class="inp rng" id="mgQuality" type="number" min="1" max="100" value="95"
-                           title="4.0 固定 -q:v 2，无此参数" disabled>
-                    <span class="unit">%</span>
-                  </span>
-                </div>
+                <!-- 「质量」这一行**已删除**（用户口径）：帧图 JPEG 固定 quality=100 + 4:4:4
+                     （app/server/routes_merge.py 的 _STAGE_JPEG_QUALITY），PNG 本来就无损。
+                     以前那颗 95 的输入框既不可编辑、后端也从来没读过它 —— 一个动不了又
+                     不生效的旋钮只会让人以为画质是这里定的。低画质没有使用场景，不留。
+                     真要排障：body.jpeg_quality 仍然认（1..100，默认 100），只是界面不再暴露。 -->
                 <div class="cfgrow cfgpathrow">
                   <div class="inp mono pathinp cfgpath" style="flex:1 1 auto;width:auto;min-width:0">
                     <span class="lb" title="留空 = 源视频名_result.mp4">输出路径</span>
@@ -1076,14 +1069,14 @@
         <div class="mgview" data-view="progress">
           <div class="mgprog">
             <div class="mgprog-hd">
-              <b>正在导出</b>
+              <b id="mgpHdTitle">正在导出</b>
               <span class="mgprog-file" id="mgpFile">—</span>
             </div>
 
-            <div class="mgprog-bar">
+            <div class="mgprog-bar" id="mgpBar">
               <i id="mgpFill" style="width:0%"></i>
             </div>
-            <div class="mgprog-meta">
+            <div class="mgprog-meta" id="mgpMeta">
               <span id="mgpPct">0%</span>
               <span id="mgpFrames">—</span>
               <span id="mgpEta">剩余 —</span>
@@ -1091,7 +1084,7 @@
 
             <!-- 六步动画：直接复用「模型转换」那套 Stepper（节点 + 连线 + 当前步高亮），
                  文案换成 切帧 → 切脸 → 换脸 → 遮罩 → 合成 → 导出。每完成一个阶段推进一格。 -->
-            <div class="mgprog-steps">
+            <div class="mgprog-steps" id="mgpStepsBox">
               <div class="cvsteps" id="mgpSteps">
                 <div class="cvst" id="mgpS1" data-s="frames">
                   <div class="cvline"><i></i></div>
@@ -1123,13 +1116,15 @@
                  导出中 hidden（这时只有下面那颗「取消导出」）；终态一出来就顶上来，
                  给「返回导出设置」和「再次导出」两个出口，参数一个都不丢。 -->
             <div class="mgprog-res" id="mgpResult" hidden>
-              <div class="mgprog-res-hd">结果</div>
+              <div class="mgprog-res-hd" id="mgpResultHd">结果</div>
+              <!-- 一行结论：完成路径 = 成片/取消说明；被拒路径 = 「显存不足：需要 X GB，可用 Y GB」 -->
+              <div class="mgprog-res-txt" id="mgpResultText"></div>
               <div class="mgprog-res-acts">
                 <button class="btn" id="mgpToSettings" type="button">返回导出设置</button>
               </div>
             </div>
 
-            <div class="mgprog-foot">
+            <div class="mgprog-foot" id="mgpFoot">
               <button class="btn" id="mgpCancel">取消导出</button>
             </div>
           </div>

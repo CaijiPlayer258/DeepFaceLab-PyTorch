@@ -6528,7 +6528,136 @@ function mgStageEmpty(on) {
       }
     }
 
+    /* ---------- 「被拒绝」态（显存不足）----------
+       和「失败」不是一回事：后端在**起 job 之前**就 400 了，一个字节都没跑。
+       所以六步 / 进度条 / 帧数 / 取消键全部收起，只留一行错误 + 「返回导出设置」。
+       以前这里把六步画成「并行中」就那么停着，用户看到的是"跑过、然后全失败"。 */
+    function mgpRejectShow(d) {
+      d = d || {};
+      var box = $("mgpResult");
+      var txt = $("mgpResultText");
+      var hd = $("mgpResultHd");
+      var cb = $("mgpCancel");
+      if (cb) cb.hidden = true;
+      ["mgpStepsBox", "mgpBar", "mgpMeta", "mgpFoot"].forEach(function (id) {
+        var el = $(id);
+        if (el) el.hidden = true;
+      });
+      /* 小标题（"结果"）在拒绝态是多余的：卡片大标题已经写了「导出未启动」 */
+      if (hd) hd.hidden = true;
+      var ttl = $("mgpHdTitle");
+      if (ttl) ttl.textContent = "导出未启动";          /* 卡片标题也别再说"正在导出" */
+      if (txt) {
+        var line = mgVramLine(d);
+        var tip = mgVramAdvice(d);
+        txt.textContent = tip ? (line + " · " + tip) : line;
+      }
+      if (box) { box.hidden = false; box.classList.add("is-rej"); }
+      var pct = $("mgpPct"); if (pct) pct.textContent = "0%";
+      var fill = $("mgpFill"); if (fill) fill.style.width = "0%";
+      return box;
+    }
+    /* 回到「正常进度页」的样子（用户改完设置再点一次时先把拒绝态收起来） */
+    function mgpRejectHide() {
+      var box = $("mgpResult");
+      if (box) box.classList.remove("is-rej");
+      var hd = $("mgpResultHd");
+      if (hd) { hd.hidden = false; hd.textContent = "结果"; }
+      var ttl = $("mgpHdTitle");
+      if (ttl) ttl.textContent = "正在导出";
+      ["mgpStepsBox", "mgpBar", "mgpMeta", "mgpFoot"].forEach(function (id) {
+        var el = $(id);
+        if (el) el.hidden = false;
+      });
+    }
+    window.mgpRejectShow = mgpRejectShow;
+    window.mgpRejectHide = mgpRejectHide;
+
+    /* 显存数字 -> 「需要 2.44 GB，可用 0.60 GB」（后端 400 里的 need_mb / avail_mb） */
+    function mgGb(mb) {
+      var n = Number(mb);
+      if (!isFinite(n) || n < 0) return "";
+      return (n / 1024).toFixed(2) + " GB";
+    }
+    function mgVramLine(d) {
+      d = d || {};
+      var need = mgGb(d.need_mb), avail = mgGb(d.avail_mb);
+      if (!need || !avail) {
+        return String(d.error || d.detail || "显存不足").split("\n")[0];
+      }
+      return "显存不足：需要 " + need + "，可用 " + avail;
+    }
+    function mgVramAdvice(d) {
+      var s = (d && d.suggest) || [];
+      return String(s[0] || "").trim();
+    }
+    /* 同一条拒绝 4 秒内只弹一次（连点导出不叠 toast） */
+    var MG_VRAM_TOAST = { at: 0, text: "" };
+    function mgVramToast(d) {
+      var line = mgVramLine(d);
+      var now = Date.now();
+      if (line === MG_VRAM_TOAST.text && (now - MG_VRAM_TOAST.at) < 4000) return null;
+      MG_VRAM_TOAST.at = now;
+      MG_VRAM_TOAST.text = line;
+      return toast(line, mgVramAdvice(d) || "关掉占 GPU 的程序后重试", "error", 7000);
+    }
+    /* 被拒的统一收口：**一次**提示 + 拒绝态 + 复位三个忙闲位（还能再点一次）。
+       被拒也要进进度页：用户口径是「只显示一行错误 + 返回导出设置」——
+       停在设置页虽然也能再点，但就没有那个明确的出口和结论了。 */
+    function mgVramReject(d) {
+      window.__mergeExporting = false;
+      window.__mgStageRunning = false;
+      window.__mgFusedRunning = false;
+      window.__mgVramChecking = false;
+      var cb = $("mgpCancel");
+      if (cb) { cb.disabled = false; cb.textContent = "取消导出"; }
+      if (window.mgStep) window.mgStep("progress");
+      mgpRejectShow(d || {});
+      mgVramToast(d || {});
+      return false;
+    }
+    window.mgVramReject = mgVramReject;
+
+    /* 起 job 之前的显存预检：POST 同一份 body + dry_run=1。
+       后端只算账（_vram_plan：不加载模型、不建 job、不开线程）：
+         · 200 → 照常开跑；
+         · 400 + need_mb/avail_mb/suggest → 这里就收口（**一次** toast + 拒绝态）；
+         · 别的失败 → 不挡路，交给真请求自己报（免得两套错误文案）。
+       回调 cb(proceed)：proceed=false 表示已经处理完（别开跑）。 */
+    function mgVramPreflight(body, cb) {
+      var probe = {};
+      for (var k in body) {
+        if (Object.prototype.hasOwnProperty.call(body, k)) probe[k] = body[k];
+      }
+      probe.dry_run = 1;
+      var fired = false;                      /* 回调只许走一次：重复进 mgFusedStart 会发两次 POST */
+      fetch("/api/merge/export", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(probe)
+      }).then(function (r) {
+        return r.json().then(function (d) { return { status: r.status, ok: r.ok, d: d || {} }; });
+      }).then(function (res) {
+        if (fired) return;
+        var d = res.d || {};
+        if (res.ok && d.ok !== false) { fired = true; cb(true, d); return; }
+        if (res.status === 400 && d.need_mb != null) {
+          fired = true;
+          mgVramReject(d);                    /* 一次 toast + 拒绝态 + 复位忙闲位 */
+          cb(false, d);
+          return;
+        }
+        fired = true;
+        cb(true, d);                          /* 别的错误交给真请求自己报 */
+      }).catch(function () {                  /* 预检自己挂了：别把用户挡在门外 */
+        if (fired) return;
+        fired = true;
+        cb(true, {});
+      });
+    }
+    window.mgVramPreflight = mgVramPreflight;
+
     function mgpReset() {
+      mgpRejectHide();
       var nodes = mgpNodes();
       for (var k = 0; k < nodes.length; k++) {
         nodes[k].className = "cvst";
@@ -6559,6 +6688,9 @@ function mgStageEmpty(on) {
       d = d || {};
       var box = $("mgpResult");
       var txt = $("mgpResultText");
+      /* 上一轮可能是「被拒绝」态（六步/进度条收起来了）：这里要恢复回来，
+         否则一次拒绝之后再跑成功，进度页还是只剩一行字。 */
+      mgpRejectHide();
       var cb = $("mgpCancel");
       if (cb) cb.hidden = true;               /* 终态不再有「取消导出」 */
       if (txt) {
@@ -6693,6 +6825,9 @@ function mgStageEmpty(on) {
         body: JSON.stringify(body)
       }).then(function (r) {
         return r.json().then(function (d) {
+          /* 显存拒绝是「这一单没开始」，不是「这个阶段失败」：不标红、不重试，
+             直接走被拒态（一行提示 + 返回导出设置）。 */
+          if (r.status === 400 && d && d.need_mb != null) throw { __vram: d };
           if (!r.ok || d.ok === false) throw new Error(d.error || d.detail || ("HTTP " + r.status));
           return d;
         });
@@ -6711,6 +6846,11 @@ function mgStageEmpty(on) {
         mgpStatusPaint(d, idx);
         mgpPollStage(idx, body, next);
       }).catch(function (e) {
+        if (e && e.__vram) {                 /* 起 job 之前就被显存挡下：一次提示，不标红 */
+          mgpTrace({ stage: st, ev: "vram-refuse", msg: mgVramLine(e.__vram) });
+          mgVramReject(e.__vram);
+          return;
+        }
         var msg = String((e && e.message) || e);
         /* 长任务跑完那一拍偶尔掉一次连接（网络层抖动）：重试一次。
            后端明确报的错（HTTP 4xx/5xx 带 error 文本）不重试，免得把真错误刷掉。 */
@@ -6736,8 +6876,9 @@ function mgStageEmpty(on) {
         toast("没有素材", "先在工作台导入一段视频", "warn");
         return;
       }
-      if (window.__mergeExporting || window.__mgStageRunning) {
-        toast("正在导出", "上一次还没结束", "info");
+      if (window.__mergeExporting || window.__mgStageRunning || window.__mgVramChecking) {
+        /* 连点：2 秒内只弹一条（幂等 —— 上一次还在跑/还在预检，再点不该叠 toast） */
+        mgToastOnce("merge-busy", "正在导出", "上一次还没结束", "info");
         return;
       }
       var body = {
@@ -6767,6 +6908,19 @@ function mgStageEmpty(on) {
       if (!isNaN(frameFrom) && frameFrom > 0) body.start_frame = frameFrom;
       var frameTo = parseInt(payload.frame_to, 10);
       if (!isNaN(frameTo) && frameTo > 0) body.end_frame = frameTo;
+
+      /* ★ 显存预检（dry_run）：分段链有六个阶段，但显存是**一条链共用的**。
+         在这里问一次，装不下就整条拒绝 —— 不然六个阶段会各失败一次
+         （六步全红 + 好几条一样的 toast，用户看到的是"跑过又失败"）。 */
+      window.__mgVramChecking = true;
+      mgVramPreflight(body, function (proceed) {
+        window.__mgVramChecking = false;
+        if (!proceed) return;
+        mgStageStart(payload, body);
+      });
+    }
+    /* 预检通过之后真正开始六阶段链 */
+    function mgStageStart(payload, body) {
       window.__mergeExporting = true;
       window.__mgStageRunning = true;
       mgpStopPoll();
@@ -6879,11 +7033,18 @@ function mgStageEmpty(on) {
 
     function mgFusedPoll() {
       mgFusedStopPoll();
+      /* fired：setInterval 不等异步回调 —— status 那一发要是慢过 500ms，会同时压着
+         两三个 tick 一起回来，每个都走一遍终态分支 = 同一条「导出完成」弹 2~3 次。
+         终态只许收一次口（这也是「连点/抖动不叠 toast」的一部分）。 */
+      var fired = false;
       MGP_FUSED_TIMER = setInterval(function () {
+        if (fired) return;
         fetch("/api/merge/export/status").then(function (r) { return r.json(); })
           .then(function (d) {
+            if (fired) return;
             mgpFusedPaint(d);
             if (d.running) return;
+            fired = true;
             mgFusedStopPoll();
             window.__mgFusedRunning = false;
             window.__mergeExporting = false;
@@ -6917,8 +7078,8 @@ function mgStageEmpty(on) {
         toast("没有素材", "先在工作台导入一段视频", "warn");
         return;
       }
-      if (window.__mergeExporting || window.__mgStageRunning) {
-        toast("正在导出", "上一次还没结束", "info");
+      if (window.__mergeExporting || window.__mgStageRunning || window.__mgVramChecking) {
+        mgToastOnce("merge-busy", "正在导出", "上一次还没结束", "info");
         return;
       }
       var body = {
@@ -6941,6 +7102,17 @@ function mgStageEmpty(on) {
       var frameTo = parseInt(payload.frame_to, 10);
       if (!isNaN(frameTo) && frameTo > 0) body.end_frame = frameTo;
 
+      /* ★ 显存预检（dry_run）：装不下就**在这里**收口 —— 不进进度页、不起 job。
+         以前是先把六步画成「并行中」，再把六步打红 + 三条一样的 toast。 */
+      window.__mgVramChecking = true;
+      mgVramPreflight(body, function (proceed) {
+        window.__mgVramChecking = false;
+        if (!proceed) return;                    /* 已被拒：toast + 拒绝态都出来了 */
+        mgFusedStart(payload, body);
+      });
+    }
+    /* 预检通过之后真正开跑（内容和以前一模一样，只是被包进了回调里） */
+    function mgFusedStart(payload, body) {
       window.__mergeExporting = true;
       window.__mgFusedRunning = true;
       window.__mgStageRunning = false;
@@ -6957,11 +7129,15 @@ function mgStageEmpty(on) {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
       }).then(function (r) {
-        return r.json().then(function (d) {
-          if (!r.ok || d.ok === false) throw new Error(d.error || d.detail || ("HTTP " + r.status));
-          return d;
-        });
-      }).then(function (d) {
+        return r.json().then(function (d) { return { status: r.status, ok: r.ok, d: d || {} }; });
+      }).then(function (res) {
+        var d = res.d || {};
+        /* 二次防线：预检和真请求之间显存可能被别人抢走 —— 这里同样按「被拒」收口，
+           不许只弹一条 toast 就把六步留在「并行中」。 */
+        if (res.status === 400 && d.need_mb != null) { mgVramReject(d); return; }
+        if (!res.ok || d.ok === false) {
+          throw new Error(d.error || d.detail || ("HTTP " + res.status));
+        }
         if (d.fused === false) { mgpFusedPaint({ running: true, msg: "后端走了分段链…", vid: {} }); }
         mgFusedPoll();
       }).catch(function (e) {
@@ -7200,6 +7376,7 @@ function mgStageEmpty(on) {
       toSet2.dataset.bound = "1";
       toSet2.addEventListener("click", function () {
         mgpResultHide();
+        if (window.mgpRejectHide) window.mgpRejectHide();   /* 拒绝态（六步收起）也一起复位 */
         mgStep("settings");
         mgFillExportSettings();
       });
@@ -7362,8 +7539,13 @@ function mgStageEmpty(on) {
     /* 新一轮导出：把上一轮留下的终态按钮字样（返回设置/重新导出）复位 */
     var cb0 = document.getElementById("mgpCancel");
     if (cb0) { cb0.textContent = "取消导出"; cb0.disabled = false; }
+    /* 和 mgFusedPoll 同一个道理：setInterval 不等异步回调，慢一拍就会几个 tick 同时
+       走终态分支 → 同一条结果 toast 弹好几次。终态只收一次口。 */
+    var fired = false;
     MERGE_POLL = setInterval(function () {
+      if (fired) return;
       fetch("/api/merge/export/status").then(function (r) { return r.json(); }).then(function (d) {
+        if (fired) return;
         var fill = document.getElementById("mgpFill");
         var pctEl = document.getElementById("mgpPct");
         var frEl = document.getElementById("mgpFrames");
@@ -7416,6 +7598,8 @@ function mgStageEmpty(on) {
         });
 
         if (!d.running) {
+          if (fired) return;
+          fired = true;
           clearInterval(MERGE_POLL); MERGE_POLL = null;
           window.__mergeExporting = false;
           /* 终态文案：成功「完成」· 取消「已取消」· 失败给 d.error 前 60 字（不再只闪 3.6 秒的 toast） */

@@ -5525,6 +5525,19 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 /* 终态时取消键自己藏起来 —— [hidden] 要能压过 .mgprog-foot .btn 的其它声明 */
 #p-merge .mgprog-foot #mgpCancel[hidden] { display: none !important; }
 
+/* ---------- 被拒绝（显存不足）：进度页只留一行错误 + 「返回导出设置」 ----------
+   用户口径（截图 2）：显存不够时**根本没开始**，这时候把六个阶段画成红的/黄的
+   会让人以为"跑过又失败了"。所以拒绝态把六步 / 进度条 / 帧数 / 取消键全部收起，
+   只留一句「显存不足：需要 X GB，可用 Y GB」和出口按钮。
+   .mgprog-bar / .mgprog-meta 自己有 display，得显式写 [hidden] 才压得住。 */
+#p-merge .mgprog-bar[hidden],
+#p-merge .mgprog-meta[hidden],
+#p-merge .mgprog-steps[hidden],
+#p-merge .mgprog-foot[hidden] { display: none !important; }
+#p-merge .mgprog-res.is-rej .mgprog-res-txt { color: #ef4444; }
+/* 出口按钮沿用结果面板那条「整行按钮」（app.css:5747 的 .mgprog-res .btn），
+   不在这里另起一套：拒绝态和完成/失败态长得一样，用户才认得出这是同一种卡。 */
+
 /* 导出进度 / 结果卡片居中，结果块只留一个按钮 */
 #p-merge .mgprog { margin-left: auto; margin-right: auto; }            /* mgprog-center-fix */
 #p-merge .mgprog-res { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }

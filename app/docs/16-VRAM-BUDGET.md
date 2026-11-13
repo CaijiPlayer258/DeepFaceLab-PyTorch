@@ -53,11 +53,44 @@ batch 4 起 ORT 的 arena 换到另一个池子 → 台阶不是直线，所以 
 拒绝点都放在**路由里**（不是 worker 线程里）：线程里抛异常只会变成「任务失败」，
 前端拿不到 400，也拿不到那句带数字的消息。
 
+### 3.1 拒绝发生在「起 job 之前」（截图 2 那一轮）
+
+用户点导出、显存不够时，**一个字节的任务都不许起**：不建 job、不加载模型、不开线程。
+四条入口各自先算账：
+
+| 入口 | 闸门 | 说明 |
+|---|---|---|
+| POST /api/merge/export（fused=1） | _vram_guard(mode=frames) | 帧预算 × dfm 批 |
+| POST /api/merge/export（fused=0） | _vram_guard(mode=none) | 分段链一次一帧，只有一份会话 |
+| POST /api/merge/stage/{name} | _stage_vram_gate | 按阶段点名要加载的模型（pred/merge=dfm、mask=XSeg、faces=检测器、frames/encode 不加载模型）；顺序在 _stage_precheck **之后** —— 缺上游该给 409，别拿显存背锅 |
+| 预览 / 项目导出 | _preview_guard / _proj_run 的 _vram_guard | 老口径不变 |
+
+拒绝响应 = HTTP 400 + **结构化字段**（不是让前端去正则抠中文）：
+
+    {"ok": false, "error": "快速导出：显存不够 —— 需要 1.44 GB（拆项…），可用 0.59 GB（…）。建议：①…",
+     "detail": "同上", "kind": "vram", "label": "快速导出",
+     "need_mb": 1469.7, "avail_mb": 608.0, "free_mb": 1400, "total_mb": null,
+     "procs": 1, "frames": 8, "batch": 1,
+     "suggest": ["关掉占 GPU 的程序后重试", "换更小的 .dfm / 调低帧预算", "设 DFL_ALLOW_CPU_FALLBACK=1 用 CPU 跑"],
+     "vram": { …完整 plan… }}
+
+前端只弹**一条** toast（「显存不足：需要 2.44 GB，可用 0.60 GB」+ 一句建议）、进度页收起六步
+只留一行错误 + 「返回导出设置」；同一条拒绝 4 秒内不重复弹（连点不叠 toast）。
+
+两边都支持 dry_run=1：只回计划（vram_plan + need_mb/avail_mb/free_mb/suggest），不建 job ——
+前端在起 job 之前先拿它做一次预检。
+
+**重试不需要重启后端**：拒绝发生在加载之前，_DFM_SESS / 预览 worker 一个字都没动；
+用户关掉占显存的程序后回设置页再点一次即可。验收里这条用
+<WORKSPACE>/_vram_free_mb.txt（一行整数 MB）复现：它比 DFL_VRAM_FREE_MB 多一个能力 ——
+**同一个后端进程里改得动**（env 换档必须重启，那等于把「缓存有没有坏」这件事测没了）。
+
 ## 4. 开关
 
 | 环境变量 | 作用 |
 |---|---|
 | `DFL_VRAM_FREE_MB` | 伪造「可用显存」，三条路共用（验收/排障；`DFL_FUSED_VRAM_FREE_MB` 仍认） |
+| `<WORKSPACE>/_vram_free_mb.txt` | 同上，但**同一个后端进程里改得动**（验收用：验证「关掉占显存的程序后重试不用重启后端」）。文件不存在就当没有 |
 | `DFL_ALLOW_CPU_FALLBACK=1` | 显存不够时不拒绝，回落 CPU EP 照跑（416 实测慢 ~17 倍） |
 
 CPU 回退是**一处开关、全链路生效**：`_dfm_session` 建 CPU session、`_stage_xseg` 走 CPU

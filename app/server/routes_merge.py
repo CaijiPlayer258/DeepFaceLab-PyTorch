@@ -201,25 +201,39 @@ def _ok(**kw) -> dict:
     return body
 
 
-def _fail(status: int, msg: str) -> JSONResponse:
+def _fail(status: int, msg: str, extra: dict = None) -> JSONResponse:
     """失败体：HTTP 4xx/5xx + {ok: false, error, detail}。
 
     detail 是给旧前端留的（界面里到处是 d.detail || "…"），error 是这次的约定。
     返回 JSONResponse 而不是抛 HTTPException，是为了让响应体长得一样：
     抛异常时 FastAPI 只会给 {"detail": ...}。
+
+    extra：**结构化字段**（显存拒绝那一路用）。摊在顶层，不塞进一个子对象：
+    前端要能直接读 d.need_mb / d.avail_mb / d.free_mb / d.suggest，
+    不用先判断"这次错误是不是带明细的那种"。ok/error/detail 三个键不让被覆盖。
     """
     text = str(msg or "未知错误")
-    return JSONResponse(status_code=int(status),
-                        content={"ok": False, "error": text, "detail": text})
+    body = {"ok": False, "error": text, "detail": text}
+    if extra:
+        for k, v in dict(extra).items():
+            if k not in body:
+                body[k] = v
+    return JSONResponse(status_code=int(status), content=body)
 
 
 class _BadInput(Exception):
-    """校验失败 / 前置条件不满足。由 _api 统一转成 _fail。"""
+    """校验失败 / 前置条件不满足。由 _api 统一转成 _fail。
 
-    def __init__(self, msg, status=400):
+    extra：要摊进响应体顶层的结构化字段（见 _fail）。显存拒绝靠它把
+    need_mb / avail_mb / free_mb / suggest[] 一起带出去 —— 前端只弹一条提示、
+    并且知道该建议用户干什么，全靠这几个数，不用去正则抠中文。
+    """
+
+    def __init__(self, msg, status=400, extra: dict = None):
         super().__init__(msg)
         self.status = int(status)
         self.msg = str(msg)
+        self.extra = dict(extra or {})
 
 
 def _api(fn):
@@ -234,7 +248,7 @@ def _api(fn):
         try:
             return fn(*a, **kw)
         except _BadInput as e:
-            return _fail(e.status, e.msg)
+            return _fail(e.status, e.msg, getattr(e, "extra", None))
         except HTTPException as e:
             return _fail(e.status_code, str(e.detail))
         except Exception as e:                       # noqa: BLE001
@@ -7033,12 +7047,15 @@ def _stage_meta_ready(meta: dict, video: Path, probe: dict) -> dict:
 
 
 # ---------------- 帧图读写（最高质量）----------------
-def _stage_imencode(img, ext=".png") -> bytes:
+def _stage_imencode(img, ext=".png", quality=None) -> bytes:
     """帧图编码：png 走无损；jpg 走 **quality=100 + 4:4:4**（禁止默认 95/85）。
 
     采样因子不再在这里手写：cv2 5.0 只认 ImwriteJPEGSamplingFactorParams 枚举，
     裸数字会被拒并**静默**落成 4:2:0（见 _align.py 的 jpeg444_probe 注释）。
     这里跟对齐脸共用同一份探测结果，一次探测、全进程一个策略。
+
+    quality：帧图 JPEG 质量，默认 100（= _STAGE_JPEG_QUALITY；界面已经没这个旋钮，
+    只有老客户端/验收脚本会传）。**PNG 分支不看它**：无损，只认 png_compression。
     """
     import cv2
     ext = str(ext or ".png").lower()
@@ -7046,7 +7063,8 @@ def _stage_imencode(img, ext=".png") -> bytes:
         ok, buf = cv2.imencode(".png", img, [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
     else:
         from ._align import jpeg_encode_params
-        ok, buf = cv2.imencode(".jpg", img, jpeg_encode_params(100, 0))
+        q = _STAGE_JPEG_QUALITY if quality is None else max(1, min(100, int(quality)))
+        ok, buf = cv2.imencode(".jpg", img, jpeg_encode_params(q, 0))
     if not ok:
         raise _BadInput("这一帧编不出图（%s）" % ext, 500)
     return buf.tobytes()
@@ -7671,6 +7689,10 @@ def _stage_do_faces(cfg: dict) -> dict:
                    % (int(rng["start"]) + cursor, cursor))
     _stage_log("切脸：检测器 %s · thresh=%.2f · 68 点仿射 · 帧范围 %d..%d（%d 帧）"
                % (det_name, thresh, int(rng["start"]), int(rng["end"]), total))
+    # 对齐脸是这条链上唯一的 JPEG 产物：质量回显出来（验收/排障要能一眼看到，
+    # 别再靠"默认值"猜）。默认 100 + 4:4:4；PNG 帧完全不受这个数影响。
+    _stage_log("切脸：对齐脸 JPEG quality=%d · 4:4:4（界面无旋钮，固定质量）"
+               % int(cfg.get("jpeg_quality") or _STAGE_JPEG_QUALITY))
     # 检测器先建好（加载要几百毫秒）：流水线里只有一个线程用它，不再每帧走 _detector()
     det = _detector(det_name)
 
@@ -7891,7 +7913,8 @@ def _stage_do_faces(cfg: dict) -> dict:
                     pass
                 t_en = time.perf_counter()
                 write_dfljpg(aligned_dir / _stage_face_name(rows[pos], k), crop, meta_f,
-                             quality=100, subsampling=0)
+                             quality=int(cfg.get("jpeg_quality") or _STAGE_JPEG_QUALITY),
+                             subsampling=0)
                 ticks.add("encode", time.perf_counter() - t_en)
                 n += 1
             faces_total += n
@@ -8328,8 +8351,13 @@ _CPU_EP_LOCK = threading.Lock()
 def _vram_probe(ttl: float = None) -> tuple:
     """(free_mb, total_mb, source)。
 
-    source 用来在日志里说清「这个数是哪来的」：env / torch / nvidia-smi / none。
+    source 用来在日志里说清「这个数是哪来的」：env / file / torch / nvidia-smi / none。
     env 伪造的值不走缓存（验收脚本会在同一个进程里换档，缓存会骗人）。
+
+    还有一个**只在验收里用**的伪造口：<WORKSPACE>/_vram_free_mb.txt（一行整数，MB）。
+    比 env 强的地方是它能在**同一个后端进程**里改 —— 用户那条「关掉占显存的程序后
+    再点一次导出，不重启后端也能出片」就是靠它复现的（重启后端来换 env 等于把
+    "缓存有没有坏"这件事测没了）。文件不存在就当没有，生产路径上零成本。
     """
     fake = str(os.environ.get(_VRAM_ENV_FREE) or "").strip()
     if fake:
@@ -8337,6 +8365,16 @@ def _vram_probe(ttl: float = None) -> tuple:
             return int(float(fake)), None, "env:" + _VRAM_ENV_FREE
         except (TypeError, ValueError):
             pass
+    ff = Path(WORKSPACE) / "_vram_free_mb.txt"
+    try:
+        if ff.is_file():
+            txt = ff.read_text("utf-8", "ignore").strip().splitlines()[0].strip()
+            return int(float(txt)), None, "file:" + ff.name
+    except Exception:                                       # noqa: BLE001
+        # 文件在、但这一拍读不出来（正好被改写/内容不是数字）：**不许退回旧缓存**
+        # —— 那会让"刚刚改成 1400"读成上一次的 8000。这里改成强制重新探测一次。
+        if ff.is_file():
+            ttl = 0.0
     old = str(os.environ.get(_FUSED_ENV_VRAM) or "").strip()   # 老开关继续认（既有验收脚本在用）
     if old:
         try:
@@ -8648,6 +8686,39 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
     return plan
 
 
+def _vram_refuse_extra(plan: dict, what: str = "") -> dict:
+    """拒绝时的**结构化字段**（HTTP 响应体顶层）。
+
+    前端只认这几个数就能写出「显存不足：需要 2.44 GB，可用 0.60 GB」这一行，
+    不用去正则抠中文；vram 里那份完整计划留给排障和 status 回显。
+
+    口径：
+      need_mb   最小档真跑起来的预计峰值（和拒绝消息里的「需要 X GB」同一个数）
+      avail_mb  预算（= 空闲 × (1-安全系数) - 预留），也就是「可用 Y GB」
+      free_mb   探测到的空闲显存（伪造时是 DFL_VRAM_FREE_MB 那个值）
+      suggest   建议列表（第一条就是「关掉占 GPU 的程序后重试」）
+    """
+    label = str(what or plan.get("label") or "")
+    suggest = [str(s) for s in (plan.get("suggest") or [])
+               if str(s or "").strip()]
+    if not suggest:
+        suggest = ["关掉占 GPU 的程序后重试"]
+    return {
+        "kind": "vram",
+        "label": label,
+        "need_mb": round(float(plan.get("need_mb") or 0.0), 1),
+        "avail_mb": (None if plan.get("avail_mb") is None
+                     else round(float(plan.get("avail_mb") or 0.0), 1)),
+        "free_mb": (None if plan.get("free_mb") is None else int(plan.get("free_mb") or 0)),
+        "total_mb": (None if plan.get("total_mb") is None else int(plan.get("total_mb") or 0)),
+        "procs": int(plan.get("procs") or 1),
+        "frames": int(plan.get("frames") or 0),
+        "batch": int(plan.get("batch") or 0),
+        "suggest": suggest,
+        "vram": dict(plan),
+    }
+
+
 def _vram_refuse_msg(plan: dict, what: str = "这个任务") -> str:
     """拒绝消息：**必须带数字**（需要多少 / 可用多少 / 怎么改）。
 
@@ -8807,7 +8878,9 @@ def _vram_guard(dfms, opts: dict = None, label: str = "任务",
         msg = plan.get("msg") or _vram_refuse_msg(plan, label)
         # 拒绝必须有日志（排障第一现场）：这一行进后端 stdout（→ server.log）
         print("[vram] ★ 拒绝 %s ★ %s" % (label, msg), flush=True)
-        raise _BadInput(msg, 400)
+        # 400 带上 need_mb / avail_mb / free_mb / suggest[]（前端只弹一条提示、
+        # 不再去正则抠中文），并且**在起 job / 加载模型之前**抛出去。
+        raise _BadInput(msg, 400, extra=_vram_refuse_extra(plan, label))
     return plan
 
 _PRED_VRAM_SAFETY = 0.20      # 留 20% 余量：探测量打八折才是敢用的预算
@@ -10664,6 +10737,12 @@ _MERGE_WORKERS_DEFAULT = min(32, _MERGE_WORKERS_DEFAULT)
 _MERGE_THREADS_DEFAULT = _MERGE_WORKERS_DEFAULT
 _MERGE_CV2_THREADS_DEFAULT = max(0, _env_int("DFL_MERGE_CV2_THREADS", 0))
 _MERGE_PNG_LEVEL = max(0, min(9, int(str(os.environ.get("DFL_MERGE_PNG_LEVEL") or "1").strip() or 1)))
+# 帧图 JPEG 质量：**固定 100**（4:4:4），界面不再有这个旋钮。
+# 理由（用户定的）：默认就是无损优先，低画质没有使用场景，留个能调的旋钮只会误导
+# —— 上一版设置页那颗「质量 95」既不可编辑、后端也从来没读过它。
+# 老客户端/验收脚本仍然可以传 jpeg_quality 覆盖（1..100）；不传就是 100。
+# 注意：**PNG 路径完全不受影响**（无损，只认 png_compression）。
+_STAGE_JPEG_QUALITY = 100
 
 
 # ---------------- 帧范围（1 起、闭区间） ----------------
@@ -10959,6 +11038,9 @@ def _stage_cfg(body: dict, stage: str, chain: bool = False) -> dict:
             1, 32, _MERGE_WORKERS_DEFAULT),
         "png_level": _int_val("png_compression", body.get("png_compression"), 0, 9,
                               _MERGE_PNG_LEVEL),
+        # 帧图 JPEG 质量：固定 100（界面没有旋钮）；老客户端传了就认，但**默认 100**
+        "jpeg_quality": _int_val("jpeg_quality", body.get("jpeg_quality"), 1, 100,
+                                 _STAGE_JPEG_QUALITY),
         # ③④ 两条流水线的并行度（0 = 自动；验收/测速脚本可以点名覆盖）
         "pred_readers": _int_val("pred_readers", body.get("pred_readers"), 0, 16, 0),
         "pred_writers": _int_val("pred_writers", body.get("pred_writers"), 0, 16, 0),
@@ -11160,6 +11242,11 @@ def _stage_brief_meta(cfg: dict, extra: dict = None) -> dict:
         "range_total": int(cfg.get("range_total") or 0),
         "range_changed": bool(cfg.get("range_changed")),
         "settings": dict(cfg.get("settings") or {}),
+        # 帧图编码口径（JSON 回显）：PNG 无损，JPEG 固定 100 —— 界面没有这个旋钮，
+        # 但验收/排障要能从响应里读到真实值，不用去翻 meta.json。
+        "jpeg_quality": int(cfg.get("jpeg_quality") or _STAGE_JPEG_QUALITY),
+        "png_level": int(cfg.get("png_level") if cfg.get("png_level") is not None else 1),
+        "image_format": str((cfg.get("settings") or {}).get("image_format") or "jpg"),
     }
     if extra:
         out.update(extra)
@@ -11331,6 +11418,8 @@ def merge_stage_status(cache_dir: str = "", video: str = ""):
         "cache_exists": bool(cache) and Path(cache).exists(),
         "cache_removed": bool(snap.get("cache_removed")),
         "out_video": str(snap.get("out_video") or ""),
+        # 这次阶段是按什么显存预算放行的（和被拒时的结构化字段同一份形状）
+        "vram_plan": dict(snap.get("vram_plan") or {}),
         # 帧范围 + **相对进度**：frames_total/frames_done 都是「这一段」里的数
         "range": dict(rng_m),
         "range_key": str(rng_m.get("key") or ""),
@@ -11411,6 +11500,51 @@ def merge_stage_cancel(body: dict = None):
                note=("正在取消 %s" % _STAGE_LABEL.get(stage, stage)) if running else "当前没有阶段在跑")
 
 
+def _stage_gpu_paths(cfg: dict, stage: str) -> list:
+    """这个阶段**真要加载**的 GPU 模型（没有就不算显存账）。
+
+    按阶段点名，不按"导出"一把梭：
+      · pred / merge —— 每个选中模型一份 dfm session（_dfm_session 常驻）
+      · mask         —— XSeg 遮罩 onnx（来源是 DFM 时本阶段本来就跳过）
+      · faces        —— 检测器 + 2D106 关键点（onnx，走 CUDA EP）
+      · frames/encode —— 一个 GPU 模型都不加载（ffmpeg 干活），不列
+    """
+    if stage in ("pred", "merge"):
+        return [str(m.get("dfm") or "") for m in (cfg.get("single_models") or [])
+                if str(m.get("dfm") or "")]
+    if stage == "mask":
+        src = cfg.get("mask_src") or {}
+        if str(src.get("source") or "").lower() == "xseg" and str(cfg.get("xseg") or ""):
+            return [str(cfg["xseg"])]
+        return []
+    if stage == "faces":
+        # 2D106 是纯 CPU（见 _landmarks_model 的注释），不算显存账；只算检测器。
+        try:
+            flat = _app_mod._DET_ONNX[_detector_val(cfg.get("det_align"))]
+            p = _app_mod._detector_path(flat)
+        except Exception:                                   # noqa: BLE001
+            p = None
+        return [str(p)] if p else []
+    return []
+
+
+def _stage_vram_gate(cfg: dict, stage: str) -> dict:
+    """阶段起手前的显存闸门 —— **在起 job / 加载模型 / 开线程之前**跑。
+
+    用户口径（截图 2）：显存不够时点导出，不许先起一个 job 再把六个阶段全打失败。
+    所以这里只算账（_vram_plan，不加载任何模型），装不下就抛 400 + 结构化字段。
+
+    frames / encode 不加载 GPU 模型，但它们同样要先过一遍账：
+    连「一份 CUDA context + 一帧的解码缓冲」都放不下时，后面五个阶段一个也跑不成，
+    与其让用户在第二步才吃到 400，不如第一步就说清楚。
+    """
+    label = _STAGE_LABEL.get(stage, stage)
+    paths = _stage_gpu_paths(cfg, stage)
+    opts = {"mode": "none", "procs": 1, "label": label,
+            "aux": bool(stage not in ("frames", "encode"))}
+    return _vram_guard(paths, opts, label=label)
+
+
 @router.post("/api/merge/stage/{name}")
 @_api
 def merge_stage(name: str, body: dict = None):
@@ -11418,6 +11552,8 @@ def merge_stage(name: str, body: dict = None):
 
     幂等：已完成的阶段再点一次不会重跑（返回 skipped=true），force=true 才重做。
     并发：一次只允许一个阶段在跑（409）。
+    显存：起 job 之前先过 _stage_vram_gate，装不下 → HTTP 400（结构化字段，
+    不建 job、不加载模型、不开 worker）。dry_run=1 只算账不干活（前端预检用）。
     """
     stage = _stage_name(name)
     if not stage:
@@ -11445,6 +11581,21 @@ def merge_stage(name: str, body: dict = None):
                    skipped_why=str(plan.get("skipped_why") or ""),
                    **_stage_brief_meta(cfg))
 
+    # ---- 显存闸门：**skip 之后、建 job 之前** ----
+    # 顺序有讲究：先跑前置检查（缺上游 → 409 点名要跑哪一步），再算显存账。
+    # 反过来的话，一个"还没切帧"的用户会拿到「显存不够」，而真原因是那个 409。
+    # 闸门只算账：不加载模型、不建 job、不开线程 —— 拒绝 = 这一单什么都没发生。
+    vplan = _stage_vram_gate(cfg, stage)
+    cfg["vram_plan"] = vplan
+    if _bool_val(body.get("dry_run"), False):
+        return _ok(dry_run=True, stage=stage, started=False, skipped=False,
+                   vram_plan=dict(vplan), need_mb=vplan.get("need_mb"),
+                   avail_mb=vplan.get("avail_mb"), free_mb=vplan.get("free_mb"),
+                   suggest=list(vplan.get("suggest") or []),
+                   frames=int(vplan.get("frames") or 0),
+                   batch=int(vplan.get("batch") or 0),
+                   on_cpu=bool(_vram_cpu_on()))
+
     # 线程起来之后 meta 会被 worker 改：范围日志要用的旧指纹先在这里取好
     old_key = str(((cfg.get("meta") or {}).get("stages", {}).get(stage) or {})
                   .get("range_key") or "all")
@@ -11465,12 +11616,16 @@ def merge_stage(name: str, body: dict = None):
             "cache_removed": False, "counts": _stage_counts(cfg["cache"]),
             "started_at": time.time(), "finished_at": None, "chain": False,
             "keep_cache": bool(cfg.get("keep_cache")), "force": bool(cfg.get("force")),
-            "frames": [],
+            "frames": [], "vram_plan": dict(cfg.get("vram_plan") or {}),
         })
     threading.Thread(target=_stage_worker, args=(cfg,), daemon=True,
                      name="merge-stage-%s" % stage).start()
     rng = cfg.get("range") or {}
     _stage_log("阶段 %s 启动：%s -> %s" % (stage, cfg["video"], cfg["cache"]))
+    _stage_log("帧图编码：PNG 无损（compression level %s）/ JPEG quality=%d + 4:4:4"
+               "（界面没有该旋钮，固定质量；PNG 不受影响）"
+               % (cfg.get("png_level"), int(cfg.get("jpeg_quality")
+                                            or _STAGE_JPEG_QUALITY)))
     _stage_log("帧范围：第 %s..%s 帧（共 %s 帧）%s"
                % (rng.get("start"), rng.get("end"), rng.get("total"),
                   "· 全片" if rng.get("full") else "· 只处理这一段"))
@@ -11679,6 +11834,9 @@ def _fused_cfg(body: dict) -> dict:
                                       0, 64, _MERGE_CV2_THREADS_DEFAULT),
         "png_level": _int_val("png_compression", body.get("png_compression"), 0, 9,
                               _MERGE_PNG_LEVEL),
+        # 帧图 JPEG 质量：固定 100（和分段链同一条口径，见 _STAGE_JPEG_QUALITY）
+        "jpeg_quality": _int_val("jpeg_quality", body.get("jpeg_quality"), 1, 100,
+                                 _STAGE_JPEG_QUALITY),
         # 对齐/预处理线程默认 4（B 配置），0 也让它是 4 —— 以前 0 落到 cpu//3，核少就掉档
         "pred_readers": _int_val("pred_readers", body.get("pred_readers"), 0, 16,
                                  _FUSED_PREP_DEFAULT),
@@ -12319,8 +12477,13 @@ def _fused_run(cfg: dict) -> dict:
                     xseg_dst = None
                     if need_dst:
                         # 分段的 dst 输入是 aligned/*.jpg（q100 4:4:4，仍然有损）→ 照抄这一步
+                        # 质量取同一个 cfg["jpeg_quality"]（默认 100）：两条路必须逐位一致，
+                        # 所以这里不写死 100，免得以后改一处忘另一处。
                         from ._align import jpeg_encode_params
-                        okj, buf = cv2.imencode(".jpg", crop, jpeg_encode_params(100, 0))
+                        okj, buf = cv2.imencode(
+                            ".jpg", crop,
+                            jpeg_encode_params(int(cfg.get("jpeg_quality")
+                                                   or _STAGE_JPEG_QUALITY), 0))
                         if okj:
                             dec = cv2.imdecode(np.frombuffer(buf.tobytes(), np.uint8),
                                                cv2.IMREAD_COLOR)
@@ -12976,15 +13139,35 @@ def _start_video_export(body: dict):
     cfg = _fused_cfg(body) if fused else _stage_cfg(body, "frames", chain=True)
     if not fused:
         cfg["stages"] = list(_STAGE_ORDER)
+    # ---- 显存闸门：**在这里**判（HTTP 400），不能在 worker 线程里判 ----
+    # 线程里抛 _BadInput 只会变成「任务失败」，前端拿不到 400，也拿不到那句
+    # 「需要 X GB / 可用 Y GB / 建议」。真正的加载在 _fused_run / _stage_worker 里，
+    # 这里只算账（_vram_plan 不加载任何模型）—— 拒绝时**不建 job、不开线程**。
+    #
+    # 两条路都要判（用户口径，截图 2）：
+    #   · fused  —— 帧预算 + dfm 批是它的两个旋钮，按 mode=frames 算；
+    #   · 分段链 —— 一次一帧一张脸，没有帧缓冲，按 mode=none（一份会话）算。
+    _dfms = (cfg.get("dfm")
+             or [m.get("dfm") for m in cfg.get("single_models") or []])
     if fused:
-        # ---- 显存闸门：**在这里**判（HTTP 400），不能在 worker 线程里判 ----
-        # 线程里抛 _BadInput 只会变成「任务失败」，前端拿不到 400，也拿不到那句
-        # 「需要 X GB / 可用 Y GB / 建议」。真正的加载在 _fused_run 里，这里只算账。
-        plan = _vram_guard(cfg.get("dfm") or [m.get("dfm") for m in cfg.get("single_models") or []],
+        plan = _vram_guard(_dfms,
                            {"mode": "frames", "frames": int(cfg.get("frame_budget_want") or 0),
                             "batch": int(cfg.get("fused_batch") or 0), "procs": 1},
                            label="快速导出")
-        cfg["vram_plan"] = plan
+    else:
+        plan = _vram_guard(_dfms, {"mode": "none", "procs": 1}, label="分段导出")
+    cfg["vram_plan"] = plan
+    if _bool_val(body.get("dry_run"), False):
+        # 预检（前端在起 job 之前问一次）：只回计划，不建 job、不开线程、不碰 status。
+        return _ok(dry_run=True, fused=bool(fused), stages=(["fused"] if fused
+                                                           else list(_STAGE_ORDER)),
+                   video=str(cfg["video"]), output=str(cfg["out"]),
+                   vram_plan=dict(plan), need_mb=plan.get("need_mb"),
+                   avail_mb=plan.get("avail_mb"), free_mb=plan.get("free_mb"),
+                   suggest=list(plan.get("suggest") or []),
+                   frames=int(plan.get("frames") or 0),
+                   batch=int(plan.get("batch") or 0),
+                   on_cpu=bool(_vram_cpu_on()))
     with _STAGE_LOCK:
         if _STAGE_JOB.get("running"):
             raise _BadInput("已经有阶段在跑（%s）—— 等它结束或点取消"
@@ -13033,6 +13216,12 @@ def _start_video_export(body: dict):
             "vram_plan": dict(cfg.get("vram_plan") or {}),
         })
     cfg["log_file"] = _vid_open_log(Path(cfg["out"]).with_suffix(".log"))
+    # 帧图编码口径（两条路同一句）：PNG 无损 / JPEG 固定 quality=100 + 4:4:4。
+    # 设置页那颗「质量」旋钮已经删掉 —— 后端不再从界面读它，日志里照旧回显真实值。
+    _vid_log("帧图编码：PNG 无损（compression level %s）/ JPEG quality=%d + 4:4:4"
+             "（界面没有该旋钮，固定质量；PNG 不受影响）"
+             % (cfg.get("png_level"), int(cfg.get("jpeg_quality")
+                                          or _STAGE_JPEG_QUALITY)))
     if fused:
         threading.Thread(target=_fused_worker, args=(cfg,), daemon=True,
                          name="merge-export-fused").start()

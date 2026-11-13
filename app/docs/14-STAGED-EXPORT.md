@@ -55,7 +55,13 @@
 
 帧图默认 **PNG 无损**：`ffmpeg -compression_level 1` 抽帧，合成结果由 `_img_bytes(..., "png")`
 写 `IMWRITE_PNG_COMPRESSION=3`。jpg 兜底分支写 `IMWRITE_JPEG_QUALITY=100`（不用默认 95/85/75）。
-aligned 的 DFLJPG 用 q100。
+
+**JPEG 质量固定 100，界面没有这个旋钮**（`routes_merge._STAGE_JPEG_QUALITY`）：aligned 的
+DFLJPG 与 fused 的 dst 裁图都走 q100 + 4:4:4。以前导出设置页那颗「质量 95」既不可编辑、
+后端也从来没读过它 —— 现在控件删掉，参数口径留下：
+`body.jpeg_quality` 仍然认（1..100，默认 100，只给老客户端/验收脚本），
+响应（`_stage_brief_meta`）与日志都回显真实值（`jpeg_quality=100` / `JPEG quality=100`），
+meta.json 的 `stages.frames.jpeg_quality` 也是 100。**PNG 路径不受这个数影响**。
 
 ## 不变的东西
 

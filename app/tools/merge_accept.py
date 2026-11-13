@@ -252,6 +252,12 @@ class Browser:
             [edge, "--headless=new", "--disable-gpu", "--hide-scrollbars",
              "--disable-extensions", "--disable-sync", "--no-first-run",
              "--no-default-browser-check", "--disable-background-networking",
+             # 无头窗口会被当成「不可见」→ setInterval 被节流到 1 分钟一跳，
+             # 进度页那些 500ms 的轮询就变成「导出完了界面还不知道」：
+             # 完成 toast 迟到、终态按钮不出现。这三个开关把节流关掉。
+             "--disable-background-timer-throttling",
+             "--disable-renderer-backgrounding",
+             "--disable-backgrounding-occluded-windows",
              "--remote-debugging-port=%d" % self.port,
              "--user-data-dir=%s" % self.profile, "about:blank"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

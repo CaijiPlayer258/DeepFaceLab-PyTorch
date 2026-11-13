@@ -57,17 +57,9 @@
           <b data-v="png" title="4.0 值 png（PNG 帧缓存）">PNG</b>
         </div>
       </div>
-      <div class="mgrow">
-        <span class="f">质量</span>
-        <div class="mgnum">
-          <!-- MISSING: 4.0 后端 ExportStartRequest 没有质量字段，
-               _stage1_extract_frames 固定 -q:v 2（export_pipeline.py:1272）；
-               这里只按设计稿占位，禁用且不随导出请求提交 -->
-          <input class="mgtiny" id="mgQuality" type="number" min="1" max="100" value="95"
-                 title="4.0 固定 -q:v 2，无此参数" disabled>
-          <span class="mgunit">%</span>
-        </div>
-      </div>
+      <!-- 「质量」这一行已删除：帧图 JPEG 固定 quality=100 + 4:4:4
+           （app/server/routes_merge.py 的 _STAGE_JPEG_QUALITY），PNG 无损。
+           一个不可编辑、后端也不读的旋钮只会误导。 -->
       <div class="mgrow">
         <span class="f">输出路径</span>
         <div class="inp mono pathinp">
