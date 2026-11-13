@@ -10,6 +10,11 @@ r"""快速导出（融合流水线 fused）的验收：真后端 + 真视频（1
      取消完还能立刻再跑一单（证明线程都退干净了）。
   e) 帧范围：start=100/end=200 → 出片 101 帧、时长对、音轨在、输出名带 _0100-0200。
   f) 回归：DFL 项目导出（/api/merge/export-project）照旧能出片（那条路一行没改）。
+  g) 可选解码路径：DFL_FUSED_DECODE=png 仍然能出片（默认已是 rawvideo bgr24 软解）。
+
+注意：解码**像素**的正确性（fused 解码 vs 切帧产物 frames/%06d.png，逐帧逐像素）不在这里验
+—— 成片过了一遍 libx264，源头的 LSB 级差异会被量化抹平。那条在
+app\tools\fused_decode_parity.py 里，单独跑。
 
 跑法（仓库根）：
     runtime\server\Scripts\python.exe app\tools\fused_export_accept.py
@@ -680,6 +685,34 @@ def case_f(clip, src_info):
     check((proj / "merged").is_dir(), "f merged/ 还在（项目模式的老行为）", str(proj / "merged"))
 
 
+# ============================================================
+# 案例 G：可选解码路径 DFL_FUSED_DECODE=png（默认已经是 rawvideo bgr24）
+# ============================================================
+def case_g(clip):
+    head("G · 可选解码路径 DFL_FUSED_DECODE=png（默认是 rawvideo bgr24 软解）")
+    proc = start_server("dec-png", {"DFL_FUSED_DECODE": "png"})
+    try:
+        out = OUT / "g_png.mp4"
+        if out.exists():
+            out.unlink()
+        d0 = start_export({"video": str(clip), "model": DFM, "settings": dict(SETTINGS),
+                           "output_dir": str(out), "start_frame": 1, "end_frame": 12}, "G")
+        out = Path(str(d0.get("output") or out))
+        fin = wait_export(1200.0)
+        check(fin.get("phase") == "done" and fin.get("ok") is True,
+              "g PNG 路径（DFL_FUSED_DECODE=png）照样能出片",
+              "phase=%s err=%s" % (fin.get("phase"), (fin.get("error") or "")[:140]))
+        info = probe(out) if out.is_file() else {}
+        check(bool(info) and info.get("frames") == 12, "g 出片 12 帧",
+              "%s 帧 · %s" % (info.get("frames") if info else "-", out.name))
+        log = log_of(out)
+        hit = [ln.strip() for ln in log.splitlines() if "PNG 管道" in ln]
+        check(bool(hit) and "DFL_FUSED_DECODE=png" in hit[0],
+              "g 日志写明这条走的是 PNG 管道（开关生效）", (hit[0] if hit else "")[:160])
+    finally:
+        stop_server(proc)
+
+
 def wait_stage(timeout=1800.0):
     t0 = time.time()
     last = {}
@@ -696,8 +729,8 @@ def wait_stage(timeout=1800.0):
 # ============================================================
 def main(argv=None):
     ap = argparse.ArgumentParser(description="快速导出（融合流水线）验收")
-    ap.add_argument("--cases", default="a,b,d,e,f,c",
-                    help="要跑的案例（a/b/c/d/e/f，逗号分隔）")
+    ap.add_argument("--cases", default="a,b,d,e,f,c,g",
+                    help="要跑的案例（a/b/c/d/e/f/g，逗号分隔）")
     args = ap.parse_args(argv)
     want = [c.strip().lower() for c in str(args.cases).split(",") if c.strip()]
     t_all = time.time()
@@ -722,6 +755,8 @@ def main(argv=None):
             case_e(clip240, info240)
         if "f" in want:
             case_f(clip, info120)
+        if "g" in want:
+            case_g(clip)
     finally:
         stop_server(proc)
 

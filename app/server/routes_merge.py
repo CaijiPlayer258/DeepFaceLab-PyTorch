@@ -10668,40 +10668,87 @@ def _fused_cfg(body: dict) -> dict:
 _PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
 
-_FUSED_ENV_DECODE = "DFL_FUSED_DECODE"   # 验收/排障：png（默认）| raw（rawvideo bgr24）
+# 解码路径：**默认 raw**（-f rawvideo，软解）；DFL_FUSED_DECODE=png 退回 PNG 管道。
+_FUSED_ENV_DECODE = "DFL_FUSED_DECODE"
+_FUSED_RAW_MODES = ("raw", "rawvideo", "bgr24", "bgr48le")
+# -i 的流信息里挑「pix_fmt, 宽x高」这一对；位深只从 pix_fmt 名字看
+_FUSED_PIX_TOKEN = re.compile(r"Video:\s[^\n]*?,\s*([a-z][a-z0-9]+)(?:\([^)\n]*\))?,\s*\d+x\d+")
+_FUSED_WIDE_TOKEN = re.compile(r"(10|12|16|48|64)(?:le|be)?$")
 
 
-def _fused_open_frames(video: Path, start_i: int, size=None, mode="png"):
-    """开一路「ffmpeg → PNG 帧流」（默认）或「ffmpeg → rawvideo bgr24 帧流」，返回 (proc, 读一帧的函数)。
+def _fused_src_bits(video: Path) -> int:
+    """源视频**解码后**的位深（8 / 10 / 12 / 16）—— 决定 raw 管道进 bgr24 还是 bgr48le。
 
-    **为什么不用 rawvideo bgr24 那条路**（_app._open_video）：实测同一帧解出来和
-    「切帧」阶段落盘的 PNG 差 mean 0.89 / max 14 LSB —— 软件的 HEVC 解码 + swscale
-    两种输出（png 编码器 vs -pix_fmt bgr24）不是逐位相同的。而 fused 的验收口径是
-    「和分段产物逐像素一致」，只有走**同一条**编码/解码路径才做得到：
-        ffmpeg 解 HEVC → PNG（无损，-compression_level 1，和切帧同参）→ cv2.imdecode
-    区别只是这里 PNG 进了管道、不落盘。代价是每帧多一次 PNG 编解码（约 25ms），
-    而检测是 47ms/帧的硬底，这一段完全藏得住。
+    为什么要问这一句：切帧阶段落盘的是 PNG，而 ffmpeg 的 png 编码器对 >8bit 的源会挑
+    16bit（rgb48be）。所以「切帧产物」那一路是 16bit PNG 被 cv2 砍成 8bit（libpng 的
+    chop = 取高字节，等价 >>8），这和 swscale 的 10→8 正确舍入**不是同一个数**：
+    HEVC 10bit 实测 bgr24 vs frames/*.png mean 0.6038 / max 4 / 只有 5.16% 像素相同。
+    改成 bgr48le 进来再 >>8 之后逐位相同（30 帧 mean 0.0000 / max 0 / 100%）。
+    8bit 源仍然走 bgr24（多要一倍管道带宽没意义）。
 
-    start_i > 1 时用 ffmpeg 的 select 滤镜跳帧（0 基：保留 n >= start-1），
-    跳过的帧不编码 PNG，比"读出来再丢"省得多；帧号仍然是绝对的。
+    判不出来就当 8bit（= 原来的 bgr24 行为，一行都不变）。解析一次 -i 的流信息约 50ms，
+    一次导出只调一次。
+    """
+    try:
+        r = subprocess.run([str(_app_mod._ffmpeg_exe()), "-hide_banner", "-i", str(video)],
+                           capture_output=True,
+                           creationflags=getattr(_app_mod, "_NO_WINDOW", 0))
+        txt = (r.stderr or b"").decode("utf-8", "ignore")
+    except Exception:                                       # noqa: BLE001
+        return 8
+    m = _FUSED_PIX_TOKEN.search(txt)
+    if not m:
+        return 8
+    # yuv420p10le / gbrp12le / gray16le → 10 / 12 / 16；yuv420p / rgb24 / rgba → 8
+    d = _FUSED_WIDE_TOKEN.search(m.group(1) or "")
+    if not d:
+        return 8
+    return 16 if d.group(1) in ("48", "64") else int(d.group(1))
+
+
+def _fused_open_frames(video: Path, start_i: int, size=None, mode="raw", bits=None):
+    """开一路「ffmpeg → rawvideo 帧流」（默认）或「ffmpeg → PNG 帧流」，返回 (proc, 读一帧的函数)。
+
+    默认 raw：`-f rawvideo -pix_fmt bgr24`（8bit 源）/`bgr48le -> >>8`（>8bit 源），
+    软解。产物和切帧阶段落盘的 frames/%06d.png **逐位相同**（30 帧 mean 0.0000 / max 0 /
+    100% 像素相同），每帧 25.2 → 8.9 ms。回归见 app/tools/fused_decode_parity.py。
+
+    DFL_FUSED_DECODE=png 保留 PNG 管道（ffmpeg 解 → 无损 PNG → 管道 → cv2.imdecode）：
+    排障时用它，或者要「同一条 PNG 编解码路径」做对照时用它（约 25ms/帧）。
+
+    **注意别用 -hwaccel cuda**：NVDEC 那条路把帧下载成 nv12 再转 BGR，色度是另一套
+    插值，实测 mean 0.8895 / max 12（软解/NVDEC 的 YUV 平面本身逐位相同，差全在
+    nv12→RGB 这一步）。**这条 0.89 与本改动无关**，容易误判成 raw 的锅。所以 raw 一律软解。
+
+    >8bit 为什么是 bgr48le：见 _fused_src_bits（PNG 那一路是 16bit 截高字节，不是舍入）。
+
+    旋转元数据（手机竖拍）：两条路都走 ffmpeg 的 autorotate，且 probe 给的是**显示方向**
+    的宽高（imageio 读的就是 540x960 这种），所以 reshape 对得上 —— 90° 素材实测 100%
+    相同。**-noautorotate 别加**：那会让 raw 变成未旋转的原始帧，和 PNG 产物对不上。
+
+    start_i > 1 时用 ffmpeg 的 select 滤镜跳帧（0 基：保留 n >= start-1），跳过的帧不
+    编码/不转换，比"读出来再丢"省得多；帧号仍然是绝对的（N 帧 = frames/NNNNNN.png）。
     """
     import cv2
     import numpy as np
 
-    # ---- 两条解码路径（像素**完全等价**，实测见 _attr_bench/decode_final.py）----
-    #   png（默认）：ffmpeg 解 → PNG(无损) → 管道 → cv2.imdecode。25 ms/帧。
-    #   raw        ：ffmpeg 解 → rawvideo **bgr24** → 管道 → 直接 reshape。9 ms/帧。
-    # 为什么 raw 不改像素：PNG 是无损容器，两条路都是「同一个软解 → 同一个 swscale
-    # yuv420p(tv,bt709) → 8bit BGR」。逐帧对拍 30 帧：mean=0.0000 / max=0 / 逐位相同像素
-    # 100.000%。**注意别用 -hwaccel cuda**：NVDEC 那条路把帧下载成 nv12 再转 BGR，
-    # 色度是另一套插值，实测 mean 0.8895 / max 12（软解/NVDEC 的 YUV 平面本身逐位相同，
-    # 差全在 nv12→RGB 这一步）。所以 raw 一律走软解。
-    raw = str(mode or "png").strip().lower() in ("raw", "rawvideo", "bgr24")
+    # ---- 三条解码路径 ----
+    #   raw  · 8bit ：ffmpeg 解 → rawvideo bgr24  → 管道 → 直接 reshape。9 ms/帧。
+    #   raw  · >8bit：ffmpeg 解 → rawvideo bgr48le → 管道 → <u2 reshape >>8。约 12 ms/帧。
+    #   png  · 任意 ：ffmpeg 解 → PNG(无损) → 管道 → cv2.imdecode。25 ms/帧（可选）。
+    # 为什么 raw 不改像素：两条路都是「同一个软解 → 同一个 swscale → BGR」，PNG 只是无损
+    # 容器（8bit 源 rgb24 / >8bit 源 rgb48be，后者 cv2 取高字节 = 这里的 >>8）。
+    # 这条口径由 app/tools/fused_decode_parity.py 对着 frames/%06d.png 逐帧逐像素盯着。
+    raw = str(mode or "raw").strip().lower() in _FUSED_RAW_MODES
     rf = (0, 0)
+    deep = False
     if raw:
         if not size or int(size[0] or 0) <= 0 or int(size[1] or 0) <= 0:
             raise _BadInput("raw 解码要源视频的宽高，但 probe 里没有", 422)
         rf = (int(size[0]), int(size[1]))
+        if bits is None:
+            bits = _fused_src_bits(video)
+        deep = int(bits) > 8
 
     ffmpeg = str(_app_mod._ffmpeg_exe())
     cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-nostats", "-nostdin",
@@ -10711,7 +10758,7 @@ def _fused_open_frames(video: Path, start_i: int, size=None, mode="png"):
     # -vsync 0：原样搬每一帧（不按时间戳丢/补），帧数 = 选中的帧数
     cmd += ["-vsync", "0"]
     if raw:
-        cmd += ["-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"]
+        cmd += ["-f", "rawvideo", "-pix_fmt", ("bgr48le" if deep else "bgr24"), "pipe:1"]
     else:
         cmd += ["-f", "image2pipe", "-vcodec", "png",
                 "-compression_level", "1", "pipe:1"]
@@ -10744,11 +10791,18 @@ def _fused_open_frames(video: Path, start_i: int, size=None, mode="png"):
                 return b"".join(parts)
 
     def _next_frame_raw():
-        """rawvideo：定长读一帧（w*h*3 字节）→ (h,w,3) BGR uint8；流结束返回 None。"""
-        nb = rf[0] * rf[1] * 3
+        """rawvideo：定长读一帧 → (h,w,3) BGR uint8；流结束返回 None。
+
+        >8bit 的源进的是 bgr48le（w*h*3*2 字节），这里 `>> 8` 取高字节 —— 和 16bit PNG
+        被 libpng chop（= 取高字节）的结果逐位相同；用 swscale 的 10→8 舍入就对不上了。
+        """
+        bpp = 6 if deep else 3
+        nb = rf[0] * rf[1] * bpp
         buf = proc.stdout.read(nb)
         if not buf or len(buf) < nb:
             return None
+        if deep:
+            return (np.frombuffer(buf, "<u2").reshape(rf[1], rf[0], 3) >> 8).astype(np.uint8)
         return np.frombuffer(buf, np.uint8).reshape(rf[1], rf[0], 3).copy()
 
     def _next_frame():
@@ -11076,25 +11130,29 @@ def _fused_run(cfg: dict) -> dict:
                     int(ent[2]), int(ent[2])))
         return int(b)
 
-    # ---- ① 解码：ffmpeg 的 PNG 帧流 → 帧缓冲（信号量卡死上限，满了解码就停，天然背压）----
-    # 走 PNG 而不是 rawvideo bgr24：见 _fused_open_frames 的注释（只有同一条编解码路径
-    # 才能和分段产物逐像素一致）。
+    # ---- ① 解码：ffmpeg 的 rawvideo 帧流 → 帧缓冲（信号量卡死上限，满了解码就停，天然背压）----
+    # 默认 rawvideo（软解）：和切帧产物 frames/%06d.png 逐位相同，25.2→8.9 ms/帧
+    # （见 _fused_open_frames 的注释 + app/tools/fused_decode_parity.py 的对拍回归）。
+    # DFL_FUSED_DECODE=png 可退回 PNG 管道（排障 / 想走「同一条 PNG 编解码路径」时用）。
     gen = {}
-    dec_mode = str(os.environ.get(_FUSED_ENV_DECODE) or "png").strip().lower()
-    if dec_mode not in ("raw", "rawvideo", "bgr24"):
-        dec_mode = "png"
-    _vid_log("快速导出：解码 %s（%s）· 源 %sx%s"
-             % ("rawvideo bgr24（软解）" if dec_mode != "png" else "PNG 管道",
-                "DFL_FUSED_DECODE=raw，逐位等价、25→9 ms/帧" if dec_mode != "png"
-                else "默认；和切帧阶段同一条编解码路径",
-                probe.get("w"), probe.get("h")))
+    dec_mode = str(os.environ.get(_FUSED_ENV_DECODE) or "raw").strip().lower()
+    if dec_mode not in _FUSED_RAW_MODES:
+        dec_mode = "png"                      # 只认显式非 raw 值（png）= 回落 PNG 管道
+    src_bits = _fused_src_bits(video)        # 8 / 10 / 12 / 16：日志 + raw 选 bgr24 / bgr48le
+    _vid_log("快速导出：解码 %s（%s）· 源 %sx%s / %sbit"
+             % ("rawvideo %s（软解）" % ("bgr48le→>>8" if src_bits > 8 else "bgr24")
+                if dec_mode != "png" else "PNG 管道",
+                "默认；和切帧阶段落盘的 frames/%06d.png 逐位相同、25→9 ms/帧"
+                if dec_mode != "png"
+                else "DFL_FUSED_DECODE=png，可选；同一条 PNG 编解码路径，约 25 ms/帧",
+                probe.get("w"), probe.get("h"), src_bits))
 
     def _decode():
         proc = None
         try:
             proc, next_frame = _fused_open_frames(video, start_i,
                                                  size=(probe.get("w"), probe.get("h")),
-                                                 mode=dec_mode)
+                                                 mode=dec_mode, bits=(src_bits or None))
             gen["proc"] = proc
             n = start_i - 1
             while not stop.is_set():
