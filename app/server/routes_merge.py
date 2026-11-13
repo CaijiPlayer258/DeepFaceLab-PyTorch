@@ -3637,6 +3637,89 @@ class _PreviewWorker:
 _WORKER = _PreviewWorker()
 
 
+# ------------------------------------------------------------
+# 项目导出的 worker 进程池（对齐 iperov 的分片多进程）
+#
+# iperov 的导出 Stage4（export_pipeline._stage4_swap_faces_mp）是一个
+# multiprocessing.Pool：主进程切片下发，每个子进程在 initializer 里建**自己的**
+# dfm/xseg session（_phase_init_all），进程内直接读帧/换脸/融合/落盘，主进程只
+# 顺着 imap_unordered 收回执。这里不重造那套代码 —— _PreviewWorker 本来就是
+# 「一份 session + 一条 JSON 协议」的独立进程，把它复制成 N 份即可：像素路径
+# 原样不动，多出来的只有并行度。
+# ------------------------------------------------------------
+def _proj_workers_default() -> int:
+    """项目模式默认并行度：min(4, cpu//4)；DFL_PROJ_WORKERS 可覆盖（测试/调参用）。"""
+    try:
+        n = int(str(os.environ.get("DFL_PROJ_WORKERS") or "").strip() or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n > 0:
+        return max(1, min(16, n))
+    cpu = os.cpu_count() or 8
+    return max(1, min(4, cpu // 4))
+
+
+class _PreviewWorkerPool:
+    """N 个常驻 worker 进程，按「空/忙」借还；每个进程有自己的 dfm session。
+
+    · 预热是**串行**的：同时起 N 个进程抢显存时谁先失败、失败几个都不确定；
+      一个个来才能精确知道这台机器装得下几个（8GB 卡 + 1.6GB 的 384 模型通常只
+      装得下 2 个），装不下的当场 close 掉，池子里剩下的才是真能用的。
+    · 借还用 Queue：线程池里正好 N 个线程，所以不会有两个线程拿到同一个 worker。
+    """
+
+    def __init__(self, n: int):
+        n = max(1, int(n))
+        self._all = [_PreviewWorker() for _ in range(n)]
+        self._free = queue.Queue()
+        for w in self._all:
+            self._free.put(w)
+        self._closed = False
+
+    def __len__(self) -> int:
+        return len(self._all)
+
+    def acquire(self):
+        return self._free.get()
+
+    def release(self, w):
+        self._free.put(w)
+
+    def prewarm(self, dfms, xseg) -> int:
+        """逐个把 dfm/xseg 装进显存并空跑一次前向；返回真正起来的 worker 个数。"""
+        ok = []
+        for w in list(self._all):
+            try:
+                r = w.call({"cmd": "warm",
+                            "dfms": [str(p) for p in (dfms or []) if str(p or "")],
+                            "xseg": str(xseg or "")})
+                if not r.get("ok"):
+                    raise _BadInput(str(r.get("error") or "warm 失败"), 500)
+                ok.append(w)
+            except Exception as e:                      # noqa: BLE001
+                print("[merge-proj] worker 预热失败（%s）：%s"
+                      % (e.__class__.__name__, str(e)[:200]), flush=True)
+                try:
+                    w.close("预热失败")
+                except Exception:                       # noqa: BLE001
+                    pass
+        self._all = ok
+        self._free = queue.Queue()
+        for w in ok:
+            self._free.put(w)
+        return len(ok)
+
+    def close(self, why="项目导出结束"):
+        if self._closed:
+            return
+        self._closed = True
+        for w in self._all:
+            try:
+                w.close(why)
+            except Exception:                           # noqa: BLE001
+                pass
+
+
 def _shutdown_preview_worker():
     try:
         _WORKER.close("进程退出")
@@ -4282,7 +4365,10 @@ def _preview_multi(job: dict, frame, boxes, box_wh, timings, stage_fn, state) ->
         "jpeg_quality": q,
         "fmt": fmt,
     }
-    resp = _WORKER.call(payload, on_stage=lambda st: state.__setitem__("stage", st))
+    # job["worker"] 只给项目导出并行那条路用（每个 worker 进程一份 session）；
+    # 没给就是常驻单 worker，单帧预览的行为一个字都不变。
+    resp = (job.get("worker") or _WORKER).call(
+        payload, on_stage=lambda st: state.__setitem__("stage", st))
     if not resp.get("ok"):
         raise _BadInput("换脸失败：%s" % (resp.get("error") or "预览 worker 没给原因"), 500)
     try:
@@ -4445,7 +4531,9 @@ def _preview_job(job: dict) -> dict:
         "jpeg_quality": q,
         "fmt": fmt,
     }
-    resp = _WORKER.call(payload, on_stage=lambda st: state.__setitem__("stage", st))
+    # 同 _preview_multi：job["worker"] 给了就用它（项目导出的并行池），否则常驻单 worker
+    resp = (job.get("worker") or _WORKER).call(
+        payload, on_stage=lambda st: state.__setitem__("stage", st))
     if not resp.get("ok"):
         raise _BadInput("换脸失败：%s" % (resp.get("error") or "预览 worker 没给原因"), 500)
     try:
@@ -5462,66 +5550,119 @@ def _proj_run(cfg: dict):
     total = len(frames)
     done = swapped = copied = skipped = 0
     failed_frames, face_miss = [], []
-    for name in frames:
-        if _proj_cancelled():
-            stop.set()
-            raise _ProjCancel()
-        src_p = frames_dir / name
+
+    # ---- 并行度：N 个 worker 进程，每个进程一份自己的 dfm session ----
+    # iperov 的 stage4 是 Pool(N) 按帧分片；这里对齐同一个语义。区别只在实现：
+    # 那套在每个子进程的 initializer 里建 session（_phase_init_all），我们借还的
+    # 是一个已经预热好的常驻 worker 进程（它本来就是「一份 session + 一条协议」）。
+    # 只有 N=1 时走老路径（就在本进程外那一个 _WORKER 上），逐像素基准就是它。
+    want_workers = int(cfg.get("workers") or _proj_workers_default())
+    want_workers = max(1, min(int(want_workers), int(total) or 1, 16))
+    pool = None
+    n_workers = 1
+    if want_workers > 1:
+        pool = _PreviewWorkerPool(want_workers)
+        _dfms = [m["dfm"] for m in (models or []) if m.get("dfm")] or [str(cfg["dfm"])]
+        t_warm = time.time()
+        n_ok = 0
+        try:
+            n_ok = pool.prewarm(_dfms, cfg.get("xseg"))
+        except Exception as e:                          # noqa: BLE001
+            _proj_warn("worker 预热整体失败：%s: %s"
+                       % (e.__class__.__name__, str(e)[:160]))
+        _proj_log("并行：请求 %d 个 worker 进程，显存装下 %d 个（预热 %.1fs）"
+                  % (want_workers, n_ok, time.time() - t_warm))
+        if n_ok <= 0:
+            pool.close("预热全失败")
+            pool = None
+            raise _BadInput("项目导出：worker 进程一个都没起来 —— 见上一条日志", 500)
+        if n_ok < want_workers:
+            _proj_warn("%d 个 worker 没起来（显存不够 / 加载失败），实际并行 %d"
+                       % (want_workers - n_ok, n_ok))
+        n_workers = int(n_ok)
+    _proj_set(workers=int(n_workers))
+
+    def _produce(name, worker):
+        """一帧的活：读帧 → 检测 → 68 点 → worker 里换脸/遮罩/融合 → 整帧编码。
+
+        返回 (kind, payload)：
+          skip  续跑：merged 里已经有这一帧（payload=None）
+          copy  没有对齐脸 → 源文件原样搬（payload=None）
+          res   _preview_job 的结果（payload=res）
+          err   这一帧失败（payload={"frame","error"}）
+        **不落盘、不计数** —— 这两件事只在主线程做，断点续跑与进度的语义才不会
+        被并行打乱（帧按提交顺序取回，所以落盘顺序仍和串行时一样）。
+        """
         dst_p = merged_dir / name
+        src_p = frames_dir / name
         # ---- 断点续跑：merged 里已经有非空文件就跳过（--force 时才重做）----
         if not force and dst_p.is_file() and dst_p.stat().st_size > 0:
-            skipped += 1
-        else:
+            return "skip", None
+        try:
+            frame = _app_mod._imread_any(src_p)
+        except Exception:
             frame = None
+        if frame is None:
+            return "err", {"frame": name, "error": "这一帧读不出来（损坏？）"}
+        if not (face_map.get(name) or []):
+            # 有没有脸：aligned 说了算。没有就原样搬（无损，也不白跑一次检测）
+            return "copy", None
+        fmt = "png" if Path(name).suffix.lower() == ".png" else "jpg"
+        try:
+            res = _preview_job({"frame": frame, "models": models,
+                                "dfm": cfg["dfm"], "xseg": cfg["xseg"],
+                                "config": cfg["config"],
+                                "detector": cfg["detector"],
+                                "thresh": float(cfg["thresh"]),
+                                "stop": stop, "state": state,
+                                "fmt": fmt, "quality": q,
+                                "no_face_copy": True, "worker": worker})
+        except _BadInput as e:
+            return "err", {"frame": name, "error": str(e.msg)[:200]}
+        except Exception as e:                      # noqa: BLE001
+            traceback.print_exc()
+            return "err", {"frame": name,
+                           "error": "%s: %s" % (e.__class__.__name__, str(e)[:160])}
+        return "res", res
+
+    def _commit(name, kind, payload):
+        """落盘 + 记账（只在主线程跑）。"""
+        nonlocal skipped, copied, swapped
+        if kind == "skip":
+            skipped += 1
+            return
+        if kind == "err":
+            failed_frames.append(payload)
+            return
+        dst_p = merged_dir / name
+        src_p = frames_dir / name
+        if kind == "copy":
             try:
-                frame = _app_mod._imread_any(src_p)
-            except Exception:
-                frame = None
-            if frame is None:
-                failed_frames.append({"frame": name, "error": "这一帧读不出来（损坏？）"})
-            elif not (face_map.get(name) or []):
-                # 有没有脸：aligned 说了算。没有就原样搬（无损，也不白跑一次检测）
-                try:
-                    _proj_put(dst_p, src=src_p)
-                    copied += 1
-                except Exception as e:              # noqa: BLE001
-                    failed_frames.append({"frame": name,
-                                          "error": "搬运失败：%s" % str(e)[:120]})
+                _proj_put(dst_p, src=src_p)
+                copied += 1
+            except Exception as e:                  # noqa: BLE001
+                failed_frames.append({"frame": name,
+                                      "error": "搬运失败：%s" % str(e)[:120]})
+            return
+        res = payload or {}
+        try:
+            if res.get("copy"):
+                _proj_put(dst_p, src=src_p)
+                copied += 1
+                if not res.get("has_face"):
+                    # 有对齐脸但检测不到脸：记下来，别让它悄悄过
+                    if len(face_miss) < _PROJ_MAX_LIST:
+                        face_miss.append(name)
             else:
-                fmt = "png" if Path(name).suffix.lower() == ".png" else "jpg"
-                try:
-                    res = _preview_job({"frame": frame, "models": models,
-                                        "dfm": cfg["dfm"], "xseg": cfg["xseg"],
-                                        "config": cfg["config"],
-                                        "detector": cfg["detector"],
-                                        "thresh": float(cfg["thresh"]),
-                                        "stop": stop, "state": state,
-                                        "fmt": fmt, "quality": q,
-                                        "no_face_copy": True})
-                except _BadInput as e:
-                    res = None
-                    failed_frames.append({"frame": name, "error": str(e.msg)[:200]})
-                except Exception as e:              # noqa: BLE001
-                    res = None
-                    traceback.print_exc()
-                    failed_frames.append({"frame": name,
-                                          "error": "%s: %s" % (e.__class__.__name__,
-                                                               str(e)[:160])})
-                if res is not None:
-                    try:
-                        if res.get("copy"):
-                            _proj_put(dst_p, src=src_p)
-                            copied += 1
-                            if not res.get("has_face"):
-                                # 有对齐脸但检测不到脸：记下来，别让它悄悄过
-                                if len(face_miss) < _PROJ_MAX_LIST:
-                                    face_miss.append(name)
-                        else:
-                            _proj_put(dst_p, data=res.get("img") or res.get("jpg"))
-                            swapped += 1
-                    except Exception as e:          # noqa: BLE001
-                        failed_frames.append({"frame": name,
-                                              "error": "落盘失败：%s" % str(e)[:120]})
+                _proj_put(dst_p, data=res.get("img") or res.get("jpg"))
+                swapped += 1
+        except Exception as e:                      # noqa: BLE001
+            failed_frames.append({"frame": name,
+                                  "error": "落盘失败：%s" % str(e)[:120]})
+
+    def _tick():
+        """进度（只在主线程跑，和以前串行时的口径一模一样）。"""
+        nonlocal done
         done += 1
         el = max(0.001, time.time() - t0)
         # 帧速只按真正干过活的帧算：续跑跳过的不算，否则「全跳过」会报出 3 万帧/秒
@@ -5538,6 +5679,66 @@ def _proj_run(cfg: dict):
         if done % 20 == 0 or done == total:
             _proj_log("合成 %d/%d 帧 · 换脸 %d · 原样 %d · 跳过 %d · 失败 %d"
                       % (done, total, swapped, copied, skipped, len(failed_frames)))
+
+    try:
+        if pool is None:
+            # ---- 单进程：一帧算完再下一帧（老路径，逐像素基准）----
+            for name in frames:
+                if _proj_cancelled():
+                    stop.set()
+                    raise _ProjCancel()
+                kind, payload = _produce(name, None)
+                _commit(name, kind, payload)
+                _tick()
+        else:
+            # ---- N 进程：主线程只做读帧/检测/68 点 + 落盘/记账，重活在 worker ----
+            from concurrent.futures import ThreadPoolExecutor
+            # 在飞的帧数：够把每个 worker 都堵满，又不至于攒一屏的 base64 帧在内存里
+            window = max(2, n_workers + 2)
+            pending = collections.deque()
+            it = iter(frames)
+            cancelled = False
+
+            def _slot(name):
+                w = pool.acquire()
+                try:
+                    return _produce(name, w)
+                finally:
+                    pool.release(w)
+
+            with ThreadPoolExecutor(max_workers=n_workers,
+                                    thread_name_prefix="proj-frame") as ex:
+                while True:
+                    while len(pending) < window:
+                        try:
+                            name = next(it)
+                        except StopIteration:
+                            break
+                        if _proj_cancelled():
+                            cancelled = True
+                            break
+                        pending.append((name, ex.submit(_slot, name)))
+                    if cancelled or not pending:
+                        break
+                    name, fut = pending.popleft()
+                    try:
+                        kind, payload = fut.result()
+                    except Exception as e:          # noqa: BLE001
+                        kind, payload = "err", {"frame": name,
+                                                "error": "%s: %s"
+                                                         % (e.__class__.__name__,
+                                                            str(e)[:160])}
+                    _commit(name, kind, payload)
+                    _tick()
+                if cancelled:
+                    # 取消：先杀掉 worker（ONNX 推理从外部打断不了），在飞的那几个
+                    # 立刻带着"失联"错误返回，线程池才收得掉；已经写好的帧留着。
+                    stop.set()
+                    pool.close("项目导出已取消")
+                    raise _ProjCancel()
+    finally:
+        if pool is not None:
+            pool.close()
 
     if face_miss:
         _proj_warn("%d 帧有对齐脸但没检出人脸，已按原帧落盘：%s"
@@ -5673,6 +5874,9 @@ def merge_export_project(body: dict):
                     —— 和 /api/merge/export、/api/merge/preview 同一套协议
       force         可选，true = 忽略 merged 里已有的帧，全部重做
       quality       可选，jpg 帧的编码质量（默认 92，和单帧预览一致）
+      workers       可选，并行 worker 进程数（默认 min(4, cpu//4)，1 = 老的单进程路径）。
+                    每个 worker 是一份独立的 dfm session；显存装不下几个就只用几个，
+                    实际值回在 status 的 workers 字段里。
     """
     body = _as_dict(body)
     project = _norm_path(body.get("project_dir") or body.get("project"))
@@ -5709,6 +5913,9 @@ def merge_export_project(body: dict):
     xseg = _xseg_of(body)
     quality = _int_val("quality", body.get("quality"), 1, 100, _PREVIEW_QUALITY)
     force = bool(body.get("force"))
+    # 并行度：N 个 worker 进程，各持自己的 dfm session（iperov stage4 的同一个语义）。
+    workers = int(_int_val("workers", body.get("workers"), 1, 16,
+                           _proj_workers_default()))
 
     # ---- 原视频 / fps / 分辨率：读不到就报错，不猜 ----
     video, why = _proj_source_video(body.get("video") or body.get("source_video"),
@@ -5755,7 +5962,7 @@ def merge_export_project(body: dict):
            "models": models, "dfm": str(dfm), "model": str(model_name),
            "config": cfg_main, "settings": settings, "xseg": xseg,
            "detector": detector, "thresh": float(thresh), "quality": int(quality),
-           "force": force}
+           "force": force, "workers": int(workers)}
 
     with _PROJ_LOCK:
         if _PROJ_JOB.get("running"):
@@ -5773,6 +5980,7 @@ def merge_export_project(body: dict):
             "swapped": 0, "copied": 0, "skipped": 0, "failed": 0,
             "frame_fps": 0.0, "eta_s": None, "started_at": time.time(),
             "finished_at": None, "force": force, "dfm": str(dfm),
+            "workers": int(workers),
             "model": str(model_name),
             "models": [{"name": m["name"], "dfm": m["dfm"],
                         "faces": list(m["faces"])} for m in (models or [])],
