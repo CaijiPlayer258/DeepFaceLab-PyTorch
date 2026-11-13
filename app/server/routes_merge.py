@@ -2226,6 +2226,10 @@ def merge_export_status():
         resp["resumable"] = (not fused)
         resp["frame_budget"] = resp["vid"]["frame_budget"]
         resp["no_cache"] = bool(fused)
+    # 显存计划（三条路共用一个形状）：训练/导出出问题时第一眼看它 ——
+    # 里面有可用显存、需求拆项、选了哪一档、有没有降档、是不是在 CPU 上跑。
+    resp["vram_plan"] = dict(snap.get("vram_plan") or _vram_last("快速导出") or {})
+    resp["on_cpu"] = bool(resp["vram_plan"].get("cpu")) or bool(snap.get("on_cpu"))
     return resp
 
 
@@ -2870,6 +2874,15 @@ def main():
     except Exception:
         _ort_dirs = []
     import onnxruntime as ort
+    # 父进程说「显存不够、用户开了 DFL_ALLOW_CPU_FALLBACK」时会带这个环境变量过来：
+    # 本进程一律只建 CPU EP 的 session（不然 dfm 让出了显存、XSeg 又去抢）。
+    _FORCE_CPU = str(os.environ.get("DFL_FORCE_CPU_EP") or "").strip().lower() in (
+        "1", "true", "yes", "on")
+    _PROVIDERS = (["CPUExecutionProvider"] if _FORCE_CPU
+                  else ["CUDAExecutionProvider", "CPUExecutionProvider"])
+    if _FORCE_CPU:
+        print("[preview] ★ 当前在 CPU 上跑 ★（DFL_ALLOW_CPU_FALLBACK=1 + 显存不够）",
+              file=sys.stderr, flush=True)
     import MergeStudio.core.merger as _merger
     from MergeStudio.core.merger import MergeMaskedFace
     from MergeStudio.core.config import MergerConfigMasked, ctm_dict
@@ -2963,8 +2976,7 @@ def main():
                   "models": sorted(models)})
         _say({"id": rid, "stage": "loading_model", "file": os.path.basename(dfm),
               "dfm": str(dfm), "slots": len(models)})
-        sess = ort.InferenceSession(dfm, providers=["CUDAExecutionProvider",
-                                                    "CPUExecutionProvider"])
+        sess = ort.InferenceSession(dfm, providers=list(_PROVIDERS))
         shape = list(sess.get_inputs()[0].shape)
         nchw = len(shape) >= 4 and shape[1] in (1, 3)
         try:
@@ -2978,7 +2990,7 @@ def main():
         except Exception:
             providers = []
         _say({"id": rid, "stage": "model_ready", "size": size, "dfm": str(dfm),
-              "providers": providers,
+              "providers": providers, "on_cpu": bool(_FORCE_CPU),
               "models": sorted(models),      # 父进程照这个对齐 _models（现在最多 3 个）
               "models_lru": list(models), "max_models": _MAX_MODELS,
               "load_ms": round((time.time() - t_boot) * 1000.0, 1)})
@@ -2989,8 +3001,7 @@ def main():
             return None
         if path in xsegs:
             return xsegs[path]
-        xs = ort.InferenceSession(path, providers=["CUDAExecutionProvider",
-                                                   "CPUExecutionProvider"])
+        xs = ort.InferenceSession(path, providers=list(_PROVIDERS))
         xi = xs.get_inputs()[0].name
         xsh = list(xs.get_inputs()[0].shape)
         nchw = len(xsh) >= 4 and xsh[1] in (1, 3)
@@ -3052,7 +3063,8 @@ def main():
 
     _say({"ready": True, "boot_ms": round((time.time() - t_boot) * 1000.0, 1),
           "providers": ort.get_available_providers(), "engine": engine,
-          "max_models": _MAX_MODELS, "pid": os.getpid()})
+          "max_models": _MAX_MODELS, "pid": os.getpid(), "on_cpu": bool(_FORCE_CPU),
+          "ep": ("CPUExecutionProvider" if _FORCE_CPU else "auto")})
 
     for line in _IN:
         line = line.strip()
@@ -3335,6 +3347,8 @@ class _PreviewWorker:
         self._sess_providers = {}               # dfm -> worker 建 session 时真正拿到的 provider
         self._script = None
         self._providers = []
+        self._on_cpu = False           # worker 是不是被逼着跑 CPU（DFL_ALLOW_CPU_FALLBACK）
+        self._vram_plan = {}           # 起 worker 时那份显存计划（status 里回显）
 
     # ---- 状态 ----
     def alive(self) -> bool:
@@ -3353,7 +3367,11 @@ class _PreviewWorker:
                 "max_models": int(self._max_models or 3),
                 "session_providers": {os.path.basename(k): list(v)
                                       for k, v in self._sess_providers.items()},
-                "script": str(self._script or "")}
+                "script": str(self._script or ""),
+                "on_cpu": bool(self._on_cpu),
+                "cpu_note": ("★ 当前在 CPU 上跑 ★（显存不够 + DFL_ALLOW_CPU_FALLBACK=1，"
+                             "预计慢约 17 倍）" if self._on_cpu else ""),
+                "vram_plan": dict(self._vram_plan or {})}
 
     def _tail_text(self, n=6) -> str:
         lines = [x for x in list(self._tail) if str(x).strip()][-n:]
@@ -3385,6 +3403,15 @@ class _PreviewWorker:
         env = dict(os.environ)
         env.update({"PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1",
                     "PYTHONUTF8": "1"})
+        # 显存预算说「装不下但允许 CPU 回落」时，把这个决定带进子进程 ——
+        # 子进程是独立解释器，父进程的开关传不过去。
+        self._on_cpu = bool(_vram_cpu_on())
+        if self._on_cpu:
+            env["DFL_FORCE_CPU_EP"] = "1"
+            print("[merge-preview] ★ 当前在 CPU 上跑 ★（显存不够 + %s=1）"
+                  % _VRAM_ENV_CPU, flush=True)
+        else:
+            env.pop("DFL_FORCE_CPU_EP", None)
         try:
             proc = subprocess.Popen(
                 [str(py), str(script), str(root)],
@@ -3403,6 +3430,7 @@ class _PreviewWorker:
         self._models = {}
         self._sess_providers = {}
         self._tail.clear()
+        self._vram_plan = dict(_vram_last("预览") or {})
         self._out_t = threading.Thread(target=self._read_stdout, args=(proc, self._q),
                                        daemon=True, name="merge-preview-out")
         self._out_t.start()
@@ -4592,10 +4620,19 @@ def merge_preview(body: dict):
     thresh = _float_val("thresh", body.get("thresh"), 0.0, 1.0, 0.5)
     xseg = _xseg_of(body)
 
+    # ---- 显存闸门：模型装不下就**明确拒绝**，别让 worker 半死不活 ----
+    # 以前这里是「起 worker → 加载失败 → 报一句 worker 的 stderr 尾巴」，用户看到的
+    # 是一条 CUDA/ORT 的英文异常；现在先算账：装不下就 400 + 「需要 X GB / 可用 Y GB /
+    # 建议」，开了 DFL_ALLOW_CPU_FALLBACK 就走 CPU（worker 会收到 DFL_FORCE_CPU_EP=1）。
+    plan = _preview_guard([m["dfm"] for m in (models or []) if m.get("dfm")] or [str(dfm)])
+
     note = ""
     if int(cfg.get("mask_mode") or 0) >= 6 and not xseg:
         note = ("mask_mode=%s 要 XSeg 模型，但找不到 —— 引擎会退化成整块矩形贴脸"
                 % cfg.get("mask_mode"))
+    if plan.get("cpu"):
+        note = (note + "；" if note else "") + ("★ 当前在 CPU 上跑 ★（显存不够 + "
+                                                "DFL_ALLOW_CPU_FALLBACK=1，预计慢约 17 倍）")
     if settings.get("face_margin") not in (None, ""):
         note = (note + "；" if note else "") + "face_margin 只影响抽帧对齐，预览不读它"
 
@@ -4620,6 +4657,8 @@ def merge_preview(body: dict):
             tm["cache_hit"] = 1
             hit_res["timings"] = tm
             hit_res["ms"] = int(round((time.time() - t_start) * 1000.0))
+            hit_res["vram_plan"] = dict(plan)
+            hit_res["on_cpu"] = bool(plan.get("cpu"))
             try:
                 hit_res["worker"] = _WORKER.status()
             except Exception:
@@ -4698,7 +4737,8 @@ def merge_preview(body: dict):
                 blur_mask=cfg.get("blur_mask_modifier"),
                 xseg=xseg, detector=detector,
                 settings=settings, timings=res.get("timings") or {},
-                worker=_WORKER.status(), note=res.get("note") or note)
+                worker=_WORKER.status(), note=res.get("note") or note,
+                vram_plan=dict(plan), on_cpu=bool(plan.get("cpu")))
     if models:                          # 多模型：只增不改，把「谁被用了」摊开给前端核对
         resp["models"] = [{"name": m["name"], "dfm": m["dfm"],
                            "faces": list(m["faces"])} for m in models]
@@ -4717,8 +4757,14 @@ def merge_preview(body: dict):
 @router.get("/api/merge/preview/status")
 @_api
 def merge_preview_status():
-    """预览 worker 的现状（排障用：起没起、加载过哪些模型、跑在哪个 provider 上）。"""
-    return _ok(**_WORKER.status())
+    """预览 worker 的现状（排障用：起没起、加载过哪些模型、跑在哪个 provider 上）。
+
+    另带一份 vram_plan：这次加载是按什么显存预算放行的、有没有降档 / 是不是在 CPU 上跑。
+    """
+    st = _WORKER.status()
+    plan = dict(st.get("vram_plan") or _vram_last("预览") or {})
+    return _ok(**dict(st, vram_plan=plan,
+                      on_cpu=bool(st.get("on_cpu") or plan.get("cpu"))))
 
 @router.post("/api/merge/preview-frame")
 @_api
@@ -4756,6 +4802,9 @@ def merge_preview_frame(body: dict):
     fmt = "png" if str(body.get("fmt") or "jpg").strip().lower() == "png" else "jpg"
     quality = _int_val("quality", body.get("quality"), 1, 100, _PREVIEW_QUALITY)
 
+    # 显存闸门（和 /preview 同一口径）：装不下就 400 + 数字，别去起 worker 试
+    plan = _preview_guard([m["dfm"] for m in (models or []) if m.get("dfm")] or [str(dfm)])
+
     frame = _app_mod._imread_any(fp)
     if frame is None:
         raise _BadInput("这张帧图解不开：%s" % fp.name, 422)
@@ -4781,7 +4830,7 @@ def merge_preview_frame(body: dict):
                swapped=bool(res.get("swapped")), note=res.get("note") or "",
                timings=res.get("timings") or {},
                model=model_name, dfm=str(dfm), xseg=xseg, detector=detector,
-               settings=settings)
+               settings=settings, vram_plan=dict(plan), on_cpu=bool(plan.get("cpu")))
     if models:
         resp["models"] = [{"name": m["name"], "dfm": m["dfm"],
                            "faces": list(m["faces"])} for m in models]
@@ -5091,6 +5140,8 @@ def merge_preview_warm(body: dict = None):
         dfm, model_name = _dfm_of(body)        # 模型不存在：这里就 404，不进线程
         dfms, names = [str(dfm)], [str(model_name or "")]
     det_name = _detector_val(body.get("detector"))
+    # 预热也要过显存闸门：装不下就在这里 400（带数字），别让后台线程去撞 CUDA
+    plan = _preview_guard(dfms)
 
     hot, why = _warm_note_hot(dfms, names, det_name)
     ms = int(round((time.time() - t_req) * 1000.0))
@@ -5099,7 +5150,8 @@ def merge_preview_warm(body: dict = None):
                    model=names[0], dfm=dfms[0], detector=det_name,
                    worker_pid=_worker_pid(),
                    models=[{"name": n, "dfm": d} for n, d in zip(names, dfms)],
-                   models_used=list(names), max_models=_WORKER_MAX_MODELS)
+                   models_used=list(names), max_models=_WORKER_MAX_MODELS,
+                   vram_plan=dict(plan), on_cpu=bool(plan.get("cpu")))
 
     started = _warm_kick(dfms, names, det_name, t_req)
     return _ok(warming=True, ready=False, ms=int(round((time.time() - t_req) * 1000.0)),
@@ -5556,7 +5608,19 @@ def _proj_run(cfg: dict):
     # 那套在每个子进程的 initializer 里建 session（_phase_init_all），我们借还的
     # 是一个已经预热好的常驻 worker 进程（它本来就是「一份 session + 一条协议」）。
     # 只有 N=1 时走老路径（就在本进程外那一个 _WORKER 上），逐像素基准就是它。
+    vplan = dict(cfg.get("vram_plan") or {})
+    if vplan:
+        for _ln in _vram_log_lines(vplan, "项目导出"):
+            _proj_log(_ln)
     want_workers = int(cfg.get("workers") or _proj_workers_default())
+    # 显存计划给的是**上限**：真起不来的仍有 prewarm 兜底（那才是这台机器的实测），
+    # 但没理由在计划已经说「只装得下 1 个」的时候还去起 4 个进程试运气。
+    if vplan.get("procs"):
+        want_workers = min(int(want_workers), max(1, int(vplan["procs"])))
+        if int(vplan["procs"]) < int(vplan.get("requested_procs") or 0):
+            _proj_warn("显存预算只装得下 %d 个 worker（请求 %d）→ 实际按 %d 开"
+                       % (int(vplan["procs"]), int(vplan.get("requested_procs") or 0),
+                          int(vplan["procs"])))
     want_workers = max(1, min(int(want_workers), int(total) or 1, 16))
     pool = None
     n_workers = 1
@@ -5916,6 +5980,14 @@ def merge_export_project(body: dict):
     # 并行度：N 个 worker 进程，各持自己的 dfm session（iperov stage4 的同一个语义）。
     workers = int(_int_val("workers", body.get("workers"), 1, 16,
                            _proj_workers_default()))
+    # ---- 显存预算：能开几个 worker 就开几个（1/2/3），一个都开不了就明确拒绝 ----
+    # 每多一个 worker 就多一份「会话 + CUDA context」（416 实测 1166MB/份），
+    # 以前是「先起 4 个进程、看谁崩」，崩了再退 —— 那一步本身就会把卡顶到 OOM。
+    plan_paths = [m["dfm"] for m in (models or []) if m.get("dfm")] or [str(dfm)]
+    plan = _vram_guard(plan_paths, {"mode": "procs", "max_procs": int(workers),
+                                    "aux": True}, label="项目导出")
+    if int(plan.get("procs") or 1) < int(workers):
+        workers = max(1, int(plan.get("procs") or 1))
 
     # ---- 原视频 / fps / 分辨率：读不到就报错，不猜 ----
     video, why = _proj_source_video(body.get("video") or body.get("source_video"),
@@ -5962,7 +6034,8 @@ def merge_export_project(body: dict):
            "models": models, "dfm": str(dfm), "model": str(model_name),
            "config": cfg_main, "settings": settings, "xseg": xseg,
            "detector": detector, "thresh": float(thresh), "quality": int(quality),
-           "force": force, "workers": int(workers)}
+           "force": force, "workers": int(workers),
+           "vram_plan": dict(plan)}
 
     with _PROJ_LOCK:
         if _PROJ_JOB.get("running"):
@@ -5980,7 +6053,8 @@ def merge_export_project(body: dict):
             "swapped": 0, "copied": 0, "skipped": 0, "failed": 0,
             "frame_fps": 0.0, "eta_s": None, "started_at": time.time(),
             "finished_at": None, "force": force, "dfm": str(dfm),
-            "workers": int(workers),
+            "workers": int(workers), "vram_plan": dict(plan),
+            "on_cpu": bool(plan.get("cpu")),
             "model": str(model_name),
             "models": [{"name": m["name"], "dfm": m["dfm"],
                         "faces": list(m["faces"])} for m in (models or [])],
@@ -6002,6 +6076,8 @@ def merge_export_project(body: dict):
 def merge_export_project_status():
     """项目导出的进度。ok = 任务是否成功（和 /export/status 一个口径）。"""
     snap = _proj_snap()
+    snap["vram_plan"] = dict(snap.get("vram_plan") or _vram_last("项目导出") or {})
+    snap["on_cpu"] = bool(snap["vram_plan"].get("cpu")) or bool(snap.get("on_cpu"))
     ok = snap.get("ok")
     cancelled = bool(snap.get("cancelled"))
     want = bool(snap.get("want_cancel"))
@@ -7541,8 +7617,10 @@ def _dfm_session(dfm: str):
     session 按路径常驻，切模型才重建。
     """
     key = str(dfm)
+    cpu = _vram_cpu_on()            # 显存不够 + DFL_ALLOW_CPU_FALLBACK=1 → 整条链走 CPU EP
+    ckey = (key + "|cpu") if cpu else key
     with _PRED_LOCK:
-        hit = _DFM_SESS.get(key)
+        hit = _DFM_SESS.get(ckey)
         if hit is not None:
             return hit
         import onnxruntime as ort
@@ -7554,14 +7632,30 @@ def _dfm_session(dfm: str):
         info = {}
         sess = None
         backend = "ort-cuda"
-        try:
-            from . import _engines as _E
-            sess = _E.try_engine(ws, _dfm_engine_name(key), key,
-                                 precision=("bf16",), use_graph=False, info=info)
-        except Exception as e:                          # noqa: BLE001
-            info = {"reason": "try_engine 抛异常：%r" % (e,)}
-            sess = None
-        if sess is not None:
+        if cpu:
+            info = {"reason": "DFL_ALLOW_CPU_FALLBACK=1（显存预算装不下，主动回落 CPU）"}
+        else:
+            try:
+                from . import _engines as _E
+                sess = _E.try_engine(ws, _dfm_engine_name(key), key,
+                                     precision=("bf16",), use_graph=False, info=info)
+            except Exception as e:                      # noqa: BLE001
+                info = {"reason": "try_engine 抛异常：%r" % (e,)}
+                sess = None
+        if cpu:
+            backend = "ort-cpu-forced"
+            so = ort.SessionOptions()
+            so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            sess = ort.InferenceSession(key, sess_options=so,
+                                        providers=["CPUExecutionProvider"])
+            shape = list(sess.get_inputs()[0].shape)
+            name = sess.get_inputs()[0].name
+            provs = list(sess.get_providers())
+            _stage_log("换脸：★ 当前在 CPU 上跑 ★ dfm=%s 走 CPU EP —— 显存不够且开了 "
+                       "DFL_ALLOW_CPU_FALLBACK=1（416 实测 527 ms/张，GPU 约 31 ms/张，"
+                       "慢 %.0f 倍）。关掉这个开关就改成明确拒绝。"
+                       % (Path(key).name, _VRAM_CPU_SLOW))
+        elif sess is not None:
             backend = "trt"
             sess.precision = info.get("precision") or ""
             shape = list(sess.get_inputs()[0].shape)
@@ -7594,7 +7688,7 @@ def _dfm_session(dfm: str):
             size = 256
         cap = _sess_batch_cap(sess)
         ent = (sess, name, size, nchw, provs, cap, backend)
-        _DFM_SESS[key] = ent
+        _DFM_SESS[ckey] = ent
         _stage_log("换脸：dfm 已加载 %s · %d×%d · %s · 单次最多 %d 张"
                    % (Path(key).name, size, size, backend, cap))
         return ent
@@ -7763,6 +7857,538 @@ def _vram_free_mb():
         return None, None
 
 
+# ============================================================
+# 显存预算（三条路共用）：模型体量 → (计划 batch, 帧预算, 预计峰值, 可行?)
+# ============================================================
+# 为什么要有这一块：以前只有 _fused_budget（只按 30/16/8 降帧）和 _pred_pick_batch
+# （OOM 之后才降 batch）—— 两条都是「先跑，崩了再退」，**没有把模型体量算进总需求**，
+# 也没在「连 batch=1 都装不下」时停下来。结果是 3GB 空闲的机器上点导出会一路 OOM 到
+# 崩进程（fused 那条尤其难看：线程全炸、日志只剩 traceback）。
+#
+# 现在的口径是「按预算跑，跑不了就明说」：
+#   ① 探测可用显存（torch → nvidia-smi；DFL_VRAM_FREE_MB 可伪造，给验收/排障用）；
+#   ② 预算 = 空闲 × (1 - 20%) - 512MB（20% 是驱动/碎片余量，512MB 给桌面合成器）；
+#   ③ 需求 = 会话（权重 + ORT arena）+ CUDA context + 检测/遮罩 + 帧缓冲 + dfm 批；
+#   ④ 沿阶往下试，第一个装得下的就用（降档要记账）；连最小档都装不下：
+#        · 默认 → 明确拒绝（HTTP 400，消息里给「需要 X GB / 可用 Y GB / 建议」）；
+#        · DFL_ALLOW_CPU_FALLBACK=1 → 回落 CPU EP 照跑（慢 ~17 倍），日志和 status
+#          都写「当前在 CPU 上跑」。
+#
+# 这里的常数都是**量的**，不是拍的（RTX 5070 Laptop 8GB + 416 dfm + ort-CUDA）：
+#   会话建好（含这个进程的 CUDA context）          1161 MB   ← 权重 514 + context 512 + arena 135
+#   batch 1 / 2 / 4 / 8 / 16 的整卡增量             1173 / 1240 / 2199 / 2256 / 6274 MB
+#     → 减去会话本身：+12 / +79 / +1036 / +1091 / +5117（batch 4 起 ORT 的 arena
+#       换到另一个池子，所以是台阶不是直线；16 会把 8GB 卡顶到墙 —— 与 _pred_pick_batch
+#       里「16 撑爆 arena 之后整个进程变慢」的实测一致）；
+#   384 模型（文件 1567MB）会话 ≈ 2.07GB（用户口径 + 本仓库实测）→ 权重 + context 就够，
+#   arena 是小头，所以 _VRAM_ARENA_MB 取 140（416 实测 135，上取整）。
+_VRAM_ENV_FREE = "DFL_VRAM_FREE_MB"        # 验收/排障：假装可用显存只有这么多（三条路共用）
+_VRAM_ENV_CPU = "DFL_ALLOW_CPU_FALLBACK"   # 1 = 显存不够时回落 CPU EP（默认关：宁可拒绝）
+_VRAM_SAFETY = 0.20                        # 预留：空闲显存的 20%
+_VRAM_RESERVE_MB = 512                     # 再固定留 512MB（桌面合成器/驱动/碎片）
+_VRAM_CTX_MB = 512                         # 每进程一份 CUDA context
+_VRAM_ARENA_MB = 140                       # ORT CUDA arena：会话建好后比权重多出来的那点
+_VRAM_AUX_MB = 300                         # 检测器 + 2D106 关键点 + XSeg（用户口径 0.3GB）
+_VRAM_CPU_SLOW = 17.0                       # 回落 CPU 的代价（416 实测 527ms vs 31ms/张）
+_VRAM_BASE_PX = 416                         # 下面两张表都是按 416 量的，其它尺寸按 (s/416)² 缩放
+# 416 dfm 的批成本（整卡增量 − 会话本身）：台阶不是直线，所以查表 + 分段线性
+_VRAM_BATCH_PTS = ((1, 80.0), (2, 160.0), (4, 1100.0), (8, 1150.0), (16, 5200.0))
+_VRAM_PROBE_TTL = 4.0                       # 预览每拖一次都要问：nvidia-smi 80ms 不能每次都跑
+_VRAM_PROBE = {"at": 0.0, "free": None, "total": None, "src": ""}
+_VRAM_MODEL_CACHE = {}
+_VRAM_SIZE_CACHE = {}
+_VRAM_LAST = {}                             # label -> 最近一次的计划（status 端点要能回显）
+_VRAM_LOGGED = {}                           # label -> 上一次打过的签名（同样的决定只打一次）
+_VRAM_LOCK = threading.RLock()
+_CPU_EP = {"on": False, "why": ""}          # 全局「强制 CPU EP」：_dfm_session / _stage_xseg 读它
+_CPU_EP_LOCK = threading.Lock()
+
+
+def _vram_probe(ttl: float = None) -> tuple:
+    """(free_mb, total_mb, source)。
+
+    source 用来在日志里说清「这个数是哪来的」：env / torch / nvidia-smi / none。
+    env 伪造的值不走缓存（验收脚本会在同一个进程里换档，缓存会骗人）。
+    """
+    fake = str(os.environ.get(_VRAM_ENV_FREE) or "").strip()
+    if fake:
+        try:
+            return int(float(fake)), None, "env:" + _VRAM_ENV_FREE
+        except (TypeError, ValueError):
+            pass
+    old = str(os.environ.get(_FUSED_ENV_VRAM) or "").strip()   # 老开关继续认（既有验收脚本在用）
+    if old:
+        try:
+            return int(float(old)), None, "env:" + _FUSED_ENV_VRAM
+        except (TypeError, ValueError):
+            pass
+    ttl = _VRAM_PROBE_TTL if ttl is None else float(ttl)
+    now = time.time()
+    with _VRAM_LOCK:
+        if _VRAM_PROBE["at"] and (now - _VRAM_PROBE["at"]) < ttl:
+            return _VRAM_PROBE["free"], _VRAM_PROBE["total"], _VRAM_PROBE["src"]
+    free, total = _vram_free_mb()
+    src = "none" if free is None else "torch/nvidia-smi"
+    with _VRAM_LOCK:
+        _VRAM_PROBE.update({"at": now, "free": free, "total": total, "src": src})
+    return free, total, src
+
+
+def _vram_model_mb(path) -> float:
+    """一份 .dfm 的**权重**体量（MB）= 文件体积。
+
+    dfm 里就是前向用的那一份权重（fp32）：实测 416 —— 会话建好 1161MB 里，
+    512 是 CUDA context、135 是 ORT arena，剩下正好是 514（= 文件体积）。
+    文件读不到就按 0 算（不拦任务，只是预算里少算模型 —— 这种情况日志会写出来）。
+    """
+    key = str(path or "")
+    if not key:
+        return 0.0
+    try:
+        st = os.stat(key)
+    except OSError:
+        return 0.0
+    sig = (int(st.st_size), int(st.st_mtime))
+    with _VRAM_LOCK:
+        hit = _VRAM_MODEL_CACHE.get(key)
+    if hit and hit[0] == sig:
+        return hit[1]
+    mb = max(0.0, st.st_size / 1048576.0)
+    with _VRAM_LOCK:
+        _VRAM_MODEL_CACHE[key] = (sig, mb)
+    return mb
+
+
+def _vram_models_mb(paths) -> float:
+    """一组 dfm 里最大的那份。
+
+    多模型导出时它们常驻在同一个进程里（上限 _MAX_MODELS=3），但同一帧只会用到其中
+    一路、而且 A 卸 B 载是按 LRU 走的 —— 按**最大那份**算比按和算更接近峰值，
+    又不至于把 3 份 0.5GB 的模型误判成装不下。
+    """
+    best = 0.0
+    for p in (paths or []):
+        best = max(best, _vram_model_mb(p))
+    return best
+
+
+def _dfm_size_hint(dfm) -> int:
+    """这个 .dfm 的输入边长（416/512/…）——**不加载模型**就要知道，因为预算要在加载前算。
+
+    先看文件名（本仓库导出的模型都带边长，例如 阿証証証証-416.dfm），再退回 416。
+    真正喂给 session 的尺寸仍由 session 自己决定：_fused_run 加载后会拿实测尺寸
+    把这个预算**再算一遍**（不一样就按新尺寸重新判一次）。
+    """
+    key = str(dfm or "")
+    with _VRAM_LOCK:
+        hit = _VRAM_SIZE_CACHE.get(key)
+    if hit:
+        return int(hit)
+    size = 0
+    try:
+        stem = Path(key).stem
+        cand = [int(m) for m in re.findall(
+            r"(?<![0-9])(256|288|320|384|416|448|480|512|640)(?![0-9])", stem)]
+        if cand:
+            size = max(cand)
+    except Exception:                                       # noqa: BLE001
+        size = 0
+    if not size:
+        size = _VRAM_BASE_PX
+    with _VRAM_LOCK:
+        _VRAM_SIZE_CACHE[key] = int(size)
+    return int(size)
+
+
+def _vram_frame_mb(size_px: int) -> float:
+    """一帧在飞时压在 GPU 上大约多少 MB：dfm 输入 + 输出脸 + prd + dst 四份 float32。
+
+    416 → 7.92MB（用户口径 30×7.9 ≈ 237MB）；512 → 12.0MB。
+    """
+    size_px = max(64, int(size_px or _VRAM_BASE_PX))
+    return max(4.0, (size_px * size_px * 3 * 4 * 4) / 1048576.0)
+
+
+def _vram_batch_mb(size_px: int, batch) -> float:
+    """dfm 一次前向喂 batch 张时的额外占用（查 _VRAM_BATCH_PTS，按 (size/416)² 缩放）。"""
+    b = int(batch or 0)
+    if b <= 0:
+        return 0.0
+    k = (max(64, int(size_px or _VRAM_BASE_PX)) / float(_VRAM_BASE_PX)) ** 2
+    pts = _VRAM_BATCH_PTS
+    if b <= pts[0][0]:
+        return pts[0][1] * k
+    for i in range(1, len(pts)):
+        b0, c0 = pts[i - 1]
+        b1, c1 = pts[i]
+        if b <= b1:
+            return (c0 + (c1 - c0) * (b - b0) / float(b1 - b0)) * k
+    b_last, c_last = pts[-1]
+    b_prev, c_prev = pts[-2]
+    slope = (c_last - c_prev) / float(b_last - b_prev)
+    return (c_last + slope * (b - b_last)) * k
+
+
+def _vram_cpu_fallback_env() -> bool:
+    return str(os.environ.get(_VRAM_ENV_CPU) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _vram_cpu_on() -> bool:
+    """当前是不是「强制 CPU EP」（显存不够 + 用户开了 DFL_ALLOW_CPU_FALLBACK）。
+
+    _dfm_session / _stage_xseg 都读它 —— 一处开关，全链路一致，不会出现
+    「dfm 在 CPU 上、XSeg 还在抢显存」这种半吊子状态。
+    """
+    with _CPU_EP_LOCK:
+        return bool(_CPU_EP["on"])
+
+
+def _vram_set_cpu(on: bool, why: str = "") -> bool:
+    on = bool(on)
+    with _CPU_EP_LOCK:
+        was = bool(_CPU_EP["on"])
+        _CPU_EP["on"] = on
+        _CPU_EP["why"] = str(why or "") if on else ""
+    if on != was:
+        print("[vram] %s CPU EP（%s）"
+              % ("★ 切到" if on else "解除 CPU（回到 GPU）", why or "显存预算恢复"), flush=True)
+    return on
+
+
+def _vram_cands(mode: str, want_frames: int, want_batch: int,
+                want_procs: int, procs: int) -> list:
+    """候选计划：从「最想要」到「最省」。
+
+    · frames —— fused 视频导出：先保帧预算（流水线的重叠靠它），再降 dfm 批
+      （416 上 B1/B4/B8 每张耗时几乎一样，所以降批几乎不花钱）；
+    · procs  —— 项目导出：降的是 worker 进程数（每份 session + 一个 CUDA context），
+      帧/批固定（那一路一次只算一帧一张脸）；
+    · none   —— 预览：只问「一份会话装不装得下」。
+    """
+    if mode == "none":
+        return [{"frames": 0, "batch": 1, "procs": max(1, int(procs))}]
+    if mode == "procs":
+        return [{"frames": 0, "batch": 1, "procs": n}
+                for n in range(max(1, int(want_procs)), 0, -1)]
+    frames_ladder = sorted({int(f) for f in (want_frames, int(_FUSED_BUDGETS[1]),
+                                             int(_FUSED_BUDGETS[2]), int(_FUSED_BUDGETS[-1]))
+                            if 1 <= int(f) <= int(want_frames)}, reverse=True) \
+        or [int(want_frames)]
+    batch_ladder = sorted({int(b) for b in (want_batch, 4, 2, 1)
+                           if 1 <= int(b) <= int(want_batch)}, reverse=True) \
+        or [int(want_batch)]
+    out = []
+    for n in [max(1, int(procs))]:               # fused：单进程，只有帧/批两个旋钮
+        for f in frames_ladder:
+            for b in batch_ladder:
+                out.append({"frames": int(f), "batch": int(b), "procs": int(n)})
+    return out
+
+
+def _vram_need_mb(cand: dict) -> float:
+    """一个候选/计划的总需求（MB）：会话×进程 + 检测遮罩 + 帧缓冲 + dfm 批。"""
+    return (float(cand.get("sess_mb") or 0.0) * max(1, int(cand.get("procs") or 1))
+            + float(cand.get("aux_mb") or 0.0)
+            + int(cand.get("frames") or 0) * float(cand.get("frame_mb") or 0.0)
+            + float(cand.get("batch_mb") or 0.0))
+
+
+def _vram_plan(model_mb, opts: dict = None) -> dict:
+    """统一的显存预算：模型体量 + 选项 → 计划 batch / 帧预算 / 预计峰值 / 可行?
+
+    opts:
+      mode       frames（fused 视频导出，默认）| procs（项目导出 worker）| none（预览）
+      size_px    dfm 输入边长（默认 416；用 _dfm_size_hint 拿，别加载模型）
+      frames     想要的帧缓冲（默认 30 = _FUSED_BUDGETS[0]）
+      batch      想要的 dfm 批（默认 _FUSED_BATCH_TARGET）
+      procs      固定要几份会话（fused/preview = 1）
+      max_procs  mode=procs 时的上限（默认 = procs）
+      aux        要不要算检测器/关键点/XSeg（默认 True）
+      label      用途名（进日志与 status）
+      free_mb / total_mb  覆盖探测量（单测用；不传就走 _vram_probe）
+
+    返回 dict（关键字见下面 plan = {...}）。**ok=False 的调用方必须拒绝**：
+    _vram_plan 只算账，不抛异常（拒绝的样子由 _vram_guard / 调用点决定）。
+    开了 DFL_ALLOW_CPU_FALLBACK 且装不下时，返回 ok=True + cpu=True。
+    """
+    opts = dict(opts or {})
+    mode = str(opts.get("mode") or "frames")
+    label = str(opts.get("label") or "显存预算")
+    size_px = int(opts.get("size_px") or _VRAM_BASE_PX)
+    procs = max(1, int(opts.get("procs") or 1))
+    want_frames = int(opts.get("frames") or 0) or int(_FUSED_BUDGETS[0])
+    want_frames = max(int(_FUSED_BUDGETS[-1]), min(64, int(want_frames)))
+    want_batch = int(opts.get("batch") or 0) or int(_FUSED_BATCH_TARGET)
+    want_batch = max(1, min(int(_PRED_BATCH_CAP), int(want_batch)))
+    max_procs = max(1, min(16, int(opts.get("max_procs") or procs)))
+    aux = float(_VRAM_AUX_MB) if opts.get("aux", True) else 0.0
+    model_mb = max(0.0, float(model_mb or 0.0))
+    # 一份会话 = 权重 + 它自己的 CUDA context。ORT 的 arena（416 实测 +135MB）不单列
+    # —— 它由「空闲的 20% + 512MB」那份预留吸收；单列的话 384 模型会算成 2219MB/份，
+    # 把实测「8GB 卡上 2 个 worker 行、3 个 spill」误判成「只装得下 1 个」。
+    sess_mb = model_mb + float(_VRAM_CTX_MB)
+    frame_mb = _vram_frame_mb(size_px)
+    if opts.get("free_mb") is not None:
+        free, total, src = int(opts["free_mb"]), opts.get("total_mb"), "override"
+    else:
+        free, total, src = _vram_probe()
+
+    def _mk(frames, batch, nproc):
+        cand = {"sess_mb": round(sess_mb, 1), "aux_mb": round(aux, 1),
+                "frame_mb": round(frame_mb, 2), "frames": int(frames),
+                "batch": int(batch), "batch_mb": round(_vram_batch_mb(size_px, batch), 1),
+                "procs": int(nproc)}
+        cand["need_mb"] = round(_vram_need_mb(cand), 1)
+        return cand
+
+    ladder = [_mk(c["frames"], c["batch"], c["procs"])
+              for c in _vram_cands(mode, want_frames, want_batch, max_procs, procs)]
+    floor = ladder[-1]
+    plan = {
+        "ok": False, "cpu": False, "mode": mode, "label": label, "size_px": int(size_px),
+        "model_mb": round(model_mb, 1), "sess_mb": round(sess_mb, 1),
+        "ctx_mb": int(_VRAM_CTX_MB), "arena_mb": int(_VRAM_ARENA_MB),   # arena 只在日志里提一句
+        "aux_mb": round(aux, 1), "frame_mb": round(frame_mb, 2),
+        "safety": float(_VRAM_SAFETY), "reserve_mb": int(_VRAM_RESERVE_MB),
+        "free_mb": (None if free is None else int(free)),
+        "total_mb": (None if total is None else int(total)),
+        "source": src, "avail_mb": None, "need_mb": round(floor["need_mb"], 1),
+        "peak_mb": None, "procs": int(max_procs if mode == "procs" else procs),
+        "frames": int(want_frames if mode != "procs" else 0),
+        "batch": int(want_batch if mode != "procs" else 1),
+        "batch_mb": round(_vram_batch_mb(size_px, want_batch if mode != "procs" else 1), 1),
+        "requested_frames": int(want_frames), "requested_batch": int(want_batch),
+        "requested_procs": int(max_procs if mode == "procs" else procs),
+        "downgraded": False, "steps": [], "reason": "", "msg": "", "suggest": [],
+        # 老字段（_fused_budget 的调用方/验收脚本还在读）
+        "frame_budget": int(want_frames if mode != "procs" else 0),
+        "requested": int(want_frames), "per_frame_mb": round(frame_mb, 2),
+    }
+    if free is None:
+        plan.update({"ok": True,
+                     "reason": "拿不到显存信息（torch / nvidia-smi 都没答）→ 不猜、不降档",
+                     "msg": "%s：拿不到显存信息 → 按请求值跑（帧预算 %d / 批 %d）"
+                            % (label, plan["frames"], plan["batch"])})
+        return plan
+    avail = max(0.0, float(free) * (1.0 - _VRAM_SAFETY) - float(_VRAM_RESERVE_MB))
+    plan["avail_mb"] = round(avail, 1)
+    hit = None
+    for cand in ladder:
+        ok = bool(cand["need_mb"] <= avail)
+        plan["steps"].append({"frames": int(cand["frames"]), "batch": int(cand["batch"]),
+                              "procs": int(cand["procs"]), "need_mb": cand["need_mb"],
+                              "batch_mb": cand["batch_mb"], "avail_mb": round(avail, 1),
+                              "fit": ok})
+        if ok and hit is None:
+            hit = cand
+    if hit is not None:
+        plan.update({"ok": True, "frames": int(hit["frames"]), "batch": int(hit["batch"]),
+                     "procs": int(hit["procs"]), "batch_mb": hit["batch_mb"],
+                     "peak_mb": hit["need_mb"],
+                     "downgraded": bool(hit["frames"] < plan["requested_frames"]
+                                        or hit["batch"] < plan["requested_batch"]
+                                        or hit["procs"] < plan["requested_procs"])})
+        plan["frame_budget"] = int(plan["frames"])
+        plan["reason"] = ("装得下：请求 (帧 %d / 批 %d / 进程 %d) → 实际 (帧 %d / 批 %d / 进程 %d)"
+                          % (plan["requested_frames"], plan["requested_batch"],
+                             plan["requested_procs"], plan["frames"], plan["batch"],
+                             plan["procs"])
+                          if plan["downgraded"] else
+                          "装得下：帧 %d / 批 %d / 进程 %d（不用降档）"
+                          % (plan["frames"], plan["batch"], plan["procs"]))
+        plan["msg"] = "%s：%s · 预计峰值 %.0f MB / 可用 %.0f MB" % (
+            label, plan["reason"], hit["need_mb"], avail)
+        return plan
+
+    # 连最小档都装不下：把「最小档」的数字落到 plan 上（拒绝消息里的拆项必须和
+    # need_mb 对得上，否则用户照着算会发现少了一截）
+    plan.update({"peak_mb": None, "frames": int(floor["frames"]),
+                 "batch": int(floor["batch"]), "batch_mb": floor["batch_mb"],
+                 "procs": int(floor["procs"])})
+    plan["frame_budget"] = int(plan["frames"])
+    plan["msg"] = _vram_refuse_msg(plan, label)
+    plan["suggest"] = ["关掉占 GPU 的程序后重试", "换更小的 .dfm / 调低帧预算",
+                       "设 %s=1 用 CPU 跑" % _VRAM_ENV_CPU]
+    if _vram_cpu_fallback_env():
+        plan.update({"ok": True, "cpu": True, "procs": 1,
+                     "frames": int(want_frames if mode != "procs" else 0), "batch": 1,
+                     "downgraded": True,
+                     "reason": "显存不够但开了 %s → 回落 CPU EP" % _VRAM_ENV_CPU})
+        plan["frame_budget"] = int(plan["frames"])
+        plan["msg"] = ("%s：显存不够（需要 %.2f GB / 可用 %.2f GB）→ ★ 当前在 CPU 上跑 ★"
+                       "（慢约 %.0f 倍；不设 %s 时这里会明确拒绝）"
+                       % (label, plan["need_mb"] / 1024.0, avail / 1024.0,
+                          _VRAM_CPU_SLOW, _VRAM_ENV_CPU))
+        return plan
+    plan["reason"] = (("连 1 个 worker 都要 %.0f MB > 可用 %.0f MB"
+                       % (floor["need_mb"], avail)) if mode == "procs" else
+                      ("连最小档（帧 %d / 批 %d）都要 %.0f MB > 可用 %.0f MB"
+                       % (floor["frames"], floor["batch"], floor["need_mb"], avail)))
+    return plan
+
+
+def _vram_refuse_msg(plan: dict, what: str = "这个任务") -> str:
+    """拒绝消息：**必须带数字**（需要多少 / 可用多少 / 怎么改）。
+
+    形状固定成「需要 X GB（拆项）/ 可用 Y GB（怎么算的）/ 建议 ①②③」——
+    前端直接展示，用户不用翻日志就知道该关什么。
+    """
+    what = str(what or plan.get("label") or "这个任务")
+    need = float(plan.get("need_mb") or 0.0) / 1024.0
+    avail = float(plan.get("avail_mb") or 0.0) / 1024.0
+    free = plan.get("free_mb")
+    nproc = int(plan.get("requested_procs") or 1)
+    parts = ["模型 %.2f GB × %d 份" % (float(plan.get("model_mb") or 0.0) / 1024.0,
+                                      max(1, min(nproc, int(plan.get("procs") or 1)))),
+             "CUDA context %.2f GB × %d"
+             % (int(plan.get("ctx_mb") or _VRAM_CTX_MB) / 1024.0,
+                max(1, min(nproc, int(plan.get("procs") or 1)))),
+             "检测/遮罩 %.2f GB" % (float(plan.get("aux_mb") or 0.0) / 1024.0)]
+    if int(plan.get("frames") or 0):
+        parts.append("帧缓冲 %d×%.2f MB"
+                     % (int(plan.get("frames") or 0),
+                        float(plan.get("per_frame_mb") or 0.0)))
+    parts.append("dfm 批（最小档）%.2f GB" % (float(plan.get("batch_mb") or 0.0) / 1024.0))
+    return ("%s：显存不够 —— 需要 %.2f GB（%s），可用 %.2f GB（空闲 %s MB，预留 %d%% + %d MB）。"
+            "建议：① 关掉占 GPU 的程序（浏览器硬件加速/游戏/另一个导出）后重试；"
+            "② 换更小的 .dfm，或把「帧预算」调低（请求的是 %d 帧）；"
+            "③ 设 %s=1 改用 CPU 跑（慢约 %.0f 倍，但能出片）。"
+            % (what, need, " + ".join(parts), avail,
+               ("?" if free is None else int(free)),
+               int(round(float(plan.get("safety") or 0.0) * 100)),
+               int(plan.get("reserve_mb") or 0),
+               int(plan.get("requested_frames") or 0),
+               _VRAM_ENV_CPU, _VRAM_CPU_SLOW))
+
+
+def _vram_log_lines(plan: dict, tag: str = "") -> list:
+    """把一份计划摊成几行日志（降档逐档记账，拒绝能看出差多少）。"""
+    tag = str(tag or plan.get("label") or "显存")
+    src = str(plan.get("source") or "?")
+    if plan.get("free_mb") is None:
+        return ["%s：显存探不到（%s）→ %s" % (tag, src, plan.get("reason") or "不降档")]
+    lines = ["%s：显存 空闲 %s / 共 %s MB（%s）· 预算 %.0f MB = 空闲 - %d%% - %d MB"
+             % (tag, plan.get("free_mb"), plan.get("total_mb") or "?", src,
+                float(plan.get("avail_mb") or 0.0),
+                int(round(float(plan.get("safety") or 0.0) * 100)),
+                int(plan.get("reserve_mb") or 0)),
+             "%s：需求拆项 模型 %.0f + context %d + 检测/遮罩 %.0f MB/份"
+             " + 帧 %d×%.2f + dfm 批 %s MB（ORT arena %d MB 含在预留里）"
+             % (tag, float(plan.get("model_mb") or 0), int(plan.get("ctx_mb") or 0),
+                float(plan.get("aux_mb") or 0),
+                int(plan.get("frames") or 0), float(plan.get("frame_mb") or 0.0),
+                plan.get("batch_mb") if plan.get("batch_mb") is not None else "?",
+                int(plan.get("arena_mb") or 0))]
+    if plan.get("mode") == "procs":
+        lines.append("%s：计划 %d 个 worker（请求 %d）· 预计峰值 %.0f MB"
+                     % (tag, int(plan.get("procs") or 1), int(plan.get("requested_procs") or 1),
+                        float(plan.get("peak_mb") or plan.get("need_mb") or 0)))
+    else:
+        lines.append("%s：计划 帧预算 %d / dfm 批 %d%s · 预计峰值 %s（可用 %.0f MB）"
+                     % (tag, int(plan.get("frames") or 0), int(plan.get("batch") or 0),
+                        "（已降档）" if plan.get("downgraded") else "",
+                        (("%.0f MB" % plan["peak_mb"]) if plan.get("peak_mb") is not None
+                         else "装不下（没有一档塞得进预算）"),
+                        float(plan.get("avail_mb") or 0.0)))
+    # 逐档记账：拿到「采用」那一档就停（后面的档位这次用不上，刷日志只会淹掉重点）；
+    # 全都装不下时把 12 档全列出来 —— 拒绝的理由要看得出「差多少」。
+    _stop = False
+    for st in (plan.get("steps") or []):
+        if _stop:
+            break
+        lines.append("%s：%s 帧 %s / 批 %s / 进程 %s → 要 %.0f MB %s %.0f MB"
+                     % (tag, "采用" if st.get("fit") else "否决",
+                        st.get("frames"), st.get("batch"), st.get("procs"),
+                        float(st.get("need_mb") or 0),
+                        "≤" if st.get("fit") else ">", float(st.get("avail_mb") or 0)))
+        _stop = bool(st.get("fit"))
+    if plan.get("cpu"):
+        lines.append("%s：★ 当前在 CPU 上跑 ★（%s；不设 %s 时这里会明确拒绝）"
+                     % (tag, plan.get("reason") or "", _VRAM_ENV_CPU))
+    return lines
+
+
+def _vram_apply(plan: dict, label: str = "", sticky: bool = False) -> dict:
+    """落实一份计划：切 CPU/GPU 开关、记进 _VRAM_LAST（status 端点读它）。
+
+    sticky=True 表示「只许开、不许关」：预览每拖一帧都会算一次计划，它没有权力替一个
+    正在跑的导出把 CPU 开关关掉（那会让半个任务在 CPU、半个在 GPU）。关这个开关的
+    只有「新任务起手时自己算的那一份计划」。
+    """
+    label = str(label or plan.get("label") or "vram")
+    plan["label"] = label
+    plan["at"] = round(time.time(), 3)
+    if plan.get("cpu") or not sticky:
+        _vram_set_cpu(bool(plan.get("cpu")), plan.get("reason") or "")
+    with _VRAM_LOCK:
+        _VRAM_LAST[label] = dict(plan)
+        sig = (label, bool(plan.get("ok")), plan.get("frames"), plan.get("batch"),
+               plan.get("procs"), bool(plan.get("cpu")),
+               None if plan.get("avail_mb") is None else int(float(plan["avail_mb"]) // 256))
+        fresh = _VRAM_LOGGED.get(label) != sig
+        if fresh:
+            _VRAM_LOGGED[label] = sig
+    # 服务端日志留一份账（预览这种每秒都可能问一次的，只在「决定变了」时打）
+    if fresh:
+        for _ln in _vram_log_lines(plan, label):
+            print("[vram] " + _ln, flush=True)
+    return plan
+
+
+def _vram_last(label: str = None) -> dict:
+    with _VRAM_LOCK:
+        if label:
+            return dict(_VRAM_LAST.get(str(label)) or {})
+        return {k: dict(v) for k, v in _VRAM_LAST.items()}
+
+
+def _preview_guard(dfms, label: str = "预览") -> dict:
+    """预览的显存闸门（sticky：只许开 CPU，不许关别人的）。
+
+    特例 —— **模型已经常驻在预览 worker 里**时不算增量：那一帧只跑一次前向，不新建
+    session，显存本来就已经占着了（这是唯一一种「空闲 0MB 但预览照样能出图」的情形）。
+    不认这个特例会误杀：stage6 验收里 4.0 对拍把卡占满的那几分钟，预览是被拒的，
+    而它连一个字节都不用再分配。**只有在要新加载模型时才真的需要预算**。
+    """
+    paths = [str(p) for p in (dfms or []) if str(p or "")]
+    try:
+        live = _WORKER.alive()
+        loaded = {os.path.normcase(str(k)) for k in (_WORKER._models or {})} if live else set()
+    except Exception:                                       # noqa: BLE001
+        live, loaded = False, set()
+    if live and paths and all(os.path.normcase(p) in loaded for p in paths):
+        plan = _vram_plan(_vram_models_mb(paths),
+                          {"mode": "none", "procs": 1, "label": label})
+        plan.update({"ok": True, "cpu": False, "resident": True,
+                     "reason": "模型已在预览 worker 里常驻（这一帧不再新占显存）",
+                     "msg": "%s：模型已常驻，不再额外占显存（空闲 %s MB / 增量 0 MB）"
+                            % (label, plan.get("free_mb"))})
+        return _vram_apply(plan, label, sticky=True)
+    return _vram_guard(paths, {"mode": "none", "procs": 1}, label=label, sticky=True)
+
+
+def _vram_guard(dfms, opts: dict = None, label: str = "任务",
+                sticky: bool = False) -> dict:
+    """加载模型**之前**的一次预算检查：装得下返回计划，装不下抛 400（消息带数字）。
+
+    sticky=True（预览用）：只在「要在 CPU 上跑」时短路全链路，不允许把别人的 CPU 开关关掉。
+    """
+    if isinstance(dfms, (str, Path)):
+        paths = [str(dfms)]
+    else:
+        paths = [str(p) for p in (dfms or []) if str(p or "")]
+    opts = dict(opts or {})
+    if not opts.get("size_px"):
+        opts["size_px"] = _dfm_size_hint(paths[0] if paths else "")
+    plan = _vram_plan(_vram_models_mb(paths), dict(opts, label=label))
+    _vram_apply(plan, label, sticky=bool(sticky))
+    if not plan.get("ok"):
+        msg = plan.get("msg") or _vram_refuse_msg(plan, label)
+        # 拒绝必须有日志（排障第一现场）：这一行进后端 stdout（→ server.log）
+        print("[vram] ★ 拒绝 %s ★ %s" % (label, msg), flush=True)
+        raise _BadInput(msg, 400)
+    return plan
+
 _PRED_VRAM_SAFETY = 0.20      # 留 20% 余量：探测量打八折才是敢用的预算
 _PRED_BATCH_CAP = 32          # 上限（再大对单卡没意义，batch 16 起反而开始抖）
 
@@ -7793,6 +8419,10 @@ def _pred_pick_batch(cfg: dict, ent) -> tuple:
         return max(1, min(64, want)), {"source": "request", "batch": int(want),
                                        "ladder": [], "free_mb": None, "total_mb": None,
                                        "per_item_mb": None, "best_per_face_ms": None}
+    if _vram_cpu_on():
+        # CPU 上跑还探阶梯没意义（每档都慢 17 倍，而且没有显存可省）：直接 1 张。
+        return 1, {"source": "cpu", "batch": 1, "ladder": [], "free_mb": None,
+                   "total_mb": None, "per_item_mb": None, "best_per_face_ms": None}
     import numpy as np
     _sess, _name, size, _nchw = ent[0], ent[1], ent[2], ent[3]
     _cap = int(ent[5] or 1) if len(ent) > 5 else 8
@@ -8438,7 +9068,10 @@ def _stage_xseg(model):
                         "workspace/model/XSeg/XSeg.onnx）—— 遮罩来源选了 %s 就必须有它；"
                         "找过：%s" % (res.get("label") or model or "XSeg",
                                      "、".join(res.get("candidates") or [])[:300]), 500)
-    key = (res["key"], str(res["path"]))
+    # 显存不够 + DFL_ALLOW_CPU_FALLBACK=1 时，遮罩也必须在 CPU 上：
+    # 不然 dfm 让出了显存、XSeg 又去抢 TRT 引擎 —— 半吊子状态比全 CPU 更难查。
+    cpu = _vram_cpu_on()
+    key = (res["key"], str(res["path"]), bool(cpu))
     with _XSEG_SESS_LOCK:
         hit = _XSEG_SESS.get(key)
     if hit is not None:
@@ -8448,8 +9081,13 @@ def _stage_xseg(model):
         _stage_log("遮罩：缓存的遮罩器不能再用（%s）→ 重新加载并重新判定后端" % why)
         with _XSEG_SESS_LOCK:
             _XSEG_SESS.pop(key, None)
-    m = _xseglib.XSegMasker(str(res["path"]), workspace=WORKSPACE,
-                            engine_name=res["engine"])
+    m = _xseglib.XSegMasker(str(res["path"]),
+                            workspace=(None if cpu else WORKSPACE),
+                            engine_name=res["engine"],
+                            providers=(["CPUExecutionProvider"] if cpu else None))
+    if cpu:
+        _stage_log("遮罩：★ 当前在 CPU 上跑 ★ %s 走 CPU EP（DFL_ALLOW_CPU_FALLBACK=1）"
+                   % Path(str(res["path"])).name)
     with _XSEG_SESS_LOCK:
         _XSEG_SESS[key] = m
     return m, res
@@ -10515,59 +11153,32 @@ def _fused_vram_free():
 
 
 def _fused_frame_mb(size_px: int) -> float:
-    """一帧在飞时压在 GPU 上大约多少 MB：dfm 输入 + 输出脸 + prd + dst 四份 float32。"""
-    size_px = max(64, int(size_px or 416))
-    return max(4.0, (size_px * size_px * 3 * 4 * 4) / 1048576.0)
+    """一帧在飞时压在 GPU 上大约多少 MB：dfm 输入 + 输出脸 + prd + dst 四份 float32。
 
-
-def _fused_budget(want: int, free_mb, total_mb, size_px: int) -> dict:
-    """帧缓冲预算：请求值 → 显存装不下就沿 30/16/8 降档，**每一步都记账**（日志 + status）。
-
-    为什么帧预算和显存有关：在飞的每一帧都可能同时压着 dfm 的输入/输出/两张遮罩
-    （见 _fused_frame_mb），再加上常驻的模型 + CUDA context。可用显存不够时把在飞帧数
-    压下来，峰值就跟着下来；真正的硬底仍然是 dfm 批大小（_pred_pick_batch 自己会退档）。
-    拿不到显存信息（torch / nvidia-smi 都没答）时不降档 —— 不猜。
+    计算在 _vram_frame_mb（三条路共用），这里只留名字给历史调用点。
     """
-    want = int(want or 0)
-    if want <= 0:
-        want = int(_FUSED_BUDGETS[0])
-    want = max(int(_FUSED_BUDGETS[-1]), min(64, want))
-    per = _fused_frame_mb(size_px)
-    ladder = sorted(set([want] + [int(b) for b in _FUSED_BUDGETS if int(b) <= want]),
-                    reverse=True)
-    steps = []
-    picked = int(want)
-    if free_mb is None:
-        steps.append({"budget": int(want), "fit": None,
-                      "why": "拿不到显存信息（torch / nvidia-smi 都没答）→ 不降档"})
-    else:
-        avail = max(0.0, float(free_mb) * _FUSED_VRAM_SAFETY - _FUSED_RESERVE_MB)
-        hit = None
-        for b in ladder:
-            need = float(b) * per
-            ok = bool(need <= avail)
-            steps.append({"budget": int(b), "need_mb": round(need, 1),
-                          "avail_mb": round(avail, 1), "fit": ok})
-            if ok:
-                hit = int(b)
-                break
-        if hit is None:
-            picked = int(_FUSED_BUDGETS[-1])
-            why = ("可用显存连最小档都装不下 → 压到 %d 帧照跑，OOM 由 dfm 批阶梯兜底"
-                   % picked)
-            if steps and int(steps[-1].get("budget") or 0) == picked:
-                steps[-1]["why"] = why        # 别把同一个档位记两遍
-            else:
-                steps.append({"budget": picked, "fit": False, "why": why})
-        else:
-            picked = int(hit)
-    return {"frame_budget": int(picked), "requested": int(want),
-            "downgraded": bool(picked < want),
-            "per_frame_mb": round(per, 2), "reserve_mb": int(_FUSED_RESERVE_MB),
-            "safety": float(_FUSED_VRAM_SAFETY),
-            "free_mb": (None if free_mb is None else int(free_mb)),
-            "total_mb": (None if total_mb is None else int(total_mb)),
-            "steps": steps}
+    return _vram_frame_mb(size_px)
+
+
+def _fused_budget(want: int, free_mb, total_mb, size_px: int, model_mb: float = 0.0,
+                  batch: int = 0, label: str = "快速导出") -> dict:
+    """fused 的帧预算 —— 现在就是 _vram_plan 的一层壳（老调用方读的键一个都不改）。
+
+    和以前那一版（只按 30/16/8 降帧）的区别只有两点，但都是这次要治的病：
+      · 把**模型体量**和 **dfm 批的开销**算进总需求（以前只算帧，模型 2GB 也当没看见）；
+      · 连「最小档（8 帧 / 批 1）」都装不下时返回 ok=False —— 以前是压到 8 帧照跑，
+        让 OOM 在流水线里炸；现在由调用方明确拒绝（或按 DFL_ALLOW_CPU_FALLBACK 走 CPU）。
+
+    free_mb 传 None = 「按 _vram_probe 自己探」（env 伪造值优先）；调用方已经探过了就传进来。
+    """
+    opts = {"mode": "frames", "size_px": int(size_px or _VRAM_BASE_PX),
+            "frames": int(want or 0), "batch": int(batch or 0), "procs": 1,
+            "label": label}
+    if free_mb is not None:
+        opts["free_mb"] = int(free_mb)
+        if total_mb is not None:
+            opts["total_mb"] = int(total_mb)
+    return _vram_plan(float(model_mb or 0.0), opts)
 
 
 def _fused_cfg(body: dict) -> dict:
@@ -10985,18 +11596,46 @@ def _fused_run(cfg: dict) -> dict:
             dump_frames.add(int(_tok))
 
     # ---- 模型 / 显存 / 帧预算（起流水线之前，出问题要在这里就喊出来）----
+    # 顺序要紧：**先算预算，再加载模型**。加载本身就是最可能 OOM 的那一步（一份 384
+    # 会话 2.07GB，只有 2GB 空闲的卡上「加载」两个字就已经崩了），所以拒绝要在它之前。
+    # 尺寸不加载也能知道（_dfm_size_hint 看文件名），加载后如果实测尺寸不一样再判一次。
+    model_mb = _vram_model_mb(cfg["dfm"])
+    size_hint = _dfm_size_hint(cfg["dfm"])
+    want_frames = int(cfg.get("frame_budget_want") or 0)
+    bud = _fused_budget(want_frames, None, None, size_hint,
+                        model_mb=model_mb, batch=int(batch_target))
+    _vram_apply(bud, "快速导出")
+    for _ln in _vram_log_lines(bud, "快速导出"):
+        _vid_log(_ln)
     lm = _landmarks_model()
     if lm is None:
         raise _BadInput("2D106 关键点模型不可用（weights/insightface_2d106.onnx）—— "
                         "没有 68 点就跑不了快速导出", 500)
     det = _detector(det_name)
+    # 预算说不可行时**不加载** dfm —— 加载是要占显存的，先拒绝再别动显存
+    if not bud.get("ok"):
+        raise _BadInput(bud.get("msg") or _vram_refuse_msg(bud, "快速导出"), 400)
     ent0 = _dfm_session(str(cfg["dfm"]))
     size_px = int(ent0[2])
-    free_mb, total_mb = _fused_vram_free()
-    bud = _fused_budget(int(cfg.get("frame_budget_want") or 0), free_mb, total_mb, size_px)
-    budget = int(bud["frame_budget"])
+    if size_px != int(size_hint):
+        _vid_log("快速导出：文件名给的尺寸 %d 与实测 %d 不一致 → 按实测重算预算"
+                 % (int(size_hint), size_px))
+        bud = _fused_budget(want_frames, None, None, size_px,
+                            model_mb=model_mb, batch=int(batch_target))
+        _vram_apply(bud, "快速导出")
+        for _ln in _vram_log_lines(bud, "快速导出"):
+            _vid_log(_ln)
+        if not bud.get("ok"):
+            raise _BadInput(bud.get("msg") or _vram_refuse_msg(bud, "快速导出"), 400)
+    budget = int(bud.get("frames") or bud.get("frame_budget") or _FUSED_BUDGETS[0])
+    # 预算批 ≤ 攒批目标：显存只够批 2 时就别再按 8 攒（_target_for 还会按实测再降一次）
+    _plan_batch = max(1, int(bud.get("batch") or batch_target))
+    if _plan_batch < batch_target:
+        _vid_log("快速导出：dfm 攒批 目标 %d → %d（显存预算）" % (batch_target, _plan_batch))
+        batch_target = _plan_batch
     cfg["frame_budget"] = budget
     cfg["budget"] = bud
+    cfg["vram_plan"] = bud
     xseg = None
     xs_label = ""
     if need_xseg:
@@ -11010,17 +11649,16 @@ def _fused_run(cfg: dict) -> dict:
     _vid_log("快速导出：dfm %s · %dx%d · %s · 检测器 %s thresh=%.2f"
              % (Path(str(cfg["dfm"])).name, size_px, size_px,
                 (ent0[6] if len(ent0) > 6 else "?"), det_name, det_thresh))
-    _vid_log("快速导出：显存 %s/%s MB · 每帧预算 %.1f MB · 保留 %d MB · 安全系数 %.2f "
-             "→ 帧缓冲 %d（请求 %d%s）"
-             % (bud["free_mb"], bud["total_mb"], bud["per_frame_mb"], bud["reserve_mb"],
-                bud["safety"], budget, bud["requested"],
-                "，已降档" if bud["downgraded"] else ""))
-    for st in bud["steps"]:
-        if st.get("fit") is False or st.get("why"):
-            _vid_log("快速导出：帧预算 %s 帧 → %s"
-                     % (st.get("budget"),
-                        st.get("why") or ("要 %.1f MB > 可用 %.1f MB"
-                                          % (st.get("need_mb") or 0, st.get("avail_mb") or 0))))
+    _vid_log("快速导出：显存预算 → 帧缓冲 %d / dfm 批 %d（请求 %d 帧 / 批 %d%s）· "
+             "预计峰值 %s MB / 可用 %.0f MB"
+             % (budget, int(bud.get("batch") or 0), int(bud.get("requested") or 0),
+                int(bud.get("requested_batch") or 0),
+                "，已降档" if bud.get("downgraded") else "，不用降档",
+                ("%.0f" % bud["peak_mb"]) if bud.get("peak_mb") is not None else "装不下",
+                float(bud.get("avail_mb") or 0.0)))
+    if bud.get("cpu"):
+        _vid_log("快速导出：★ 当前在 CPU 上跑 ★（显存装不下 + %s=1）—— 预计比 GPU 慢约 %.0f 倍"
+                 % (_VRAM_ENV_CPU, _VRAM_CPU_SLOW))
 
     frames_dir = Path(tempfile.mkdtemp(prefix="dfl_fused_"))
     cfg["frames_dir"] = str(frames_dir)
@@ -11848,6 +12486,11 @@ def _fused_worker(cfg: dict):
             "快速导出完成" if ok else ("快速导出取消" if cancelled else "快速导出失败"))
         wall = round(time.time() - t0, 2)
         bud = (res.get("frame_budget") if res else None) or cfg.get("frame_budget")
+        # 显示层用的是 res["budget"]（_fused_run 落实过的计划）；res 没有（失败得太早）就
+        # 用 _start_video_export 闸门算的那一份 —— status 里始终有 vram_plan 可查
+        vplan = dict((res.get("budget") if res else None) or cfg.get("vram_plan") or {})
+        if vplan:
+            vplan["cpu"] = bool(_vram_cpu_on())
         with _STAGE_LOCK:
             _STAGE_JOB.update({
                 "running": False, "ok": bool(ok), "cancelled": bool(cancelled),
@@ -11867,7 +12510,7 @@ def _fused_worker(cfg: dict):
                 "frame_budget": bud, "resumed": False, "seconds": {"fused": wall},
                 "counts": {"frames": int(res.get("frames") or 0), "faces": 0,
                            "pred": 0, "masks": 0},
-                "meta": {},
+                "meta": {}, "vram_plan": vplan, "on_cpu": bool(_vram_cpu_on()),
             })
         with _merge_job_lock:
             _merge_job.update({
@@ -11882,6 +12525,7 @@ def _fused_worker(cfg: dict):
                 "error_detail": ("" if ok else "\n".join(_log_tail(
                     list(_merge_job.get("log") or []), 30))[:4000]),
                 "cache": cache_state, "frame_budget": bud, "active": False,
+                "vram_plan": vplan, "on_cpu": bool(_vram_cpu_on()),
             })
         _vid_log("快速导出结束：%s · %.2f s%s"
                  % ("成功" if ok else ("已取消" if cancelled else "失败"), wall,
@@ -11911,6 +12555,15 @@ def _start_video_export(body: dict):
     cfg = _fused_cfg(body) if fused else _stage_cfg(body, "frames", chain=True)
     if not fused:
         cfg["stages"] = list(_STAGE_ORDER)
+    if fused:
+        # ---- 显存闸门：**在这里**判（HTTP 400），不能在 worker 线程里判 ----
+        # 线程里抛 _BadInput 只会变成「任务失败」，前端拿不到 400，也拿不到那句
+        # 「需要 X GB / 可用 Y GB / 建议」。真正的加载在 _fused_run 里，这里只算账。
+        plan = _vram_guard(cfg.get("dfm") or [m.get("dfm") for m in cfg.get("single_models") or []],
+                           {"mode": "frames", "frames": int(cfg.get("frame_budget_want") or 0),
+                            "batch": int(cfg.get("fused_batch") or 0), "procs": 1},
+                           label="快速导出")
+        cfg["vram_plan"] = plan
     with _STAGE_LOCK:
         if _STAGE_JOB.get("running"):
             raise _BadInput("已经有阶段在跑（%s）—— 等它结束或点取消"
@@ -11932,6 +12585,7 @@ def _start_video_export(body: dict):
             "mode": "video", "video": str(cfg["video"]), "total": int(cfg.get("total") or 0),
             "frames_done": 0, "frames": [], "stats": {}, "cache": {}, "encode": {},
             "fused": bool(fused), "frame_budget": None, "cache_dir": str(cfg.get("cache") or ""),
+            "vram_plan": dict(cfg.get("vram_plan") or {}),
         })
     with _STAGE_LOCK:
         _STAGE_JOB.update({
@@ -11955,6 +12609,7 @@ def _start_video_export(body: dict):
             "finished_at": None, "chain": True,
             "keep_cache": bool(cfg.get("keep_cache")), "force": bool(cfg.get("force")),
             "frames": [], "fused": bool(fused), "frame_budget": None, "resumed": False,
+            "vram_plan": dict(cfg.get("vram_plan") or {}),
         })
     cfg["log_file"] = _vid_open_log(Path(cfg["out"]).with_suffix(".log"))
     if fused:
@@ -11974,6 +12629,8 @@ def _start_video_export(body: dict):
                    output_dir=str(cfg["out"]), cache_dir="",
                    no_cache=True, resumable=False,
                    frame_budget=None, frame_budget_want=int(cfg.get("frame_budget_want") or 0),
+                   vram_plan=dict(cfg.get("vram_plan") or {}),
+                   on_cpu=bool(_vram_cpu_on()),
                    dfm=str(cfg["dfm"]), model=str(cfg["model"]),
                    settings=dict(cfg.get("settings") or {}),
                    detector=str(cfg["detector"]), thresh=float(cfg.get("thresh") or 0.5),

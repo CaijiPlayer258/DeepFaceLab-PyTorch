@@ -5,7 +5,8 @@ r"""快速导出（融合流水线 fused）的验收：真后端 + 真视频（1
   a) 视频模式导出**默认走 fused**：出片、时长≈源、有音轨、帧数对、**无 <视频>_cache/**；
      贴帧/秒与各段占用（per_stage_ms / stage_util_pct）。
   b) 与 fused=0 的分段导出对拍：同参数、同源，帧级 |diff| 平均 ≤ 0.5 LSB（给数字）。
-  c) 显存降档：请求预算 30 但可用显存不够 → 自动降到 16 / 8 并**成功出片**（日志为证）。
+  c) 显存降档：请求预算 30 但可用显存不够 → 自动降到 16 并成功出片（日志为证）；
+     连最小档（8 帧 / 批 1）都装不下时 → **HTTP 400 + 需要/可用/建议**（不硬跑）。
   d) 取消：中途取消 → 状态 cancelled、**明确不可续跑**、无临时帧目录、无 .part、无 cache；
      取消完还能立刻再跑一单（证明线程都退干净了）。
   e) 帧范围：start=100/end=200 → 出片 101 帧、时长对、音轨在、输出名带 _0100-0200。
@@ -222,6 +223,10 @@ def start_server(tag="", extra_env=None):
     env.pop("DFL_STAGE_KEEP", None)
     env.pop("DFL_FUSED_VRAM_FREE_MB", None)
     env.pop("DFL_FUSED_BUDGET", None)
+    # 显存预算（_vram_plan）那两个开关也必须清掉：外面 shell 里留着
+    # DFL_VRAM_FREE_MB=1200 会把这一轮的「默认」档变成拒绝，报错还会看着莫名其妙。
+    env.pop("DFL_VRAM_FREE_MB", None)
+    env.pop("DFL_ALLOW_CPU_FALLBACK", None)
     for k, v in (extra_env or {}).items():
         env[str(k)] = str(v)
     logf = open(str(SERVER_LOG), "ab")
@@ -500,11 +505,17 @@ def case_b(clip, a):
 
 
 # ============================================================
-# 案例 C：显存降档（请求 30 → 实际 16 / 8）并成功出片
+# 案例 C：显存降档（请求 30 → 实际 16）并成功出片；装不下时明确拒绝
+# ------------------------------------------------------------
+# 口径变了（_vram_plan 上台）：以前是「连最小档都装不下也压到 8 帧照跑」，
+# 现在是「沿阶降档，连最小档都装不下就 400」。所以这一档的伪造显存从 1500/1100
+# 上调到 2600（帧预算降 16）和 1200（拒绝）—— 数字是照新公式算的，不是拍的：
+#   avail = 空闲×0.8 - 512；416 的会话 1026MB + 检测遮罩 300MB = 固定 1326MB，
+#   帧 7.92MB/帧，dfm 批 8/4/2/1 = 1150/1100/160/80MB。
 # ============================================================
 def case_c(clip, tag, fake_free, expect):
-    head("C · 显存降档：DFL_FUSED_VRAM_FREE_MB=%s → 期望帧预算 %s" % (fake_free, expect))
-    proc = start_server(tag, {"DFL_FUSED_VRAM_FREE_MB": str(fake_free)})
+    head("C · 显存降档：DFL_VRAM_FREE_MB=%s → 期望帧预算 %s" % (fake_free, expect))
+    proc = start_server(tag, {"DFL_VRAM_FREE_MB": str(fake_free)})
     try:
         out = OUT / ("c_%s.mp4" % expect)
         if out.exists():
@@ -531,7 +542,33 @@ def case_c(clip, tag, fake_free, expect):
         for ln in lines[:6]:
             say("日志：" + ln)
         check(bool(lines), "c 日志里有降档记账", "%d 行" % len(lines))
-        return {"frame_budget": got, "log": lines}
+        plan = fin.get("vram_plan") or {}
+        check(plan.get("downgraded") is True, "c vram_plan 里标了降档",
+              "downgraded=%r batch=%r" % (plan.get("downgraded"), plan.get("batch")))
+        check(float(plan.get("peak_mb") or 1e9) <= float(plan.get("avail_mb") or 0) + 1,
+              "c 预计峰值 ≤ 可用预算",
+              "peak=%s / avail=%s" % (plan.get("peak_mb"), plan.get("avail_mb")))
+        return {"frame_budget": got, "log": lines, "plan": plan}
+    finally:
+        stop_server(proc)
+
+
+def case_c_refuse(clip, fake_free):
+    """连最小档（8 帧 / 批 1）都装不下 → 必须 400，且消息里带数字。"""
+    head("C2 · 显存不够：DFL_VRAM_FREE_MB=%s → 期望明确拒绝（400）" % fake_free)
+    proc = start_server("拒绝", {"DFL_VRAM_FREE_MB": str(fake_free)})
+    try:
+        out = OUT / "c_refuse.mp4"
+        st, d = post("/api/merge/export", {"video": str(clip), "model": DFM,
+                                          "settings": dict(SETTINGS),
+                                          "output_dir": str(out), "frame_budget": 30,
+                                          "start_frame": 1, "end_frame": 12})
+        msg = str((d or {}).get("error") or "")
+        check(st == 400, "c2 拒绝是 HTTP 400", "HTTP %s" % st)
+        check("需要" in msg and "可用" in msg, "c2 消息里有「需要 / 可用」", msg[:160])
+        check("建议" in msg, "c2 消息里有建议", msg[:120])
+        check(not Path(str(out)).exists(), "c2 没留下半截成片", out.name)
+        return {"msg": msg}
     finally:
         stop_server(proc)
 
@@ -762,8 +799,8 @@ def main(argv=None):
 
     c = {}
     if "c" in want:
-        c["16"] = case_c(clip, "降档16", 1500, 16)
-        c["8"] = case_c(clip, "降档8", 1100, 8)
+        c["16"] = case_c(clip, "降档16", 2600, 16)
+        c["refuse"] = case_c_refuse(clip, 1200)
 
     fails = [r for r in RESULTS if not r[0]]
     print("")
