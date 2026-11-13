@@ -173,6 +173,12 @@ staging（硬链接）→ 载入 DFM → 逐帧合成 → ffmpeg 编码 → 清�
   见 `15-SIX-STAGES.md` 那一节。
 - **帧序**：以源帧文件名的字典序为准（= ffmpeg image2 的读取顺序）；`aligned/*.jpg` 只用来
   决定「这一帧有没有脸」和点名缺帧，认不出来的进 `missing_source`，不猜。
+- **并行与批处理**：`workers` 个 worker 进程（各自一份 dfm session，默认 **2**）×
+  每条请求 `batch` 帧（worker 内 batch 个线程并行，默认 **4**）。父进程是三段流水：
+  准备（读帧 / 检测 / 68 点）→ 换脸（一条请求 k 帧，帧走**裸字节块**，不再 base64）→
+  落盘（PNG/JPEG 编码 + `.part` → `os.replace`）。主线程按**提交顺序**收结果，所以
+  落盘顺序和串行一致、断点续跑的游标不变。实测 1080x1920 真项目 1×1 3.81 → 2×4
+  7.4~7.9 帧/秒，扫描表与像素对拍见 `17-PROJ-BATCH.md`。
 - **断点续跑**：`merged/<帧名>` 存在且非空就跳过（`force: true` 才重做）。落盘是
   `.part` → `os.replace`，被杀不会留下半张图被当成已完成。
 - **没脸的帧**：原帧**原样 copy** 进 merged（不重编码，不掉画质），所以成片长度和原片一致。
@@ -201,6 +207,10 @@ python app/tools/merge_accept.py 视频.mp4 --keep  # 连导出一起跑完（�
 
 项目模式导出的验收（不在 merge_accept 里）：
 
+`proj_pool_accept.py` 是并行/批处理那一版：自己组项目、扫 workers×batch、逐像素对拍、
+跑一次「取消 → 续跑」（约 8 分钟）：
+
+
 ```
 python app/tools/test_merge_api.py        # 接口层
 # 端到端：prepare 一个 3 秒 90 帧的项目 → POST /api/merge/export-project
@@ -214,8 +224,10 @@ python app/tools/test_merge_api.py        # 接口层
   合成本身不需要人脸库，MergeStudio 靠 DFLJPG 元数据定位人脸。
 - 速度约 4~5 帧/秒（1080p，含解码 / 遮罩 / 编码），和 4.0 的原管线一致；
   瓶颈在逐帧 PNG 落盘与遮罩计算，不在 DFM 推理。
-  项目模式实测 1080x1920 / 416 的 DFM：逐帧 3.9~4.4 帧/秒，90 帧总计 23~25 秒
-  （其中编码 1.1 秒）。
+  项目模式实测 1080x1920 / 416 的 DFM：默认 2 进程 × 4 帧并行 **7.4~7.9 帧/秒**
+  （1×1 是 3.8，改造前同口径 2.4~3.1），90~120 帧的项目 20~25 秒，其中 ffmpeg 编码
+  1.1 秒。瓶颈是整帧 float32 的内存带宽（seamlessClone + 色彩迁移 + 遮罩），不是 DFM
+  推理（前向只占 ~15ms/帧）—— 见 `17-PROJ-BATCH.md`。
 - 项目模式的 merged 帧和源帧同名同格式（jpg→jpg / png→png）。jpg 会按 quality（默认 92，
   与单帧预览一致）重编码一次；没脸的帧走原文件 copy，不重编码。
 - CUDA 推理的浮点累加顺序不保证逐次一致：同一帧连跑两次，像素可能差 0~8/255（JPEG 量化会

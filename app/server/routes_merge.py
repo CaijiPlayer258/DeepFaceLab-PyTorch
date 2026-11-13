@@ -1907,16 +1907,18 @@ def _face_debug_payload(payload: dict) -> dict:
             return out
 
     import numpy as np
+    # 帧走裸字节块（PNG，无损）：六宫格要的是"脸发蒙时最直接的证据"，缩放/有损编码
+    # 都会把证据毁掉，所以这里仍旧无损，只是不再 base64。
+    _enc, _blob, _h, _w = _send_frame_bytes(frame, {"send_lossless": True})
     resp = _WORKER.call({
         "cmd": "face_debug",
-        "frame": _send_frame_b64(frame, {"send_lossless": True}),
         "dfm": str(dfm),
         "landmarks": np.asarray(lm, dtype=np.float64).round(2).tolist(),
         "box": list(box_wh),
         "config": dict(cfg),
         "xseg": xseg,
         "panel_size": int(panel_size),
-    })
+    }, [_blob])
     if not resp.get("ok"):
         raise _BadInput("六宫格出图失败：%s" % (resp.get("error") or "预览 worker 没给原因"), 500)
 
@@ -2772,6 +2774,7 @@ _PREVIEW_HIT_LOCK = threading.Lock()
 _WORKER_MAX_MODELS = 3            # worker 里 DFM 的常驻上限（它自己报 max_models，这里是兜底）
 _PREVIEW_MAX_MODELS = 8           # 一次请求最多声明几个模型（真正常驻的仍只有 3 个）
 _PREVIEW_MAX_SWAPS = 8            # 单帧最多换几张脸（多模型模式下检测到的脸全换）
+_PREVIEW_MAX_BATCH = 16           # 一条请求最多带几帧（worker 内部同样多个线程并行）
 
 # 预览 worker 源码：写进系统 Temp（不进仓库），内容变了就换文件名重新落盘。
 _PREVIEW_WORKER_SRC = r'''# -*- coding: utf-8 -*-
@@ -2781,29 +2784,50 @@ _PREVIEW_WORKER_SRC = r'''# -*- coding: utf-8 -*-
 协议: stdin/stdout 上的 JSON lines（ASCII 转义）。
 """
 import base64
-import io
 import json
 import os
 import sys
+import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 
 # 协议通道：先 dup 一份 stdout，再把 fd 1 指到 stderr。
 # 引擎里 torch / onnxruntime / facelib 会往 fd 1 打非 UTF-8 的中文日志，
 # 混进 JSON lines 会让父进程整行解码直接炸。
-_OUT = os.fdopen(os.dup(1), "w", encoding="utf-8", newline="\n")
+#
+# 通道是**二进制**的：一行 JSON 头（ASCII 转义）+ 紧随其后的裸字节块。
+# 帧不再 base64 —— base64 把 3 字节抬成 4 字节，父进程还要 ~5ms/帧编解码，
+# 而头和块都排在同一条管道上，不需要"可打印字符"。
+# 头的 "blobs": [n1, n2, …] 是后面几块的字节数，两边都按它精确读满。
+_OUT = os.fdopen(os.dup(1), "wb", buffering=1 << 20)
 os.dup2(2, 1)
 sys.stdout = sys.stderr
-_IN = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8",
-                       errors="replace", newline="\n")
+_IN = sys.stdin.buffer
 
 
-def _say(obj):
+def _say(obj, blobs=()):
+    """一行 JSON 头 + 紧随其后的裸字节块（同一条管道、按顺序写、最后 flush 一次）。"""
     try:
-        _OUT.write(json.dumps(obj, ensure_ascii=True) + "\n")
+        _OUT.write((json.dumps(obj, ensure_ascii=True) + "\n").encode("utf-8"))
+        for b in blobs:
+            if b:
+                _OUT.write(b)
         _OUT.flush()
     except Exception:
         pass
+
+
+def _read_exact(n):
+    """从 stdin 精确读 n 字节 —— 管道短读是常态，必须循环读满。"""
+    parts, got = [], 0
+    while got < n:
+        chunk = _IN.read(min(n - got, 1 << 20))
+        if not chunk:
+            raise EOFError("stdin 提前结束")
+        parts.append(chunk)
+        got += len(chunk)
+    return parts[0] if len(parts) == 1 else b"".join(parts)
 
 
 def _mask2d(t, size, np, cv2):
@@ -3066,18 +3090,236 @@ def main():
           "max_models": _MAX_MODELS, "pid": os.getpid(), "on_cpu": bool(_FORCE_CPU),
           "ep": ("CPUExecutionProvider" if _FORCE_CPU else "auto")})
 
+    # ------------------------------------------------------------
+    # 一帧的活（批处理时每项都走这里，k 个线程并行跑 k 项）
+    # ------------------------------------------------------------
+    _MODELS_LOCK = threading.Lock()     # OrderedDict / xsegs 的增删只在锁里做
+
+    def _load_locked(dfm, rid):
+        with _MODELS_LOCK:
+            return _load(dfm, rid)
+
+    def _xseg_locked(path, rid):
+        with _MODELS_LOCK:
+            return _xseg(path, rid)
+
+    def _sorted_models():
+        with _MODELS_LOCK:
+            return sorted(models)
+
+    def _lru_snapshot():
+        with _MODELS_LOCK:
+            return list(models)
+
+    def _decode_frame(it, blob):
+        """帧字节 → BGR。enc=raw 是裸 BGR（父进程不再编 JPEG），jpg/png 走 imdecode。
+
+        copy 一次：下面的合成要往这块内存里读很多次，frombuffer 给的是只读视图，
+        留一份可写的省得某个分支（cv2 的 out 参数、.copy 之外的就地写）突然炸。
+        """
+        enc = str(it.get("enc") or "jpg").strip().lower()
+        if enc == "raw":
+            h = int(it.get("h") or 0)
+            w = int(it.get("w") or 0)
+            need = h * w * 3
+            if h <= 0 or w <= 0:
+                raise RuntimeError("raw 帧缺 h/w")
+            if len(blob) < need:
+                raise RuntimeError("raw 帧短了：%d < %d" % (len(blob), need))
+            return np.frombuffer(blob, np.uint8, need).reshape(h, w, 3).copy()
+        return cv2.imdecode(np.frombuffer(blob, np.uint8), cv2.IMREAD_COLOR)
+
+    def _swap_item(it, blob, rid):
+        """一项（一帧）：解码 → 换脸/遮罩/融合 → 出图。返回 (meta, 出图字节)。
+
+        **像素路径和「一请求一帧」时逐行相同**：cfg 逐项落地、_load/_xseg 幂等、
+        MergeMaskedFace 同一份调用、_paste_face 同一个分支、编码同一个函数。
+        多线程只是让不同帧的这些步骤重叠，不改变任何一帧的计算。
+        """
+        t0 = time.time()
+        frame = _decode_frame(it, blob)
+        if frame is None or not int(getattr(frame, "size", 0)):
+            raise RuntimeError("帧解码失败")
+
+        c = it.get("config") or {}
+        # config 就是父进程 _merge_settings_to_config() 的产物，**这一帧的参数
+        # 只从这里来**：不读任何全局/缓存值，也不回落到"默认参数"。
+        # 逐项都在这儿落地，少一项 = 那一项改了画面不动。
+        cfg = MergerConfigMasked(
+            face_type=str(c.get("face_type") or "whole_face"),
+            mode=str(c.get("mode") or "seamless"),
+            mask_mode=max(0, min(9, int(c.get("mask_mode", 6)))),
+            color_transfer_mode=ct_map.get(
+                str(c.get("color_transfer_mode") or "none").strip().lower(), 0),
+            erode_mask_modifier=max(-100, min(100, int(c.get("erode_mask_modifier", 0)))),
+            blur_mask_modifier=max(-100, min(100, int(c.get("blur_mask_modifier", 0)))),
+            show_debug=False,
+        )
+        q = int(it.get("jpeg_quality") or 92)
+        q = max(30, min(100, q))
+
+        faces = it.get("faces") or None      # 多模型：[{dfm, landmarks, box}, …]
+        if not faces:
+            # ---- 老的单模型请求：一行行为都不改 ----
+            dfm = str(it.get("dfm") or "")
+            if not dfm or not os.path.isfile(dfm):
+                raise RuntimeError("DFM 不存在: %s" % dfm)
+            sess, inp_name, size, nchw = _load_locked(dfm, rid)
+            xs = _xseg_locked(str(it.get("xseg") or ""), rid)
+            lm = np.array(it.get("landmarks") or [], dtype=np.float32)
+            if lm.ndim != 2 or lm.shape[1] < 2 or lm.shape[0] < 5:
+                raise RuntimeError("68 点不合法: %r" % (getattr(lm, "shape", None),))
+            # input_size 显式传进去，不靠模块级 _merger._model_input_size：
+            # 批处理里两个线程同时写那个全局，另一帧就会按错的边长 warp
+            # （多模型、输入尺寸不同时必现）。
+            fo, _fmask = MergeMaskedFace(frame, lm, cfg,
+                                         _predictor(sess, inp_name, size, nchw),
+                                         xseg_256_extract_func=xs, input_size=size)
+            if fo is None or not hasattr(fo, "shape"):
+                raise RuntimeError("MergeMaskedFace 没返回图")
+            out = fo
+            if out.ndim != 3 or out.shape[2] != 3:
+                raise RuntimeError("合成结果形状不对: %r" % (getattr(out, "shape", None),))
+            if out.shape[:2] != frame.shape[:2]:
+                if str(cfg.mode) == "debug":
+                    pass                          # 调试视图本身就是输出
+                else:
+                    out = _paste_face(frame, out, it.get("box"), np, cv2)
+            per = [{"dfm": dfm, "size": size}]
+        else:
+            # ---- 多模型：同一张帧上按顺序一张脸一张脸贴 ----
+            # load 是这次「声明要用」的整组；先装进显存，免得到第 2 张脸才付加载时间。
+            # 超过 _MAX_MODELS 的部分 _load 会自动 LRU 淘汰，这里不用管上限。
+            for p in [str(x) for x in (it.get("load") or [])]:
+                if p and os.path.isfile(p):
+                    _load_locked(p, rid)          # 幂等：已经在显存里就原样返回
+            xs = _xseg_locked(str(it.get("xseg") or ""), rid)
+            out = frame
+            per = []
+            for k, fc in enumerate(faces):
+                fc = fc or {}
+                f_dfm = str(fc.get("dfm") or "")
+                if not f_dfm or not os.path.isfile(f_dfm):
+                    raise RuntimeError("第 %d 张脸的 DFM 不存在: %s" % (k + 1, f_dfm))
+                sess_k, in_k, size_k, nchw_k = _load_locked(f_dfm, rid)
+                lm_k = np.array(fc.get("landmarks") or [], dtype=np.float32)
+                if lm_k.ndim != 2 or lm_k.shape[1] < 2 or lm_k.shape[0] < 5:
+                    raise RuntimeError("第 %d 张脸的 68 点不合法: %r"
+                                       % (k + 1, getattr(lm_k, "shape", None)))
+                t_k = time.time()
+                # 调试视图本身就是整帧输出，再叠第二张会把上一张盖掉 —— 每张都
+                # 从原帧出发；正常模式贴的就是上一次的结果，多张脸能叠在一起。
+                src = frame if str(cfg.mode) == "debug" else out
+                fo, _fmask = MergeMaskedFace(src, lm_k, cfg,
+                                             _predictor(sess_k, in_k, size_k, nchw_k),
+                                             xseg_256_extract_func=xs, input_size=size_k)
+                if fo is None or not hasattr(fo, "shape"):
+                    raise RuntimeError("第 %d 张脸：MergeMaskedFace 没返回图" % (k + 1))
+                if fo.ndim != 3 or fo.shape[2] != 3:
+                    raise RuntimeError("第 %d 张脸：合成结果形状不对: %r"
+                                       % (k + 1, getattr(fo, "shape", None)))
+                if fo.shape[:2] != frame.shape[:2]:
+                    if str(cfg.mode) == "debug":
+                        out = fo                      # 调试视图本身就是输出
+                    else:
+                        out = _paste_face(out, fo, fc.get("box"), np, cv2)
+                else:
+                    out = fo
+                per.append({"dfm": f_dfm, "size": size_k,
+                            "ms": round((time.time() - t_k) * 1000.0, 1)})
+        # 出图：默认 jpg（预览一直是这条）。fmt=raw 给「父进程自己编 PNG」用 ——
+        # 1080x1920 的 PNG 在 worker 里要 132~145ms/帧，挪到父进程的落盘线程里
+        # 就能和别的帧的换脸重叠，而且逐像素无损（PNG 是 0 损失，raw 也是）。
+        fmt = str(it.get("fmt") or "jpg").strip().lower()
+        if fmt == "raw":
+            blob_out = np.ascontiguousarray(out).tobytes()
+        elif fmt == "png":
+            ok, buf = cv2.imencode(".png", out, [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
+            if not ok:
+                raise RuntimeError("PNG 编码失败")
+            blob_out = buf.tobytes()
+        else:
+            fmt = "jpg"
+            ok, buf = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), q])
+            if not ok:
+                raise RuntimeError("JPEG 编码失败")
+            blob_out = buf.tobytes()
+        return ({"ok": True, "size": (per[0]["size"] if per else 256), "fmt": fmt,
+                 "swap_ms": round((time.time() - t0) * 1000.0, 1),
+                 "shape": [int(out.shape[0]), int(out.shape[1])],
+                 "swaps": len(per), "per_face": per,
+                 "models": _sorted_models(), "models_lru": _lru_snapshot(),
+                 "max_models": _MAX_MODELS}, blob_out)
+
+    def _safe_item(it, blob, rid):
+        """一项炸了只影响它自己：错误折进 meta，其它项照跑。"""
+        try:
+            return _swap_item(it, blob, rid)
+        except Exception as e:
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+            return ({"ok": False, "error": "%s: %s" % (e.__class__.__name__,
+                                                       str(e)[:300])}, b"")
+
+    _POOL = {"k": 0, "ex": None}
+
+    def _pool_for(k):
+        """按 k 建（或换）线程池：k 变了才重建，不然一直用同一组线程。"""
+        k = max(1, min(16, int(k)))
+        ex = _POOL.get("ex")
+        if ex is not None and int(_POOL.get("k") or 0) == k:
+            return ex
+        if ex is not None:
+            try:
+                ex.shutdown(wait=True)
+            except Exception:
+                pass
+        ex = ThreadPoolExecutor(max_workers=k, thread_name_prefix="preview-swap")
+        _POOL.update({"k": k, "ex": ex})
+        return ex
+
+    def _run_items(items, blobs, k, rid):
+        """k 项一起跑。返回 (metas, payload)，两边顺序都和 items 一致。
+
+        失败的项 meta 里是 ok=False、payload 是 b""，父进程靠下标对回帧名，不会串。
+        """
+        if int(k) <= 1 or len(items) <= 1:
+            out = [_safe_item(it, bl, rid) for it, bl in zip(items, blobs)]
+        else:
+            ex = _pool_for(k)
+            futs = [ex.submit(_safe_item, it, bl, rid)
+                    for it, bl in zip(items, blobs)]
+            out = []
+            for f in futs:
+                try:
+                    out.append(f.result())
+                except Exception as e:              # 兜底：_safe_item 自己不抛
+                    out.append(({"ok": False,
+                                 "error": "%s: %s" % (e.__class__.__name__,
+                                                      str(e)[:300])}, b""))
+        return [o[0] for o in out], [o[1] for o in out]
+
     for line in _IN:
         line = line.strip()
         if not line:
             continue
         try:
-            req = json.loads(line)
+            req = json.loads(line.decode("utf-8"))
         except Exception as e:
             _say({"ok": False, "error": "bad json: %s" % e})
             continue
         rid = req.get("id")
         cmd = str(req.get("cmd") or "")
         if cmd == "exit":
+            break
+        # 请求可以带裸字节块：头的 "blobs": [n1, n2, …] 就是后面几块的字节数。
+        # 先把块读满再干活 —— 读不满说明通道错位（父进程半路走了），直接收工。
+        blobs = []
+        try:
+            for _n in (req.get("blobs") or []):
+                _n = int(_n)
+                blobs.append(_read_exact(_n) if _n > 0 else b"")
+        except EOFError:
             break
         if cmd == "unload":
             # 手动放显存：{"cmd":"unload"} 全放；{"cmd":"unload","dfm":X} 只留 X
@@ -3086,7 +3328,7 @@ def main():
                 keep = ""                  # 要留的那个本来就没加载，那就全放
             gone = _unload(keep)
             _say({"id": rid, "ok": True, "unload": True, "unloaded": len(gone),
-                  "keep": keep, "models": sorted(models),
+                  "keep": keep, "models": _sorted_models(),
                   "max_models": _MAX_MODELS})
             continue
         if cmd == "warm":
@@ -3109,7 +3351,7 @@ def main():
             try:
                 for p in dfms:
                     t_m = time.time()
-                    _sess, _in, size, _nchw = _load(p, rid)
+                    _sess, _in, size, _nchw = _load_locked(p, rid)
                     # 第一次前向要把 cuDNN/TRT 的句柄和 kernel 建起来（实测 ~1.1s）。
                     # 用一张 zeros 走一遍把这份开销留在预热里 —— 不取帧、不合成。
                     t_p = time.time()
@@ -3126,7 +3368,7 @@ def main():
             xs_err = ""
             if xp:
                 try:
-                    _xs_fn = _xseg(xp, rid)
+                    _xs_fn = _xseg_locked(xp, rid)
                     _xs_fn(np.zeros((256, 256, 3), np.float32))   # 同上，先付一次
                 except Exception as e:
                     xs_err = "%s: %s" % (e.__class__.__name__, str(e)[:200])
@@ -3136,8 +3378,8 @@ def main():
                   "first_ms": head["first_ms"],
                   "warm_ms": round((time.time() - t_w) * 1000.0, 1),
                   "per_model": per, "count": len(per),
-                  "pid": os.getpid(), "models": sorted(models),
-                  "models_lru": list(models), "max_models": _MAX_MODELS})
+                  "pid": os.getpid(), "models": _sorted_models(),
+                  "models_lru": _lru_snapshot(), "max_models": _MAX_MODELS})
             continue
         if cmd == "face_debug":
             # 单脸六宫格：只跑**这一张脸**的一次合成，把中间量拆成六张 PNG 发回去。
@@ -3145,8 +3387,8 @@ def main():
             # capture 只写不读，一个像素都不改，所以第 6 格「merged」和用户在画面上
             # 看到的那张脸是同一份像素（脸发蒙时它是最直接的证据）。
             try:
-                raw = base64.b64decode(req.get("frame") or "")
-                frame = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+                blob0 = blobs[0] if blobs else base64.b64decode(req.get("frame") or "")
+                frame = cv2.imdecode(np.frombuffer(blob0, np.uint8), cv2.IMREAD_COLOR)
                 if frame is None:
                     raise RuntimeError("帧解码失败")
                 dfm = str(req.get("dfm") or "")
@@ -3166,12 +3408,11 @@ def main():
                 lm = np.array(req.get("landmarks") or [], dtype=np.float32)
                 if lm.ndim != 2 or lm.shape[1] < 2 or lm.shape[0] < 5:
                     raise RuntimeError("68 点不合法: %r" % (getattr(lm, "shape", None),))
-                sess, inp_name, size, nchw = _load(dfm, rid)
-                xs = _xseg(str(req.get("xseg") or ""), rid)
-                _merger._model_input_size = size
+                sess, inp_name, size, nchw = _load_locked(dfm, rid)
+                xs = _xseg_locked(str(req.get("xseg") or ""), rid)
                 cap = {}
                 MergeMaskedFace(frame, lm, cfg, _predictor(sess, inp_name, size, nchw),
-                                xseg_256_extract_func=xs, capture=cap)
+                                xseg_256_extract_func=xs, capture=cap, input_size=size)
                 panel_size = int(req.get("panel_size") or 256)
                 panels = []
                 for key, label, img in _merger.build_debug_panels(cap, panel_size):
@@ -3199,127 +3440,24 @@ def main():
                 _say({"id": rid, "ok": False,
                       "error": "%s: %s" % (e.__class__.__name__, str(e)[:300])})
             continue
-        t0 = time.time()
+
+        # ---- 换脸（默认分支）：items 里可以是 1 帧，也可以是一次 k 帧 ----
+        # 父进程把 k 帧合成**一条**请求发过来，这里用 k 个线程并行处理：GPU 前向、
+        # 整帧 float32 的遮罩/合成、PNG 编码互相重叠，管道往返只付一次。
+        items = req.get("items") or [req]
+        if len(blobs) < len(items):
+            blobs = list(blobs) + [b""] * (len(items) - len(blobs))
+        k = max(1, min(16, int(req.get("threads") or len(items) or 1)))
         try:
-            raw = base64.b64decode(req.get("frame") or "")
-            frame = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
-            if frame is None:
-                raise RuntimeError("帧解码失败")
-
-            c = req.get("config") or {}
-            # config 就是父进程 _merge_settings_to_config() 的产物，**这一帧的参数
-            # 只从这里来**：不读任何全局/缓存值，也不回落到"默认参数"。
-            # 逐项都在这儿落地，少一项 = 那一项改了画面不动。
-            cfg = MergerConfigMasked(
-                face_type=str(c.get("face_type") or "whole_face"),
-                mode=str(c.get("mode") or "seamless"),
-                mask_mode=max(0, min(9, int(c.get("mask_mode", 6)))),
-                color_transfer_mode=ct_map.get(
-                    str(c.get("color_transfer_mode") or "none").strip().lower(), 0),
-                erode_mask_modifier=max(-100, min(100, int(c.get("erode_mask_modifier", 0)))),
-                blur_mask_modifier=max(-100, min(100, int(c.get("blur_mask_modifier", 0)))),
-                show_debug=False,
-            )
-            q = int(req.get("jpeg_quality") or 92)
-            q = max(30, min(100, q))
-
-            faces = req.get("faces") or None      # 多模型：[{dfm, landmarks, box}, …]
-            if not faces:
-                # ---- 老的单模型请求：一行行为都不改 ----
-                dfm = str(req.get("dfm") or "")
-                if not dfm or not os.path.isfile(dfm):
-                    raise RuntimeError("DFM 不存在: %s" % dfm)
-                sess, inp_name, size, nchw = _load(dfm, rid)
-                xs = _xseg(str(req.get("xseg") or ""), rid)
-                _say({"id": rid, "stage": "swap"})
-                lm = np.array(req.get("landmarks") or [], dtype=np.float32)
-                if lm.ndim != 2 or lm.shape[1] < 2 or lm.shape[0] < 5:
-                    raise RuntimeError("68 点不合法: %r" % (getattr(lm, "shape", None),))
-                _merger._model_input_size = size     # MergeMaskedFace 读这个模块级变量
-                fo, _fmask = MergeMaskedFace(frame, lm, cfg,
-                                             _predictor(sess, inp_name, size, nchw),
-                                             xseg_256_extract_func=xs)
-                if fo is None or not hasattr(fo, "shape"):
-                    raise RuntimeError("MergeMaskedFace 没返回图")
-                out = fo
-                if out.ndim != 3 or out.shape[2] != 3:
-                    raise RuntimeError("合成结果形状不对: %r" % (getattr(out, "shape", None),))
-                if out.shape[:2] != frame.shape[:2]:
-                    if str(cfg.mode) == "debug":
-                        pass                          # 调试视图本身就是输出
-                    else:
-                        out = _paste_face(frame, out, req.get("box"), np, cv2)
-                per = [{"dfm": dfm, "size": size,
-                        "ms": round((time.time() - t0) * 1000.0, 1)}]
-            else:
-                # ---- 多模型：同一张帧上按顺序一张脸一张脸贴 ----
-                # load 是这次「声明要用」的整组；先装进显存，免得到第 2 张脸才付加载时间。
-                # 超过 _MAX_MODELS 的部分 _load 会自动 LRU 淘汰，这里不用管上限。
-                for p in [str(x) for x in (req.get("load") or [])]:
-                    if p and os.path.isfile(p) and p not in models:
-                        _load(p, rid)
-                xs = _xseg(str(req.get("xseg") or ""), rid)
-                out = frame
-                per = []
-                for k, fc in enumerate(faces):
-                    fc = fc or {}
-                    _say({"id": rid, "stage": "swap", "face": k,
-                          "faces": len(faces)})
-                    f_dfm = str(fc.get("dfm") or "")
-                    if not f_dfm or not os.path.isfile(f_dfm):
-                        raise RuntimeError("第 %d 张脸的 DFM 不存在: %s" % (k + 1, f_dfm))
-                    sess_k, in_k, size_k, nchw_k = _load(f_dfm, rid)
-                    lm_k = np.array(fc.get("landmarks") or [], dtype=np.float32)
-                    if lm_k.ndim != 2 or lm_k.shape[1] < 2 or lm_k.shape[0] < 5:
-                        raise RuntimeError("第 %d 张脸的 68 点不合法: %r"
-                                           % (k + 1, getattr(lm_k, "shape", None)))
-                    t_k = time.time()
-                    _merger._model_input_size = size_k
-                    # 调试视图本身就是整帧输出，再叠第二张会把上一张盖掉 —— 每张都
-                    # 从原帧出发；正常模式贴的就是上一次的结果，多张脸能叠在一起。
-                    src = frame if str(cfg.mode) == "debug" else out
-                    fo, _fmask = MergeMaskedFace(src, lm_k, cfg,
-                                                 _predictor(sess_k, in_k, size_k, nchw_k),
-                                                 xseg_256_extract_func=xs)
-                    if fo is None or not hasattr(fo, "shape"):
-                        raise RuntimeError("第 %d 张脸：MergeMaskedFace 没返回图" % (k + 1))
-                    if fo.ndim != 3 or fo.shape[2] != 3:
-                        raise RuntimeError("第 %d 张脸：合成结果形状不对: %r"
-                                           % (k + 1, getattr(fo, "shape", None)))
-                    if fo.shape[:2] != frame.shape[:2]:
-                        if str(cfg.mode) == "debug":
-                            out = fo                      # 调试视图本身就是输出
-                        else:
-                            out = _paste_face(out, fo, fc.get("box"), np, cv2)
-                    else:
-                        out = fo
-                    per.append({"dfm": f_dfm, "size": size_k,
-                                "ms": round((time.time() - t_k) * 1000.0, 1)})
-            # 编码：默认 jpg（预览一直是这条，行为不变）；fmt=png 给「整帧落盘」用
-            # —— 项目模式导出要把 merged 当中间素材再编码，JPEG 每帧掉一次画质没意义。
-            fmt = str(req.get("fmt") or "jpg").strip().lower()
-            if fmt == "png":
-                ok, buf = cv2.imencode(".png", out, [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
-                if not ok:
-                    raise RuntimeError("PNG 编码失败")
-            else:
-                fmt = "jpg"
-                ok, buf = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), q])
-                if not ok:
-                    raise RuntimeError("JPEG 编码失败")
-            _say({"id": rid, "ok": True,
-                  "size": (per[0]["size"] if per else 256),
-                  "fmt": fmt,
-                  "jpeg": base64.b64encode(buf.tobytes()).decode("ascii"),
-                  "swap_ms": round((time.time() - t0) * 1000.0, 1),
-                  "swaps": len(per), "per_face": per,
-                  "models": sorted(models), "models_lru": list(models),
-                  "max_models": _MAX_MODELS})
+            metas, payload = _run_items(items, blobs[:len(items)], k, rid)
+            _say({"id": rid, "ok": True, "k": k,
+                  "items": metas, "blobs": [len(b) for b in payload]}, payload)
         except Exception as e:
             import traceback
             traceback.print_exc(file=sys.stderr)
             _say({"id": rid, "ok": False,
                   "error": "%s: %s" % (e.__class__.__name__, str(e)[:300])})
+
 
 
 main()
@@ -3443,15 +3581,47 @@ class _PreviewWorker:
             self._idle_t.start()
 
     def _read_stdout(self, proc, q):
+        """读 worker 的 stdout：一行 JSON 头，后面可能跟若干裸字节块。
+
+        头里的 "blobs": [n…] 是紧随其后的块长度（帧/出图不再 base64）。块读不满 =
+        通道错位（worker 崩了/被杀）→ 塞 eof，让等着的人立刻醒，不会白等到超时。
+        """
+        f = proc.stdout
         try:
-            for raw in proc.stdout:
-                line = raw.decode("utf-8", "replace").strip()
+            while True:
+                line = f.readline()
                 if not line:
+                    break
+                s = line.decode("utf-8", "replace").strip()
+                if not s:
                     continue
                 try:
-                    q.put(json.loads(line))
+                    msg = json.loads(s)
                 except Exception:
                     continue
+                sizes = msg.get("blobs")
+                if isinstance(sizes, list) and sizes:
+                    blocks, bad = [], False
+                    for n in sizes:
+                        try:
+                            n = int(n)
+                        except (TypeError, ValueError):
+                            bad = True
+                            break
+                        buf = bytearray()
+                        while len(buf) < n:
+                            chunk = f.read(n - len(buf))
+                            if not chunk:
+                                bad = True
+                                break
+                            buf += chunk
+                        if bad:
+                            break
+                        blocks.append(bytes(buf))
+                    if bad:
+                        break
+                    msg["_blobs"] = blocks
+                q.put(msg)
         except Exception:
             pass
         finally:
@@ -3565,9 +3735,13 @@ class _PreviewWorker:
         return self.call({"cmd": "unload", "dfm": str(dfm or "")},
                          work_timeout=10.0, load_timeout=10.0)
 
-    def call(self, payload: dict, work_timeout=None, load_timeout=None,
+    def call(self, payload: dict, blobs=(), work_timeout=None, load_timeout=None,
              on_stage=None) -> dict:
-        """发一帧给 worker 并等结果。超时/失联会杀掉 worker 再抛 _BadInput。"""
+        """发一次请求给 worker 并等结果。超时/失联会杀掉 worker 再抛 _BadInput。
+
+        payload 是 JSON 头，blobs 是紧跟其后的裸字节块（帧/出图）：头的 "blobs"
+        写的是每块字节数，worker 按它精确读满 —— 帧不再 base64。
+        """
         work_timeout = float(_PREVIEW_WORK_TIMEOUT if work_timeout is None else work_timeout)
         load_timeout = float(_PREVIEW_LOAD_TIMEOUT if load_timeout is None else load_timeout)
         with self._lock:
@@ -3578,9 +3752,13 @@ class _PreviewWorker:
             rid = self._seq
             msg_in = dict(payload)
             msg_in["id"] = rid
+            msg_in["blobs"] = [len(b) for b in (blobs or ())]
             line = (json.dumps(msg_in) + "\n").encode("utf-8")   # ASCII 转义，安全过管道
             try:
                 self._stdin.write(line)
+                for b in (blobs or ()):              # 裸字节块：紧跟 JSON 头，一次 flush
+                    if b:
+                        self._stdin.write(b)
                 self._stdin.flush()
             except Exception as e:
                 tail = self._tail_text()
@@ -3676,7 +3854,12 @@ _WORKER = _PreviewWorker()
 # 原样不动，多出来的只有并行度。
 # ------------------------------------------------------------
 def _proj_workers_default() -> int:
-    """项目模式默认并行度：min(4, cpu//4)；DFL_PROJ_WORKERS 可覆盖（测试/调参用）。"""
+    """项目模式默认并行度：2（DFL_PROJ_WORKERS 可覆盖）。
+
+    一份 dfm session 实测 2.07GB；8GB 卡上 2 份就是 ~4.2GB，第 3 份开始 spill
+    （显存不够时驱动把 CUDA 页换到主存，单帧直接掉到 900ms+，实测 3 进程 1.32 帧/秒）。
+    所以默认不再"按核数往上堆"—— 往上堆的是**每进程的线程数**（_proj_batch_default）。
+    """
     try:
         n = int(str(os.environ.get("DFL_PROJ_WORKERS") or "").strip() or 0)
     except (TypeError, ValueError):
@@ -3684,7 +3867,52 @@ def _proj_workers_default() -> int:
     if n > 0:
         return max(1, min(16, n))
     cpu = os.cpu_count() or 8
-    return max(1, min(4, cpu // 4))
+    return max(1, min(2, cpu // 4))
+
+
+def _proj_batch_default() -> int:
+    """一次请求带几帧 = worker 内部同时跑几帧：默认 4（DFL_PROJ_BATCH 可覆盖）。
+
+    实测（一份 session、1080x1920、真项目 A/frames、fmt=png）：k=1 507ms/帧、
+    k=4 244、k=8 223 —— 4 已经吃掉大部分重叠收益，再往上只是把内存带宽摊薄
+    （本机 numpy 逐元素运算 8 线程相对单线程只有 1.27x 聚合）。所以 k=4。
+    """
+    try:
+        n = int(str(os.environ.get("DFL_PROJ_BATCH") or "").strip() or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n > 0:
+        return max(1, min(_PREVIEW_MAX_BATCH, n))
+    return 4
+
+
+def _proj_send_raw() -> bool:
+    """传帧用裸 BGR（默认）；DFL_PROJ_SEND=jpg 退回 q95 JPEG。
+
+    换的理由是**像素门过了**，不是"看着差不多"：同一帧、同参数对拍
+    （%TEMP%/dfl_proj_pool，1080x1920 真项目帧）q95 JPEG 往返 vs 裸字节
+    = mean 0.1506 LSB / 差异像素 12.60% / max 5 LSB，在 0.5 LSB 门内。
+    代价只是管道上多走 6.2MB/帧（本机 ~25MB/s 的管道，8 帧/秒也就 50MB/s），
+    省下的是父进程 20ms/帧的 JPEG 编码 + worker 6ms/帧的解码。
+    """
+    v = str(os.environ.get("DFL_PROJ_SEND") or "").strip().lower()
+    return v not in ("jpg", "jpeg", "b64", "base64", "off", "0")
+
+
+def _proj_out_raw() -> bool:
+    """**只对 .png 帧生效**：worker 回传裸 BGR，PNG 改由父进程的落盘线程编。
+
+    1080x1920 的 PNG（compression=3）在 worker 里要 132~145ms/帧（那一路单帧 475ms
+    的三成）；它是**纯计算**，挪到父进程的落盘线程就能和别的帧的换脸重叠。像素无损
+    （PNG 无损、raw 也是逐字节原样），实测「PNG 回传 vs 裸字节回传」逐像素最大差 0
+    → 产物像素不变（文件字节会变：编码器换成了父进程那份 cv2）。
+
+    **.jpg 帧不走这条**：那条路 worker 编的是 JPEG(q92)，合并产物就是 JPEG ——
+    改写成无损 PNG 会**改变像素**（q95/q92 往返 mean ≈ 1 LSB），也违背「不改像素」。
+    DFL_PROJ_OUT=png 可以让 .png 帧也交回 worker 编（产物字节和以前逐位相同）。
+    """
+    v = str(os.environ.get("DFL_PROJ_OUT") or "").strip().lower()
+    return v not in ("png", "jpg", "jpeg", "worker", "off", "0")
 
 
 class _PreviewWorkerPool:
@@ -4279,19 +4507,30 @@ def _img_bytes(img, fmt="jpg", quality=_PREVIEW_QUALITY) -> bytes:
     return buf.tobytes()
 
 
-def _send_frame_b64(frame, job: dict) -> str:
-    """整帧发给 worker 的 base64。
+def _send_frame_bytes(frame, job: dict):
+    """整帧发给 worker 的裸字节 → (enc, blob, h, w)。**不再 base64。**
 
-    job["send_lossless"]（= 请求 fmt=png）时走 PNG：**只有无损传输，没被换的脸
-    才可能和原帧逐像素相同**（no_swap_faces 的验收条件就是"脸区域差异为 0"）。
-    jpg（界面预览那条路）仍旧是 q95 JPEG，速度优先，眼睛看不出来。
+    三条路（默认全局共用一份开关，见 _proj_send_raw）：
+      · job["send_raw"]     裸 BGR。项目模式导出走它（省 20ms 编码 + 6ms 解码，
+                            像素差 mean 0.1506 LSB，见 _proj_send_raw 的注释）；
+      · job["send_lossless"] PNG，无损（no_swap_faces 那条验收要的"脸区域差异为 0"
+                            靠它；和以前完全同一条路，只是不再 base64）；
+      · 其余（界面单帧预览） q95 JPEG —— **字节和以前一模一样**，只是不再 base64。
     """
+    import cv2
+    h, w = int(frame.shape[0]), int(frame.shape[1])
+    if job.get("send_raw"):
+        import numpy as np
+        return "raw", np.ascontiguousarray(frame).tobytes(), h, w
     if job.get("send_lossless"):
-        import cv2
         ok, buf = cv2.imencode(".png", frame, [int(cv2.IMWRITE_PNG_COMPRESSION), 1])
         if ok:
-            return _b64.b64encode(buf.tobytes()).decode("ascii")
-    return _b64.b64encode(_jpeg_bytes(frame, _PREVIEW_SEND_QUALITY)).decode("ascii")
+            return "png", buf.tobytes(), h, w
+    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY),
+                                          _PREVIEW_SEND_QUALITY])
+    if not ok:
+        raise _BadInput("这一帧编不出 JPEG", 500)
+    return "jpg", buf.tobytes(), h, w
 
 
 def _plain_frame(job: dict, frame, box_wh, timings, note="", has_face=True,
@@ -4317,28 +4556,66 @@ def _plain_frame(job: dict, frame, box_wh, timings, note="", has_face=True,
             "note": note, "faces": [], "models_used": [], "swaps": 0}
 
 
-def _preview_multi(job: dict, frame, boxes, box_wh, timings, stage_fn, state) -> dict:
-    """多模型换脸：检测到的每张脸都按 models 里的分配换，没分配的用第 0 个。
+# ------------------------------------------------------------
+# 「一帧」的三个半边：准备（取帧/检测/68 点/组帧）、发车（一条协议）、收尾（结果）
+#
+# 拆成三块是为了批处理 —— 项目模式导出一次发 k 帧（worker 里 k 个线程并行），
+# 主进程这边 k 帧的检测/68 点/组帧也能和别帧的换脸重叠。单帧预览
+# （/api/merge/preview）走的还是同一条路，只是 k=1；准备/发车/收尾这三步本来就
+# 是 _preview_job 里连着做的，所以预览的像素与响应字段一个字都没变。
+# ------------------------------------------------------------
+def _swap_desc(job: dict, frame, boxes, best, box_xyxy, box_wh, timings,
+               stage_fn, state):
+    """检测之后 → (desc, plain_note)。
 
-    一次 worker 请求把「这次要用的整组模型」先装进显存（worker 上限 3 个，超了
-    LRU 淘汰），然后在同一张帧上按检测顺序一张一张贴 —— 每张贴的都是上一次的
-    结果，所以 3 张脸就是 3 次 MergeMaskedFace，最后只编一次 JPEG。
-
-    人脸序号就是检测顺序（det.detect() 的返回顺序，从 0 起）；和 /api/merge/detect
-    返回的 boxes 下标完全一致，前端拿它做脸-模型的勾选就对了。
+    desc=None 表示这一帧不用去 worker（调用方用 _plain_frame 出结果，note 就是
+    第二个返回值）。否则 desc 里带：
+      item   要发给 worker 的那一份（帧字节另挂，见 _swap_blob）
+      multi  True = 多模型（每张脸各用各的），False = 老的单模型
+      plan   真贴上脸的那些（多模型用），skipped 没贴的 + 原因
+      box    检测框 [x, y, w, h]，n_boxes 这一帧检出几张脸
+      models 多模型的整组声明
     """
     import numpy as np
 
-    models = job["models"]
-    fmt = str(job.get("fmt") or "jpg").strip().lower()       # "jpg"（预览）/ "png"（落盘）
+    models = job.get("models")
+    fmt = str(job.get("fmt") or "jpg").strip().lower()
     q = int(job.get("quality") or _PREVIEW_QUALITY)
+    common = {"xseg": str(job.get("xseg") or ""), "config": dict(job["config"]),
+              "jpeg_quality": int(q), "fmt": fmt}
+    no_swap = {int(x) for x in (job.get("no_swap") or ())}
+    boxes = list(boxes or [])
+
+    if not models:
+        # ---- 单模型路径：主角那张脸被点名"不换"就整帧原样回去（不能假装换过）----
+        best_i = next((i for i, b in enumerate(boxes) if b is best), None)
+        if no_swap and best_i is not None and best_i in no_swap:
+            return None, "第 %d 张脸在 no_swap_faces 里 —— 整帧保持原像素" % best_i
+        stage_fn("landmarks")
+        t_lm = time.time()
+        lm68 = _frame_landmarks(frame, best, box_xyxy)
+        timings["landmarks_ms"] = round((time.time() - t_lm) * 1000.0, 1)
+        if lm68 is None:
+            return None, "检出人脸但 68 点算不出来 —— 只回原帧"
+        item = dict(common)
+        item["dfm"] = str(job["dfm"])
+        item["landmarks"] = np.asarray(lm68, dtype=np.float64).round(2).tolist()
+        item["box"] = list(box_wh)
+        return ({"item": item, "multi": False, "plan": [], "skipped": [],
+                 "box": box_wh, "n_boxes": len(boxes), "models": None}, "")
+
+    # ---- 多模型：检测到的每张脸都按 models 里的分配换，没分配的用第 0 个 ----
+    # 一次 worker 请求把「这次要用的整组模型」先装进显存（worker 上限 3 个，超了
+    # LRU 淘汰），然后在同一张帧上按检测顺序一张一张贴 —— 每张贴的都是上一次的
+    # 结果，所以 3 张脸就是 3 次 MergeMaskedFace，最后只编一次图。
+    # 人脸序号就是检测顺序（det.detect() 的返回顺序，从 0 起）；和 /api/merge/detect
+    # 返回的 boxes 下标完全一致，前端拿它做脸-模型的勾选就对了。
     stage_fn("faces")
     t_lm = time.time()
     plan, skipped = [], []
     # 「不换脸」的脸：直接不参与合成 —— 既不算进 plan，也不兜给第 0 个模型。
     # 这条必须在 _model_for_face 之前判掉，否则"未声明"会被兜底成第 0 个模型。
-    no_swap = {int(x) for x in (job.get("no_swap") or ())}
-    for i, b in enumerate((boxes or [])[:_PREVIEW_MAX_SWAPS]):
+    for i, b in enumerate(boxes[:_PREVIEW_MAX_SWAPS]):
         if int(i) in no_swap:
             skipped.append({"face": int(i), "why": "no_swap_faces：按要求保持原像素"})
             continue
@@ -4364,9 +4641,8 @@ def _preview_multi(job: dict, frame, boxes, box_wh, timings, stage_fn, state) ->
 
     if not plan:
         if no_swap and all(s.get("why", "").startswith("no_swap_faces") for s in skipped):
-            return _plain_frame(job, frame, box_wh, timings,
-                                note="这一帧的脸都在 no_swap_faces 里 —— 整帧保持原像素")
-        return _plain_frame(job, frame, box_wh, timings, note="检出人脸但 68 点算不出来 —— 只回原帧")
+            return None, "这一帧的脸都在 no_swap_faces 里 —— 整帧保持原像素"
+        return None, "检出人脸但 68 点算不出来 —— 只回原帧"
 
     # 声明要用的整组（去重、按 models 顺序）。worker 只常驻 3 个，多出来的它自己
     # LRU 换 —— 这里截到上限就行，免得让它在一次请求里反复横跳。
@@ -4380,105 +4656,103 @@ def _preview_multi(job: dict, frame, boxes, box_wh, timings, stage_fn, state) ->
         if len(load) >= _WORKER_MAX_MODELS:
             break
 
-    stage_fn("swap")
-    state["stage"] = "queued"          # worker 一次只跑一帧：排队时间不算进 15s
-    t0 = time.time()
-    payload = {
-        "frame": _send_frame_b64(frame, job),
-        "faces": [{"dfm": p["dfm"], "landmarks": p["landmarks"], "box": p["box"]}
-                  for p in plan],
-        "load": load,
-        "xseg": str(job.get("xseg") or ""),
-        "config": dict(job["config"]),
-        "jpeg_quality": q,
-        "fmt": fmt,
-    }
-    # job["worker"] 只给项目导出并行那条路用（每个 worker 进程一份 session）；
-    # 没给就是常驻单 worker，单帧预览的行为一个字都不变。
-    resp = (job.get("worker") or _WORKER).call(
-        payload, on_stage=lambda st: state.__setitem__("stage", st))
+    item = dict(common)
+    item["faces"] = [{"dfm": p["dfm"], "landmarks": p["landmarks"], "box": p["box"]}
+                     for p in plan]
+    item["load"] = load
+    return ({"item": item, "multi": True, "plan": plan, "skipped": skipped,
+             "box": box_wh, "n_boxes": len(boxes), "models": models}, "")
+
+
+def _swap_blob(job: dict, frame, desc: dict) -> dict:
+    """把帧字节挂到 item 上（不进 JSON：几 MB 的裸字节走 blob 通道）。"""
+    enc, blob, h, w = _send_frame_bytes(frame, job)
+    item = dict(desc["item"])
+    item["enc"] = enc
+    if enc == "raw":
+        item["h"], item["w"] = int(h), int(w)
+    item["_blob"] = blob
+    return item
+
+
+def _worker_swap(worker, items, threads=1, state=None):
+    """一次请求 k 帧（worker 内部用同样多个线程并行）。返回 (metas, imgs)。
+
+    metas[i] / imgs[i] 对应 items[i]；某项失败只会让那一项 ok=False，其它项照旧
+    —— 主进程按帧名单独记账。超时按「轮数」放大：k 帧分 ceil(k/线程) 轮跑完。
+    """
+    blobs = [it.pop("_blob", b"") or b"" for it in items]
+    k = max(1, min(_PREVIEW_MAX_BATCH, int(threads or 1)))
+    rounds = max(1, (len(items) + k - 1) // k)
+    if state is not None:
+        state["stage"] = "queued"      # worker 里排队的时间不算进单帧超时
+    on_stage = ((lambda st: state.__setitem__("stage", st)) if state is not None else None)
+    resp = worker.call({"cmd": "swap", "threads": k, "items": items}, blobs,
+                       work_timeout=_PREVIEW_WORK_TIMEOUT * rounds,
+                       on_stage=on_stage)
     if not resp.get("ok"):
         raise _BadInput("换脸失败：%s" % (resp.get("error") or "预览 worker 没给原因"), 500)
-    try:
-        jpg = _b64.b64decode(resp.get("jpeg") or "")
-    except Exception:
-        raise _BadInput("换脸结果是坏的（base64 解不开）", 500)
-    if not jpg:
+    metas = list(resp.get("items") or [])
+    imgs = list(resp.get("_blobs") or [])
+    while len(metas) < len(items):
+        metas.append({"ok": False, "error": "worker 少了这一项的回执"})
+    while len(imgs) < len(items):
+        imgs.append(b"")
+    return metas, imgs
+
+
+def _preview_finish(desc: dict, resp: dict, img, timings, t0) -> dict:
+    """worker 的回执 → 结果 dict（字段和改造前一致，前端一个字都不用改）。"""
+    if not resp.get("ok"):
+        raise _BadInput("换脸失败：%s" % (resp.get("error") or "预览 worker 没给原因"), 500)
+    if not img:
         raise _BadInput("换脸结果为空", 500)
     timings["swap_ms"] = resp.get("swap_ms")
     timings["swap_wall_ms"] = round((time.time() - t0) * 1000.0, 1)
 
+    out = {"jpg": img, "img": img, "box": desc.get("box"), "has_face": True,
+           "no_faces": False, "swapped": True, "timings": timings,
+           "model_size": resp.get("size"), "note": ""}
+    if str(resp.get("fmt") or "").strip().lower() == "raw":
+        # worker 回的是裸 BGR：PNG 由落盘那一侧编（见 _proj_out_raw）。
+        shp = list(resp.get("shape") or [])
+        if len(shp) >= 2:
+            out["raw"] = img
+            out["raw_hw"] = (int(shp[0]), int(shp[1]))
+        out["jpg"] = out["img"] = None
+    if not desc.get("multi"):
+        return out
+
+    skipped = desc.get("skipped") or []
+    models = desc.get("models") or []
+    plan = desc.get("plan") or []
+    n_boxes = int(desc.get("n_boxes") or 0)
     note = ""
     if skipped:
         note = "%d 张脸没换（%s）" % (len(skipped), "；".join(
             "#%d %s" % (s["face"], s["why"]) for s in skipped))
-    if len(boxes or []) > _PREVIEW_MAX_SWAPS:
+    if n_boxes > _PREVIEW_MAX_SWAPS:
         note = (note + "；" if note else "") + ("只换前 %d 张脸（这一帧检出 %d 张）"
-                                                % (_PREVIEW_MAX_SWAPS, len(boxes)))
-    return {"jpg": jpg, "img": jpg, "box": box_wh, "has_face": True, "no_faces": False,
-            "swapped": True,
-            "timings": timings, "model_size": resp.get("size"), "note": note,
-            "faces": [{"face": p["face"], "model": p["name"], "dfm": p["dfm"],
-                       "box": p["box"]} for p in plan],
-            "models_used": _used_names(models, resp.get("models"),
-                                       [p["dfm"] for p in plan]),
-            "swaps": len(plan), "skipped": skipped}
+                                                % (_PREVIEW_MAX_SWAPS, n_boxes))
+    out.update({"note": note,
+                "faces": [{"face": p["face"], "model": p["name"], "dfm": p["dfm"],
+                           "box": p["box"]} for p in plan],
+                "models_used": _used_names(models, resp.get("models"),
+                                           [p["dfm"] for p in plan]),
+                "swaps": len(plan), "skipped": skipped})
+    return out
 
 
-# ------------------------------------------------------------
-# 单帧预览：一步式 MergeMaskedFace（不碰 <视频>_cache/，不调 stage 函数）
-#
-# 这里以前放过另一条路：预览也走 ⑤ 合成 —— 先读 <视频>_cache/pred|mask（有就复用），
-# 没有就现场算 dfm + XSeg，再调 _merge_compose.compose_frame。它和导出的字节更接近，
-# 但代价是：① 预览开始依赖 cache 存在与否（有 cache 和没 cache 出图不一样，还会读到
-# 别人留下的半成品）；② 整帧 float32 的色彩迁移 + compose 比一步式慢一倍
-# （1080×1920 实测 10 帧端到端：改前 497ms/帧 → 改后 230ms/帧，见
-# app/tools/preview_fast_accept.py）；③ 一次 UI 预览把六阶段的代码路径也拉进了请求
-# 线程。整条已删掉，连同「从 <视频>_cache/frames 读帧」那一小段。
-#
-# 现在只有一条路：取帧 → worker → MergeMaskedFace（dfm 推理 + 遮罩 + 融合一次做完）
-# → 内存里的 JPEG/PNG 原路返回。**不读 cache、不写 cache、不创建 cache 目录，
-# 也不调用任何 _stage_* 函数**（本文件里 _stage_* 只服务六阶段导出）。
-# worker 自己的临时目录（%TEMP%/dfl41_merge_preview，只放 worker 脚本）不在素材目录
-# 或 cache 目录树里。
-#
-# 与导出的关系：算法等价、代码路径不同。
-#   · 预览：merger.MergeMaskedFace —— 一张脸从头到尾一次算完；4.0 在 seamless 之后
-#     还有一段「把结果 warp 回脸空间再做一次色彩迁移」，预览保留。
-#   · 导出：六阶段（stage6_accept.py 验的那条）—— pred/mask 先落盘，合成是纯 CPU 的
-#     _merge_compose.compose_frame，逐段对照 4.0 的 _phase_merge_worker。
-# 所以同一帧「预览」和「导出」的像素差是**允许存在**的，实测（stage6_accept 的 d 段）：
-#   · 预览 PNG vs 导出帧 PNG（同一帧、都无损）→ mean 0.02~0.03 / max 20~33：两条路的
-#     融合只差边缘那几级灰度；
-#   · 成片（crf16 yuv420p + 预览那侧 JPEG）vs 预览 → mean ≈ 3.6~4：这才是那 ~3.7 的来源，
-#     是编码往返，不是算法。
-# 不要为了「逐像素相同」再把预览接回 compose —— 那等于用一倍的耗时换一个用户看不出来
-# 的差值，还顺手把预览绑在 cache 上。
-# ------------------------------------------------------------
+def _preview_prepare(job: dict) -> dict:
+    """前半段：取帧 → 检测 → 68 点 → 拼好要发给 worker 的那一份。
 
-
-def _preview_job(job: dict) -> dict:
-    """一次预览的重活：取帧 → 检测 → 68 点 → 换脸 + 遮罩 + 合成。
-
-    job: {video, t, dfm, xseg, config, detector, thresh, stop, state[, models]}
-    models 为空/缺省 = 老的单模型路径：只换「主角」那一张脸，行为一个字都不改；
-    给了 models = 多模型（见 _preview_multi）。
-    每个阶段之间都查 stop —— 超时/取消时调用方置位，这里尽快收手。
-
-    **预览只有一条路**：换脸/遮罩/融合全在 worker 里由 MergeMaskedFace 一次做完，
-    返回的图直接在内存里，任何中间量都不落盘、不读 <视频>_cache/。导出走的是六阶段
-    （pred/mask 落盘 + 纯 CPU compose_frame），两条路算法等价、代码路径不同，同一帧的
-    像素差允许存在（无损对拍 mean 0.02~0.03；成片 vs 预览 mean ≈ 3.6~4 是编码往返）——
-    详见 _preview_job 上面那段说明。
+    返回 {"done": res}   = 这一帧不用去 worker（_plain_frame 已经出结果）；
+    或 {"item", "desc", "timings"} = 发给 worker，回来走 _preview_finish。
+    **不碰 worker**，所以它能和别的帧的换脸同时跑（项目导出的批处理靠这个）。
     """
-    import cv2
-    import numpy as np
-
     stop = job["stop"]
     state = job["state"]
     timings = {}
-    fmt = str(job.get("fmt") or "jpg").strip().lower()       # "jpg"（预览）/ "png"（落盘）
-    q = int(job.get("quality") or _PREVIEW_QUALITY)
 
     def _stage(name):
         state["stage"] = name
@@ -4523,58 +4797,73 @@ def _preview_job(job: dict) -> dict:
     if box_wh is None:
         # 一张脸都没检出：原帧原样回去（导出那条路会 copy=True 直接搬源文件），
         # 后面「自动分配 / 68 点 / 换脸」一步都不该再跑。
-        return _plain_frame(job, frame, None, timings, note="这一帧没检出人脸",
-                            has_face=False, no_faces=True)
+        return {"done": _plain_frame(job, frame, None, timings,
+                                     note="这一帧没检出人脸",
+                                     has_face=False, no_faces=True)}
 
-    if job.get("models"):                      # 多模型：每张脸各用各的模型
-        return _preview_multi(job, frame, boxes, box_wh, timings, _stage, state)
-
-    # 单模型路径：主角那张脸被点名"不换"就整帧原样回去（不能假装换过）
-    no_swap = {int(x) for x in (job.get("no_swap") or ())}
-    if no_swap:
-        best_i = next((i for i, b in enumerate(boxes) if b is best), None)
-        if best_i is not None and best_i in no_swap:
-            return _plain_frame(job, frame, box_wh, timings,
-                                note="第 %d 张脸在 no_swap_faces 里 —— 整帧保持原像素"
-                                     % best_i)
-
-    _stage("landmarks")
-    t0 = time.time()
-    lm68 = _frame_landmarks(frame, best, box_xyxy)
-    timings["landmarks_ms"] = round((time.time() - t0) * 1000.0, 1)
-    if lm68 is None:
-        return _plain_frame(job, frame, box_wh, timings,
-                            note="检出人脸但 68 点算不出来 —— 只回原帧")
-
+    desc, plain_note = _swap_desc(job, frame, boxes, best, box_xyxy, box_wh,
+                                  timings, _stage, state)
+    if desc is None:
+        return {"done": _plain_frame(job, frame, box_wh, timings, note=plain_note)}
     _stage("swap")
-    state["stage"] = "queued"          # worker 一次只跑一帧：排队时间不算进 15s
+    return {"item": _swap_blob(job, frame, desc), "desc": desc, "timings": timings}
+
+
+def _preview_job(job: dict) -> dict:
+    """一次预览的重活：取帧 → 检测 → 68 点 → 换脸 + 遮罩 + 合成。
+
+    job: {video, t, dfm, xseg, config, detector, thresh, stop, state[, models]}
+    models 为空/缺省 = 老的单模型路径：只换「主角」那一张脸，行为一个字都不改；
+    给了 models = 多模型（见 _swap_desc）。
+
+    **预览只有一条路**：换脸/遮罩/融合全在 worker 里由 MergeMaskedFace 一次做完，
+    返回的图直接在内存里，任何中间量都不落盘、不读 <视频>_cache/。导出走的是六阶段
+    （pred/mask 落盘 + 纯 CPU compose_frame），两条路算法等价、代码路径不同，同一帧的
+    像素差允许存在（无损对拍 mean 0.02~0.03；成片 vs 预览 mean ≈ 3.6~4 是编码往返）——
+    详见上面那段说明。
+
+    这里是「准备 + 发一帧 + 收尾」：和项目模式的批处理共用同一份 _swap_desc /
+    _worker_swap / _preview_finish，只是 k=1。
+    """
+    prep = _preview_prepare(job)
+    if prep.get("done") is not None:
+        return prep["done"]
     t0 = time.time()
-    payload = {
-        "frame": _send_frame_b64(frame, job),
-        "landmarks": np.asarray(lm68, dtype=np.float64).round(2).tolist(),
-        "dfm": str(job["dfm"]),
-        "xseg": str(job.get("xseg") or ""),
-        "box": list(box_wh),
-        "config": dict(job["config"]),
-        "jpeg_quality": q,
-        "fmt": fmt,
-    }
-    # 同 _preview_multi：job["worker"] 给了就用它（项目导出的并行池），否则常驻单 worker
-    resp = (job.get("worker") or _WORKER).call(
-        payload, on_stage=lambda st: state.__setitem__("stage", st))
-    if not resp.get("ok"):
-        raise _BadInput("换脸失败：%s" % (resp.get("error") or "预览 worker 没给原因"), 500)
-    try:
-        jpg = _b64.b64decode(resp.get("jpeg") or "")
-    except Exception:
-        raise _BadInput("换脸结果是坏的（base64 解不开）", 500)
-    if not jpg:
-        raise _BadInput("换脸结果为空", 500)
-    timings["swap_ms"] = resp.get("swap_ms")
-    timings["swap_wall_ms"] = round((time.time() - t0) * 1000.0, 1)
-    return {"jpg": jpg, "img": jpg, "box": box_wh, "has_face": True, "no_faces": False,
-            "swapped": True,
-            "timings": timings, "model_size": resp.get("size"), "note": ""}
+    metas, imgs = _worker_swap(job.get("worker") or _WORKER, [prep["item"]],
+                               threads=1, state=job.get("state"))
+    return _preview_finish(prep["desc"], metas[0], imgs[0], prep["timings"], t0)
+
+
+# ------------------------------------------------------------# 单帧预览：一步式 MergeMaskedFace（不碰 <视频>_cache/，不调 stage 函数）
+#
+# 这里以前放过另一条路：预览也走 ⑤ 合成 —— 先读 <视频>_cache/pred|mask（有就复用），
+# 没有就现场算 dfm + XSeg，再调 _merge_compose.compose_frame。它和导出的字节更接近，
+# 但代价是：① 预览开始依赖 cache 存在与否（有 cache 和没 cache 出图不一样，还会读到
+# 别人留下的半成品）；② 整帧 float32 的色彩迁移 + compose 比一步式慢一倍
+# （1080×1920 实测 10 帧端到端：改前 497ms/帧 → 改后 230ms/帧，见
+# app/tools/preview_fast_accept.py）；③ 一次 UI 预览把六阶段的代码路径也拉进了请求
+# 线程。整条已删掉，连同「从 <视频>_cache/frames 读帧」那一小段。
+#
+# 现在只有一条路：取帧 → worker → MergeMaskedFace（dfm 推理 + 遮罩 + 融合一次做完）
+# → 内存里的 JPEG/PNG 原路返回。**不读 cache、不写 cache、不创建 cache 目录，
+# 也不调用任何 _stage_* 函数**（本文件里 _stage_* 只服务六阶段导出）。
+# worker 自己的临时目录（%TEMP%/dfl41_merge_preview，只放 worker 脚本）不在素材目录
+# 或 cache 目录树里。
+#
+# 与导出的关系：算法等价、代码路径不同。
+#   · 预览：merger.MergeMaskedFace —— 一张脸从头到尾一次算完；4.0 在 seamless 之后
+#     还有一段「把结果 warp 回脸空间再做一次色彩迁移」，预览保留。
+#   · 导出：六阶段（stage6_accept.py 验的那条）—— pred/mask 先落盘，合成是纯 CPU 的
+#     _merge_compose.compose_frame，逐段对照 4.0 的 _phase_merge_worker。
+# 所以同一帧「预览」和「导出」的像素差是**允许存在**的，实测（stage6_accept 的 d 段）：
+#   · 预览 PNG vs 导出帧 PNG（同一帧、都无损）→ mean 0.02~0.03 / max 20~33：两条路的
+#     融合只差边缘那几级灰度；
+#   · 成片（crf16 yuv420p + 预览那侧 JPEG）vs 预览 → mean ≈ 3.6~4：这才是那 ~3.7 的来源，
+#     是编码往返，不是算法。
+# 不要为了「逐像素相同」再把预览接回 compose —— 那等于用一倍的耗时换一个用户看不出来
+# 的差值，还顺手把预览绑在 cache 上。
+# ------------------------------------------------------------
+
 
 
 @router.post("/api/merge/preview")
@@ -5622,40 +5911,46 @@ def _proj_run(cfg: dict):
                        % (int(vplan["procs"]), int(vplan.get("requested_procs") or 0),
                           int(vplan["procs"])))
     want_workers = max(1, min(int(want_workers), int(total) or 1, 16))
-    pool = None
-    n_workers = 1
-    if want_workers > 1:
-        pool = _PreviewWorkerPool(want_workers)
-        _dfms = [m["dfm"] for m in (models or []) if m.get("dfm")] or [str(cfg["dfm"])]
-        t_warm = time.time()
-        n_ok = 0
-        try:
-            n_ok = pool.prewarm(_dfms, cfg.get("xseg"))
-        except Exception as e:                          # noqa: BLE001
-            _proj_warn("worker 预热整体失败：%s: %s"
-                       % (e.__class__.__name__, str(e)[:160]))
-        _proj_log("并行：请求 %d 个 worker 进程，显存装下 %d 个（预热 %.1fs）"
-                  % (want_workers, n_ok, time.time() - t_warm))
-        if n_ok <= 0:
-            pool.close("预热全失败")
-            pool = None
-            raise _BadInput("项目导出：worker 进程一个都没起来 —— 见上一条日志", 500)
-        if n_ok < want_workers:
-            _proj_warn("%d 个 worker 没起来（显存不够 / 加载失败），实际并行 %d"
-                       % (want_workers - n_ok, n_ok))
-        n_workers = int(n_ok)
-    _proj_set(workers=int(n_workers))
+    batch = int(cfg.get("batch") or _proj_batch_default())
+    batch = max(1, min(int(batch), _PREVIEW_MAX_BATCH, int(total) or 1))
 
-    def _produce(name, worker):
-        """一帧的活：读帧 → 检测 → 68 点 → worker 里换脸/遮罩/融合 → 整帧编码。
+    # 一个 worker 也走池子：批量协议（一次请求 k 帧，worker 里 k 个线程）在 N=1 时
+    # 照样有效；workers=1 + batch=1 就是"一帧一请求"的老语义（逐像素基准那一档）。
+    pool = _PreviewWorkerPool(want_workers)
+    _dfms = [m["dfm"] for m in (models or []) if m.get("dfm")] or [str(cfg["dfm"])]
+    t_warm = time.time()
+    n_ok = 0
+    try:
+        n_ok = pool.prewarm(_dfms, cfg.get("xseg"))
+    except Exception as e:                          # noqa: BLE001
+        _proj_warn("worker 预热整体失败：%s: %s"
+                   % (e.__class__.__name__, str(e)[:160]))
+    _proj_log("并行：请求 %d 个 worker 进程，显存装下 %d 个（预热 %.1fs）；每进程 %d 帧并行"
+              % (want_workers, n_ok, time.time() - t_warm, batch))
+    if n_ok <= 0:
+        pool.close("预热全失败")
+        raise _BadInput("项目导出：worker 进程一个都没起来 —— 见上一条日志", 500)
+    if n_ok < want_workers:
+        _proj_warn("%d 个 worker 没起来（显存不够 / 加载失败），实际并行 %d"
+                   % (want_workers - n_ok, n_ok))
+    n_workers = int(n_ok)
+    _proj_set(workers=int(n_workers), batch=int(batch))
+    # 帧速从**预热之后**开始算：预热是建 session / 加载模型，不是干活
+    t_swap = time.time()
+    swap_ms = []            # 每帧 worker 内部的换脸耗时（p50 进 status，扫描表要用）
+    send_raw = _proj_send_raw()
+    out_raw = _proj_out_raw()
+
+    def _prep(name):
+        """一帧的「准备」：读帧 → 检测 → 68 点 → 拼好要发 worker 的那一份。
 
         返回 (kind, payload)：
           skip  续跑：merged 里已经有这一帧（payload=None）
           copy  没有对齐脸 → 源文件原样搬（payload=None）
-          res   _preview_job 的结果（payload=res）
+          item  要换脸：payload={"item","desc","timings"}（item 里挂着裸帧字节）
+          res   _plain_frame 的结果（有脸但没换，整帧原样回去）
           err   这一帧失败（payload={"frame","error"}）
-        **不落盘、不计数** —— 这两件事只在主线程做，断点续跑与进度的语义才不会
-        被并行打乱（帧按提交顺序取回，所以落盘顺序仍和串行时一样）。
+        这一步**不碰 worker**，所以它能和别的帧的换脸同时跑（见 prep_pool）。
         """
         dst_p = merged_dir / name
         src_p = frames_dir / name
@@ -5671,68 +5966,145 @@ def _proj_run(cfg: dict):
         if not (face_map.get(name) or []):
             # 有没有脸：aligned 说了算。没有就原样搬（无损，也不白跑一次检测）
             return "copy", None
+        # 产物编码格式和以前**完全一致**（.png 帧编 PNG、.jpg 帧编 JPEG q92）；
+        # 只有 .png 帧在 out_raw 时改由父进程编（像素不变，见 _proj_out_raw）。
         fmt = "png" if Path(name).suffix.lower() == ".png" else "jpg"
+        if out_raw and fmt == "png":
+            fmt = "raw"
         try:
-            res = _preview_job({"frame": frame, "models": models,
-                                "dfm": cfg["dfm"], "xseg": cfg["xseg"],
-                                "config": cfg["config"],
-                                "detector": cfg["detector"],
-                                "thresh": float(cfg["thresh"]),
-                                "stop": stop, "state": state,
-                                "fmt": fmt, "quality": q,
-                                "no_face_copy": True, "worker": worker})
+            prep = _preview_prepare({"frame": frame, "models": models,
+                                     "dfm": cfg["dfm"], "xseg": cfg["xseg"],
+                                     "config": cfg["config"],
+                                     "detector": cfg["detector"],
+                                     "thresh": float(cfg["thresh"]),
+                                     "stop": stop, "state": state,
+                                     "fmt": fmt, "quality": q,
+                                     "no_face_copy": True, "send_raw": send_raw})
         except _BadInput as e:
             return "err", {"frame": name, "error": str(e.msg)[:200]}
         except Exception as e:                      # noqa: BLE001
             traceback.print_exc()
             return "err", {"frame": name,
                            "error": "%s: %s" % (e.__class__.__name__, str(e)[:160])}
-        return "res", res
+        if prep.get("done") is not None:
+            return "res", prep["done"]
+        return "item", prep
 
-    def _commit(name, kind, payload):
-        """落盘 + 记账（只在主线程跑）。"""
+    def _swap_batch(names_b, preps, worker):
+        """一个批：等这批的准备结果 → 换脸合成**一次**请求（k 帧并行）→ 摊平。
+
+        返回 [(name, kind, payload)]，顺序和 names_b 一致。
+        """
+        prepared = []
+        for i, fut in enumerate(preps):
+            try:
+                prepared.append(fut.result())
+            except Exception as e:                  # noqa: BLE001
+                prepared.append(("err", {"frame": names_b[i],
+                                         "error": "%s: %s"
+                                                  % (e.__class__.__name__,
+                                                     str(e)[:160])}))
+        out = [None] * len(names_b)
+        items, slots = [], []
+        for i, (kind, payload) in enumerate(prepared):
+            if kind == "item":
+                items.append(payload)
+                slots.append(i)
+            else:
+                out[i] = (kind, payload)
+        if items:
+            t_send = time.time()
+            metas, imgs = _worker_swap(worker, [p["item"] for p in items],
+                                       threads=min(int(batch), len(items)),
+                                       state=state)
+            for j, slot in enumerate(slots):
+                ctx = items[j]
+                meta = metas[j]
+                nm = names_b[slot]
+                if not meta.get("ok"):
+                    out[slot] = ("err", {"frame": nm,
+                                         "error": str(meta.get("error")
+                                                      or "换脸失败")[:200]})
+                    continue
+                try:
+                    res = _preview_finish(ctx["desc"], meta, imgs[j],
+                                          ctx["timings"], t_send)
+                except _BadInput as e:
+                    out[slot] = ("err", {"frame": nm, "error": str(e.msg)[:200]})
+                    continue
+                except Exception as e:              # noqa: BLE001
+                    traceback.print_exc()
+                    out[slot] = ("err", {"frame": nm,
+                                         "error": "%s: %s"
+                                                  % (e.__class__.__name__,
+                                                     str(e)[:160])})
+                    continue
+                out[slot] = ("res", res)
+        return [(names_b[i], out[i][0], out[i][1]) for i in range(len(names_b))]
+
+    def _write_frame(name, kind, payload):
+        """落盘一帧（在落盘线程里跑 —— PNG 编码 130ms/帧，压在换脸线程里就白等了）。
+
+        原子落盘、跳过/搬运、失败记账的口径和以前**一模一样**（_proj_put 没动）。
+        """
+        dst_p = merged_dir / name
+        src_p = frames_dir / name
+        try:
+            if kind == "copy":
+                _proj_put(dst_p, src=src_p)
+                return "copy", None
+            res = payload or {}
+            if res.get("copy"):
+                _proj_put(dst_p, src=src_p)
+                return ("copy" if res.get("has_face") else "copy_noface"), None
+            raw = res.get("raw")
+            if raw is not None:
+                # 只有 .png 帧会走到这儿（见 _proj_out_raw）：编成 PNG 落盘，
+                # 像素和 worker 编的完全一样，省下的是 worker 里那 130ms。
+                import numpy as np
+                hh, ww = res.get("raw_hw") or (0, 0)
+                img = np.frombuffer(raw, np.uint8).reshape(int(hh), int(ww), 3)
+                _proj_put(dst_p, data=_img_bytes(img, "png", q))
+            else:
+                _proj_put(dst_p, data=res.get("img") or res.get("jpg"))
+            return "res", None
+        except Exception as e:                      # noqa: BLE001
+            return "err", {"frame": name, "error": "落盘失败：%s" % str(e)[:120]}
+
+    def _count(name, kind, err):
+        """记账（主线程、按帧顺序调 —— 进度和续跑游标才和串行时一模一样）。"""
         nonlocal skipped, copied, swapped
         if kind == "skip":
             skipped += 1
-            return
-        if kind == "err":
-            failed_frames.append(payload)
-            return
-        dst_p = merged_dir / name
-        src_p = frames_dir / name
-        if kind == "copy":
-            try:
-                _proj_put(dst_p, src=src_p)
-                copied += 1
-            except Exception as e:                  # noqa: BLE001
-                failed_frames.append({"frame": name,
-                                      "error": "搬运失败：%s" % str(e)[:120]})
-            return
-        res = payload or {}
-        try:
-            if res.get("copy"):
-                _proj_put(dst_p, src=src_p)
-                copied += 1
-                if not res.get("has_face"):
-                    # 有对齐脸但检测不到脸：记下来，别让它悄悄过
-                    if len(face_miss) < _PROJ_MAX_LIST:
-                        face_miss.append(name)
-            else:
-                _proj_put(dst_p, data=res.get("img") or res.get("jpg"))
-                swapped += 1
-        except Exception as e:                      # noqa: BLE001
-            failed_frames.append({"frame": name,
-                                  "error": "落盘失败：%s" % str(e)[:120]})
+        elif kind == "err":
+            failed_frames.append(err or {"frame": name, "error": "未知错误"})
+        elif kind == "copy":
+            copied += 1
+        elif kind == "copy_noface":
+            copied += 1
+            if len(face_miss) < _PROJ_MAX_LIST:
+                face_miss.append(name)      # 有对齐脸但检测不到脸：记下来，别悄悄过
+        else:
+            swapped += 1
 
     def _tick():
-        """进度（只在主线程跑，和以前串行时的口径一模一样）。"""
+        """进度（只在主线程跑，和以前串行时的口径一模一样）。
+
+        帧速用**预热之后**的时钟算（预热是加载模型，不是干活）；顺带把每帧 worker
+        内部的换脸耗时收成 p50 —— 扫描「进程数 × 线程数」那张表要的就是它。
+        """
         nonlocal done
         done += 1
         el = max(0.001, time.time() - t0)
+        el_swap = max(0.001, time.time() - t_swap)
         # 帧速只按真正干过活的帧算：续跑跳过的不算，否则「全跳过」会报出 3 万帧/秒
-        rate = (swapped + copied + len(failed_frames)) / el
+        rate = (swapped + copied + len(failed_frames)) / el_swap
+        vals = sorted(x for x in swap_ms if x)
+        p50 = round(vals[len(vals) // 2], 1) if vals else None
         _proj_set(done=done, swapped=swapped, copied=copied, skipped=skipped,
                   failed=len(failed_frames), elapsed=round(el, 1),
+                  swap_elapsed=round(el_swap, 1), swap_frames=len(swap_ms),
+                  swap_p50=p50,
                   frame_fps=round(rate, 2),
                   eta_s=(int((total - done) / rate) if rate > 0 and done < total else 0),
                   pct=min(_PROJ_PCT_SWAP, int(_PROJ_PCT_SWAP * done / float(total))),
@@ -5741,69 +6113,97 @@ def _proj_run(cfg: dict):
         if len(failed_frames) > _PROJ_MAX_LIST:
             del failed_frames[_PROJ_MAX_LIST:]
         if done % 20 == 0 or done == total:
-            _proj_log("合成 %d/%d 帧 · 换脸 %d · 原样 %d · 跳过 %d · 失败 %d"
-                      % (done, total, swapped, copied, skipped, len(failed_frames)))
+            _proj_log("合成 %d/%d 帧 · 换脸 %d · 原样 %d · 跳过 %d · 失败 %d · "
+                      "worker 单帧 p50 %sms"
+                      % (done, total, swapped, copied, skipped, len(failed_frames),
+                         p50 if p50 is not None else "-"))
 
     try:
-        if pool is None:
-            # ---- 单进程：一帧算完再下一帧（老路径，逐像素基准）----
-            for name in frames:
-                if _proj_cancelled():
-                    stop.set()
-                    raise _ProjCancel()
-                kind, payload = _produce(name, None)
-                _commit(name, kind, payload)
-                _tick()
-        else:
-            # ---- N 进程：主线程只做读帧/检测/68 点 + 落盘/记账，重活在 worker ----
-            from concurrent.futures import ThreadPoolExecutor
-            # 在飞的帧数：够把每个 worker 都堵满，又不至于攒一屏的 base64 帧在内存里
-            window = max(2, n_workers + 2)
-            pending = collections.deque()
-            it = iter(frames)
-            cancelled = False
+        # ---- 三段流水：准备（读帧/检测/68 点）→ 换脸（worker 里 k 帧并行）→ 落盘 ----
+        # 主线程只干三件事：切批、按**提交顺序**收结果、记账 —— 落盘顺序因此和串行时
+        # 一样（断点续跑的游标不变），PNG 编码则挪到落盘线程里，不占换脸的时间。
+        from concurrent.futures import ThreadPoolExecutor
+        prep_n = max(2, min(8, int(batch) * 2))
+        enc_n = max(2, min(6, int(n_workers) * 2))
+        window_b = max(1, int(n_workers)) + 1
 
-            def _slot(name):
-                w = pool.acquire()
-                try:
-                    return _produce(name, w)
-                finally:
-                    pool.release(w)
+        def _slot_batch(names_b, preps):
+            w = pool.acquire()
+            try:
+                return _swap_batch(names_b, preps, w)
+            finally:
+                pool.release(w)
 
-            with ThreadPoolExecutor(max_workers=n_workers,
-                                    thread_name_prefix="proj-frame") as ex:
-                while True:
-                    while len(pending) < window:
+        batch_q = collections.deque()
+        writes = collections.deque()
+        it = iter(frames)
+        cancelled = False
+
+        with ThreadPoolExecutor(max_workers=prep_n,
+                                thread_name_prefix="proj-prep") as prep_pool, \
+                ThreadPoolExecutor(max_workers=max(1, int(n_workers)),
+                                   thread_name_prefix="proj-swap") as swap_pool, \
+                ThreadPoolExecutor(max_workers=enc_n,
+                                   thread_name_prefix="proj-write") as write_pool:
+
+            def _pump(limit):
+                """按顺序收落盘结果（顺序 = 帧顺序 → 续跑游标才对）。"""
+                while len(writes) > limit:
+                    nm, fut = writes.popleft()
+                    try:
+                        kind, err = fut.result()
+                    except Exception as e:          # noqa: BLE001
+                        kind, err = "err", {"frame": nm,
+                                            "error": "%s: %s"
+                                                     % (e.__class__.__name__,
+                                                        str(e)[:160])}
+                    _count(nm, kind, err)
+                    _tick()
+
+            while True:
+                while len(batch_q) < window_b:
+                    names_b = []
+                    for _k in range(int(batch)):
                         try:
-                            name = next(it)
+                            names_b.append(next(it))
                         except StopIteration:
                             break
-                        if _proj_cancelled():
-                            cancelled = True
-                            break
-                        pending.append((name, ex.submit(_slot, name)))
-                    if cancelled or not pending:
+                    if not names_b:
                         break
-                    name, fut = pending.popleft()
-                    try:
-                        kind, payload = fut.result()
-                    except Exception as e:          # noqa: BLE001
-                        kind, payload = "err", {"frame": name,
-                                                "error": "%s: %s"
-                                                         % (e.__class__.__name__,
-                                                            str(e)[:160])}
-                    _commit(name, kind, payload)
-                    _tick()
-                if cancelled:
-                    # 取消：先杀掉 worker（ONNX 推理从外部打断不了），在飞的那几个
-                    # 立刻带着"失联"错误返回，线程池才收得掉；已经写好的帧留着。
-                    stop.set()
-                    pool.close("项目导出已取消")
-                    raise _ProjCancel()
+                    if _proj_cancelled():
+                        cancelled = True
+                        break
+                    preps = [prep_pool.submit(_prep, nm) for nm in names_b]
+                    batch_q.append((names_b,
+                                    swap_pool.submit(_slot_batch, names_b, preps)))
+                if cancelled or not batch_q:
+                    break
+                names_b, fut = batch_q.popleft()
+                try:
+                    landed = fut.result()
+                except Exception as e:              # noqa: BLE001
+                    landed = [(nm, "err", {"frame": nm, "error": "%s: %s"
+                                           % (e.__class__.__name__, str(e)[:160])})
+                              for nm in names_b]
+                for (nm, kind, payload) in landed:
+                    if kind == "res" and payload:
+                        _ms = (payload.get("timings") or {}).get("swap_ms")
+                        if _ms:
+                            swap_ms.append(float(_ms))
+                    writes.append((nm, write_pool.submit(_write_frame,
+                                                         nm, kind, payload)))
+                _pump(enc_n * 2)
+            if cancelled:
+                # 取消：先杀掉 worker（ONNX 推理从外部打断不了），在飞的那几个
+                # 立刻带着"失联"错误返回，线程池才收得掉；已经写好的帧留着。
+                stop.set()
+                pool.close("项目导出已取消")
+            _pump(0)                  # 已经算出来的帧照样落盘（续跑会跳过它们）
+            if cancelled:
+                raise _ProjCancel()
     finally:
         if pool is not None:
             pool.close()
-
     if face_miss:
         _proj_warn("%d 帧有对齐脸但没检出人脸，已按原帧落盘：%s"
                    % (len(face_miss), "、".join(face_miss[:6])))
@@ -5938,9 +6338,12 @@ def merge_export_project(body: dict):
                     —— 和 /api/merge/export、/api/merge/preview 同一套协议
       force         可选，true = 忽略 merged 里已有的帧，全部重做
       quality       可选，jpg 帧的编码质量（默认 92，和单帧预览一致）
-      workers       可选，并行 worker 进程数（默认 min(4, cpu//4)，1 = 老的单进程路径）。
-                    每个 worker 是一份独立的 dfm session；显存装不下几个就只用几个，
-                    实际值回在 status 的 workers 字段里。
+      workers       可选，并行 worker 进程数（默认 2）。每个 worker 是一份独立的
+                    dfm session（一份 ~2.07GB），显存装不下几个就只用几个，
+                    实际值回在 status.workers 里。
+      batch         可选，一条请求里带几帧（默认 4）。worker 内部用同样多个线程并行
+                    处理这一批，主进程每个 worker 维持 batch 个在飞槽位；
+                    workers×batch = 同时在飞的帧数，实际值回在 status.batch 里。
     """
     body = _as_dict(body)
     project = _norm_path(body.get("project_dir") or body.get("project"))
@@ -5977,9 +6380,12 @@ def merge_export_project(body: dict):
     xseg = _xseg_of(body)
     quality = _int_val("quality", body.get("quality"), 1, 100, _PREVIEW_QUALITY)
     force = bool(body.get("force"))
-    # 并行度：N 个 worker 进程，各持自己的 dfm session（iperov stage4 的同一个语义）。
+    # 并行度：N 个 worker 进程，各持自己的 dfm session（iperov stage4 的同一个语义）；
+    # batch = 一条请求里带几帧（= worker 内部同时跑几帧）。
     workers = int(_int_val("workers", body.get("workers"), 1, 16,
                            _proj_workers_default()))
+    batch = int(_int_val("batch", body.get("batch"), 1, _PREVIEW_MAX_BATCH,
+                         _proj_batch_default()))
     # ---- 显存预算：能开几个 worker 就开几个（1/2/3），一个都开不了就明确拒绝 ----
     # 每多一个 worker 就多一份「会话 + CUDA context」（416 实测 1166MB/份），
     # 以前是「先起 4 个进程、看谁崩」，崩了再退 —— 那一步本身就会把卡顶到 OOM。
@@ -6034,7 +6440,7 @@ def merge_export_project(body: dict):
            "models": models, "dfm": str(dfm), "model": str(model_name),
            "config": cfg_main, "settings": settings, "xseg": xseg,
            "detector": detector, "thresh": float(thresh), "quality": int(quality),
-           "force": force, "workers": int(workers),
+           "force": force, "workers": int(workers), "batch": int(batch),
            "vram_plan": dict(plan)}
 
     with _PROJ_LOCK:

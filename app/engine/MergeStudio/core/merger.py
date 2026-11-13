@@ -144,7 +144,7 @@ def build_debug_panels(capture, size=256):
 
 def MergeMaskedFace(frame_img, face_landmarks, cfg, predictor_func=None,
                     face_enhancer_func=None, xseg_256_extract_func=None,
-                    capture=None):
+                    capture=None, input_size=None):
     """
     Merge a single face. Matches original MergeMasked.py flow exactly.
     Everything works in 0-1 float range. Predictor returns [face, prd_mask, dst_mask].
@@ -160,7 +160,10 @@ def MergeMaskedFace(frame_img, face_landmarks, cfg, predictor_func=None,
                       'full_face': FaceType.FULL, 'whole_face': FaceType.WHOLE_FACE, 'head': FaceType.HEAD}
             cfg.face_type = ft_map.get(cfg.face_type, FaceType.WHOLE_FACE)
 
-        input_size = _model_input_size
+        # input_size 显式传进来就以它为准：批处理里同一进程内多帧并行，
+        # 模块级 _model_input_size 是共享可变状态（两个线程先后写它，后写的那份会让
+        # 另一帧按错的边长 warp —— 多模型、输入尺寸不同时必现）。不传 = 老行为。
+        input_size = _model_input_size if input_size is None else int(input_size)
         output_size = input_size
         if cfg.super_resolution_power != 0:
             output_size *= 4
