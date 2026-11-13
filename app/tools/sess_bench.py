@@ -336,7 +336,15 @@ def main(argv=None):
                  one.get("mem_cpu_mb"), one.get("input")))
         if tag.startswith("detect."):
             # 真正该比的是**整帧 detect()**：模型只是其中一小块，1080p→640 的 letterbox
-            # resize + NMS + python 开销都在这一步里（实测整段 48.9 ms，模型只占 7.9 ms）。
+            # resize + NMS + python 开销都在这一步里。
+            #
+            # ★ 修正（2026-11，实测）：上面这句以前被写成「整段 48.9ms，模型只占 7.9ms」，
+            # 于是推出「48ms 里大半是 resize/NMS，所以让 CPU 多参与」。**这个分解是错的**：
+            # 分三段单独量（零图 / 中位）—— letterbox 0.7~0.9ms、前向 12ms、NMS+解码 0.1ms
+            # （retinaface_10g 1080p）；tinymog 是 letterbox 0.8 + 前向 1.8 + NMS 0.05。
+            # 48ms 里那 35ms 的差额是**在等 GPU**（同进程里 dfm+xseg 也在用同一块卡），
+            # 不是 CPU 活。所以「加 CPU session」注定是负收益（实测 −2.4%~−8%）：
+            # 同一份 GPU 排队只会被抢得更碎。见 app/server/routes_merge.py 的 _det_quick_profile。
             mode = full_detect(tag, path, n=max(2, n // 2))
             for k, v in (mode or {}).items():
                 one["full_" + k] = v

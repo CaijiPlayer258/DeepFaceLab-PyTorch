@@ -7345,6 +7345,26 @@ def _stage_quality_detector(quality) -> str:
     return "tinymog" if q in ("fast", "tinymog") else "retinaface_10g"
 
 
+def _align_detector(body: dict):
+    """切脸/对齐用哪个检测器 → (规范名, 来源说明)。**界面选的 detector 优先。**
+
+    以前这里只有 quality 一个入口：cfg["det_align"] = _stage_quality_detector(quality)，
+    而界面根本不发 quality（app.js 里是 payload.align_quality || "high"），于是
+    「检测器」下拉无论选什么都落成 retinaface_10g —— 界面上写着 TinyMog、导出日志里
+    却是 retinaface_10g，detect 段 49ms/帧（retina 前向本来就 ~12ms，还要跟 dfm 抢 GPU）。
+    这跟 mask_source 那次是同一个形状：**界面选了，但没传**。
+
+    现在：请求体里有 detector（界面「检测器」下拉发的就是它）就以它为准；
+    没有才按 quality 档推 —— 老脚本 / 验收工具（quality=fast）一个字都不用改。
+    """
+    raw = str((body or {}).get("detector") or "").strip()
+    if raw:
+        return _detector_val(raw), "界面/请求体 detector=%s" % raw
+    q = str((body or {}).get("quality") or (body or {}).get("align_quality") or "high")
+    return (_stage_quality_detector(q),
+            "请求体没给 detector → 按 quality=%s 推" % q.strip().lower())
+
+
 def _stage_brief(res: dict) -> str:
     bits = []
     for k in ("count", "frames", "swapped", "copied", "no_face", "out", "seconds"):
@@ -7727,8 +7747,9 @@ def _stage_do_faces(cfg: dict) -> dict:
     if cursor:
         _stage_log("切脸：从第 %d 帧续跑（前 %d 帧的对齐脸已经在）"
                    % (int(rng["start"]) + cursor, cursor))
-    _stage_log("切脸：检测器 %s · thresh=%.2f · 68 点仿射 · 帧范围 %d..%d（%d 帧）"
-               % (det_name, thresh, int(rng["start"]), int(rng["end"]), total))
+    _stage_log("切脸：检测器 %s（%s）· thresh=%.2f · 68 点仿射 · 帧范围 %d..%d（%d 帧）"
+               % (det_name, str(cfg.get("det_align_src") or "cfg.det_align"), thresh,
+                  int(rng["start"]), int(rng["end"]), total))
     # 对齐脸是这条链上唯一的 JPEG 产物：质量回显出来（验收/排障要能一眼看到，
     # 别再靠"默认值"猜）。默认 100 + 4:4:4；PNG 帧完全不受这个数影响。
     _stage_log("切脸：对齐脸 JPEG quality=%d · 4:4:4（界面无旋钮，固定质量）"
@@ -11923,7 +11944,8 @@ def _stage_cfg(body: dict, stage: str, chain: bool = False) -> dict:
         "force": bool(_bool_val(body.get("force"), False)),
         "keep_cache": bool(_STAGE_KEEP or _bool_val(body.get("keep_cache"), False)),
         "detector": _detector_val(body.get("detector")),
-        "det_align": _stage_quality_detector(body.get("quality") or body.get("align_quality")),
+        "det_align": _align_detector(body)[0],
+        "det_align_src": _align_detector(body)[1],
         "thresh": _float_val("thresh", body.get("thresh"), 0.0, 1.0, 0.5),
         "align_thresh": _float_val("align_thresh", body.get("align_thresh"), 0.0, 1.0, 0.5),
         "dfm": str(dfm), "model": str(model_name), "xseg": str(xseg),
@@ -12699,6 +12721,13 @@ _FUSED_CMP_DEFAULT = max(1, min(32, _env_int("DFL_FUSED_CMP", 8)))
 # 为什么默认只给**检测**段开池：检测是这条链的硬底（实测 48.9 ms/帧、96~98% 占用），
 # 只有瓶颈段多开一路才有净收益；dfm 70% / xseg 13% / 合成 21% 加一路只会抢 CPU
 # （数据见 docs/sess_pool_bench.md）。要开也只是一个环境变量的事。
+#
+# ★ 2026-11 修正：那 48.9ms 的构成**不是**「resize/NMS 占大头」。分三段实测（1080p 零图）：
+# letterbox 0.7~0.9ms · 前向 12.0ms（retinaface_10g）/ 1.8ms（tinymog）· NMS+解码 0.1ms；
+# 剩下的三十几毫秒是**前向在等 GPU**（dfm+xseg 同时在用同一块卡）。这也是「CPU session」
+# 净增 −2.4%~−8% 的原因：它缩短不了 GPU 上的那一段，只是把同一帧的 CPU 预处理再做一遍。
+# 真要提速只有两条：换更轻的检测器（tinymog，实测整条线 +20~24%）或让检测器少排队。
+# 另有 DFL_FUSED_DET_PREP=0 可把 letterbox 退回检测线程（默认在解码线程做）。
 from . import _sess        # 异构池（探测 / 微基准 / 配比 / 调度），见 server/_sess.py
 
 _SESS_LOCK = threading.Lock()
@@ -12827,6 +12856,86 @@ def _detect_on(det, frame, thresh: float) -> list:
     """用**指定**的检测器跑一帧（不碰共享实例上的 thresh 字段，可并发）。"""
     det.thresh = float(thresh)
     return det.detect(frame) or []
+
+
+def _det_prep(det, frame):
+    """把检测器的 letterbox 先算出来（decode 线程干，检测线程只留前向 + NMS）。
+
+    检测器没有 prep（老/第三方实现）就返回 None，调用方退回「帧直接丢给 detect」。
+    prep 只读 self.input_size、不碰 session，所以可以和安全跑着的 detect 并发。
+    """
+    fn = getattr(det, "prep", None)
+    if fn is None:
+        return None
+    return fn(frame)
+
+
+def _detect_on_ctx(det, ctx, thresh: float) -> list:
+    """已经 prep 好的上下文 → 人脸列表（自己的 session 用，不加锁）。"""
+    det.thresh = float(thresh)
+    return det.detect_ctx(ctx) or []
+
+
+def _detect_boxes_ctx(ctx, detector: str, thresh: float) -> list:
+    """共享实例版：和 _detect_boxes 同一把锁、同一个 thresh 口径，只是跳过 resize。"""
+    det = _detector(detector)
+    with _det_run_lock:
+        det.thresh = float(thresh)
+        try:
+            return det.detect_ctx(ctx) or []
+        except Exception as e:                            # noqa: BLE001
+            raise _BadInput("检测失败：%s" % (str(e)[:200],), 500)
+
+
+def _det_quick_profile(det, w: int, h: int, n: int = 3) -> dict:
+    """单帧检测的三段实测（1080p 真尺寸零图，n 次取中位）—— 只用来打日志。
+
+    为什么要在**起流水线之前**量这一段：用户报的是「界面选了 TinyMog，日志却 48ms/帧」。
+    有这张表就能一眼分开三件事：模型本身多贵（前向）、resize 多贵（预处理）、NMS 多贵；
+    剩下的差额就是「在等 GPU/CPU」——那属于整条流水线的账，不属于检测器。
+    """
+    import time as _t
+
+    import numpy as np
+
+    frame = np.zeros((max(2, int(h or 1080)), max(2, int(w or 1920)), 3), np.uint8)
+    out = {"w": int(frame.shape[1]), "h": int(frame.shape[0]), "n": int(max(1, n)),
+           "sess": type(getattr(det, "sess", None)).__name__}
+    full, prep, fwd, post = [], [], [], []
+    try:
+        # 先空跑一张：第一次前向可能包含 CUDA Graph 捕获 / torch 张量路径初始化
+        # （实测 tinymog 第一张 76ms、之后 2ms）—— 把那次算进「每帧耗时」就是纯误导。
+        det.detect(frame)
+        for _ in range(max(1, int(n))):
+            t0 = _t.perf_counter()
+            det.detect(frame)
+            t1 = _t.perf_counter()
+            full.append((t1 - t0) * 1000.0)
+        prep_fn = getattr(det, "prep", None)
+        ctx_fn = getattr(det, "detect_ctx", None)
+        if prep_fn is not None and ctx_fn is not None:
+            for _ in range(max(1, int(n))):
+                t0 = _t.perf_counter()
+                ctx = prep_fn(frame)
+                t1 = _t.perf_counter()
+                fw = det._forward(ctx["canvas"])
+                t2 = _t.perf_counter()
+                ctx_fn(ctx)
+                t3 = _t.perf_counter()
+                prep.append((t1 - t0) * 1000.0)
+                fwd.append((t2 - t1) * 1000.0)
+                # 注意：detect_ctx 内部**又跑了一次**前向，所以 post 这一栏 = 前向 + NMS/解码；
+                # 报出去时减掉前向的中位数，剩下的才是 NMS/解码本身。
+                post.append((t3 - t2) * 1000.0)
+        med = lambda v: (sorted(v)[len(v) // 2] if v else None)          # noqa: E731
+        out["full_ms"] = None if not full else round(med(full), 2)
+        out["prep_ms"] = None if not prep else round(med(prep), 2)
+        out["fwd_ms"] = None if not fwd else round(med(fwd), 2)
+        out["post_ms"] = (None if not post or not fwd
+                          else round(max(0.0, med(post) - med(fwd)), 2))
+    except Exception as e:                                            # noqa: BLE001
+        out["err"] = str(e)[:160]
+    return out
 
 
 def _detect_bench(name, w: int, h: int) -> dict:
@@ -12992,7 +13101,8 @@ def _fused_cfg(body: dict) -> dict:
         "range": rng, "range_key": str(rng["key"]), "range_total": int(rng["total"]),
         "range_full": bool(rng["full"]), "settings": dict(settings),
         "detector": _detector_val(body.get("detector")),
-        "det_align": _stage_quality_detector(body.get("quality") or body.get("align_quality")),
+        "det_align": _align_detector(body)[0],
+        "det_align_src": _align_detector(body)[1],
         "thresh": _float_val("thresh", body.get("thresh"), 0.0, 1.0, 0.5),
         "align_thresh": _float_val("align_thresh", body.get("align_thresh"), 0.0, 1.0, 0.5),
         "dfm": str(dfm), "model": str(model_name), "xseg": str(xseg),
@@ -13048,6 +13158,8 @@ _PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
 # 解码路径：**默认 raw**（-f rawvideo，软解）；DFL_FUSED_DECODE=png 退回 PNG 管道。
 _FUSED_ENV_DECODE = "DFL_FUSED_DECODE"
+# 检测输入（letterbox canvas）在 decode 线程先算：DFL_FUSED_DET_PREP=0 关（回老口径）
+_FUSED_ENV_DET_PREP = "DFL_FUSED_DET_PREP"
 _FUSED_RAW_MODES = ("raw", "rawvideo", "bgr24", "bgr48le")
 # -i 的流信息里挑「pix_fmt, 宽x高」这一对；位深只从 pix_fmt 名字看
 _FUSED_PIX_TOKEN = re.compile(r"Video:\s[^\n]*?,\s*([a-z][a-z0-9]+)(?:\([^)\n]*\))?,\s*\d+x\d+")
@@ -13199,12 +13311,15 @@ def _fused_open_frames(video: Path, start_i: int, size=None, mode="raw", bits=No
 class _FusedFrame:
     """一帧在流水线里的全部状态（帧对象从头带到合成，合成之后源帧就放掉）。"""
 
-    __slots__ = ("idx", "n", "frame", "boxes", "faces", "timings", "plan", "rec")
+    __slots__ = ("idx", "n", "frame", "boxes", "faces", "timings", "plan", "rec",
+                 "det_ctx")
 
     def __init__(self, idx, n, frame):
         self.idx = int(idx)          # 源视频里的绝对帧号（1 起）
         self.n = int(n)              # 本段里的序号（1..total，PNG 文件名用它）
         self.frame = frame
+        # 检测输入（decode 线程预先算好的 letterbox canvas + scale）；None = 检测线程自己做
+        self.det_ctx = None
         self.boxes = None
         self.faces = None
         self.timings = {}
@@ -13329,7 +13444,13 @@ def _fused_run(cfg: dict) -> dict:
     need_xseg = str(mask_src.get("source") or "").lower() == "xseg"
     need_dst = bool(need_xseg and int(comp_cfg["mask_mode"]) in (7, 8, 9))
     det_name = str(cfg.get("det_align") or "retinaface_10g")
+    det_src = str(cfg.get("det_align_src") or "cfg.det_align")
     det_thresh = float(cfg.get("align_thresh") or 0.5)
+    # 检测的 letterbox 在 decode 线程先做（检测线程只留前向 + NMS）。关掉 = 回到老口径，
+    # 两条路逐位一致（同一个 prep()，见 app/tools/det_prep_parity.py），留这个开关
+    # 只是为了 A/B 与排障时能量到两边的账。
+    det_prep_on = str(os.environ.get(_FUSED_ENV_DET_PREP) or "1").strip().lower() \
+        not in ("0", "off", "false", "no")
     png_level = int(cfg.get("png_level") if cfg.get("png_level") is not None else 1)
     n_cmp = max(1, int(_merge_worker_count(cfg)))
     # PNG 编码是这一条链上最贵的纯 CPU 活（1080p 实测 94ms/帧，cv2.imencode 会放 GIL，
@@ -13349,10 +13470,11 @@ def _fused_run(cfg: dict) -> dict:
     batch_wait = max(0.0, float(_wait_ms) / 1000.0)
     qd = int(_FUSED_QDEPTH)
     # cv2 的内部线程数（进程级）：合成阶段的口径是「worker 多了就别让 cv2 自己摊线程」，
-    # 但这条链的**硬底是检测**（retinaface_10g 单帧 52.8ms，其中 1080p→640 的 letterbox
-    # resize 是 cv2.resize）。合成那 8 个 worker 实测有 76% 是空等（见 profile 的 cmp_wait），
-    # 所以这里反过来：给 cv2 留几条线程，让检测的预处理能并行起来。
-    # 实测把它钉成 1 时 detect 从 52.8 涨到 65.8 ms/帧、整条线 12.1 帧/秒。
+    # 但这条链的**硬底是检测**（retinaface_10g 整段 52.8ms/帧）。合成那 8 个 worker 实测
+    # 有 76% 是空等（见 profile 的 cmp_wait），所以这里反过来：给 cv2 留几条线程，让检测的
+    # 预处理能并行起来。实测把它钉成 1 时 detect 从 52.8 涨到 65.8 ms/帧、整条线 12.1 帧/秒。
+    # ★ 这 52.8ms 里 letterbox 只占 0.7~0.9ms（见 _det_quick_profile 的实测），大头是前向
+    #   在等 GPU。cv2 线程数仍然值得留，但别指望靠它把检测段砍下来。
     cv2_threads = max(2, min(8, int(os.cpu_count() or 8) // max(1, n_cmp)))
 
     cache_dir = Path(str(video.parent / (video.stem + "_cache")))
@@ -13381,6 +13503,21 @@ def _fused_run(cfg: dict) -> dict:
         raise _BadInput("2D106 关键点模型不可用（weights/insightface_2d106.onnx）—— "
                         "没有 68 点就跑不了快速导出", 500)
     det = _detector(det_name)
+    # 「用了哪个检测器 + 它到底多贵」必须在起流水线之前就落进 <成片>.log：
+    # 界面上选的是 TinyMog、日志里出现 retinaface_10g 这种对不上账的问题，只有这里能复盘。
+    _dp = _det_quick_profile(det, probe.get("w"), probe.get("h"))
+    _vid_log("快速导出：检测器 %s（%s · %s）· 1080p 单帧 %s ms = letterbox %s + 前向 %s + "
+             "NMS/解码 %s（零图 %d 次中位）"
+             % (det_name, det_src, _dp.get("sess") or "?",
+                _dp.get("full_ms"), _dp.get("prep_ms"), _dp.get("fwd_ms"),
+                _dp.get("post_ms"), int(_dp.get("n") or 0)))
+    if _dp.get("err"):
+        _vid_log("快速导出：检测器基准没量成（%s）" % _dp["err"])
+    elif det_name == "tinymog" and (_dp.get("full_ms") or 0.0) > 20.0:
+        # 这条 warning 是给「以为在用 TinyMog」的人：tinymog 正常 2~6ms，20ms 以上只有三种可能
+        _vid_log("快速导出：★ 检测器是 tinymog，单帧却 %.1f ms（正常 2~6ms）—— 查这三件事："
+                 "有没有 TRT 引擎、是不是退回 onnxruntime、是不是在 CPU EP 上"
+                 % float(_dp.get("full_ms") or 0.0))
     # 预算说不可行时**不加载** dfm —— 加载是要占显存的，先拒绝再别动显存
     if not bud.get("ok"):
         raise _BadInput(bud.get("msg") or _vram_refuse_msg(bud, "快速导出"), 400)
@@ -13419,9 +13556,9 @@ def _fused_run(cfg: dict) -> dict:
                  % (xs_label or "-", Path(str(info.get("onnx") or "")).name or "-",
                     info.get("backend") or "?", ("(%s)" % info.get("precision"))
                     if info.get("precision") else ""))
-    _vid_log("快速导出：dfm %s · %dx%d · %s · 检测器 %s thresh=%.2f"
+    _vid_log("快速导出：dfm %s · %dx%d · %s · 检测器 %s thresh=%.2f（%s）"
              % (Path(str(cfg["dfm"])).name, size_px, size_px,
-                (ent0[6] if len(ent0) > 6 else "?"), det_name, det_thresh))
+                (ent0[6] if len(ent0) > 6 else "?"), det_name, det_thresh, det_src))
     _vid_log("快速导出：显存预算 → 帧缓冲 %d / dfm 批 %d（请求 %d 帧 / 批 %d%s）· "
              "预计峰值 %s MB / 可用 %.0f MB"
              % (budget, int(bud.get("batch") or 0), int(bud.get("requested") or 0),
@@ -13437,8 +13574,9 @@ def _fused_run(cfg: dict) -> dict:
     cfg["frames_dir"] = str(frames_dir)
     # 线程数一律把**实际生效的值**和它是从哪来的打出来：用户改过环境变量/请求体时，
     # 「日志里明明是 8，为什么只有 4」这种事不该再发生（这条日志是唯一能复盘的地方）。
-    _vid_log("快速导出：线程 检测1/解码1/对齐%d/GPU1/合成%d/编码%d · 队列 %d · cv2 %d 线程"
-             % (n_prep, n_cmp, n_enc, qd, cv2_threads))
+    _vid_log("快速导出：线程 检测1/解码1/对齐%d/GPU1/合成%d/编码%d · 队列 %d · cv2 %d 线程 · "
+             "检测预处理在解码线程 %s"
+             % (n_prep, n_cmp, n_enc, qd, cv2_threads, "开" if det_prep_on else "关"))
     _vid_log("快速导出：线程来源 对齐=%s 合成=%s（B 配置默认 4/8；DFL_FUSED_PREP / "
              "DFL_FUSED_CMP / body.pred_readers / body.merge_workers 可覆盖 · cpu %d 线程）"
              % (_src_of(cfg, ("pred_readers",), _FUSED_PREP_DEFAULT, "DFL_FUSED_PREP"),
@@ -13586,7 +13724,16 @@ def _fused_run(cfg: dict) -> dict:
                     live["n"] += 1
                     if live["n"] > live["peak"]:
                         live["peak"] = live["n"]
-                if not _put(q_dec, _FusedFrame(n, n - start_i + 1, frame)):
+                job = _FusedFrame(n, n - start_i + 1, frame)
+                if det_prep_on:
+                    # 检测的 letterbox 在这条线程做：它只忙 15ms/帧（30%），有富余；
+                    # 检测线程是硬底，把 0.7ms 的 resize + 填边搬走就是净赚。
+                    # 逐位一致由「同一个 prep()」保证（见 _detect.py 的 _prep_ctx）。
+                    t_prep = time.perf_counter()
+                    job.det_ctx = _det_prep(det, frame)
+                    if job.det_ctx is not None:
+                        ticks.add("det_prep", time.perf_counter() - t_prep)
+                if not _put(q_dec, job):
                     break
         except BaseException as e:                             # noqa: BLE001
             _fail("decode", e)
@@ -13597,6 +13744,9 @@ def _fused_run(cfg: dict) -> dict:
     # 多路的由来：检测是这条链的硬底（实测 48.9 ms/帧 = 20.4 帧/秒，占用 96~98%），
     # 只靠一路 GPU 就把整条线钉死了。多开的那几路各拿**自己的** session（CPU EP 或
     # 第二份 CUDA），帧从 q_dec 里抢着取 —— 谁空谁拿，天然就是「最短队列优先」。
+    # 这一路只做「前向 + NMS」：letterbox 已经在 decode 线程做完（见 _det_prep）。
+    # 搬家只在「检测是瓶颈」时才值钱（retinaface：detect 占用 88%）；tinymog 下瓶颈
+    # 已经移到 dfm/编码，端到端 0 收益 —— 别把它当提速手段。
     def _detect(k=0, det_obj=None, n_workers=1):
         try:
             while True:
@@ -13613,8 +13763,16 @@ def _fused_run(cfg: dict) -> dict:
                     break
                 t = time.perf_counter()
                 try:
-                    boxes = (_detect_on(det_obj, job.frame, det_thresh) if det_obj is not None
-                             else _detect_boxes(job.frame, det_name, det_thresh))
+                    if job.det_ctx is not None:
+                        # 主路径：canvas 已经在 decode 线程做好，这里只剩前向 + NMS
+                        boxes = (_detect_on_ctx(det_obj, job.det_ctx, det_thresh)
+                                 if det_obj is not None
+                                 else _detect_boxes_ctx(job.det_ctx, det_name, det_thresh))
+                        job.det_ctx = None       # 1.2MB/帧：用完就放，别带到合成再扔
+                    else:
+                        boxes = (_detect_on(det_obj, job.frame, det_thresh)
+                                 if det_obj is not None
+                                 else _detect_boxes(job.frame, det_name, det_thresh))
                 except Exception as e:                         # noqa: BLE001
                     _fail("detect", e)
                     for _i in range(n_prep):
@@ -14146,6 +14304,7 @@ def _fused_run(cfg: dict) -> dict:
         "enc_wait": round(100.0 * busy.get("enc_wait", 0.0) / max(1e-6, wall * n_enc), 1),
         "decode": round(100.0 * busy.get("decode", 0.0) / max(1e-6, wall), 1),
         "detect": round(100.0 * busy.get("detect", 0.0) / max(1e-6, wall), 1),
+        "det_prep": round(100.0 * busy.get("det_prep", 0.0) / max(1e-6, wall), 1),
         "align": round(100.0 * busy.get("align", 0.0) / max(1e-6, wall * n_prep), 1),
         "embed": round(100.0 * busy.get("embed", 0.0) / max(1e-6, wall * n_prep), 1),
         "dfm": round(100.0 * busy.get("dfm", 0.0) / max(1e-6, wall), 1),
@@ -14277,7 +14436,9 @@ def _fused_run(cfg: dict) -> dict:
                                    _FUSED_CMP_DEFAULT, "DFL_FUSED_CMP")},
             "batch_target": int(batch_target),
             "batch_wait_ms": int(round(batch_wait * 1000.0)),
-            "decode_mode": dec_mode}
+            "decode_mode": dec_mode,
+            "detector": str(det_name), "detector_src": str(det_src),
+            "det_prep": bool(det_prep_on), "det_probe": dict(_dp or {})}
 
 
 def _fused_worker(cfg: dict):

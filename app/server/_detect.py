@@ -24,6 +24,62 @@ def _det_log(key, msg):
     print(msg, flush=True)
 
 
+def _prep_ctx(img_bgr, input_size, pad):
+    """整帧 → {'canvas','scale','w','h'}：letterbox + 填边，**只此一份**。
+
+    RetinaFace 用 0 填边、TinyMog 用 128（和 4.0 的 modelgraph 一致），插值都是
+    INTER_LINEAR —— 这里的每一个字都决定框的位置，改一处就是另一套坐标。
+    """
+    import cv2
+
+    H, W = img_bgr.shape[:2]
+    S = int(input_size)
+    scale = min(S / float(W), S / float(H))
+    nw, nh = max(1, int(round(W * scale))), max(1, int(round(H * scale)))
+    canvas = (np.full((S, S, 3), int(pad), np.uint8) if pad
+              else np.zeros((S, S, 3), np.uint8))
+    canvas[:nh, :nw] = cv2.resize(img_bgr, (nw, nh), interpolation=cv2.INTER_LINEAR)
+    return {"canvas": canvas, "scale": scale, "w": int(W), "h": int(H)}
+
+
+def _faces_from_fwd(det, fwd, ctx, min_face=16):
+    """前向输出（canvas 坐标）→ 原图坐标的人脸列表。
+
+    解码 → 按分数排 → NMS → 除以 scale 回原图 → 丢掉太小的。这一步是**纯 CPU**，
+    所以「检测段 48ms 里 resize/NMS 占多少」只能靠它和 _prep_ctx 分别计时来回答。
+    """
+    if len(fwd) == 3:
+        scores, boxes, kpss = fwd
+    else:
+        scores, boxes = fwd
+        kpss = np.zeros((scores.shape[0], 5, 2), np.float32)
+    if scores.size == 0:
+        return []
+
+    scale = float(ctx["scale"])
+    W, H = int(ctx["w"]), int(ctx["h"])
+    order = scores.argsort()[::-1]
+    dets = np.hstack([boxes[order], scores[order, None]]).astype(np.float32)
+    kpss = kpss[order]
+    keep = det._nms(dets, det.nms_thresh)
+
+    out = []
+    for i in keep:
+        d = dets[i]
+        x1 = max(0.0, d[0] / scale)
+        y1 = max(0.0, d[1] / scale)
+        x2 = min(float(W), d[2] / scale)
+        y2 = min(float(H), d[3] / scale)
+        if min(x2 - x1, y2 - y1) >= min_face:
+            kp = kpss[i] / scale
+            out.append({"box": [round(float(x1), 1), round(float(y1), 1),
+                                round(float(x2), 1), round(float(y2), 1)],
+                        "kps": [[round(float(p[0]), 1), round(float(p[1]), 1)] for p in kp],
+                        "score": round(float(d[4]), 4)})
+    out.sort(key=lambda x: -x["score"])
+    return out
+
+
 class RetinaFaceDet:
     needs_canvas = False      # detect(img) 内部自己做 letterbox
     """det_10g / det_500m 通用。输入 BGR ndarray，输出人头框列表。"""
@@ -141,45 +197,23 @@ class RetinaFaceDet:
         return keep
 
     # ---------- 对外 ----------
+    def prep(self, img_bgr):
+        """整帧 → 检测输入上下文 {'canvas','scale','w','h'}。**不改像素，只做 letterbox**。
+
+        单独拆出来是为了让调用方在**别的线程**先把这一步做掉（decode 线程有富余，
+        检测线程是硬底）：detect() = prep() + detect_ctx()，两步的分界线就是
+        「CPU 的 resize / 填边」与「前向 + NMS」，拆开前后逐位一致（同一个函数、
+        同一个插值、同一张 canvas），见 app/tools/det_prep_parity.py。
+        """
+        return _prep_ctx(img_bgr, self.input_size, 0)
+
+    def detect_ctx(self, ctx, min_face=16):
+        """上下文 → [{'box','kps','score'}]（原图坐标）。和 detect() 完全同一条口径。"""
+        return _faces_from_fwd(self, self._forward(ctx["canvas"]), ctx, min_face)
+
     def detect(self, img_bgr, min_face=16):
         """返回 [{'box': [x1,y1,x2,y2], 'score': float}, ...]（原图坐标）。"""
-        import cv2
-        H, W = img_bgr.shape[:2]
-        S = self.input_size
-        scale = min(S / float(W), S / float(H))
-        nw, nh = max(1, int(round(W * scale))), max(1, int(round(H * scale)))
-        canvas = np.zeros((S, S, 3), np.uint8)
-        canvas[:nh, :nw] = cv2.resize(img_bgr, (nw, nh), interpolation=cv2.INTER_LINEAR)
-
-        fwd = self._forward(canvas)
-        if len(fwd) == 3:
-            scores, boxes, kpss = fwd
-        else:
-            scores, boxes = fwd
-            kpss = np.zeros((scores.shape[0], 5, 2), np.float32)
-        if scores.size == 0:
-            return []
-
-        order = scores.argsort()[::-1]
-        dets = np.hstack([boxes[order], scores[order, None]]).astype(np.float32)
-        kpss = kpss[order]
-        keep = self._nms(dets, self.nms_thresh)
-
-        out = []
-        for i in keep:
-            d = dets[i]
-            x1 = max(0.0, d[0] / scale)
-            y1 = max(0.0, d[1] / scale)
-            x2 = min(float(W), d[2] / scale)
-            y2 = min(float(H), d[3] / scale)
-            if min(x2 - x1, y2 - y1) >= min_face:
-                kp = kpss[i] / scale
-                out.append({"box": [round(float(x1), 1), round(float(y1), 1),
-                                    round(float(x2), 1), round(float(y2), 1)],
-                            "kps": [[round(float(p[0]), 1), round(float(p[1]), 1)] for p in kp],
-                            "score": round(float(d[4]), 4)})
-        out.sort(key=lambda x: -x["score"])
-        return out
+        return self.detect_ctx(self.prep(img_bgr), min_face=min_face)
 
 
 class TinyMogDet:
@@ -407,34 +441,12 @@ class TinyMogDet:
             out.append(faces)
         return out
 
+    def prep(self, img_bgr):
+        """整帧 → {'canvas','scale','w','h'}（letterbox 填 128，和 4.0 的预处理一致）。"""
+        return _prep_ctx(img_bgr, self.input_size, 128)
+
+    def detect_ctx(self, ctx, min_face=16):
+        return _faces_from_fwd(self, self._forward(ctx["canvas"]), ctx, min_face)
+
     def detect(self, img_bgr, min_face=16):
-        import cv2
-        H, W = img_bgr.shape[:2]
-        S = self.input_size
-        scale = min(S / float(W), S / float(H))
-        nw, nh = max(1, int(round(W * scale))), max(1, int(round(H * scale)))
-        canvas = np.full((S, S, 3), 128, np.uint8)          # letterbox 用 128 填充
-        canvas[:nh, :nw] = cv2.resize(img_bgr, (nw, nh), interpolation=cv2.INTER_LINEAR)
-
-        scores, boxes, kpss = self._forward(canvas)
-        if scores.size == 0:
-            return []
-        order = scores.argsort()[::-1]
-        dets = np.hstack([boxes[order], scores[order, None]]).astype(np.float32)
-        kpss = kpss[order]
-        keep = self._nms(dets, self.nms_thresh)
-
-        out = []
-        for i in keep:
-            d = dets[i]
-            x1 = max(0.0, d[0] / scale); y1 = max(0.0, d[1] / scale)
-            x2 = min(float(W), d[2] / scale); y2 = min(float(H), d[3] / scale)
-            if min(x2 - x1, y2 - y1) < min_face:
-                continue
-            kp = kpss[i] / scale
-            out.append({"box": [round(float(x1), 1), round(float(y1), 1),
-                                round(float(x2), 1), round(float(y2), 1)],
-                        "kps": [[round(float(p[0]), 1), round(float(p[1]), 1)] for p in kp],
-                        "score": round(float(d[4]), 4)})
-        out.sort(key=lambda x: -x["score"])
-        return out
+        return self.detect_ctx(self.prep(img_bgr), min_face=min_face)
