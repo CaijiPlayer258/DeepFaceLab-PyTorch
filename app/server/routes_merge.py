@@ -8365,7 +8365,10 @@ def _vram_probe(ttl: float = None) -> tuple:
             return int(float(fake)), None, "env:" + _VRAM_ENV_FREE
         except (TypeError, ValueError):
             pass
+    _hook_on = str(os.environ.get("DFL_ALLOW_TEST_HOOK") or "").strip() in ("1", "true", "yes", "on")
     ff = Path(WORKSPACE) / "_vram_free_mb.txt"
+    if not _hook_on:                                     # 生产环境不读这个文件（否则工作区里一个文本就能改显存判断）
+        ff = None
     try:
         if ff.is_file():
             txt = ff.read_text("utf-8", "ignore").strip().splitlines()[0].strip()
