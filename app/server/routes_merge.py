@@ -10469,6 +10469,32 @@ _FUSED_ENV_DUMP = "DFL_FUSED_DUMP"             # 验收/排障：把这几帧的
 # 每张脸的 pred / prd / dst / xseg_prd / xseg_dst / 68 点全写成文件（<成片>.dump/），
 # 直接和分段 cache/ 里的同名产物逐位比。默认关（一个文件都不写）。
 
+# ---- 攒批与线程数：B 配置的口径（桌面实测见 _attr_bench/REPORT.md 第 8 节）----
+# 攒批目标：dfm 一次前向喂几张。这条链原来只是「pend 攒满 _pred_pick_batch 就送」，
+# 而那个阶梯只看**空张量单发**的每张耗时（416：B1=30.0 / B4=33.8 / B8=31.5），
+# 于是 416 被选到 4、更小的模型会被选到 1 —— 判断依据错了：进流水线之后真正的对手是
+# 「GPU 空转等批」，不是单张能跑多快。这里另给一个显式目标（默认 8 = B 配置），
+# 实际取 max(阶梯值, 目标)，再按 session 原生上限 与 _PRED_BATCH_CAP 截。
+# 像素不受它影响：同一个 session、同一份权重、同一批算子，只是一次喂进去的**张数**不同
+# （对拍证据见 _attr_bench/fused_ab_*.json 与 dump 对拍）。
+_FUSED_BATCH_TARGET = max(1, min(int(_PRED_BATCH_CAP), _env_int("DFL_FUSED_BATCH", 8)))
+# 攒批超时（ms）：从**这一批第一张脸进来**的时刻起算；超时就把手里这点先送出去。
+# 为什么必须有：片子尾巴、以及多模型时「某一路的脸一直凑不满目标」这两种情况下，
+# 已经进来的脸会一直压着不动 —— 那一帧也就一直进不了合成。0 = 关（一直攒到目标或 END）。
+# 默认 20ms —— **这是量出来的，不是拍的**（_attr_bench/fused_ab_wait*.json，90 帧 ×3 次中位）：
+#   超时 0（=一直攒满 8）15.62 帧/秒 · 250ms 15.82 · **20ms 16.79**（384 模型，同段同参）。
+# 为什么「超时越短反而越快」：384 dfm 单张 32~38ms，而这条线的硬底是检测（retinaface_10g
+# 50~55ms/帧），dfm 早就不在关键路径上了；batch 8 的代价是 GPU 段每 ~400ms 才动一次，
+# 一次憋出 8 帧，把下游 compose/encode 从「连续小批」变成「一阵一阵」，实测 compose 的
+# 墙钟从 108~121ms 拉到 126~161ms —— 吞吐反而掉。改成 20ms 之后平均批次 1~2 张，
+# dfm 每张贵 3~4ms，但整条线多 10%。**所以「攒到 8」是上限，不是目标**：
+# 上游真能喂满（>400 张脸/秒）时它照样攒满 8；平时它就是一条不憋气的流水线。
+_FUSED_BATCH_WAIT_MS = max(0, _env_int("DFL_FUSED_BATCH_WAIT_MS", 20))
+# 对齐/预处理线程 与 合成线程（B 配置：4 / 8）。以前对齐是 min(4, cpu//3) —— 核少的机器
+# 会自己掉到 1~2，同一个产品在两台机器上跑出两种口径。现在钉成常量，要改走环境变量。
+_FUSED_PREP_DEFAULT = max(1, min(16, _env_int("DFL_FUSED_PREP", 4)))
+_FUSED_CMP_DEFAULT = max(1, min(32, _env_int("DFL_FUSED_CMP", 8)))
+
 
 def _fused_on(body) -> bool:
     """这一单走不走融合流水线。**默认走**（fused=1）；fused=0 回退六阶段分段链。"""
@@ -10610,18 +10636,27 @@ def _fused_cfg(body: dict) -> dict:
         "use_library": True, "library": library_raw, "face_threshold": face_thr,
         "pred_batch": _int_val("batch", body.get("batch") or body.get("pred_batch"), 0, 64,
                                _PRED_BATCH_DEFAULT),
+        # 合成线程默认 8（B 配置）；fused 有自己的默认，不再跟着 DFL_MERGE_WORKERS 走
         "merge_workers": _int_val(
             "merge_workers",
             body.get("merge_workers") if body.get("merge_workers") is not None
             else (body.get("threads") if body.get("threads") is not None
                   else body.get("merge_threads")),
-            1, 32, _MERGE_WORKERS_DEFAULT),
+            1, 32, _FUSED_CMP_DEFAULT),
         "merge_cv2_threads": _int_val("merge_cv2_threads", body.get("merge_cv2_threads"),
                                       0, 64, _MERGE_CV2_THREADS_DEFAULT),
         "png_level": _int_val("png_compression", body.get("png_compression"), 0, 9,
                               _MERGE_PNG_LEVEL),
-        "pred_readers": _int_val("pred_readers", body.get("pred_readers"), 0, 16, 0),
+        # 对齐/预处理线程默认 4（B 配置），0 也让它是 4 —— 以前 0 落到 cpu//3，核少就掉档
+        "pred_readers": _int_val("pred_readers", body.get("pred_readers"), 0, 16,
+                                 _FUSED_PREP_DEFAULT),
         "pred_writers": _int_val("pred_writers", body.get("pred_writers"), 0, 16, 0),
+        # 攒批：目标张数 + 超时 ms（都可以从请求体/环境变量压，排障用）
+        "fused_batch": _int_val("fused_batch", body.get("fused_batch"), 1,
+                                int(_PRED_BATCH_CAP), _FUSED_BATCH_TARGET),
+        "fused_batch_wait_ms": _int_val("fused_batch_wait_ms",
+                                        body.get("fused_batch_wait_ms"), 0, 60000,
+                                        _FUSED_BATCH_WAIT_MS),
         "frame_budget_want": int(want or 0),
         # fused 专有：没有 cache / meta / 阶段游标
         "fused": True, "cache": "", "meta": {}, "stages": ["fused"],
@@ -10633,8 +10668,11 @@ def _fused_cfg(body: dict) -> dict:
 _PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
 
-def _fused_open_frames(video: Path, start_i: int):
-    """开一路「ffmpeg → PNG 帧流」，返回 (proc, 读一帧的函数)。
+_FUSED_ENV_DECODE = "DFL_FUSED_DECODE"   # 验收/排障：png（默认）| raw（rawvideo bgr24）
+
+
+def _fused_open_frames(video: Path, start_i: int, size=None, mode="png"):
+    """开一路「ffmpeg → PNG 帧流」（默认）或「ffmpeg → rawvideo bgr24 帧流」，返回 (proc, 读一帧的函数)。
 
     **为什么不用 rawvideo bgr24 那条路**（_app._open_video）：实测同一帧解出来和
     「切帧」阶段落盘的 PNG 差 mean 0.89 / max 14 LSB —— 软件的 HEVC 解码 + swscale
@@ -10650,14 +10688,33 @@ def _fused_open_frames(video: Path, start_i: int):
     import cv2
     import numpy as np
 
+    # ---- 两条解码路径（像素**完全等价**，实测见 _attr_bench/decode_final.py）----
+    #   png（默认）：ffmpeg 解 → PNG(无损) → 管道 → cv2.imdecode。25 ms/帧。
+    #   raw        ：ffmpeg 解 → rawvideo **bgr24** → 管道 → 直接 reshape。9 ms/帧。
+    # 为什么 raw 不改像素：PNG 是无损容器，两条路都是「同一个软解 → 同一个 swscale
+    # yuv420p(tv,bt709) → 8bit BGR」。逐帧对拍 30 帧：mean=0.0000 / max=0 / 逐位相同像素
+    # 100.000%。**注意别用 -hwaccel cuda**：NVDEC 那条路把帧下载成 nv12 再转 BGR，
+    # 色度是另一套插值，实测 mean 0.8895 / max 12（软解/NVDEC 的 YUV 平面本身逐位相同，
+    # 差全在 nv12→RGB 这一步）。所以 raw 一律走软解。
+    raw = str(mode or "png").strip().lower() in ("raw", "rawvideo", "bgr24")
+    rf = (0, 0)
+    if raw:
+        if not size or int(size[0] or 0) <= 0 or int(size[1] or 0) <= 0:
+            raise _BadInput("raw 解码要源视频的宽高，但 probe 里没有", 422)
+        rf = (int(size[0]), int(size[1]))
+
     ffmpeg = str(_app_mod._ffmpeg_exe())
     cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-nostats", "-nostdin",
            "-i", str(video), "-map", "0:v:0", "-an"]
     if int(start_i) > 1:
         cmd += ["-vf", "select=gte(n\\,%d)" % (int(start_i) - 1)]
     # -vsync 0：原样搬每一帧（不按时间戳丢/补），帧数 = 选中的帧数
-    cmd += ["-vsync", "0", "-f", "image2pipe", "-vcodec", "png",
-            "-compression_level", "1", "pipe:1"]
+    cmd += ["-vsync", "0"]
+    if raw:
+        cmd += ["-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"]
+    else:
+        cmd += ["-f", "image2pipe", "-vcodec", "png",
+                "-compression_level", "1", "pipe:1"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                             creationflags=getattr(_app_mod, "_NO_WINDOW", 0))
 
@@ -10686,8 +10743,18 @@ def _fused_open_frames(video: Path, start_i: int):
             if typ == b"IEND":
                 return b"".join(parts)
 
+    def _next_frame_raw():
+        """rawvideo：定长读一帧（w*h*3 字节）→ (h,w,3) BGR uint8；流结束返回 None。"""
+        nb = rf[0] * rf[1] * 3
+        buf = proc.stdout.read(nb)
+        if not buf or len(buf) < nb:
+            return None
+        return np.frombuffer(buf, np.uint8).reshape(rf[1], rf[0], 3).copy()
+
     def _next_frame():
         """读下一帧 → BGR uint8；流结束返回 None。"""
+        if raw:
+            return _next_frame_raw()
         blob = _read_png(proc.stdout)
         if not blob:
             return None
@@ -10777,6 +10844,27 @@ def _fused_dump(cfg: dict, job, composed) -> None:
         _vid_log("快速导出：dump 失败（%s）" % str(e)[:160])
 
 
+def _src_of(cfg: dict, keys, default, env_name: str) -> str:
+    """这个数是从哪来的：环境变量 / 请求体 / 默认。**只用来打日志**（不改任何取值）。
+
+    线程数这种东西一旦「日志写 8、实际跑 4」，后面所有排障都是错的 —— 所以每次导出都
+    把「实际生效值 + 来源」写进 <成片>.log，改过 env 的人自己能看到。
+    """
+    env = str(os.environ.get(env_name) or "").strip()
+    val = None
+    for k in keys:
+        v = cfg.get(k)
+        if v is not None and not (isinstance(v, str) and not str(v).strip()):
+            val = v
+            break
+    cur = default if val is None else val
+    if env and str(env) == str(cur):
+        return "env %s=%s" % (env_name, cur)
+    if val is not None and str(val) != str(default):
+        return "请求体 %s=%s" % (keys[0], cur)
+    return "默认 %s" % cur
+
+
 def _fused_run(cfg: dict) -> dict:
     """融合流水线：解码 → 检测 → 对齐/归组 → dfm → XSeg → 合成 → 编码。
 
@@ -10815,7 +10903,17 @@ def _fused_run(cfg: dict) -> dict:
     # 多线程是真并行：2 线程 ≈2 倍、4 线程 ≈3.6 倍）。默认 3：detect（52.8ms/帧）才是硬底，
     # 再往上加只会跟检测抢 CPU。
     n_enc = max(1, int(cfg.get("pred_writers") or 3))
-    n_prep = max(1, int(cfg.get("pred_readers") or min(4, max(1, (os.cpu_count() or 4) // 3))))
+    # 对齐/预处理线程：**默认 4**（B 配置）。以前是 min(4, cpu//3) —— 16 核机是 4、
+    # 8 核机是 2，同一份代码在两台机器上跑出两种口径；现在钉成 _FUSED_PREP_DEFAULT。
+    n_prep = max(1, int(cfg.get("pred_readers") or _FUSED_PREP_DEFAULT))
+    # 攒批：目标张数 + 超时（秒）。实际目标 = max(阶梯值, 这个值)，但阶梯实测如果证明
+    # 目标档每张更贵就退回阶梯那档 —— 见 _target_for 与 _FUSED_BATCH_TARGET 的注释。
+    batch_target = max(1, min(int(_PRED_BATCH_CAP),
+                              int(cfg.get("fused_batch") or _FUSED_BATCH_TARGET)))
+    _wait_ms = cfg.get("fused_batch_wait_ms")
+    if _wait_ms is None:
+        _wait_ms = _FUSED_BATCH_WAIT_MS
+    batch_wait = max(0.0, float(_wait_ms) / 1000.0)
     qd = int(_FUSED_QDEPTH)
     # cv2 的内部线程数（进程级）：合成阶段的口径是「worker 多了就别让 cv2 自己摊线程」，
     # 但这条链的**硬底是检测**（retinaface_10g 单帧 52.8ms，其中 1080p→640 的 letterbox
@@ -10872,8 +10970,18 @@ def _fused_run(cfg: dict) -> dict:
 
     frames_dir = Path(tempfile.mkdtemp(prefix="dfl_fused_"))
     cfg["frames_dir"] = str(frames_dir)
+    # 线程数一律把**实际生效的值**和它是从哪来的打出来：用户改过环境变量/请求体时，
+    # 「日志里明明是 8，为什么只有 4」这种事不该再发生（这条日志是唯一能复盘的地方）。
     _vid_log("快速导出：线程 检测1/解码1/对齐%d/GPU1/合成%d/编码%d · 队列 %d · cv2 %d 线程"
              % (n_prep, n_cmp, n_enc, qd, cv2_threads))
+    _vid_log("快速导出：线程来源 对齐=%s 合成=%s（B 配置默认 4/8；DFL_FUSED_PREP / "
+             "DFL_FUSED_CMP / body.pred_readers / body.merge_workers 可覆盖 · cpu %d 线程）"
+             % (_src_of(cfg, ("pred_readers",), _FUSED_PREP_DEFAULT, "DFL_FUSED_PREP"),
+                _src_of(cfg, ("merge_workers", "merge_threads", "threads"),
+                        _FUSED_CMP_DEFAULT, "DFL_FUSED_CMP"),
+                int(os.cpu_count() or 0)))
+    _vid_log("快速导出：攒批 目标 %d 张 / 超时 %dms（0=不超时，攒满或 END 才送）"
+             % (batch_target, int(round(batch_wait * 1000.0))))
     _vid_log("快速导出：临时帧目录 %s（成功/取消都删；<视频>_cache/ 一个都不建）" % frames_dir)
 
     END = object()
@@ -10891,7 +10999,7 @@ def _fused_run(cfg: dict) -> dict:
     live = {"n": 0, "peak": 0}
     live_lock = threading.Lock()
     stat_lock = threading.Lock()
-    bstat = {"calls": 0, "faces": 0, "max": 0, "hist": {}}
+    bstat = {"calls": 0, "faces": 0, "max": 0, "hist": {}, "why": {}}
     rep = {"at": 0.0}
     got = {"frames": 0, "swapped": 0, "copied": 0, "no_face": 0, "faces": 0, "skipped": 0}
 
@@ -10916,6 +11024,17 @@ def _fused_run(cfg: dict) -> dict:
                 continue
         return END
 
+    def _poll(q, timeout=0.005):
+        """非阻塞取一个：这一拍没活就返回 None，停止时返回 END。
+
+        为什么 GPU 段需要它：攒批超时只能在「等下一张脸」的空档里去检查 —— 用 _get
+        的无限等待，尾部那几张脸就会一直压在 pend 里等着凑满目标（见 _FUSED_BATCH_WAIT_MS）。
+        """
+        try:
+            return q.get(timeout=timeout)
+        except queue.Empty:
+            return END if stop.is_set() else None
+
     def _report(done, force=False):
         now = time.time()
         if not force and (now - rep["at"]) < 0.25:
@@ -10938,6 +11057,8 @@ def _fused_run(cfg: dict) -> dict:
 
     # ---- 显存保护：dfm 批大小按 session 实测阶梯选（每个 dfm 一次）----
     batch_of = {}
+    batch_meta = {}
+    _batch_note = {}
     batch_lock = threading.Lock()
 
     def _batch_for(dfm_path):
@@ -10949,6 +11070,7 @@ def _fused_run(cfg: dict) -> dict:
         b, bmeta = _pred_pick_batch({**cfg, "pred_batch": int(cfg.get("pred_batch") or 0)}, ent)
         with batch_lock:
             batch_of[dfm_path] = int(b)
+            batch_meta[dfm_path] = dict(bmeta or {})
         _vid_log("快速导出：dfm %s 批大小 %d（%s）· %dx%d"
                  % (Path(dfm_path).name, int(b), bmeta.get("source"),
                     int(ent[2]), int(ent[2])))
@@ -10958,11 +11080,21 @@ def _fused_run(cfg: dict) -> dict:
     # 走 PNG 而不是 rawvideo bgr24：见 _fused_open_frames 的注释（只有同一条编解码路径
     # 才能和分段产物逐像素一致）。
     gen = {}
+    dec_mode = str(os.environ.get(_FUSED_ENV_DECODE) or "png").strip().lower()
+    if dec_mode not in ("raw", "rawvideo", "bgr24"):
+        dec_mode = "png"
+    _vid_log("快速导出：解码 %s（%s）· 源 %sx%s"
+             % ("rawvideo bgr24（软解）" if dec_mode != "png" else "PNG 管道",
+                "DFL_FUSED_DECODE=raw，逐位等价、25→9 ms/帧" if dec_mode != "png"
+                else "默认；和切帧阶段同一条编解码路径",
+                probe.get("w"), probe.get("h")))
 
     def _decode():
         proc = None
         try:
-            proc, next_frame = _fused_open_frames(video, start_i)
+            proc, next_frame = _fused_open_frames(video, start_i,
+                                                 size=(probe.get("w"), probe.get("h")),
+                                                 mode=dec_mode)
             gen["proc"] = proc
             n = start_i - 1
             while not stop.is_set():
@@ -11148,18 +11280,66 @@ def _fused_run(cfg: dict) -> dict:
                 _put(q_gpu, END)
 
     # ---- ④ dfm + ⑤ XSeg：按 dfm 攒批，一次前向；回填到各自的帧 ----
+    oom_cap = {}                    # dfm_path -> OOM 退档后的硬上限（优先级最高）
+
+    def _ladder_per_face(dfm_path) -> dict:
+        """阶梯实测的 {batch: 每张 ms}（_pred_pick_batch 留下的那几行）。"""
+        meta = batch_meta.get(dfm_path) or {}
+        out = {}
+        for row in (meta.get("ladder") or []):
+            try:
+                out[int(row.get("batch"))] = float(row.get("per_face_ms"))
+            except (TypeError, ValueError, KeyError):
+                continue
+        return out
+
+    def _target_for(dfm_path) -> int:
+        """这一路 dfm 一次前向喂几张：攒批目标（默认 8），但**实测说不行就让开**。
+
+        为什么不是硬写 8：攒批只在「GPU 是瓶颈」时值钱。416 的阶梯实测
+        B1=29.1 / B4=28.7 / **B8=31.0~31.5**（每张），8 张比 4 张每张贵 5~11%；
+        硬攒到 8 的端到端实测是 **-11%**（fused_ab_after_416：15.85 vs 17.82）。
+        规则（三行）：
+          · 阶梯没量到目标档            → 用目标（没数据就别猜）
+          · 目标档每张 ≤ 最优 × 1.02    → 用目标（384：B8 就是最优 → 8）
+          · 目标档每张 > 最优 × 1.02    → 用阶梯选的那档（416：用 4），日志说一次原因
+        一句话：**目标 8 是「想攒到多少」的意图，不是「必须塞 8 张」的命令**。
+        OOM 退档（oom_cap）优先级最高，压在所有规则之上。
+        """
+        b = int(_batch_for(dfm_path) or 1)
+        cap_now = int(oom_cap.get(dfm_path) or _PRED_BATCH_CAP)
+        tgt = max(b, int(batch_target))
+        if tgt > b:
+            per = _ladder_per_face(dfm_path)
+            best = min(per.values()) if per else None
+            at = per.get(tgt)
+            if best and at is not None and at > best * 1.02:
+                with batch_lock:
+                    noted = bool(_batch_note.get(dfm_path))
+                    _batch_note[dfm_path] = True
+                if not noted:
+                    _vid_log("快速导出：攒批目标 %d 张，但阶梯实测 B%d=%.1fms/张 比最优 "
+                             "%.1fms 贵 %.0f%% → 按实测用 %d 张"
+                             % (tgt, tgt, at, best, 100.0 * (at / best - 1.0), b))
+                tgt = b
+        return max(1, min(int(_PRED_BATCH_CAP), cap_now, tgt))
+
     def _gpu():
         pend = {}
         pend_frames = {}
+        born = {}                       # dfm_path -> 「这一批第一张脸」进来的时刻
 
-        def flush(only=None):
+        def flush(only=None, why="full"):
             for dfm_path in (list(pend) if only is None else [only]):
                 part = pend.get(dfm_path) or []
                 if not part:
                     continue
                 del pend[dfm_path]
-                b = _batch_for(dfm_path)
-                step = max(1, int(b))
+                born.pop(dfm_path, None)
+                bstat["why"][why] = int(bstat["why"].get(why) or 0) + 1
+                # 攒批目标同时决定「什么时候送」和「一次塞几张」：攒到 8 就一次前向 8 张
+                # （这正是 B 配置要的东西）。显存不够时的退档走 oom_cap，优先级最高。
+                step = _target_for(dfm_path)
                 i = 0
                 while i < len(part):
                     chunk = part[i:i + step]
@@ -11185,6 +11365,8 @@ def _fused_run(cfg: dict) -> dict:
                                  % (len(faces), str(e)[:80], h))
                         with batch_lock:
                             batch_of[dfm_path] = max(1, min(int(batch_of.get(dfm_path) or h), h))
+                        # 攒批目标也要跟着退，否则下一次照样攒到 8 张再撞 OOM
+                        oom_cap[dfm_path] = max(1, min(int(oom_cap.get(dfm_path) or _PRED_BATCH_CAP), h))
                         outs = []
                         for j in range(0, len(faces), h):
                             outs.extend(_dfm_run_batch(_dfm_session(dfm_path),
@@ -11234,21 +11416,32 @@ def _fused_run(cfg: dict) -> dict:
         try:
             while True:
                 t_wait = time.perf_counter()
-                item = _get(q_gpu)
+                item = _poll(q_gpu, 0.005)
                 ticks.add("gpu_wait", time.perf_counter() - t_wait)
                 if item is END:
-                    flush()
+                    flush(why="end")
                     for _i in range(n_cmp):
                         _put(q_cmp, END)
                     break
+                if item is None:
+                    # 这一拍没有新脸进来：看看哪一路已经攒到超时了，先把它送出去。
+                    # 这是「尾部/断流」的保险 —— 正常出片时到脸间隔 30~80ms，
+                    # 超时 20ms 是量出来的最优（默认值见 _FUSED_BATCH_WAIT_MS 的实测表）。
+                    if batch_wait > 0.0 and pend:
+                        now = time.perf_counter()
+                        for _p in list(pend):
+                            if now - float(born.get(_p, now)) >= batch_wait:
+                                flush(_p, why="timeout")
+                    continue
                 job, f, nf = item
                 if id(job) not in pend_frames:
                     # 生产者给的「这一帧一共几张脸」：收到的回填进度按它算（见 _prep 的说明）
                     pend_frames[id(job)] = [int(nf)]
+                if not pend.get(f["dfm"]):
+                    born[f["dfm"]] = time.perf_counter()
                 pend.setdefault(f["dfm"], []).append((job, f))
-                b = _batch_for(f["dfm"])
-                if len(pend[f["dfm"]]) >= max(1, b):
-                    flush(f["dfm"])
+                if len(pend[f["dfm"]]) >= _target_for(f["dfm"]):
+                    flush(f["dfm"], why="full")
         except BaseException as e:                             # noqa: BLE001
             _fail("gpu", e)
 
@@ -11452,14 +11645,27 @@ def _fused_run(cfg: dict) -> dict:
              % (bstat["calls"], bstat["faces"],
                 bstat["faces"] / max(1, bstat["calls"]), bstat["max"],
                 dict(sorted(bstat["hist"].items(), key=lambda kv: int(kv[0])))))
+    _vid_log("快速导出 dfm 攒批：目标 %d 张 / 超时 %dms · 送出原因 %s（full=攒满 · "
+             "timeout=超时 · end=收尾）"
+             % (batch_target, int(round(batch_wait * 1000.0)),
+                dict(sorted((bstat.get("why") or {}).items()))))
     if written != total:
         _vid_log("快速导出：实解出 %d 帧（源信息说 %d 帧）→ 按实解帧数编码"
                  % (written, total))
     _vid_stats(done=written, total=written, fps=round(rate, 2), eta_s=0,
                frame_budget=budget, fused=True, per_stage_ms=per_stage,
-               stage_util_pct=util, batch=batch_of, pipeline={
+               stage_util_pct=util, batch=batch_of, batch_actual=dict(bstat),
+               pipeline={
                    "threads": {"decode": 1, "detect": 1, "prep": n_prep, "gpu": 1,
                                "compose": n_cmp, "encode": n_enc},
+                   "threads_src": {
+                       "prep": _src_of(cfg, ("pred_readers",), _FUSED_PREP_DEFAULT,
+                                       "DFL_FUSED_PREP"),
+                       "compose": _src_of(cfg, ("merge_workers", "merge_threads", "threads"),
+                                          _FUSED_CMP_DEFAULT, "DFL_FUSED_CMP")},
+                   "batch_target": int(batch_target),
+                   "batch_wait_ms": int(round(batch_wait * 1000.0)),
+                   "decode_mode": dec_mode,
                    "queue_depth": qd, "budget": budget, "cv2_threads": cv2_threads})
     _stage_progress("fused", _VID_PCT_SWAP,
                     "快速导出：%d 帧跑完，开始编码（%d 帧 @ %.6g fps）"
@@ -11516,8 +11722,16 @@ def _fused_run(cfg: dict) -> dict:
             "cache_dir": str(cache_dir), "cache_created": False,
             "audio_ss": (None if full else round(t_audio, 6)),
             "range": {"start": start_i, "end": end_i, "total": total, "full": full},
-            "frames_dir": str(frames_dir), "threads": {"prep": n_prep, "compose": n_cmp,
-                                                      "encode": n_enc}}
+            "frames_dir": str(frames_dir),
+            "threads": {"prep": n_prep, "compose": n_cmp, "encode": n_enc},
+            "threads_src": {
+                "prep": _src_of(cfg, ("pred_readers",), _FUSED_PREP_DEFAULT,
+                                "DFL_FUSED_PREP"),
+                "compose": _src_of(cfg, ("merge_workers", "merge_threads", "threads"),
+                                   _FUSED_CMP_DEFAULT, "DFL_FUSED_CMP")},
+            "batch_target": int(batch_target),
+            "batch_wait_ms": int(round(batch_wait * 1000.0)),
+            "decode_mode": dec_mode}
 
 
 def _fused_worker(cfg: dict):
