@@ -425,13 +425,23 @@ def case_preview_then_export(clip):
               "a2 预览常驻 → 导出预检**不再被拒**",
               "HTTP %s ok=%r msg=%s" % (_st3, p1.get("ok"),
                                         (p1.get("msg") or (d3 or {}).get("error") or "")[:160]))
-        check(float(p1.get("reclaimed_mb") or 0.0) >= 1000.0,
-              "a2 计划里记着「回收了多少」且 ≥1GB",
-              "reclaimed_mb=%s" % p1.get("reclaimed_mb"))
+        # 预留改小之后（max(256MB, free×5%)），这一档常常**不需要**回收就装得下：
+        # 3900MB 空闲 / 30 帧 / 批 2 = 峰值 2776MB，用不着动预览 worker 的那 2.5GB。
+        # 所以这里断的是**不变量**：要么真回收了 ≥1GB，要么本来就不用回收
+        #（峰值 ≤ 可用，且「可回收」那一栏有数）—— 两者都不成立才是 bug。
+        _peak = float(p1.get("peak_mb") or 1e9)
+        _avail = float(p1.get("avail_mb") or 0.0)
+        _rec = float(p1.get("reclaimed_mb") or 0.0)
+        _recl = float(p1.get("reclaimable_mb") or 0.0)
+        check(_rec >= 1000.0 or (_peak <= _avail and _recl > 0.0),
+              "a2 计划要么真回收了 ≥1GB、要么本来就不用回收（峰值 ≤ 可用）",
+              "reclaimed=%s peak=%s avail=%s reclaimable=%s"
+              % (_rec, _peak, _avail, _recl))
         blob = log_since(mark)
         hits = [ln.strip() for ln in blob.splitlines() if "回收预览模型" in ln]
-        check(bool(hits), "a2 后端日志有一行「回收预览模型 X MB … 空闲 A → B」",
-              (hits[0][:200] if hits else ""))
+        check(bool(hits) or _rec == 0.0,
+              "a2 需要回收时日志里有「回收预览模型 X MB … 空闲 A → B」",
+              (hits[0][:200] if hits else "（这一档不用回收，正常）"))
         m = re.search(r"回收预览模型\s*([0-9.]+)\s*MB", hits[0] if hits else "")
         if m:
             say("a2 回收了 %.2f GB" % (float(m.group(1)) / 1024.0))
@@ -464,9 +474,14 @@ def case_preview_then_export(clip):
         wk2 = dict(dv2 or {})
         say("a4 导出之后 nvidia-smi：%s / worker used_mb=%s"
             % (smi(), wk2.get("used_mb")))
-        check(not wk2.get("models"),
-              "a4 导出结束后预览 worker 没有立刻重载（懒加载，别来回抖）",
-              "models=%s used_mb=%s" % (wk2.get("models"), wk2.get("used_mb")))
+        # 导出**不许**为了自己把预览模型重载回来：要么它本来就被回收掉了（models 空），
+        # 要么它从头到尾没被动过（used_mb 和导出前一模一样）。两者都算「没来回抖」。
+        _same = (abs(float(wk2.get("used_mb") or 0.0) - float(wk.get("used_mb") or 0.0)) < 1.0
+                 and list(wk2.get("models") or []) == list(wk.get("models") or []))
+        check((not wk2.get("models")) or _same,
+              "a4 导出结束后预览 worker 没有来回抖（没被重载回去）",
+              "models=%s used_mb=%s（导出前 %s）"
+              % (wk2.get("models"), wk2.get("used_mb"), wk.get("used_mb")))
         t0 = time.time()
         st6, d6 = post("/api/merge/preview", preview_body(clip, 0.2), timeout=900)
         warm_ms = (time.time() - t0) * 1000.0

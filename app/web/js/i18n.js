@@ -580,6 +580,12 @@
   "结果": "Result",
   "返回导出设置": "Back to export settings",
   "再次导出": "Export again",
+  /* —— 显存不足：强制尝试（force=1）那条路 —— */
+  "仍然尝试（可能 OOM）": "Try anyway (may OOM)",
+  "正在尝试…": "Trying…",
+  "导出未启动": "Export did not start",
+  "确实不够（已回滚）": "Not enough VRAM (rolled back)",
+  "确实不够，已回滚": "Not enough VRAM — rolled back",
   "导出完成": "Export finished",
   "cache 已清理": "cache cleaned up",
   "已取消": "Cancelled",

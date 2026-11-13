@@ -6532,7 +6532,7 @@ function mgStageEmpty(on) {
        和「失败」不是一回事：后端在**起 job 之前**就 400 了，一个字节都没跑。
        所以六步 / 进度条 / 帧数 / 取消键全部收起，只留一行错误 + 「返回导出设置」。
        以前这里把六步画成「并行中」就那么停着，用户看到的是"跑过、然后全失败"。 */
-    function mgpRejectShow(d) {
+    function mgpRejectShow(d, onForce) {
       d = d || {};
       var box = $("mgpResult");
       var txt = $("mgpResultText");
@@ -6546,11 +6546,21 @@ function mgStageEmpty(on) {
       /* 小标题（"结果"）在拒绝态是多余的：卡片大标题已经写了「导出未启动」 */
       if (hd) hd.hidden = true;
       var ttl = $("mgpHdTitle");
-      if (ttl) ttl.textContent = "导出未启动";          /* 卡片标题也别再说"正在导出" */
+      /* 强制尝试撞 OOM 那一档是「跑过才失败」，别再说「未启动」—— 用户会以为没动过 */
+      if (ttl) ttl.textContent = d.vram_oom ? "确实不够（已回滚）" : "导出未启动";
       if (txt) {
         var line = mgVramLine(d);
         var tip = mgVramAdvice(d);
         txt.textContent = tip ? (line + " · " + tip) : line;
+      }
+      /* 「仍然尝试（可能 OOM）」：只有后端说 can_force 且有重试入口时才亮出来。
+         用户口径：明说不理解为什么被拒，那他更想**试**一次 —— 拒绝面板得给这条路。 */
+      var fb = $("mgpForceTry");
+      if (fb) {
+        var can = (typeof onForce === "function") && d.can_force !== false;
+        fb.hidden = !can;
+        fb.disabled = false;
+        fb.title = "按最小档真跑一次；真 OOM 会自动回滚到这一页，不会把后端搞坏";
       }
       if (box) { box.hidden = false; box.classList.add("is-rej"); }
       var pct = $("mgpPct"); if (pct) pct.textContent = "0%";
@@ -6561,6 +6571,8 @@ function mgStageEmpty(on) {
     function mgpRejectHide() {
       var box = $("mgpResult");
       if (box) box.classList.remove("is-rej");
+      var fb0 = $("mgpForceTry");
+      if (fb0) fb0.hidden = true;             /* 离开被拒态就收起「仍然尝试」 */
       var hd = $("mgpResultHd");
       if (hd) { hd.hidden = false; hd.textContent = "结果"; }
       var ttl = $("mgpHdTitle");
@@ -6579,13 +6591,34 @@ function mgStageEmpty(on) {
       if (!isFinite(n) || n < 0) return "";
       return (n / 1024).toFixed(2) + " GB";
     }
+    /* 一行话：优先用后端的 summary（它把「预留」和「本程序 / 其它程序 / 空闲」
+       都摊在同一行里 —— 老文案只给 need/avail 两个数，用户当然算不出那 1.37GB 去哪了）。
+       后端没给（老版本后端）就按同一口径在本地拼一遍，字段都来自 400 的顶层。 */
     function mgVramLine(d) {
       d = d || {};
+      if (d.vram_oom) {
+        return String(d.vram_oom.summary || d.vram_oom.msg || "强制尝试失败：确实不够，已回滚")
+          .split("\n")[0];
+      }
+      if (d.summary) return String(d.summary).split("\n")[0];
       var need = mgGb(d.need_mb), avail = mgGb(d.avail_mb);
       if (!need || !avail) {
         return String(d.error || d.detail || "显存不足").split("\n")[0];
       }
-      return "显存不足：需要 " + need + "，可用 " + avail;
+      var bits = ["需要 " + need];
+      if (d.free_mb != null) {
+        bits.push("空闲 " + mgGb(d.free_mb) +
+                  " 里预留 " + (d.reserve_mb != null ? mgGb(d.reserve_mb) : "?") +
+                  " 给驱动/碎片 = 实际可用 " + avail);
+      } else {
+        bits.push("实际可用 " + avail);
+      }
+      if (d.own_mb != null || d.other_mb != null) {
+        bits.push("本程序 " + mgGb(d.own_mb) +
+                  " / 其它程序 " + (d.other_mb == null ? "?" : mgGb(d.other_mb)) +
+                  " / 空闲 " + (d.free_mb == null ? "?" : mgGb(d.free_mb)));
+      }
+      return "显存不足：" + bits.join(" · ");
     }
     function mgVramAdvice(d) {
       var s = (d && d.suggest) || [];
@@ -6604,7 +6637,8 @@ function mgStageEmpty(on) {
     /* 被拒的统一收口：**一次**提示 + 拒绝态 + 复位三个忙闲位（还能再点一次）。
        被拒也要进进度页：用户口径是「只显示一行错误 + 返回导出设置」——
        停在设置页虽然也能再点，但就没有那个明确的出口和结论了。 */
-    function mgVramReject(d) {
+    function mgVramReject(d, onForce) {
+      d = d || {};
       window.__mergeExporting = false;
       window.__mgStageRunning = false;
       window.__mgFusedRunning = false;
@@ -6612,11 +6646,35 @@ function mgStageEmpty(on) {
       var cb = $("mgpCancel");
       if (cb) { cb.disabled = false; cb.textContent = "取消导出"; }
       if (window.mgStep) window.mgStep("progress");
-      mgpRejectShow(d || {});
-      mgVramToast(d || {});
+      /* onForce：这颗「仍然尝试（可能 OOM）」点下去干什么（见 mgVramPreflight）。
+         不给就不亮 —— 预览这种没有重试入口的地方不会画出一颗死按钮。 */
+      if (d.vram_oom) {
+        /* 强制尝试撞 OOM：**不是**「未启动」，是「跑过、确实不够、已回滚」。
+           文案里必须带上后端的 summary（需要在 / 可用 / 差多少），否则用户以为白点了一次。 */
+        if (window.mgpRejectShow) window.mgpRejectShow(d, onForce);
+        toast("确实不够，已回滚", String(d.summary || d.msg || "").slice(0, 200), "error", 9000);
+        return false;
+      }
+      mgpRejectShow(d, onForce);
+      mgVramToast(d);
       return false;
     }
     window.mgVramReject = mgVramReject;
+
+    /* 「仍然尝试（可能 OOM）」的点击口：重试回调由 mgVramPreflight 挂在 window 上 */
+    var mgForceBtn = $("mgpForceTry");
+    if (mgForceBtn && !mgForceBtn.dataset.bound) {
+      mgForceBtn.dataset.bound = "1";
+      mgForceBtn.addEventListener("click", function () {
+        var fn = window.__mgForceRetry;
+        if (typeof fn !== "function") return;
+        mgForceBtn.disabled = true;
+        var old = mgForceBtn.textContent;
+        mgForceBtn.textContent = "正在尝试…";
+        try { fn(); } catch (e) { /* 重试自己挂了：留在被拒态，别把界面弄坏 */ }
+        setTimeout(function () { mgForceBtn.disabled = false; mgForceBtn.textContent = old; }, 2500);
+      });
+    }
 
     /* 起 job 之前的显存预检：POST 同一份 body + dry_run=1。
        后端只算账（_vram_plan：不加载模型、不建 job、不开线程）：
@@ -6642,7 +6700,19 @@ function mgStageEmpty(on) {
         if (res.ok && d.ok !== false) { fired = true; cb(true, d); return; }
         if (res.status === 400 && d.need_mb != null) {
           fired = true;
-          mgVramReject(d);                    /* 一次 toast + 拒绝态 + 复位忙闲位 */
+          /* 强制尝试：把 force=1 写进**调用方那一份 body**（同一个对象引用），
+             于是真请求（mgFusedStart / mgStageStart）也会带着它 —— 否则预检放行、
+             真请求又被 400，用户看到的是「点了按钮还是不行」。 */
+          var forceRetry = function () {
+            body.force = 1;
+            window.__mgVramChecking = true;
+            mgVramPreflight(body, function (proceed2, d2) {
+              window.__mgVramChecking = false;
+              cb(proceed2, d2);
+            });
+          };
+          window.__mgForceRetry = forceRetry;
+          mgVramReject(d, forceRetry);        /* 一次 toast + 拒绝态 + 复位忙闲位 */
           cb(false, d);
           return;
         }
@@ -6777,6 +6847,11 @@ function mgStageEmpty(on) {
       /* 终态：取消键自己藏起来（mgpResultShow 里 hidden），出口改成结果面板那两颗 */
       if (cb) { cb.disabled = false; cb.textContent = "取消导出"; }
       var d2 = d || {};
+      if (d2.vram_oom) {
+        /* 强制尝试撞 OOM（分段链）：回到被拒态，别把六个阶段画成红的 */
+        window.mgVramReject(d2.vram_oom, window.__mgForceRetry);
+        return;
+      }
       if (okAll) {
         mgpPaint(MGP_STAGES.length - 1, { state: "done", tip: "mp4" });
         var fill = $("mgpFill"); if (fill) fill.style.width = "100%";
@@ -7054,6 +7129,12 @@ function mgStageEmpty(on) {
             if (cb) { cb.disabled = false; cb.textContent = "取消导出"; }
             if (okAll) {
               toast("导出完成", String(d.out || "").slice(-60), "success");
+            } else if (d.vram_oom) {
+              /* 强制尝试撞 OOM：后端已经把现场收干净（放掉本进程会话 + 重算当下的账），
+                 这里只要把界面搬回被拒态 —— 用户看的必须是「确实不够 / 已回滚」，
+                 而不是一句莫名的「导出失败」。 */
+              window.mgVramReject(d.vram_oom, window.__mgForceRetry);
+              return;
             } else if (wasCancel) {
               /* 关键差异：分段链说"接着跑"，快速导出只能说"整段重跑" */
               toast("已取消导出", "快速导出不支持续跑，需整段重跑", "info");

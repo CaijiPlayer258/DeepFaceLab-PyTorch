@@ -5535,6 +5535,12 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 #p-merge .mgprog-steps[hidden],
 #p-merge .mgprog-foot[hidden] { display: none !important; }
 #p-merge .mgprog-res.is-rej .mgprog-res-txt { color: #ef4444; }
+/* 拒绝态的第二颗按钮「仍然尝试（可能 OOM）」：在这一页它是唯一能往前走的动作，
+   做成实心；「返回导出设置」保持中性 —— 两颗长得一样用户不知道该点哪个。 */
+#p-merge .mgprog-res.is-rej .mgprog-res-acts #mgpForceTry {
+  background: var(--solid) !important;
+  color: var(--solid-ink) !important;
+}
 /* 出口按钮沿用结果面板那条「整行按钮」（app.css:5747 的 .mgprog-res .btn），
    不在这里另起一套：拒绝态和完成/失败态长得一样，用户才认得出这是同一种卡。 */
 

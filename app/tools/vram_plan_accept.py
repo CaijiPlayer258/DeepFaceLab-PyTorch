@@ -3,8 +3,10 @@ r"""显存预算（_vram_plan）验收：三条路 × 三档伪造显存 + CPU �
 
 验的东西（对应用户这一轮的要求）：
   A  fused 视频导出三档：DFL_VRAM_FREE_MB=1200 → **明确拒绝**（HTTP 400，消息带
-     「需要 X GB / 可用 Y GB / 建议」）；3000 → **降档**后成功出片；8000 → 正常
+     「需要 X GB / 可用 Y GB / 建议」）；2600 → **降档**后成功出片；8000 → 正常
      （帧预算 30 / dfm 批 8）。三档都不许出现 CUDA OOM（扫后端日志 + job.error）。
+     注：预留改小之后（max(256MB, free×5%)），3000 空闲已经能跑满 30 帧 / 批 8
+     （峰值 2714 ≤ avail 2744），所以「降档」那一档用的空闲值从 3000 挪到 2600。
   B  CPU 回退：DFL_ALLOW_CPU_FALLBACK=1 + 小显存 → 照样出片，status.on_cpu=true，
      日志里必须有「当前在 CPU 上跑」。
   C  预览：小显存 → 400 + 数字（不再半死不活）；正常显存 → 200 + vram_plan。
@@ -483,7 +485,10 @@ def make_fake_project(clip):
 
 
 def case_project(clip):
-    head("D · 项目导出：worker 数按预算（8000 → 3 / 3000 → 1 / 1200 → 拒绝）")
+    # 预期 worker 数**按同一份计划反推**（avail/sess/aux/batch 全从响应里读），
+    # 不再写死「3000 → 1」—— 那是老预留（free×20%+512MB）下的数；新预留只有
+    # max(256MB, free×5%)，3000 空闲时 2 份会话（2×1026+300+80=2432）本就装得下。
+    head("D · 项目导出：worker 数按预算（8000 → 3 / 3000 → 2 / 1200 → 拒绝）")
     proj = make_fake_project(clip)
     got = {}
     for tag, free in (("8000", 8000), ("3000", 3000), ("1200", 1200)):
@@ -499,7 +504,11 @@ def case_project(clip):
             got[tag] = {"st": st, "plan": plan, "workers": (d or {}).get("workers"),
                         "msg": (d or {}).get("error") or plan.get("msg")}
             if free >= 3000:
-                want = 3 if free >= 8000 else 1
+                sess = float(plan.get("sess_mb") or 0.0)
+                aux = float(plan.get("aux_mb") or 0.0)
+                bmb = float(plan.get("batch_mb") or 0.0)
+                avail = float(plan.get("avail_mb") or 0.0)
+                want = max(1, min(3, int((avail - aux - bmb) // max(1.0, sess))))
                 check(st == 200 and int((d or {}).get("workers") or 0) == want,
                       "d %s → %d 个 worker" % (free, want),
                       "workers=%r procs=%r" % ((d or {}).get("workers"), plan.get("procs")))
@@ -566,7 +575,10 @@ def main(argv=None):
 
     if "a" in want:
         case_refuse(clip)
-        case_downgrade(clip, 3000, "down")
+        # 降档那一档从 3000 改成 2600：新预留只有 max(256MB, free×5%)，3000 空闲时
+        # 30 帧 / 批 8（峰值 2714MB）本来就装得下（avail 2744MB），不该再降档；
+        # 2600 → avail 2344MB → 批 8（2714）与批 4（2663）都被否决 → 批 2（1723）装得上。
+        case_downgrade(clip, 2600, "down")
         case_downgrade(clip, 8000, "normal")
     if "b" in want:
         case_cpu(clip)

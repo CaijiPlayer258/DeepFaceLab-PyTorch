@@ -2247,6 +2247,9 @@ def merge_export_status():
     # 里面有可用显存、需求拆项、选了哪一档、有没有降档、是不是在 CPU 上跑。
     resp["vram_plan"] = dict(snap.get("vram_plan") or _vram_last("快速导出") or {})
     resp["on_cpu"] = bool(resp["vram_plan"].get("cpu")) or bool(snap.get("on_cpu"))
+    # 强制尝试撞上 OOM 的现场（有值 = 这一单是「确实不够、已回滚」，前端据此回到被拒态；
+    # 里面带 summary/need/avail/reserve/free/own/other，和 400 的结构化字段同一份形状）
+    resp["vram_oom"] = (dict(snap.get("vram_oom") or {}) or None)
     return resp
 
 
@@ -8098,6 +8101,15 @@ def _dfm_session(dfm: str):
     session 按路径常驻，切模型才重建。
     """
     key = str(dfm)
+    if _vram_oom_inject_on():
+        # 验收专用（DFL_ALLOW_TEST_HOOK=1 + DFL_VRAM_OOM_INJECT=1）：**在真的加载之前**
+        # 抛一次「CUDA out of memory」，把「强制尝试撞 OOM → 回滚 → 还能再试」这条路
+        # 变成可复现的。为什么需要它：WDDM 会把别的进程的显存换页出去，本机实测
+        # 「空闲 600MB + force=1」竟然还能跑完 12 帧（慢，但不 OOM）——真 OOM 只能
+        # 靠把卡压到连提交都失败，那在 32GB 内存的机器上做不到。
+        # 生产路径上这两个开关都没人设，一个字节都不走。
+        raise RuntimeError("CUDA out of memory. Tried to allocate 2079 MiB"
+                           " (DFL_VRAM_OOM_INJECT=1 注入的 OOM，验收用)")
     cpu = _vram_cpu_on()            # 显存不够 + DFL_ALLOW_CPU_FALLBACK=1 → 整条链走 CPU EP
     ckey = (key + "|cpu") if cpu else key
     with _PRED_LOCK:
@@ -8415,8 +8427,11 @@ def _vram_free_mb(fresh: bool = False):
 #   arena 是小头，所以 _VRAM_ARENA_MB 取 140（416 实测 135，上取整）。
 _VRAM_ENV_FREE = "DFL_VRAM_FREE_MB"        # 验收/排障：假装可用显存只有这么多（三条路共用）
 _VRAM_ENV_CPU = "DFL_ALLOW_CPU_FALLBACK"   # 1 = 显存不够时回落 CPU EP（默认关：宁可拒绝）
-_VRAM_SAFETY = 0.20                        # 预留：空闲显存的 20%
-_VRAM_RESERVE_MB = 512                     # 再固定留 512MB（桌面合成器/驱动/碎片）
+# ---- 预留（2026-05 改小：老的「空闲 20% + 512MB」没有任何实测依据，在 8GB 卡上
+#      等于给用户凭空造了 1.37GB 的死重 —— 见 _vram_reserve_mb 的注释）----
+_VRAM_SAFETY = 0.05                        # 预留 = 空闲的 5%（随空闲缩放）
+_VRAM_RESERVE_MB = 256                     # 底线：探测抖动（torch 与 smi 差 ≤256MB 的容差）
+_VRAM_RESERVE_MAX_MB = 768                 # 上限：大卡上不许把预留变成 1GB+
 _VRAM_CTX_MB = 512                         # 每进程一份 CUDA context
 _VRAM_ARENA_MB = 140                       # ORT CUDA arena：会话建好后比权重多出来的那点
 _VRAM_AUX_MB = 300                         # 检测器 + 2D106 关键点 + XSeg（用户口径 0.3GB）
@@ -8612,20 +8627,49 @@ def _vram_reclaim(why: str = "导出") -> dict:
         if (float(after) - float(before)) >= 0.85 * max(1.0, want):
             break
         time.sleep(0.15)
+    freed = (0.0 if (before is None or after is None)
+             else max(0.0, float(after) - float(before)))
+    # ---- 卸了模型、显存却没回来？把 worker **进程**整个回收掉 ----
+    # WDDM 上释放不等于还给驱动：本机实测预览 worker 卸掉一份 384 模型之后，进程仍握着
+    # 2347MB（Windows「GPU Process Memory · Dedicated」实测），而 nvidia-smi 的 free 只
+    # 涨了 135MB。这块残留就是用户那句「我什么都没跑，却被自己的后端堵死」的另一半 ——
+    # 只要进程不退，那 2.3GB 就一直在账上，谁也算不出「其实是自己」。
+    # 只在「卸完几乎没腾出东西」时动手（正常情况这里是 2GB+，一行都不用走），
+    # 代价是下次预览要重开进程（实测 boot 1.6s + 冷加载 3.5~4.2s），比被拒强得多。
+    _rc_switch = str(os.environ.get("DFL_VRAM_RECYCLE_WORKER") or "").strip().lower()
+    recycled = False
+    if _rc_switch not in ("0", "false", "no", "off") and freed < 0.5 * max(1.0, want):
+        print("[vram] 卸掉预览模型只腾出 %.0f MB（应约 %.0f MB）—— 进程仍握着这些显存，"
+              "直接回收 worker（下次预览懒加载）" % (freed, want), flush=True)
+        try:
+            recycled = bool(w.close("回收显存：卸模型后只腾出 %.0f MB" % freed))
+        except Exception as e:                              # noqa: BLE001
+            print("[vram] 回收预览 worker 失败：%s" % str(e)[:160], flush=True)
+        if recycled:
+            deadline = time.time() + 8.0
+            while time.time() < deadline:
+                a2, _t = _vram_free_mb(fresh=True)
+                if a2 is not None:
+                    after = a2
+                if (before is None or after is None
+                        or (float(after) - float(before)) >= 0.85 * max(1.0, want)):
+                    break
+                time.sleep(0.2)
+            freed = (0.0 if (before is None or after is None)
+                     else max(0.0, float(after) - float(before)))
     try:
         w._used_mb = 0.0            # 账已经清了：下一次 call 重新量
     except Exception:                                       # noqa: BLE001
         pass
-    freed = (0.0 if (before is None or after is None)
-             else max(0.0, float(after) - float(before)))
     ms = (time.time() - t0) * 1000.0
-    print("[vram] 回收预览模型 %.0f MB（%s · %s · %.0fms）：空闲 %s → %s MB"
+    print("[vram] 回收预览模型 %.0f MB（%s · %s · %.0fms%s）：空闲 %s → %s MB"
           % (freed, why, "/".join(names[:3]) or "-", ms,
+             " · 进程已回收" if recycled else "",
              "?" if before is None else int(before),
              "?" if after is None else int(after)), flush=True)
     return {"ok": True, "did": True, "freed_mb": round(freed, 1), "ms": round(ms, 1),
             "models": names, "before_mb": before, "after_mb": after,
-            "want_mb": round(want, 1), "why": ""}
+            "want_mb": round(want, 1), "recycled": bool(recycled), "why": ""}
 
 
 def _vram_release_inproc(reason: str = "任务收尾") -> dict:
@@ -8823,6 +8867,43 @@ def _vram_batch_mb(size_px: int, batch) -> float:
     return (c_last + slope * (b - b_last)) * k
 
 
+def _vram_reserve_mb(free_mb) -> float:
+    """这次该给驱动/碎片/别人插队留多少 MB —— **可解释，而且不给 8GB 卡留死重**。
+
+    口径：reserve = min(768, max(256, free × 5%))。
+
+    为什么不是老的「free × 20% + 512MB」（那在 8GB 卡空闲 3.4GB 时是 1.19GB，
+    再叠上「一份会话 / 一帧缓冲」之后正好变成用户看到的「需要 2.46GB / 可用 2.03GB」）：
+
+      · **20% 是拍的，不是量的。** 它出在 ceaf4f4 第一版预算里（提交信息只有
+        「avail=free×0.8-512MB」，没有任何测量支撑）。而真正会被预留吸收的那两项
+        早就有实测，而且都已经落在 need 里：
+          - CUDA context：每份会话 512MB，need 里明着算（_VRAM_CTX_MB）；
+          - ORT 的 CUDA arena：416 实测 +135MB、384 实测 +221MB（会话建好那一刻），
+            而「batch 4 起 arena 换池子」那一步的 +1036MB **已经包含在
+            _VRAM_BATCH_PTS 的实测台阶里**（那张表量的是「整卡增量 − 会话本身」），
+            再拿一个 20% 去覆盖它 = 同一笔钱记两遍。
+      · 真正需要预留的是**探测滞后**和**别人插队**，量级都在几百 MB：
+          - P0 校准：我们的 free 与 nvidia-smi 原始行差 ≤256MB（两条路取小之后）；
+          - 探测有 2~4s 缓存（_VRAM_PROBE_TTL / _SMI_MEM），这期间浏览器开个视频
+            硬件加速就能抢走几百 MB；
+          - 用户改一次参数会连打几次 dry_run，中间那点抖动不该被判成「不够」。
+        所以底线取 256MB 正好覆盖第一条，5% 让大空闲时自动放宽一点，
+        上限 768MB 防止 24GB 卡上又长出一个 1.2GB 的死重。
+
+    实测佐证（本机 RTX 5070 Laptop 8GB）：按新口径算，「空闲 3.17GB / 需要 2.46GB」
+    的单子直接放行，真跑 12 帧 0 OOM（app/tools/vram_force_accept.py 的 A 段）；
+    而按老口径它必被拒 —— 那 1.37GB 里没有一个字节是实测需要的。
+    """
+    free = max(0.0, float(free_mb or 0.0))
+    # 对照/回滚用：DFL_VRAM_RESERVE_MODE=legacy20 复原老口径（空闲 20% + 512MB）。
+    # （下面的 _vram_reserve_rule_text 把同一件事说成一句人话，文案里照抄它。）
+    # 只给验收脚本做「新旧两套数字并排」用 —— 生产默认 auto（上面的新口径）。
+    if str(os.environ.get("DFL_VRAM_RESERVE_MODE") or "").strip().lower() in ("legacy", "legacy20", "old"):
+        return free * 0.20 + 512.0
+    return min(float(_VRAM_RESERVE_MAX_MB),
+               max(float(_VRAM_RESERVE_MB), free * float(_VRAM_SAFETY)))
+
 def _vram_cpu_fallback_env() -> bool:
     return str(os.environ.get(_VRAM_ENV_CPU) or "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -8964,7 +9045,12 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
         "model_mb": round(model_mb, 1), "sess_mb": round(sess_mb, 1),
         "ctx_mb": int(_VRAM_CTX_MB), "arena_mb": int(_VRAM_ARENA_MB),   # arena 只在日志里提一句
         "aux_mb": round(aux, 1), "frame_mb": round(frame_mb, 2),
-        "safety": float(_VRAM_SAFETY), "reserve_mb": int(_VRAM_RESERVE_MB),
+        # 预留：随空闲缩放（free×5%，底线 256MB、上限 768MB），见 _vram_reserve_mb
+        "safety": float(_VRAM_SAFETY),
+        "reserve_mb": round(_vram_reserve_mb(free), 1),
+        "reserve_min_mb": int(_VRAM_RESERVE_MB), "reserve_cap_mb": int(_VRAM_RESERVE_MAX_MB),
+        "reserve_pct_mb": round(float(free or 0.0) * float(_VRAM_SAFETY), 1),
+        "forced": False,
         "free_mb": (None if free is None else int(free)),
         "total_mb": (None if total is None else int(total)),
         "source": src, "avail_mb": None, "need_mb": round(floor["need_mb"], 1),
@@ -9004,10 +9090,14 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
                      "free_smi_mb": o.get("free_smi_mb")})
 
     def _avail_for(extra_mb):
-        # 口径：可用 = 空闲×(1-安全系数) + 可回收 − 预留。以前是「只看空闲」——
-        # 于是「我们自己占着 2GB、其实随时能收回来」会被算成「这台机器不够跑」。
-        return max(0.0, (float(free) * (1.0 - _VRAM_SAFETY) + float(extra_mb)
-                         - float(_VRAM_RESERVE_MB)))
+        # 口径：可用 = 空闲 − 预留(free) + 可回收。
+        #   · 「+ 可回收」：我们自己占着 2GB 但随时能收回来，不该算成「这台机器不够跑」；
+        #   · 「− 预留」：预留**随空闲缩放**（5%，底线 256 / 上限 768），
+        #     不是老的 20%+512MB —— 见 _vram_reserve_mb 那一大段实测依据。
+        reserve = float(_vram_reserve_mb(free))
+        plan["reserve_mb"] = round(reserve, 1)
+        plan["reserve_pct_mb"] = round(float(free) * float(_VRAM_SAFETY), 1)
+        return max(0.0, float(free) - reserve + float(extra_mb))
 
     def _pick(avail_value):
         plan["avail_mb"] = round(avail_value, 1)
@@ -9109,6 +9199,9 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
                                % (reclaim_left / 1024.0))
         plan["msg"] = "%s：%s · 预计峰值 %.0f MB / 可用 %.0f MB" % (
             label, plan["reason"], hit["need_mb"], avail)
+        # 放行的这一份也带 summary：status 页 / 排障日志里的「本程序 / 其它程序 /
+        # 空闲」和拒绝态是同一句话，用户不用在两个地方看两套口径。
+        plan["summary"] = _vram_summary_line(plan)
         return plan
 
     # 连最小档都装不下：把「最小档」的数字落到 plan 上（拒绝消息里的拆项必须和
@@ -9118,7 +9211,12 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
                  "procs": int(floor["procs"])})
     plan["frame_budget"] = int(plan["frames"])
     plan["msg"] = _vram_refuse_msg(plan, label)
-    plan["suggest"] = ["关掉占 GPU 的程序后重试", "换更小的 .dfm / 调低帧预算",
+    plan["summary"] = _vram_summary_line(plan)
+    # 注意：这段文字会进后端日志，而验收脚本靠「日志里没有 out of memory / OOM」
+    # 证明「拒绝发生在加载模型之前」—— 所以这里不写 OOM 字样（按钮标签里有，够了）。
+    plan["suggest"] = ["关掉占 GPU 的程序后重试（界面里有「本程序/其它程序/空闲」三栏）",
+                       "点「仍然尝试（可能爆显存）」强制放行一次，真跑不动会自动回滚",
+                       "换更小的 .dfm / 调低帧预算",
                        "设 %s=1 用 CPU 跑" % _VRAM_ENV_CPU]
     if _vram_cpu_fallback_env():
         plan.update({"ok": True, "cpu": True, "procs": 1,
@@ -9130,6 +9228,26 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
                        "（慢约 %.0f 倍；不设 %s 时这里会明确拒绝）"
                        % (label, plan["need_mb"] / 1024.0, avail / 1024.0,
                           _VRAM_CPU_SLOW, _VRAM_ENV_CPU))
+        return plan
+    if opts.get("force"):
+        # 用户明确要试（拒绝面板上的「仍然尝试（可能 OOM）」）：按**最小档**放行。
+        # 这不是把闸门拆了 —— 只是把「我替你决定」换成「你自己决定」：
+        # 该记的账全都留在 plan 上（forced=True、差多少 MB），真 OOM 了由
+        # _vram_oom_rollback 把现场收干净并回到拒绝态（见 routes 里的 OOM 分支）。
+        plan.update({"ok": True, "cpu": False, "forced": True, "downgraded": True,
+                     "peak_mb": round(float(floor["need_mb"]), 1),
+                     "reason": "用户选择强制尝试：按最小档（帧 %d / 批 %d / 进程 %d）放行，"
+                               "可能跑不动" % (int(floor["frames"]), int(floor["batch"]),
+                                               int(floor["procs"]))})
+        plan["msg"] = ("%s：强制尝试 —— 需要 %.2f GB / 可用 %.2f GB（差 %.0f MB），"
+                       "按最小档放行（帧 %d / 批 %d）；真跑不动会自动回滚到拒绝态"
+                       % (label, float(plan["need_mb"]) / 1024.0, avail / 1024.0,
+                          max(0.0, float(plan["need_mb"]) - float(avail)),
+                          int(plan["frames"]), int(plan["batch"])))
+        plan["summary"] = _vram_summary_line(plan)
+        print("[vram] 强制尝试 %s：需要 %.0f MB / 可用 %.0f MB（预留 %.0f MB）→ 放行最小档"
+              % (label, float(plan["need_mb"]), float(avail),
+                 float(plan.get("reserve_mb") or 0.0)), flush=True)
         return plan
     plan["reason"] = (("连 1 个 worker 都要 %.0f MB > 可用 %.0f MB"
                        % (floor["need_mb"], avail)) if mode == "procs" else
@@ -9171,6 +9289,14 @@ def _vram_refuse_extra(plan: dict, what: str = "") -> dict:
         "own_preview_mb": _num("own_preview_mb"),
         "reclaimable_mb": _num("reclaimable_mb"), "reclaimed_mb": _num("reclaimed_mb"),
         "other_mb": _num("other_mb"), "preview_models": list(plan.get("preview_models") or []),
+        # 预留是**显式**的一个数（不再是「20% + 512MB」那种让用户猜的口径）
+        "reserve_mb": _num("reserve_mb"), "reserve_min_mb": int(plan.get("reserve_min_mb") or 0),
+        "reserve_pct_mb": _num("reserve_pct_mb"),
+        "safety": _num("safety"),
+        # 一行话（前端原样显示：需要 / 空闲 − 预留 = 可用 / 本程序·其它程序·空闲）
+        "summary": _vram_summary_line(plan),
+        # 拒绝面板上那颗「仍然尝试（可能 OOM）」：前端看到它才亮按钮
+        "can_force": True, "forced": bool(plan.get("forced")),
         "procs": int(plan.get("procs") or 1),
         "frames": int(plan.get("frames") or 0),
         "batch": int(plan.get("batch") or 0),
@@ -9179,11 +9305,48 @@ def _vram_refuse_extra(plan: dict, what: str = "") -> dict:
     }
 
 
-def _vram_refuse_msg(plan: dict, what: str = "这个任务") -> str:
-    """拒绝消息：**必须带数字**（需要多少 / 可用多少 / 怎么改）。
+def _vram_summary_line(plan: dict) -> str:
+    """**一行**说清这笔账（前端 toast、拒绝面板、日志都读它，不再自己拼中文）。
 
-    形状固定成「需要 X GB（拆项）/ 可用 Y GB（怎么算的）/ 建议 ①②③」——
-    前端直接展示，用户不用翻日志就知道该关什么。
+    形状（用户口径，这一轮定的）：
+        需要 2.46 GB · 空闲 3.40 GB 里预留 0.25 GB 给驱动/碎片（max(256MB, 空闲×5%)）
+        = 实际可用 3.15 GB · 本程序 0.01 GB / 其它程序 4.78 GB / 空闲 3.40 GB
+
+    为什么非要挤在一行：老的文案把「显存去向」另起了一句，而前端 mgVramLine 只认
+    need_mb/avail_mb 两个数 —— 结构化字段**根本没被显示出来**，用户看到的永远只有
+    「需要 X，可用 Y」，当然不知道那 4.6GB 是谁占的、也不知道 1.37GB 是预留。
+    """
+    plan = dict(plan or {})
+    free = plan.get("free_mb")
+    avail = float(plan.get("avail_mb") or 0.0) / 1024.0
+    need = float(plan.get("need_mb") or 0.0) / 1024.0
+    reserve = float(plan.get("reserve_mb") or 0.0) / 1024.0
+    pct = int(round(float(plan.get("safety") or 0.0) * 100))
+    floor_mb = int(plan.get("reserve_min_mb") or _VRAM_RESERVE_MB)
+    bits = ["需要 %.2f GB" % need]
+    if free is not None:
+        bits.append("空闲 %.2f GB 里预留 %.2f GB 给驱动/碎片（规则 %s）"
+                    " = 实际可用 %.2f GB" % (float(free) / 1024.0, reserve,
+                                             _vram_reserve_rule_text(), avail))
+    else:
+        bits.append("实际可用 %.2f GB（显存探不到）" % avail)
+    own = plan.get("own_mb")
+    other = plan.get("other_mb")
+    if own is not None or other is not None:
+        bits.append("本程序 %.2f GB / 其它程序 %s / 空闲 %s"
+                    % (float(own or 0.0) / 1024.0,
+                       ("?" if other is None else "%.2f GB" % (float(other or 0.0) / 1024.0)),
+                       ("?" if free is None else "%.2f GB" % (float(free) / 1024.0))))
+    if plan.get("forced"):
+        bits.append("（强制尝试）")
+    return " · ".join(bits)
+
+
+def _vram_refuse_msg(plan: dict, what: str = "这个任务") -> str:
+    """拒绝消息：**必须带数字**（需要多少 / 空闲多少 / 预留多少 / 可用多少 / 怎么改）。
+
+    第一句就是 _vram_summary_line 那一行（前端原样显示），后面才是拆项与建议 ——
+    用户口径：「把预留写出来，别让我猜」。
     """
     what = str(what or plan.get("label") or "这个任务")
     need = float(plan.get("need_mb") or 0.0) / 1024.0
@@ -9201,35 +9364,21 @@ def _vram_refuse_msg(plan: dict, what: str = "这个任务") -> str:
                      % (int(plan.get("frames") or 0),
                         float(plan.get("per_frame_mb") or 0.0)))
     parts.append("dfm 批（最小档）%.2f GB" % (float(plan.get("batch_mb") or 0.0) / 1024.0))
-    # ---- 显存去向（这是这次真正要治的病：用户只看到「空闲 1387MB」，不知道是谁占的）----
-    own = plan.get("own_mb")
-    other = plan.get("other_mb")
+    # ---- 显存去向的补注（归属那一行在 _vram_summary_line 里，前端/toast 都显示它）----
     rec_left = float(plan.get("reclaimable_mb") or 0.0) / 1024.0
     got_back = float(plan.get("reclaimed_mb") or 0.0) / 1024.0
     src = ""
-    if own is not None or other is not None:
-        src = ("显存去向：本程序 %.2f GB（本进程 %.2f GB + 预览 worker %.2f GB，其中可回收 %.2f GB）"
-               " · 其它程序 %s · 空闲 %.2f GB。"
-               % (float(own or 0.0) / 1024.0,
-                  float(plan.get("own_inproc_mb") or 0.0) / 1024.0,
-                  float(plan.get("own_preview_mb") or 0.0) / 1024.0,
-                  rec_left,
-                  ("?" if other is None else "%.2f GB" % (float(other or 0.0) / 1024.0)),
-                  (0.0 if free is None else float(free) / 1024.0)))
-        if got_back > 0:
-            src += "（本轮已经回收预览模型 %.2f GB）" % got_back
-        elif rec_left > 0:
-            src += "（预览 worker 忙，这 %.2f GB 还没回收掉 —— 导出前会再收一次）" % rec_left
-    return ("%s：显存不够 —— 需要 %.2f GB（%s），可用 %.2f GB（空闲 %s MB，预留 %d%% + %d MB）。"
-            "%s"
+    if got_back > 0:
+        src = "（本轮已经回收预览模型 %.2f GB）" % got_back
+    elif rec_left > 0:
+        src = "（预览 worker 忙，这 %.2f GB 还没回收掉 —— 导出前会再收一次）" % rec_left
+    return ("%s：显存不够 —— %s。"
+            "拆项：%s。%s"
             "建议：① 关掉占 GPU 的程序（浏览器硬件加速/游戏/另一个导出）后重试；"
-            "② 换更小的 .dfm，或把「帧预算」调低（请求的是 %d 帧）；"
-            "③ 设 %s=1 改用 CPU 跑（慢约 %.0f 倍，但能出片）。"
-            % (what, need, " + ".join(parts), avail,
-               ("?" if free is None else int(free)),
-               int(round(float(plan.get("safety") or 0.0) * 100)),
-               int(plan.get("reserve_mb") or 0),
-               src,
+            "② 点「仍然尝试（可能爆显存）」强制放行一次（真跑不动会自动回滚，不会把后端搞坏）；"
+            "③ 换更小的 .dfm，或把「帧预算」调低（请求的是 %d 帧）；"
+            "④ 设 %s=1 改用 CPU 跑（慢约 %.0f 倍，但能出片）。"
+            % (what, _vram_summary_line(plan), " + ".join(parts), src,
                int(plan.get("requested_frames") or 0),
                _VRAM_ENV_CPU, _VRAM_CPU_SLOW))
 
@@ -9240,11 +9389,13 @@ def _vram_log_lines(plan: dict, tag: str = "") -> list:
     src = str(plan.get("source") or "?")
     if plan.get("free_mb") is None:
         return ["%s：显存探不到（%s）→ %s" % (tag, src, plan.get("reason") or "不降档")]
-    lines = ["%s：显存 空闲 %s / 共 %s MB（%s）· 预算 %.0f MB = 空闲 - %d%% - %d MB + 可回收 %.0f MB"
+    lines = ["%s：显存 空闲 %s / 共 %s MB（%s）· 预算 %.0f MB = 空闲 − 预留 %.0f MB"
+             "（max(%d MB, 空闲×%d%%)）+ 可回收 %.0f MB"
              % (tag, plan.get("free_mb"), plan.get("total_mb") or "?", src,
                 float(plan.get("avail_mb") or 0.0),
+                float(plan.get("reserve_mb") or 0.0),
+                int(plan.get("reserve_min_mb") or _VRAM_RESERVE_MB),
                 int(round(float(plan.get("safety") or 0.0) * 100)),
-                int(plan.get("reserve_mb") or 0),
                 float(plan.get("reclaim_left_mb") or 0.0)),
              # 显存去向：谁占的（本程序/其它程序）。用户那句「我什么都没跑」就是靠这一行回答
              "%s：显存去向 本程序 %.0f MB（本进程 %.0f + 预览 worker %.0f）· 其它程序 %s MB"
@@ -9292,6 +9443,13 @@ def _vram_log_lines(plan: dict, tag: str = "") -> list:
                         float(st.get("need_mb") or 0),
                         "≤" if st.get("fit") else ">", float(st.get("avail_mb") or 0)))
         _stop = bool(st.get("fit"))
+    if plan.get("forced"):
+        lines.append("%s：⚠ 强制尝试（用户点了「仍然尝试」）—— 需要 %.0f MB / 可用 %.0f MB，"
+                     "差 %.0f MB；真跑不动会自动回滚到拒绝态"
+                     % (tag, float(plan.get("need_mb") or 0.0),
+                        float(plan.get("avail_mb") or 0.0),
+                        max(0.0, float(plan.get("need_mb") or 0.0)
+                            - float(plan.get("avail_mb") or 0.0))))
     if plan.get("cpu"):
         lines.append("%s：★ 当前在 CPU 上跑 ★（%s；不设 %s 时这里会明确拒绝）"
                      % (tag, plan.get("reason") or "", _VRAM_ENV_CPU))
@@ -9361,7 +9519,7 @@ def _preview_guard(dfms, label: str = "预览") -> dict:
 
 
 def _vram_guard(dfms, opts: dict = None, label: str = "任务",
-                sticky: bool = False, reclaim: bool = None) -> dict:
+                sticky: bool = False, reclaim: bool = None, force: bool = None) -> dict:
     """加载模型**之前**的一次预算检查：装得下返回计划，装不下抛 400（消息带数字）。
 
     sticky=True（预览用）：只在「要在 CPU 上跑」时短路全链路，不允许把别人的 CPU 开关关掉。
@@ -9369,6 +9527,10 @@ def _vram_guard(dfms, opts: dict = None, label: str = "任务",
     reclaim：算账之前先回收**我们自己**占的显存（常驻预览 worker 里那份 dfm 会话）。
     默认 = 非 sticky，也就是所有导出/阶段闸门都回收，预览自己不回收（它正是要靠那份
     常驻模型才快，而且 _preview_guard 有「已常驻 = 增量 0」的特例）。
+
+    force：用户点了拒绝面板上的「仍然尝试（可能 OOM）」—— 装不下也放行最小档
+    （plan.forced=True）。**只放行、不改账**：need/avail/差多少 MB 全留在 plan 上，
+    真 OOM 时 _vram_oom_rollback 收现场并回到拒绝态。
     """
     if isinstance(dfms, (str, Path)):
         paths = [str(dfms)]
@@ -9379,8 +9541,10 @@ def _vram_guard(dfms, opts: dict = None, label: str = "任务",
         opts["size_px"] = _dfm_size_hint(paths[0] if paths else "")
     if reclaim is None:
         reclaim = (not sticky)
+    if force is None:
+        force = bool(opts.get("force"))
     plan = _vram_plan(_vram_models_mb(paths),
-                      dict(opts, label=label, reclaim=bool(reclaim)))
+                      dict(opts, label=label, reclaim=bool(reclaim), force=bool(force)))
     _vram_apply(plan, label, sticky=bool(sticky))
     if not plan.get("ok"):
         msg = plan.get("msg") or _vram_refuse_msg(plan, label)
@@ -9390,6 +9554,118 @@ def _vram_guard(dfms, opts: dict = None, label: str = "任务",
         # 不再去正则抠中文），并且**在起 job / 加载模型之前**抛出去。
         raise _BadInput(msg, 400, extra=_vram_refuse_extra(plan, label))
     return plan
+
+def _vram_forced_rollback(label: str, model_mb: float, opts: dict, err) -> dict:
+    """强制尝试失败之后：该不该按「确实不够 / 已回滚」收口？要的话返回回滚现场。
+
+    判据两条，满足其一就算**真的不够**：
+      ① 报错文本是显存类（ORT / torch / TRT 的说法）；
+      ② 把现场收干净、重探一次之后，按当下的空闲**仍然装不下**。
+
+    ② 是必要的兜底：ORT 建 session 失败时给的异常五花八门（有的只有 "CUDA failure"），
+    只看文本会漏判，用户就只看到一句「导出失败」，而真相是「这块卡确实不够」。
+    反过来说，如果重探之后其实装得下（内存被别的程序还回来了 / 是我们自己的 bug），
+    这里**不**改写成「显存不够」—— 那种错该老实报错。
+    """
+    rb = _vram_oom_rollback(label, model_mb, opts, err)
+    if _vram_oom_is_text(err):
+        return rb
+    if not bool((rb.get("plan") or {}).get("ok")):
+        return rb
+    return {}
+
+
+def _vram_oom_inject_on() -> bool:
+    """验收专用：DFL_ALLOW_TEST_HOOK=1 + DFL_VRAM_OOM_INJECT=1 时，_dfm_session 立刻抛 OOM。
+
+    为什么需要这个钩子：WDDM 下「显存不够」通常**不会** OOM —— 驱动会把别人的分配换页
+    出去，本机实测把空闲压到 600MB 再 force=1 竟然还能出片（慢，但不失败）。要让
+    「强制尝试 → OOM → 回滚 → 还能再试」这条路可复现，只能注入一次 OOM。
+    双开关是照 _vram_free_mb.txt 那条规矩来的：生产环境不读任何测试钩子。
+    """
+    if str(os.environ.get("DFL_ALLOW_TEST_HOOK") or "").strip() not in ("1", "true", "yes", "on"):
+        return False
+    return str(os.environ.get("DFL_VRAM_OOM_INJECT") or "").strip() in ("1", "true", "yes", "on")
+
+
+def _vram_reserve_rule_text() -> str:
+    """预留这条规则的一句话（文案/日志共用，避免口径和数字对不上）。"""
+    if str(os.environ.get("DFL_VRAM_RESERVE_MODE") or "").strip().lower() in ("legacy",
+                                                                             "legacy20", "old"):
+        return "老口径 空闲×20% + 512MB"
+    return "max(256MB, 空闲×5%)"
+
+
+def _vram_oom_is_text(text) -> bool:
+    """这段文字/异常是不是「真的没显存了」（ORT / torch / TRT 的说法都认）。"""
+    s = str(text or "").lower()
+    return any(k in s for k in ("out of memory", "cuda_error_out_of_memory",
+                               "cudaerrormemoryallocation", "failed to allocate",
+                               "insufficient memory", "resource_exhausted",
+                               "cudnn_status_alloc_failed"))
+
+
+def _vram_oom_rollback(label: str = "任务", model_mb: float = 0.0, opts: dict = None,
+                       err="") -> dict:
+    """强制尝试撞上 OOM 之后：**干净地**回到拒绝态（用户那条「别把后端搞坏」）。
+
+    四件事，顺序不能反：
+      ① 放掉本进程的 dfm / XSeg 会话 + gc + empty_cache —— OOM 之后 ORT 的 arena
+         可能还挂在那个建到一半的 session 上，不清掉下一次连预览都抢不到显存；
+      ② 重新探一次空闲（fresh，不吃 2~4s 缓存），按**当下的数**重算一份拒绝计划
+         （不是拿 OOM 之前那份旧账忽悠用户）；
+      ③ 一句话说清「确实不够 / 已回滚 / 差多少 / 可以再试」；
+      ④ 别人的东西一概不动：预览 worker 不重载、后台进程不杀 —— 所以下次还能再试。
+
+    返回的 dict 会挂到 /export/status 与 /stage/status 的 vram_oom 键上（前端据此
+    把界面从「进度页」搬回「被拒态」并把 current 的数字重画一遍）。
+    """
+    rel = {}
+    try:
+        rel = _vram_release_inproc("强制尝试 OOM 回滚")
+    except Exception as e:                                  # noqa: BLE001
+        print("[vram] OOM 回滚：放掉本进程会话失败：%s" % str(e)[:160], flush=True)
+    try:
+        import gc
+        gc.collect()
+        gc.collect()
+        torch = sys.modules.get("torch")
+        if torch is not None and torch.cuda.is_initialized():
+            torch.cuda.empty_cache()
+    except Exception:                                       # noqa: BLE001
+        pass
+    o2 = dict(opts or {})
+    for k in ("force", "free_mb", "total_mb", "reclaim", "reclaim_inproc", "resident"):
+        o2.pop(k, None)          # 回滚这一拍：不许再强制，也不许拿一份旧 free 充数
+    o2.update({"label": label, "reclaim": False, "force": False})
+    try:
+        plan = _vram_plan(float(model_mb or 0.0), o2)
+    except Exception as e:                                  # noqa: BLE001
+        plan = {"ok": False, "need_mb": None, "avail_mb": None,
+                "reason": "重算预算失败：%s" % str(e)[:160], "msg": ""}
+    try:
+        free = plan.get("free_mb")
+        summary = "强制尝试失败：%s" % _vram_summary_line(plan)
+        gap = max(0.0, float(plan.get("need_mb") or 0.0) - float(plan.get("avail_mb") or 0.0))
+        msg = ("%s：强制尝试失败了 —— 确实不够（运行中 OOM：%s）。"
+               "已回滚：放掉本进程会话 %s，空闲现在 %s MB（%s）。差 %.0f MB，"
+               "关掉占 GPU 的程序后可以再点一次。"
+               % (label, str(err or "").strip()[:200] or "显存分配失败",
+                  "、".join(list((rel or {}).get("released") or [])[:3]) or "无（本来就没有）",
+                  ("?" if free is None else int(free)), summary, gap))
+    except Exception:                                       # noqa: BLE001
+        summary, msg = "强制尝试失败：显存确实不够，已回滚", "强制尝试失败：显存确实不够，已回滚"
+    print("[vram] ★ %s ★" % msg, flush=True)
+    return {"ok": False, "kind": "vram_oom", "label": label,
+            "released": list((rel or {}).get("released") or []),
+            "need_mb": plan.get("need_mb"), "avail_mb": plan.get("avail_mb"),
+            "free_mb": plan.get("free_mb"), "total_mb": plan.get("total_mb"),
+            "reserve_mb": plan.get("reserve_mb"), "own_mb": plan.get("own_mb"),
+            "other_mb": plan.get("other_mb"), "can_force": False,
+            "summary": summary, "msg": msg, "error": msg,
+            "suggest": ["关掉占 GPU 的程序后重试", "换更小的 .dfm / 调低帧预算",
+                        "设 %s=1 用 CPU 跑" % _VRAM_ENV_CPU],
+            "plan": dict(plan)}
 
 _PRED_VRAM_SAFETY = 0.20      # 留 20% 余量：探测量打八折才是敢用的预算
 _PRED_BATCH_CAP = 32          # 上限（再大对单卡没意义，batch 16 起反而开始抖）
@@ -11810,6 +12086,17 @@ def _stage_worker(cfg: dict):
         traceback.print_exc()
         ok, err = False, "%s: %s" % (e.__class__.__name__, str(e)[:600])
     finally:
+        # 强制尝试失败：先回滚现场（放掉本进程会话 + 重算当下的账 + 改写 err），
+        # 再往 meta/status 落字 —— 顺序反了用户就会看到「导出失败」而不是「确实不够」。
+        if (not ok) and (not cancelled) and cfg.get("vram_force"):
+            _rb = _vram_forced_rollback(
+                str(_STAGE_LABEL.get(str(_STAGE_JOB.get("stage") or cfg.get("stage") or ""),
+                                     "阶段")),
+                _vram_models_mb([str(cfg.get("dfm") or "")]),
+                {"mode": "none", "procs": 1}, err)
+            if _rb:
+                cfg["vram_oom"] = _rb
+                err = str(_rb.get("msg") or err)
         cache = Path(cfg["cache"])
         meta = cfg.get("meta") or {}
         # 失败/取消：把状态和错误写进 meta（断电续跑时一眼能看出停在哪），cache 保留
@@ -11835,8 +12122,14 @@ def _stage_worker(cfg: dict):
                       (cache_state or {}).get("extra") or "无",
                       len((cache_state or {}).get("files") or [])))
         chain = bool(cfg.get("chain"))
+        _oom = dict(cfg.get("vram_oom") or {})
         with _STAGE_LOCK:
             pct = 100 if ok else int(_STAGE_JOB.get("pct") or 0)
+            if _oom:
+                vp = dict(_oom.get("plan") or _STAGE_JOB.get("vram_plan") or {})
+                vp["forced_failed"] = True
+                _STAGE_JOB["vram_plan"] = vp
+            _STAGE_JOB["vram_oom"] = (_oom or None)
             _STAGE_JOB.update({
                 "running": False, "ok": bool(ok), "cancelled": bool(cancelled),
                 "phase": ("done" if ok else ("cancelled" if cancelled else "failed")),
@@ -11935,6 +12228,8 @@ def merge_stage_status(cache_dir: str = "", video: str = ""):
         "out_video": str(snap.get("out_video") or ""),
         # 这次阶段是按什么显存预算放行的（和被拒时的结构化字段同一份形状）
         "vram_plan": dict(snap.get("vram_plan") or {}),
+        # 强制尝试撞上 OOM 的现场（非空 = 确实不够、已回滚；前端回到被拒态）
+        "vram_oom": (dict(snap.get("vram_oom") or {}) or None),
         # 帧范围 + **相对进度**：frames_total/frames_done 都是「这一段」里的数
         "range": dict(rng_m),
         "range_key": str(rng_m.get("key") or ""),
@@ -12068,7 +12363,7 @@ def _stage_model_resident(stage: str, paths: list, cfg: dict) -> bool:
     return False
 
 
-def _stage_vram_gate(cfg: dict, stage: str) -> dict:
+def _stage_vram_gate(cfg: dict, stage: str, force: bool = False) -> dict:
     """阶段起手前的显存闸门 —— **在起 job / 加载模型 / 开线程之前**跑。
 
     用户口径（截图 2）：显存不够时点导出，不许先起一个 job 再把六个阶段全打失败。
@@ -12092,7 +12387,9 @@ def _stage_vram_gate(cfg: dict, stage: str) -> dict:
         pass
     # 真装不下时允许放掉本进程里**别人的**会话（没有任务在跑才敢，见 _vram_plan）
     opts["reclaim_inproc"] = True
-    return _vram_guard(paths, opts, label=label)
+    # force：「仍然尝试（可能 OOM）」—— 只放行最小档，真 OOM 由 _stage_worker 回滚
+    opts["force"] = bool(force)
+    return _vram_guard(paths, opts, label=label, force=bool(force))
 
 
 @router.post("/api/merge/stage/{name}")
@@ -12135,8 +12432,9 @@ def merge_stage(name: str, body: dict = None):
     # 顺序有讲究：先跑前置检查（缺上游 → 409 点名要跑哪一步），再算显存账。
     # 反过来的话，一个"还没切帧"的用户会拿到「显存不够」，而真原因是那个 409。
     # 闸门只算账：不加载模型、不建 job、不开线程 —— 拒绝 = 这一单什么都没发生。
-    vplan = _stage_vram_gate(cfg, stage)
+    vplan = _stage_vram_gate(cfg, stage, force=_bool_val(body.get("force"), False))
     cfg["vram_plan"] = vplan
+    cfg["vram_force"] = bool(vplan.get("forced"))
     if _bool_val(body.get("dry_run"), False):
         return _ok(dry_run=True, stage=stage, started=False, skipped=False,
                    vram_plan=dict(vplan), need_mb=vplan.get("need_mb"),
@@ -12288,7 +12586,7 @@ def _fused_frame_mb(size_px: int) -> float:
 
 def _fused_budget(want: int, free_mb, total_mb, size_px: int, model_mb: float = 0.0,
                   batch: int = 0, label: str = "快速导出",
-                  resident: bool = False) -> dict:
+                  resident: bool = False, force: bool = False) -> dict:
     """fused 的帧预算 —— 现在就是 _vram_plan 的一层壳（老调用方读的键一个都不改）。
 
     和以前那一版（只按 30/16/8 降帧）的区别只有两点，但都是这次要治的病：
@@ -12305,7 +12603,7 @@ def _fused_budget(want: int, free_mb, total_mb, size_px: int, model_mb: float = 
     """
     opts = {"mode": "frames", "size_px": int(size_px or _VRAM_BASE_PX),
             "frames": int(want or 0), "batch": int(batch or 0), "procs": 1,
-            "label": label, "resident": bool(resident)}
+            "label": label, "resident": bool(resident), "force": bool(force)}
     if free_mb is not None:
         opts["free_mb"] = int(free_mb)
         if total_mb is not None:
@@ -12738,7 +13036,8 @@ def _fused_run(cfg: dict) -> dict:
     size_hint = _dfm_size_hint(cfg["dfm"])
     want_frames = int(cfg.get("frame_budget_want") or 0)
     bud = _fused_budget(want_frames, None, None, size_hint,
-                        model_mb=model_mb, batch=int(batch_target))
+                        model_mb=model_mb, batch=int(batch_target),
+                        force=bool(cfg.get("vram_force")))
     _vram_apply(bud, "快速导出")
     for _ln in _vram_log_lines(bud, "快速导出"):
         _vid_log(_ln)
@@ -12760,7 +13059,7 @@ def _fused_run(cfg: dict) -> dict:
         # 只判增量：检测/遮罩（检测器上面已经加载了）+ 帧缓冲 + dfm 批。
         bud = _fused_budget(want_frames, None, None, size_px,
                             model_mb=model_mb, batch=int(batch_target),
-                            resident=True)
+                            resident=True, force=bool(cfg.get("vram_force")))
         _vram_apply(bud, "快速导出")
         for _ln in _vram_log_lines(bud, "快速导出"):
             _vid_log(_ln)
@@ -13600,6 +13899,18 @@ def _fused_worker(cfg: dict):
         traceback.print_exc()
         ok, err = False, "%s: %s" % (e.__class__.__name__, str(e)[:600])
     finally:
+        # 强制尝试失败：先回滚现场（放掉本进程会话 + 重算当下的账 + 改写 err）再收尾 ——
+        # 见 _vram_oom_rollback / _vram_forced_rollback。顺序反了用户看到的就是
+        # 「导出失败」，而不是「确实不够，已回滚」。
+        if (not ok) and (not cancelled) and cfg.get("vram_force"):
+            _rb = _vram_forced_rollback("快速导出", _vram_model_mb(cfg.get("dfm")),
+                                        {"mode": "frames",
+                                         "frames": int(cfg.get("frame_budget_want") or 0),
+                                         "batch": int(cfg.get("fused_batch") or 0),
+                                         "procs": 1}, err)
+            if _rb:
+                cfg["vram_oom"] = _rb
+                err = str(_rb.get("msg") or err)
         # active 保持 true 直到下面的收尾全部做完（删临时帧 / 清半截成片 / 写终态）。
         # 取消之后 /export/status 的 running 立刻变 false（既有语义，看门狗靠它），
         # 所以「能不能再点一次导出」要看 active —— 临时帧还没删完就再起一单，
@@ -13633,6 +13944,12 @@ def _fused_worker(cfg: dict):
         # 显示层用的是 res["budget"]（_fused_run 落实过的计划）；res 没有（失败得太早）就
         # 用 _start_video_export 闸门算的那一份 —— status 里始终有 vram_plan 可查
         vplan = dict((res.get("budget") if res else None) or cfg.get("vram_plan") or {})
+        _oom = dict(cfg.get("vram_oom") or {})
+        if _oom:
+            # 强制尝试 OOM 之后：status 里的 vram_plan 换成**回滚后当下**的这一份，
+            # 前端拿到它就能把「被拒态」的数字重画一遍（不是 OOM 之前那份旧账）。
+            vplan = dict(_oom.get("plan") or vplan)
+            vplan["forced_failed"] = True
         if vplan:
             vplan["cpu"] = bool(_vram_cpu_on())
         with _STAGE_LOCK:
@@ -13640,6 +13957,7 @@ def _fused_worker(cfg: dict):
                 "running": False, "ok": bool(ok), "cancelled": bool(cancelled),
                 "phase": ("done" if ok else ("cancelled" if cancelled else "failed")),
                 "finished_at": time.time(), "error": "" if ok else err,
+                "vram_oom": (_oom or None),
                 "error_detail": "" if ok else "\n".join(
                     list(_STAGE_JOB.get("log") or [])[-30:]),
                 "pct": (100 if ok else int(_STAGE_JOB.get("pct") or 0)),
@@ -13670,6 +13988,7 @@ def _fused_worker(cfg: dict):
                     list(_merge_job.get("log") or []), 30))[:4000]),
                 "cache": cache_state, "frame_budget": bud, "active": False,
                 "vram_plan": vplan, "on_cpu": bool(_vram_cpu_on()),
+                "vram_oom": (_oom or None),
             })
         _vid_log("快速导出结束：%s · %.2f s%s"
                  % ("成功" if ok else ("已取消" if cancelled else "失败"), wall,
@@ -13716,14 +14035,20 @@ def _start_video_export(body: dict):
     #   · 分段链 —— 一次一帧一张脸，没有帧缓冲，按 mode=none（一份会话）算。
     _dfms = (cfg.get("dfm")
              or [m.get("dfm") for m in cfg.get("single_models") or []])
+    # force = 用户在拒绝面板上点了「仍然尝试（可能 OOM）」：装不下也放行最小档。
+    # 只放行、不改账（plan.forced=True 且 need/avail 照旧），真 OOM 由 worker 里的
+    # _vram_oom_rollback 收现场并回到拒绝态 —— 见 _fused_worker / _stage_worker。
+    _force = _bool_val(body.get("force"), False)
     if fused:
         plan = _vram_guard(_dfms,
                            {"mode": "frames", "frames": int(cfg.get("frame_budget_want") or 0),
                             "batch": int(cfg.get("fused_batch") or 0), "procs": 1},
-                           label="快速导出")
+                           label="快速导出", force=_force)
     else:
-        plan = _vram_guard(_dfms, {"mode": "none", "procs": 1}, label="分段导出")
+        plan = _vram_guard(_dfms, {"mode": "none", "procs": 1},
+                           label="分段导出", force=_force)
     cfg["vram_plan"] = plan
+    cfg["vram_force"] = bool(plan.get("forced"))
     if _bool_val(body.get("dry_run"), False):
         # 预检（前端在起 job 之前问一次）：只回计划，不建 job、不开线程、不碰 status。
         return _ok(dry_run=True, fused=bool(fused), stages=(["fused"] if fused

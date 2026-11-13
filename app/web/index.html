@@ -1121,6 +1121,10 @@
               <div class="mgprog-res-txt" id="mgpResultText"></div>
               <div class="mgprog-res-acts">
                 <button class="btn" id="mgpToSettings" type="button">返回导出设置</button>
+                <!-- 次要出口：用户明确说「不理解为什么被拒」，那他更想**试**一次 ——
+                     点了带 force=1 放行 _vram_guard（按最小档真跑）；真 OOM 会自动
+                     回滚到这一页并写明「确实不够、已回滚」，不会把后端搞坏。 -->
+                <button class="btn" id="mgpForceTry" type="button" hidden>仍然尝试（可能 OOM）</button>
               </div>
             </div>
 

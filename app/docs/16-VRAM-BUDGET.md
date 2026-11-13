@@ -21,14 +21,15 @@ HTTP 400（消息里带「需要 X GB / 可用 Y GB / 建议」）；用户显�
 
 ```
 free          = min(torch.mem_get_info, nvidia-smi.memory.free)
-可用预算 avail = free × (1 - 0.20) + 可回收 - 512MB
-                 ↑ 20% 是驱动/碎片/arena 增长余量，512MB 给桌面合成器
+预留 reserve  = min(768MB, max(256MB, free × 5%))      ← 2026-05 起（原来是 free×20%+512MB）
+可用预算 avail = free - reserve + 可回收
+                 ↑ 256MB 底线 = 探测抖动（见 §2.2）；5% 让大空闲自动放宽；768MB 封顶
                  ↑ 可回收 = 我们自己的预览 worker 里那份常驻会话（导出前会真回收掉）
 一份会话 sess  = model_mb(权重，≈ .dfm 文件体积) + 512MB(CUDA context)
 固定开销 fixed = sess × 进程数 + 300MB(检测器 + 2D106 + XSeg)
 帧缓冲         = frames × size²×3×4×4/1MB        （416 → 7.92MB/帧）
 dfm 批         = f(batch)                         （查表，见下）
-总需求 need    = fixed + 帧缓冲 + dfm 批          （resident：会话那项不计，见 §2.2）
+总需求 need    = fixed + 帧缓冲 + dfm 批          （resident：会话那项不计，见 §2.3）
 可行 ⟺ need ≤ avail
 ```
 
@@ -41,7 +42,34 @@ Windows/WDDM 上 `torch.cuda.mem_get_info` 报的空闲**比 nvidia-smi 高**：
 多少」。所以两边都探、取小，`source` 写成 `min(torch 6999 / smi 5693)`，计划里另带
 `free_torch_mb` / `free_smi_mb` 两个键，排障时一眼看见差多少。
 
-### 2.2 三种「容易把可跑的活判死」的口径
+### 2.2 预留为什么从「20% + 512MB」改成「max(256MB, 空闲×5%)」
+
+老口径在 8GB 卡、空闲 3.4GB 时预留 = 3.4×0.2 + 0.512 = **1.19GB**，再叠上「一份会话
++ 帧缓冲」就变成用户截图里那句「需要 2.46 GB / 可用 2.03 GB」—— 而那 1.19GB 里
+**没有一个字节是实测需要的**：
+
+| 会被预留「吸收」的东西 | 实测 | 已经在 need 里？ |
+|---|---|---|
+| CUDA context | 每份会话 512MB | 是：`_VRAM_CTX_MB` 明着算 |
+| ORT CUDA arena（会话刚建好） | 416 +135MB / 384 +221MB | 由预留兜（很小） |
+| arena 换池子那一步（batch 4 起） | +1036MB（416） | 是：已包含在 `_VRAM_BATCH_PTS` 的实测台阶里（那张表量的是「整卡增量 − 会话本身」） |
+| 探测滞后 | 我们与 nvidia-smi 原始行差 ≤256MB；探测有 2~4s 缓存 | 否，真需要 |
+| 别的程序插队 | 浏览器开个硬件加速几百 MB | 否，真需要 |
+
+所以 20% 是**拍的**（出在 ceaf4f4 第一版，提交信息只有「avail=free×0.8-512MB」，
+没有任何测量支撑），而且和 `_VRAM_BATCH_PTS` 对 arena 那一步**重复计账**。
+新口径只覆盖表里最后两行：底线 256MB ≈ P0 校准出来的探测误差（我们 vs nvidia-smi
+差 ≤256MB），5% 让大空闲时自动放宽，768MB 封顶（24GB 卡上别再长出 1.2GB 死重）。
+
+实测（`app/tools/vram_force_accept.py`，本机 RTX 5070 Laptop 8GB / 384 dfm）：
+
+| 场景 | 预留 | 可用 | 结果 |
+|---|---|---|---|
+| 空闲 3.24GB（新口径） | 256MB | 2.91GB | 放行 → 30 帧 / 批 2 → 12 帧 **6.98 帧/秒**，整卡峰值 **7527 / 8151MB**，0 OOM |
+| 空闲 3.04GB（老口径，同一刻对照） | 1134MB | 1.93GB | **拒绝**（差 0.53GB）—— 用户看到的就是这一档 |
+| 空闲 0.63GB | 256MB | 0.38GB | 仍拒绝；`DFL_VRAM_RESERVE_MODE=legacy20` 可复原老口径做对照/回滚 |
+
+### 2.3 三种「容易把可跑的活判死」的口径
 
 | 情形 | 以前 | 现在 |
 |---|---|---|
@@ -88,12 +116,21 @@ batch 4 起 ORT 的 arena 换到另一个池子 → 台阶不是直线，所以 
 
 拒绝响应 = HTTP 400 + **结构化字段**（不是让前端去正则抠中文）：
 
-    {"ok": false, "error": "快速导出：显存不够 —— 需要 1.44 GB（拆项…），可用 0.59 GB（…）。建议：①…",
+    {"ok": false, "error": "快速导出：显存不够 —— 需要 1.44 GB · 空闲 3.04 GB 里预留 1.11 GB …",
      "detail": "同上", "kind": "vram", "label": "快速导出",
-     "need_mb": 1469.7, "avail_mb": 608.0, "free_mb": 1400, "total_mb": null,
+     "need_mb": 2522.3, "avail_mb": 1976.0, "free_mb": 3110, "total_mb": 8150,
+     "reserve_mb": 1134.0, "reserve_min_mb": 256, "reserve_pct_mb": 155.5, "safety": 0.2,
+     "own_mb": 8.0, "own_inproc_mb": 8.0, "own_preview_mb": 0.0, "other_mb": 5040.0,
+     "summary": "需要 2.46 GB · 空闲 3.04 GB 里预留 1.11 GB 给驱动/碎片（规则 …）"
+                " = 实际可用 1.93 GB · 本程序 0.01 GB / 其它程序 4.92 GB / 空闲 3.04 GB",
+     "can_force": true, "forced": false,
      "procs": 1, "frames": 8, "batch": 1,
-     "suggest": ["关掉占 GPU 的程序后重试", "换更小的 .dfm / 调低帧预算", "设 DFL_ALLOW_CPU_FALLBACK=1 用 CPU 跑"],
+     "suggest": ["关掉占 GPU 的程序后重试", "点「仍然尝试（可能爆显存）」强制放行一次", …],
      "vram": { …完整 plan… }}
+
+' + BT + 'summary' + BT + ' 是**一行话**（需要 / 空闲 − 预留 = 可用 / 本程序·其它程序·空闲），
+前端 toast 和被拒面板都直接显示它 —— 老版本只给 need_mb/avail_mb，界面上根本看不到
+「预留」和「谁占的」，用户当然算不明白。
 
 前端只弹**一条** toast（「显存不足：需要 2.44 GB，可用 0.60 GB」+ 一句建议）、进度页收起六步
 只留一行错误 + 「返回导出设置」；同一条拒绝 4 秒内不重复弹（连点不叠 toast）。
@@ -105,6 +142,50 @@ batch 4 起 ORT 的 arena 换到另一个池子 → 台阶不是直线，所以 
 用户关掉占显存的程序后回设置页再点一次即可。验收里这条用
 <WORKSPACE>/_vram_free_mb.txt（一行整数 MB）复现：它比 DFL_VRAM_FREE_MB 多一个能力 ——
 **同一个后端进程里改得动**（env 换档必须重启，那等于把「缓存有没有坏」这件事测没了）。
+
+### 3.3 「仍然尝试（可能 OOM）」：用户能推翻闸门，但推翻不了物理
+
+拒绝面板多一颗次要按钮（`mgpForceTry`）。点了之后前端把 `force=1` 写进 body，
+`_vram_guard(..., force=True)` 放行**最小档**（帧 8 / 批 1），plan 上留 `forced=true`
+与「差多少 MB」，然后正常加载、正常跑：
+
+- 跑成了 → 正常出片（status 里 `vram_plan.forced=true`，日志有一行「⚠ 强制尝试」）；
+- 真跑不动 → worker 抓异常 → `_vram_forced_rollback()`：
+  ① 放掉本进程的 dfm/XSeg 会话 + `gc` + `torch.cuda.empty_cache()`；
+  ② **重新探一次空闲**，按当下的数重算一份拒绝计划（不拿 OOM 之前那份旧账）；
+  ③ 把 `{kind:"vram_oom", summary, need_mb, avail_mb, free_mb, reserve_mb, own_mb, other_mb}`
+     挂到 `/export/status` 与 `/stage/status` 的 `vram_oom` 键上，错误文本写明**已回滚**；
+  ④ 别人的东西一概不动（预览 worker 不重载、进程不杀），所以可以再点一次。
+
+前端拿到 `vram_oom` 就把界面从「进度页」搬回被拒态：标题改成「确实不够（已回滚）」，
+正文是 `vram_oom.summary`（当下的数字），按钮还是那两颗 —— **不是**一句「导出失败」。
+
+判据（`_vram_forced_rollback`）：报错文本像显存问题，**或者**回滚之后重探仍然装不下。
+只看文本会漏判（ORT 有时只给一句 CUDA failure）；反过来「重探之后其实装得下」就不改写成
+「显存不够」—— 那是真 bug，该老实报错。
+
+**为什么验收要注入 OOM**：WDDM 会把别的进程的显存**换页**出去，本机把空闲压到 600MB
+再 force=1 竟然还是跑完了 12 帧（慢，但不失败）。所以「强制尝试撞 OOM」这条路只能用
+`DFL_ALLOW_TEST_HOOK=1 + DFL_VRAM_OOM_INJECT=1` 在 `_dfm_session` 里注入一次
+（生产环境两个开关都没人设，一个字节都不走）。实测注入口径下：OOM 被捕获 →
+`phase=failed` + `vram_oom` 有数 → 临时帧目录 0 新增、无 `.part`、`own_inproc` 42MB
+（会话已放掉）→ 再 force 一次仍被受理 → 放开压力后预览照常出图。
+
+### 3.4 显存归属：那一行必须能看懂「为什么被拒」
+
+   需要 2.46 GB · 空闲 3.04 GB 里预留 1.11 GB 给驱动/碎片（规则 …） = 实际可用 1.93 GB
+    · 本程序 0.01 GB / 其它程序 4.92 GB / 空闲 3.04 GB
+
+「本程序」= 本进程实测增量（`_vram_own_*`）+ 预览 worker 实测（`_used_mb`）；
+「其它程序」= 总显存 − 空闲 − 本程序（只在真探到时才算，伪造 free 时给 `?`）。
+三个数都进 `summary`，也都在 status / 日志里。
+
+另外加了一条**兜底回收**：`_vram_reclaim()` 卸掉预览模型之后如果只腾出不到一半，
+就把 worker **进程**收掉（下次预览懒加载：boot 1.6s + 冷加载 3.5~4.2s）。为什么需要：
+WDDM 上「释放」不等于「还给驱动」—— 本机实测预览 worker 卸掉一份 384 模型之后，进程
+仍握着 **2347MB** 专用显存（Windows「GPU Process Memory · Dedicated」，实测），而
+nvidia-smi 的 free 只涨了 135MB。这种残留正是「我什么都没跑却被堵死」的另一半。
+开关：`DFL_VRAM_RECYCLE_WORKER=0` 可关掉（默认开）。
 
 ### 3.2 导出收尾：把本进程的会话放掉（不是重载预览）
 
@@ -127,6 +208,9 @@ batch 4 起 ORT 的 arena 换到另一个池子 → 台阶不是直线，所以 
 | 环境变量 | 作用 |
 |---|---|
 | `DFL_VRAM_FREE_MB` | 伪造「可用显存」，三条路共用（验收/排障；`DFL_FUSED_VRAM_FREE_MB` 仍认） |
+| `DFL_VRAM_RESERVE_MODE=legacy20` | 复原老预留口径（free×20%+512MB），只给对照/回滚用 |
+| `DFL_VRAM_RECYCLE_WORKER=0` | 关掉「卸模型没腾出显存就把 worker 进程收掉」那条兜底（默认开） |
+| `DFL_ALLOW_TEST_HOOK=1` + `DFL_VRAM_OOM_INJECT=1` | 验收专用：在 `_dfm_session` 里注入一次 OOM（生产不设就一个字节都不走） |
 | `<WORKSPACE>/_vram_free_mb.txt` | 同上，但**同一个后端进程里改得动**（验收用：验证「关掉占显存的程序后重试不用重启后端」）。文件不存在就当没有 |
 | `DFL_ALLOW_CPU_FALLBACK=1` | 显存不够时不拒绝，回落 CPU EP 照跑（416 实测慢 ~17 倍） |
 
@@ -151,9 +235,15 @@ provider、预览 worker 收 `DFL_FORCE_CPU_EP=1`。日志与 status 都写「�
 ## 6. 验收
 
 ```
-runtime\server\Scripts\python.exe app\tools\vram_plan_accept.py      # 三档伪造显存
-runtime\server\Scripts\python.exe app\tools\vram_reclaim_accept.py   # 预览常驻 → 导出
+runtime\server\Scripts\python.exe app\tools\vram_plan_accept.py      # 三档伪造显存（51 项）
+runtime\server\Scripts\python.exe app\tools\vram_reclaim_accept.py   # 预览常驻 → 导出（26 项）
+runtime\server\Scripts\python.exe app\tools\vram_force_accept.py     # 预留 / 归属 / 强制尝试（45 项）
 ```
+
+`vram_force_accept.py` 四段：W 归属（本程序/其它程序/空闲 + 按进程实测）、
+A 空闲 3.4GB（新口径放行 vs 老口径拒绝，并真跑 12 帧报帧率/峰值）、
+B 空闲 600MB（默认拒绝 → force=1 → 注入 OOM → 回滚 → 再试 → 压力释放后预览仍能出图）、
+F 前端接线（按钮/force=1/字典/样式，静态断言）。
 
 `vram_reclaim_accept.py` 验的是**真实路径**（真后端 + 真 GPU，不要伪造 free）：
 
