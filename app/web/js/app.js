@@ -6755,6 +6755,8 @@ function mgStageEmpty(on) {
       return box;
     }
     function mgpResultShow(okAll, d) {
+    /* 结果态（成功/失败）都收起「仍然尝试」—— 它只属于「被拒」那一屏 */
+    (function () { var fb = $("mgpForceTry"); if (fb) fb.hidden = true; })();
       d = d || {};
       var box = $("mgpResult");
       var txt = $("mgpResultText");
