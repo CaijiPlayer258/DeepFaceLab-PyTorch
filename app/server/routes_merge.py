@@ -75,6 +75,7 @@ import queue
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -2441,13 +2442,18 @@ def _detector_val(raw) -> str:
 
 def _detector(name=None):
     key = _detector_val(name)
+    had = _det_cached(key)            # 已经在父进程里 = 不再占新显存，也不用量
+    _own_f0 = None if had else _vram_measure_begin()
     try:
         with _det_load_lock:              # 加载要几百毫秒，别让并发请求各建一份
-            return _get_detector(key)
+            det = _get_detector(key)
     except HTTPException as e:
         raise _BadInput(str(e.detail), e.status_code)
     except Exception as e:
         raise _BadInput("检测器加载失败（%s）：%s" % (key, str(e)[:160]), 500)
+    if _own_f0 is not None:
+        _vram_measure_end("detector:" + key, _own_f0)
+    return det
 
 
 def _with_kps68(frame, boxes):
@@ -3501,6 +3507,9 @@ class _PreviewWorker:
         self._providers = []
         self._on_cpu = False           # worker 是不是被逼着跑 CPU（DFL_ALLOW_CPU_FALLBACK）
         self._vram_plan = {}           # 起 worker 时那份显存计划（status 里回显）
+        # worker 现在占着多少显存（MB，**实测**：这一进程里加载模型前后空闲之差）。
+        # 它是「本程序占用」的一半，也是回收能腾出来的那块（见 _vram_reclaim）。
+        self._used_mb = 0.0
 
     # ---- 状态 ----
     def alive(self) -> bool:
@@ -3521,6 +3530,7 @@ class _PreviewWorker:
                                       for k, v in self._sess_providers.items()},
                 "script": str(self._script or ""),
                 "on_cpu": bool(self._on_cpu),
+                "used_mb": round(float(self._used_mb or 0.0), 1),
                 "cpu_note": ("★ 当前在 CPU 上跑 ★（显存不够 + DFL_ALLOW_CPU_FALLBACK=1，"
                              "预计慢约 17 倍）" if self._on_cpu else ""),
                 "vram_plan": dict(self._vram_plan or {})}
@@ -3582,6 +3592,7 @@ class _PreviewWorker:
         self._models = {}
         self._sess_providers = {}
         self._tail.clear()
+        self._used_mb = 0.0           # 新进程 = 显存从零开始，上一次的实测值作废
         self._vram_plan = dict(_vram_last("预览") or {})
         self._out_t = threading.Thread(target=self._read_stdout, args=(proc, self._q),
                                        daemon=True, name="merge-preview-out")
@@ -3682,6 +3693,7 @@ class _PreviewWorker:
         self._sess_providers = {}
         self._providers = []
         self._boot_ms = None
+        self._used_mb = 0.0           # 进程都收了，它占的那块显存跟着没了
         if why:
             print("[merge-preview] worker 退出：%s（pid %s）"
                   % (why, getattr(p, "pid", "?")), flush=True)
@@ -3767,6 +3779,19 @@ class _PreviewWorker:
             msg_in = dict(payload)
             msg_in["id"] = rid
             msg_in["blobs"] = [len(b) for b in (blobs or ())]
+            # 这一发会不会**新建 session**（= 新占显存）？会的话量一下：worker 里的
+            # 「模型 + 它自己的 CUDA context + ORT arena」是"本程序占用"的一半，
+            # 也是回收能腾出来的那块。已经常驻的调用不量（每帧再跑两次 nvidia-smi 太亏）。
+            _wanted = [str(p) for p in (payload.get("dfms") or []) if str(p or "")]
+            if payload.get("dfm"):
+                _wanted.append(str(payload.get("dfm")))
+            for _it in (payload.get("items") or []):      # cmd=swap：这一轮要装哪些 dfm
+                if isinstance(_it, dict):
+                    if _it.get("dfm"):                    # 单模型预览：dfm 挂在 item 上
+                        _wanted.append(str(_it.get("dfm")))
+                    _wanted.extend(str(p) for p in (_it.get("load") or []) if str(p or ""))
+            _will_load = any(p not in (self._models or {}) for p in _wanted)
+            _own_f0 = _vram_measure_begin() if _will_load else None
             line = (json.dumps(msg_in) + "\n").encode("utf-8")   # ASCII 转义，安全过管道
             try:
                 self._stdin.write(line)
@@ -3851,6 +3876,18 @@ class _PreviewWorker:
                     # warm / unload 的回应会带一份现场清单：以它为准对齐缓存
                     self._models = {str(p): self._models.get(str(p)) or 0
                                     for p in msg.get("models")}
+                if _own_f0 is not None:
+                    # 实测：这一次加载让整卡空闲掉了多少（含 context / arena）。
+                    # 累加成 max —— 同一份 worker 里换模型时前后两笔别互相抵消。
+                    _f1, _t = _vram_free_mb(fresh=True)
+                    if _f1 is not None:
+                        _used = max(0.0, float(_own_f0) - float(_f1))
+                        if _used > 0:
+                            self._used_mb = round(max(float(self._used_mb or 0.0), _used), 1)
+                            print("[merge-preview] 预览模型常驻实测 %.0f MB（空闲 %d → %d MB）"
+                                  % (_used, int(_own_f0), int(_f1)), flush=True)
+                if not self._models and msg.get("unload"):
+                    self._used_mb = 0.0          # 全放掉了：账清零（下次加载重新量）
                 return msg
 
 
@@ -8072,6 +8109,10 @@ def _dfm_session(dfm: str):
             _ensure_ort_dll_dirs()
         except Exception:                                   # noqa: BLE001
             pass
+        # 量这一份会话到底吃掉多少显存（权重 + 这个进程的 CUDA context + ORT arena）。
+        # 为什么要量：arena 会长（384 模型：建会话 +2.3GB，之后每批 8 张的前向再涨 ~1GB），
+        # 估出来的数偏小 —— 而「显存去向」那一栏必须是真数，不能是拍的。
+        _own_f0 = _vram_measure_begin()
         ws = Path(WORKSPACE)
         info = {}
         sess = None
@@ -8133,6 +8174,7 @@ def _dfm_session(dfm: str):
         cap = _sess_batch_cap(sess)
         ent = (sess, name, size, nchw, provs, cap, backend)
         _DFM_SESS[ckey] = ent
+        _vram_measure_end("dfm:" + Path(key).name, _own_f0)
         _stage_log("换脸：dfm 已加载 %s · %d×%d · %s · 单次最多 %d 张"
                    % (Path(key).name, size, size, backend, cap))
         return ent
@@ -8281,8 +8323,8 @@ def _stage_pred_assign(cfg: dict, frame, metas: list) -> list:
 
 
 # ---------------- ③ 换脸（dfm 推理）：batch / 显存 / 流水线 ----------------
-def _vram_free_mb():
-    """(free, total) MB。先问 torch（和推理同一块卡），拿不到再问 nvidia-smi。"""
+def _vram_free_torch():
+    """torch 看到的 (free, total) MB —— 和推理同一次驱动查询，但**偏乐观**（见下）。"""
     try:
         import torch
         if torch.cuda.is_available():
@@ -8290,15 +8332,60 @@ def _vram_free_mb():
             return int(free // (1 << 20)), int(total // (1 << 20))
     except Exception:                                       # noqa: BLE001
         pass
+    return None, None
+
+
+_SMI_MEM = {"at": 0.0, "free": None, "total": None, "used": None}
+
+
+def _vram_free_smi(fresh: bool = False):
+    """nvidia-smi 的 (free, total, used) MB。
+
+    '--query-gpu' 一行一卡，**只取第 0 行**：torch 的 'cuda:0' 就是 nvidia-smi 的
+    GPU 0（这台机器上另一块是 AMD，nvidia-smi 根本看不见它，所以不存在「把 AMD 的
+    显存算进来」这回事）。一次约 80ms，2 秒小缓存 —— 预览每拖一帧都要问。
+    """
+    now = time.time()
+    if not fresh and _SMI_MEM["at"] and (now - _SMI_MEM["at"]) < 2.0:
+        return _SMI_MEM["free"], _SMI_MEM["total"], _SMI_MEM["used"]
+    free = total = used = None
     try:
-        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.free,memory.total",
+        out = subprocess.run(["nvidia-smi",
+                              "--query-gpu=memory.free,memory.total,memory.used",
                               "--format=csv,noheader,nounits"], capture_output=True,
                              text=True, timeout=10,
                              creationflags=getattr(_app_mod, "_NO_WINDOW", 0))
-        f, t = [int(x) for x in (out.stdout or "").strip().splitlines()[0].split(",")]
-        return f, t
+        row = [x for x in (out.stdout or "").strip().splitlines() if x.strip()]
+        f, t, u = [int(float(x)) for x in row[0].split(",")[:3]]
+        free, total, used = f, t, u
     except Exception:                                       # noqa: BLE001
+        pass
+    if free is not None:
+        _SMI_MEM.update({"at": now, "free": free, "total": total, "used": used})
+    return free, total, used
+
+
+def _vram_free_mb(fresh: bool = False):
+    """(free, total) MB —— torch 与 nvidia-smi 取**更小的那个空闲**。
+
+    **为什么两个都问**（这一条是量的，不是拍的；本机 RTX 5070 Laptop 8GB / WDDM）：
+    空载时 torch.cuda.mem_get_info 说空闲 6999 MB，同一刻 nvidia-smi 说 5693 MB。
+    差的 1.3GB 不是谁算错了 —— WDDM 下 mem_get_info 报的是「驱动还愿意答应多少」
+    （不够就换页/回落共享内存），真分配下去立刻变成 nvidia-smi 的 used。**拿它当
+    预算就是乐观到 OOM**；反过来 nvidia-smi 的 free 是「这张卡上所有进程之外还剩
+    多少」，那才是敢用的数。所以两个都探、取小。
+
+    两个都探不到的机器（没有 torch、也没有 nvidia-smi）返回 (None, None) ——
+    调用方按「不猜」处理（不降档、不拒绝）。
+    """
+    tf, tt = _vram_free_torch()
+    sf, st, _su = _vram_free_smi(fresh=fresh)
+    cands = [(v, t) for v, t in ((tf, tt), (sf, st)) if v is not None]
+    if not cands:
         return None, None
+    free = min(v for v, _t in cands)
+    total = next((t for _v, t in cands if t), None)
+    return int(free), (None if total is None else int(total))
 
 
 # ============================================================
@@ -8348,6 +8435,246 @@ _CPU_EP = {"on": False, "why": ""}          # 全局「强制 CPU EP」：_dfm_s
 _CPU_EP_LOCK = threading.Lock()
 
 
+# ============================================================
+# 显存归属：这块卡现在被谁占着（本程序 / 其它程序 / 空闲）
+# ------------------------------------------------------------
+# 用户那一版截图最糟的地方不是被拒，而是**被拒了不知道是谁占的**：界面写「空闲
+# 1387MB」，而他自己什么都没跑 —— 因为占着的就是我们（预览 worker 里常驻的 dfm
+# 会话、本进程里加载的 dfm / 检测器，以及 ORT 那个会长大的 CUDA arena）。
+#
+# 这里只记**我们自己**的账，而且尽量是**实测**：
+#   · 本进程：每个 session 加载前后各探一次空闲，差值就是它真的吃掉的那一块
+#     （含 CUDA context / ORT arena —— 估不出来，只能量）；
+#   · 预览 worker：每次 call 前后探一次，差值记在 worker 上（它可能是 1 个也可能是
+#     3 个模型，还带着自己的 arena）；
+#   · 剩下的 = 总显存 - 空闲 - 本程序 → 归「其它程序」（浏览器/游戏/另一个导出）。
+# ============================================================
+_VRAM_OWN = {}          # tag -> MB（本进程自己加载的，实测增量）
+_VRAM_OWN_LOCK = threading.RLock()
+_VRAM_OWN_PENDING = {}  # tag -> 起始空闲（量到一半的，防并发重复计）
+
+
+def _vram_own_note(tag: str, mb: float):
+    """记一笔「本进程里这个东西吃掉了多少显存」（MB，实测增量）。"""
+    tag = str(tag or "")
+    mb = max(0.0, float(mb or 0.0))
+    if not tag or mb <= 0:
+        return
+    with _VRAM_OWN_LOCK:
+        _VRAM_OWN[tag] = round(max(mb, float(_VRAM_OWN.get(tag) or 0.0)), 1)
+
+
+def _vram_own_drop(tag: str):
+    """这个东西被放掉了（session 关了/切了 CPU）—— 从本进程的账上划掉。"""
+    with _VRAM_OWN_LOCK:
+        _VRAM_OWN.pop(str(tag or ""), None)
+
+
+def _vram_own_detail() -> dict:
+    with _VRAM_OWN_LOCK:
+        return {str(k): round(float(v), 1) for k, v in sorted(_VRAM_OWN.items())}
+
+
+def _vram_own_inproc_mb() -> float:
+    """本进程自己占着多少（MB）。"""
+    with _VRAM_OWN_LOCK:
+        return round(float(sum(_VRAM_OWN.values())), 1)
+
+
+def _vram_measure_begin():
+    """开始量：返回起始空闲（MB，探不到就是 None）。"""
+    f0, _t = _vram_free_mb(fresh=True)
+    return f0
+
+
+def _vram_measure_end(tag: str, f0):
+    """量完：把「空闲掉了多少」记到 tag 上（探不到就不记，绝不用 0 冒充）。"""
+    if f0 is None:
+        return None
+    f1, _t = _vram_free_mb(fresh=True)
+    if f1 is None:
+        return None
+    used = max(0.0, float(f0) - float(f1))
+    _vram_own_note(tag, used)
+    return round(used, 1)
+
+
+def _vram_preview_info() -> dict:
+    """常驻预览 worker 现在占着多少、都常驻了什么、能不能回收。
+
+    优先用**实测**（worker 每次调用前后探到的空闲差，见 _PreviewWorker.call）；
+    没量过才退回会话口径估（模型体量 + 一份 CUDA context + ORT arena）。实测优先
+    是因为 ORT 的 CUDA arena 会长：384 模型实测「建会话 +2.3GB」，之后每一批 8 张
+    的前向还会再涨 ~1GB（本机 3 次之后稳定在 6.4GB/8151MB）—— 估出来的数会偏小。
+    """
+    try:
+        w = _WORKER
+        alive = bool(w.alive())
+        models = list((w._models or {}).keys()) if alive else []
+        measured = float(getattr(w, "_used_mb", 0.0) or 0.0)
+    except Exception:                                       # noqa: BLE001
+        alive, models, measured = False, [], 0.0
+    est = 0.0
+    if alive and models:
+        est = (float(_vram_models_mb(models)) + float(_VRAM_CTX_MB)
+               + float(_VRAM_ARENA_MB) * max(1, len(models)))
+    # **没有常驻模型 = 那块显存已经还回去了**（unload / LRU 淘汰都走 worker 里的
+    # _vram_flush：掐引用 → gc → empty_cache）。这时 `_used_mb` 是上一次加载的旧账，
+    # 不能再算进"本程序占用"—— 否则账上永远挂着 1.6GB，谁会去回收一个不存在的东西。
+    mb = max(measured, est) if models else 0.0
+    return {"alive": bool(alive), "models": [os.path.basename(str(p)) for p in models],
+            "paths": [str(p) for p in models], "measured_mb": round(measured, 1),
+            "estimated_mb": round(est, 1), "mb": round(mb, 1),
+            "measured": bool(measured > 0)}
+
+
+def _vram_owners(free_mb=None, total_mb=None, source: str = "") -> dict:
+    """谁占着显存：本程序（分项 + 可回收多少）/ 其它程序 / 空闲。
+
+    拒绝消息、status、日志都读这一份，所以「空闲 1387MB」不再是一个孤零零的数字 ——
+    用户能看见「其中本程序 2.0GB 是可回收的预览模型，其它程序 3.4GB」。
+    """
+    if free_mb is None or total_mb is None:
+        pfree, ptotal, _p = _vram_probe()
+        free_mb = pfree if free_mb is None else free_mb
+        total_mb = ptotal if total_mb is None else total_mb
+    pv = _vram_preview_info()
+    inproc = _vram_own_inproc_mb()
+    own = float(inproc) + float(pv.get("mb") or 0.0)
+    other = None
+    src = str(source or "")
+    real = not (src.startswith("env:") or src.startswith("file:") or src == "override")
+    if free_mb is not None and total_mb is not None and real:
+        # 只有真探到的 free 才能反推「其它程序」；env/file/override 是伪造值，
+        # 拿它减出来的"其它程序"是假账（宁可显示 ?，也不给用户一个错数）。
+        other = round(max(0.0, float(total_mb) - float(free_mb) - own), 1)
+    torch_res = None
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch_res = round(torch.cuda.memory_reserved() / 1048576.0, 1)
+    except Exception:                                       # noqa: BLE001
+        pass
+    return {"free_mb": (None if free_mb is None else int(free_mb)),
+            "total_mb": (None if total_mb is None else int(total_mb)),
+            "own_mb": round(own, 1), "own_inproc_mb": round(float(inproc), 1),
+            "own_preview_mb": round(float(pv.get("mb") or 0.0), 1),
+            "own_parts": _vram_own_detail(),
+            "preview_models": list(pv.get("models") or []),
+            "preview_measured": bool(pv.get("measured")),
+            "reclaimable_mb": round(float(pv.get("mb") or 0.0), 1),
+            "other_mb": other, "torch_reserved_mb": torch_res,
+            "free_torch_mb": _vram_free_torch()[0],
+            "free_smi_mb": _vram_free_smi()[0]}
+
+
+def _vram_reclaim(why: str = "导出") -> dict:
+    """把**我们自己**占的显存收回来：请常驻预览 worker 卸掉它的 DFM 会话。
+
+    为什么导出前必须做一遍：用户先预览过一帧（worker 里 1.6GB 的 dfm + CUDA context
+    常驻），再点导出 —— 计划看到的是「空闲 1.4GB」，于是把一单本来完全跑得动的活拒
+    了，而占着的正是我们自己的子进程。这里先让它放掉、等驱动真回收（轮询空闲涨上来，
+    最多 4s），再拿新的空闲去算预算。
+
+    导出结束后**不重载**：下次预览再懒加载（实测一次重载 ~4.1s，比来回抖一晚上强）。
+    """
+    t0 = time.time()
+    try:
+        w = _WORKER
+        alive = bool(w.alive())
+        models = list((w._models or {}).keys()) if alive else []
+        used = float(getattr(w, "_used_mb", 0.0) or 0.0)
+    except Exception:                                       # noqa: BLE001
+        alive, models, used = False, [], 0.0
+    if not alive or not models:
+        return {"ok": True, "did": False, "freed_mb": 0.0, "ms": 0.0,
+                "models": [], "before_mb": None, "after_mb": None,
+                "why": "预览 worker 里没有常驻模型，不用回收"}
+    before, _t = _vram_free_mb(fresh=True)
+    want = max(float(used),
+               float(_vram_models_mb(models)) + float(_VRAM_CTX_MB)
+               + float(_VRAM_ARENA_MB) * max(1, len(models)))
+    names = [os.path.basename(str(p)) for p in models]
+    try:
+        w.unload("")
+    except Exception as e:                                  # noqa: BLE001
+        print("[vram] 回收预览模型失败（%s）：%s" % (why, str(e)[:200]), flush=True)
+        return {"ok": False, "did": False, "freed_mb": 0.0,
+                "ms": round((time.time() - t0) * 1000.0, 1), "models": names,
+                "before_mb": before, "after_mb": before,
+                "why": "回收失败：%s" % str(e)[:160]}
+    after = before
+    deadline = time.time() + 4.0
+    while time.time() < deadline:
+        after, _t = _vram_free_mb(fresh=True)
+        if before is None or after is None:
+            break
+        if (float(after) - float(before)) >= 0.85 * max(1.0, want):
+            break
+        time.sleep(0.15)
+    try:
+        w._used_mb = 0.0            # 账已经清了：下一次 call 重新量
+    except Exception:                                       # noqa: BLE001
+        pass
+    freed = (0.0 if (before is None or after is None)
+             else max(0.0, float(after) - float(before)))
+    ms = (time.time() - t0) * 1000.0
+    print("[vram] 回收预览模型 %.0f MB（%s · %s · %.0fms）：空闲 %s → %s MB"
+          % (freed, why, "/".join(names[:3]) or "-", ms,
+             "?" if before is None else int(before),
+             "?" if after is None else int(after)), flush=True)
+    return {"ok": True, "did": True, "freed_mb": round(freed, 1), "ms": round(ms, 1),
+            "models": names, "before_mb": before, "after_mb": after,
+            "want_mb": round(want, 1), "why": ""}
+
+
+def _vram_release_inproc(reason: str = "任务收尾") -> dict:
+    """把**本进程**常驻的 dfm / XSeg 会话放掉（导出收尾时用，成功/失败/取消都放）。
+
+    为什么不能在导出结束时留着：一份 384 会话建好 2.3GB，跑完几十帧之后 ORT 的
+    CUDA arena 还会继续涨（本机实测：12 帧之后整卡 used 7049/8151，空闲只剩 843MB）。
+    留着它，用户下一次预览（要新建一份 2.4GB 会话）就会被**自己的后端**堵死 ——
+    那正是这一轮用户报的「我什么都没跑，却说我显存不够」。放掉之后：下一次预览/导出
+    各自懒加载（实测冷加载 3.5~4.2s），中间这段时间卡是干净的。
+
+    只动本进程的缓存，**不动预览 worker**（那一路有自己的懒加载节奏）。
+    """
+    freed = []
+    try:
+        with _PRED_LOCK:
+            for k in list(_DFM_SESS):
+                _DFM_SESS.pop(k, None)
+                freed.append("dfm:" + Path(str(k).split("|")[0]).name)
+    except Exception:                                       # noqa: BLE001
+        pass
+    try:
+        with _XSEG_SESS_LOCK:
+            for _k in list(_XSEG_SESS):
+                _XSEG_SESS.pop(_k, None)
+                freed.append("xseg")
+    except Exception:                                       # noqa: BLE001
+        pass
+    for tag in freed:
+        _vram_own_drop(tag)
+    if not freed:
+        return {"ok": True, "did": False, "released": [], "reason": reason}
+    # 引用断了之后真的把缓存还给驱动（ORT 每个 session 的 arena 跟着 session 一起没）
+    try:
+        import gc
+        gc.collect()
+        gc.collect()
+        torch = sys.modules.get("torch")
+        if torch is not None and torch.cuda.is_initialized():
+            torch.cuda.empty_cache()
+    except Exception:                                       # noqa: BLE001
+        pass
+    f1, _t = _vram_free_mb(fresh=True)
+    print("[vram] 收尾放掉本进程的会话（%s）：%s · 空闲现在 %s MB"
+          % (reason, "、".join(freed[:4]), "?" if f1 is None else int(f1)), flush=True)
+    return {"ok": True, "did": True, "released": list(freed), "free_mb": f1,
+            "reason": reason}
+
+
 def _vram_probe(ttl: float = None) -> tuple:
     """(free_mb, total_mb, source)。
 
@@ -8389,10 +8716,15 @@ def _vram_probe(ttl: float = None) -> tuple:
     with _VRAM_LOCK:
         if _VRAM_PROBE["at"] and (now - _VRAM_PROBE["at"]) < ttl:
             return _VRAM_PROBE["free"], _VRAM_PROBE["total"], _VRAM_PROBE["src"]
-    free, total = _vram_free_mb()
-    src = "none" if free is None else "torch/nvidia-smi"
+    free, total = _vram_free_mb(fresh=(ttl <= 0.0))
+    # 来源写清楚：torch 与 nvidia-smi 取小（WDDM 上 torch 偏乐观 1.3GB，见 _vram_free_mb）
+    tf, sf = _vram_free_torch()[0], _vram_free_smi()[0]
+    src = ("none" if free is None else
+           "min(torch %s / smi %s)" % ("?" if tf is None else int(tf),
+                                       "?" if sf is None else int(sf)))
     with _VRAM_LOCK:
-        _VRAM_PROBE.update({"at": now, "free": free, "total": total, "src": src})
+        _VRAM_PROBE.update({"at": now, "free": free, "total": total, "src": src,
+                            "free_torch": tf, "free_smi": sf})
     return free, total, src
 
 
@@ -8548,8 +8880,15 @@ def _vram_cands(mode: str, want_frames: int, want_batch: int,
 
 
 def _vram_need_mb(cand: dict) -> float:
-    """一个候选/计划的总需求（MB）：会话×进程 + 检测遮罩 + 帧缓冲 + dfm 批。"""
-    return (float(cand.get("sess_mb") or 0.0) * max(1, int(cand.get("procs") or 1))
+    """一个候选/计划的总需求（MB）：会话×进程 + 检测遮罩 + 帧缓冲 + dfm 批。
+
+    resident = 这个进程**已经**持有几份会话（fused 加载完 dfm 后重算那一拍 = 1）：
+    那几份的「权重 + context」已经在卡上了，不再算进需求 —— 再算一遍就是重复计数，
+    会把一个本来跑得动的单子判死（用户截图那一单就是这么被拒的）。
+    """
+    procs = max(1, int(cand.get("procs") or 1))
+    new_sess = max(0, procs - max(0, int(cand.get("resident") or 0)))
+    return (float(cand.get("sess_mb") or 0.0) * new_sess
             + float(cand.get("aux_mb") or 0.0)
             + int(cand.get("frames") or 0) * float(cand.get("frame_mb") or 0.0)
             + float(cand.get("batch_mb") or 0.0))
@@ -8568,6 +8907,10 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
       aux        要不要算检测器/关键点/XSeg（默认 True）
       label      用途名（进日志与 status）
       free_mb / total_mb  覆盖探测量（单测用；不传就走 _vram_probe）
+      reclaim    起算之前先**回收**我们自己占的那一块（常驻预览 worker），默认关；
+                 导出闸门开它 —— 用户「预览过一帧再点导出」被拒的病根就在这里
+      resident   本进程**已经**持有这份会话了（fused 加载后重算那一拍）：会话那一项
+                 不再计入需求，否则等于把一个已经吃掉的 2GB 又算一遍 → 必被拒
 
     返回 dict（关键字见下面 plan = {...}）。**ok=False 的调用方必须拒绝**：
     _vram_plan 只算账，不抛异常（拒绝的样子由 _vram_guard / 调用点决定）。
@@ -8584,22 +8927,32 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
     want_batch = max(1, min(int(_PRED_BATCH_CAP), int(want_batch)))
     max_procs = max(1, min(16, int(opts.get("max_procs") or procs)))
     aux = float(_VRAM_AUX_MB) if opts.get("aux", True) else 0.0
+    # resident：这份会话（含它自己的 CUDA context）**已经在当前进程里**了。
+    # 只对「同一进程、同一份会话」成立，而且只在重算那一拍用（见 _fused_run）。
+    resident = 1 if opts.get("resident") else 0
     model_mb = max(0.0, float(model_mb or 0.0))
     # 一份会话 = 权重 + 它自己的 CUDA context。ORT 的 arena（416 实测 +135MB）不单列
     # —— 它由「空闲的 20% + 512MB」那份预留吸收；单列的话 384 模型会算成 2219MB/份，
     # 把实测「8GB 卡上 2 个 worker 行、3 个 spill」误判成「只装得下 1 个」。
     sess_mb = model_mb + float(_VRAM_CTX_MB)
     frame_mb = _vram_frame_mb(size_px)
+    # 先**按现状**探测（不回收）：预览常驻着模型时先照常算一遍，只有真装不下才回收
+    # 再算第二遍（两遍算账，见下面「装不下才回收」）。理由：前端每改一次参数都会打
+    # 一次 dry_run 预检，一进来就卸预览模型的代价是「拖一下滑杆，预览重载 4 秒」。
+    rec = {}
     if opts.get("free_mb") is not None:
         free, total, src = int(opts["free_mb"]), opts.get("total_mb"), "override"
     else:
         free, total, src = _vram_probe()
 
     def _mk(frames, batch, nproc):
+        # resident=1 时，第一份会话的「权重 + context」已经在这块卡上了（本进程持有），
+        # 需求里只剩**增量**：检测/遮罩 + 帧缓冲 + dfm 批。
         cand = {"sess_mb": round(sess_mb, 1), "aux_mb": round(aux, 1),
                 "frame_mb": round(frame_mb, 2), "frames": int(frames),
                 "batch": int(batch), "batch_mb": round(_vram_batch_mb(size_px, batch), 1),
-                "procs": int(nproc)}
+                "procs": int(nproc), "resident": int(resident),
+                "resident_mb": round(float(sess_mb) * min(int(nproc), int(resident)), 1)}
         cand["need_mb"] = round(_vram_need_mb(cand), 1)
         return cand
 
@@ -8616,6 +8969,12 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
         "total_mb": (None if total is None else int(total)),
         "source": src, "avail_mb": None, "need_mb": round(floor["need_mb"], 1),
         "peak_mb": None, "procs": int(max_procs if mode == "procs" else procs),
+        # 谁占着显存 + 我们回收掉了多少（拒绝消息/status/日志都读这几个键）
+        "reclaim": {}, "reclaimed_mb": 0.0, "reclaim_ms": 0.0,
+        "reclaim_left_mb": 0.0, "reclaim_note": "",
+        "own_mb": None, "own_inproc_mb": None, "own_preview_mb": None,
+        "reclaimable_mb": None, "other_mb": None, "preview_models": [],
+        "free_torch_mb": None, "free_smi_mb": None, "resident_mb": round(floor["resident_mb"], 1),
         "frames": int(want_frames if mode != "procs" else 0),
         "batch": int(want_batch if mode != "procs" else 1),
         "batch_mb": round(_vram_batch_mb(size_px, want_batch if mode != "procs" else 1), 1),
@@ -8632,17 +8991,101 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
                      "msg": "%s：拿不到显存信息 → 按请求值跑（帧预算 %d / 批 %d）"
                             % (label, plan["frames"], plan["batch"])})
         return plan
-    avail = max(0.0, float(free) * (1.0 - _VRAM_SAFETY) - float(_VRAM_RESERVE_MB))
-    plan["avail_mb"] = round(avail, 1)
-    hit = None
-    for cand in ladder:
-        ok = bool(cand["need_mb"] <= avail)
-        plan["steps"].append({"frames": int(cand["frames"]), "batch": int(cand["batch"]),
-                              "procs": int(cand["procs"]), "need_mb": cand["need_mb"],
-                              "batch_mb": cand["batch_mb"], "avail_mb": round(avail, 1),
-                              "fit": ok})
-        if ok and hit is None:
-            hit = cand
+    # ---- 谁占着这块卡（本程序 / 其它程序 / 空闲）+ 可回收多少 ----
+    def _apply_own(o):
+        plan.update({"own_mb": o.get("own_mb"),
+                     "own_inproc_mb": o.get("own_inproc_mb"),
+                     "own_preview_mb": o.get("own_preview_mb"),
+                     "own_parts": dict(o.get("own_parts") or {}),
+                     "reclaimable_mb": o.get("reclaimable_mb"),
+                     "other_mb": o.get("other_mb"),
+                     "preview_models": list(o.get("preview_models") or []),
+                     "free_torch_mb": o.get("free_torch_mb"),
+                     "free_smi_mb": o.get("free_smi_mb")})
+
+    def _avail_for(extra_mb):
+        # 口径：可用 = 空闲×(1-安全系数) + 可回收 − 预留。以前是「只看空闲」——
+        # 于是「我们自己占着 2GB、其实随时能收回来」会被算成「这台机器不够跑」。
+        return max(0.0, (float(free) * (1.0 - _VRAM_SAFETY) + float(extra_mb)
+                         - float(_VRAM_RESERVE_MB)))
+
+    def _pick(avail_value):
+        plan["avail_mb"] = round(avail_value, 1)
+        plan["steps"] = []
+        first = None
+        for cand in ladder:
+            fit = bool(cand["need_mb"] <= avail_value)
+            plan["steps"].append({"frames": int(cand["frames"]),
+                                  "batch": int(cand["batch"]),
+                                  "procs": int(cand["procs"]),
+                                  "need_mb": cand["need_mb"],
+                                  "batch_mb": cand["batch_mb"],
+                                  "avail_mb": round(avail_value, 1), "fit": fit})
+            if fit and first is None:
+                first = cand
+        return first
+
+    own = _vram_owners(free, total, src)
+    _apply_own(own)
+    reclaim_left = 0.0
+    avail = _avail_for(0.0)
+    hit = _pick(avail)
+
+    # ---- 装不下才回收我们自己占的那块（预览 worker 里常驻的 dfm），然后算第二遍 ----
+    # 回收成功 → 空闲里已经含那 2GB，**不再**把它加进 avail（重复算等于骗自己）；
+    # 没收成（worker 正忙/超时）→ 那 2GB 仍按「可回收」计入 avail，消息里注明
+    # 「导出前会再收一次」（_vram_reclaim 在起 job 前还会被调一次）。
+    # 三档模式（frames / procs / none）都适用：阶段链的闸门也是 mode=none。
+    # 预览自己不会走到这里 —— _preview_guard 明确传 reclaim=False（它要用的正是
+    # worker 里那份常驻模型）。
+    if hit is None and opts.get("reclaim") and opts.get("free_mb") is None:
+        try:
+            rec = _vram_reclaim(label)
+        except Exception as e:                              # noqa: BLE001
+            rec = {"ok": False, "did": False, "freed_mb": 0.0, "ms": 0.0,
+                   "models": [], "before_mb": None, "after_mb": None,
+                   "why": "回收抛异常：%s" % str(e)[:160]}
+        plan.update({"reclaim": dict(rec or {}),
+                     "reclaimed_mb": round(float((rec or {}).get("freed_mb") or 0.0), 1),
+                     "reclaim_ms": round(float((rec or {}).get("ms") or 0.0), 1),
+                     "reclaim_note": str((rec or {}).get("why") or "")})
+        free2, total2, src2 = _vram_probe(0.0)
+        if free2 is not None and (rec.get("did") or int(free2) > int(free)):
+            free = free2
+            if total2 is not None:
+                total = total2
+            src = src2
+            plan["free_mb"] = int(free)
+            plan["total_mb"] = (None if total is None else int(total))
+            plan["source"] = src
+            own = _vram_owners(free, total, src)
+            _apply_own(own)
+            if not rec.get("did"):                       # 没收成：按「可回收」算进去
+                reclaim_left = float(own.get("reclaimable_mb") or 0.0)
+            plan["reclaim_left_mb"] = round(reclaim_left, 1)
+            avail = _avail_for(reclaim_left)
+            hit = _pick(avail)
+
+    # ---- 还装不下？那就放掉**本进程**常驻的会话（预览/下一次导出再懒加载）----
+    # 只在「没有任何任务在跑」时做：有任务在跑时放掉 session 等于把它的腿锯了。
+    if (hit is None and opts.get("reclaim_inproc") and opts.get("free_mb") is None
+            and not _merge_job.get("running") and not _STAGE_JOB.get("running")):
+        rel = _vram_release_inproc(label)
+        if rel.get("did"):
+            plan["reclaim_inproc"] = dict(rel)
+            free2, total2, src2 = _vram_probe(0.0)
+            if free2 is not None:
+                free = free2
+                if total2 is not None:
+                    total = total2
+                src = src2
+                plan["free_mb"] = int(free)
+                plan["total_mb"] = (None if total is None else int(total))
+                plan["source"] = src
+                own = _vram_owners(free, total, src)
+                _apply_own(own)
+                avail = _avail_for(0.0)
+                hit = _pick(avail)
     if hit is not None:
         plan.update({"ok": True, "frames": int(hit["frames"]), "batch": int(hit["batch"]),
                      "procs": int(hit["procs"]), "batch_mb": hit["batch_mb"],
@@ -8658,6 +9101,12 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
                           if plan["downgraded"] else
                           "装得下：帧 %d / 批 %d / 进程 %d（不用降档）"
                           % (plan["frames"], plan["batch"], plan["procs"]))
+        if rec.get("did"):
+            plan["reason"] += ("（回收预览模型 %.1f GB 之后才装得下）"
+                               % (float(plan["reclaimed_mb"]) / 1024.0))
+        elif reclaim_left > 0:
+            plan["reason"] += ("（其中 %.1f GB 要靠回收预览 worker 才腾得出来）"
+                               % (reclaim_left / 1024.0))
         plan["msg"] = "%s：%s · 预计峰值 %.0f MB / 可用 %.0f MB" % (
             label, plan["reason"], hit["need_mb"], avail)
         return plan
@@ -8706,6 +9155,9 @@ def _vram_refuse_extra(plan: dict, what: str = "") -> dict:
                if str(s or "").strip()]
     if not suggest:
         suggest = ["关掉占 GPU 的程序后重试"]
+    def _num(key):
+        v = plan.get(key)
+        return None if v is None else round(float(v or 0.0), 1)
     return {
         "kind": "vram",
         "label": label,
@@ -8714,6 +9166,11 @@ def _vram_refuse_extra(plan: dict, what: str = "") -> dict:
                      else round(float(plan.get("avail_mb") or 0.0), 1)),
         "free_mb": (None if plan.get("free_mb") is None else int(plan.get("free_mb") or 0)),
         "total_mb": (None if plan.get("total_mb") is None else int(plan.get("total_mb") or 0)),
+        # 显存去向（前端可以直接把「谁占的」写进提示；本程序那部分是可回收的）
+        "own_mb": _num("own_mb"), "own_inproc_mb": _num("own_inproc_mb"),
+        "own_preview_mb": _num("own_preview_mb"),
+        "reclaimable_mb": _num("reclaimable_mb"), "reclaimed_mb": _num("reclaimed_mb"),
+        "other_mb": _num("other_mb"), "preview_models": list(plan.get("preview_models") or []),
         "procs": int(plan.get("procs") or 1),
         "frames": int(plan.get("frames") or 0),
         "batch": int(plan.get("batch") or 0),
@@ -8744,7 +9201,27 @@ def _vram_refuse_msg(plan: dict, what: str = "这个任务") -> str:
                      % (int(plan.get("frames") or 0),
                         float(plan.get("per_frame_mb") or 0.0)))
     parts.append("dfm 批（最小档）%.2f GB" % (float(plan.get("batch_mb") or 0.0) / 1024.0))
+    # ---- 显存去向（这是这次真正要治的病：用户只看到「空闲 1387MB」，不知道是谁占的）----
+    own = plan.get("own_mb")
+    other = plan.get("other_mb")
+    rec_left = float(plan.get("reclaimable_mb") or 0.0) / 1024.0
+    got_back = float(plan.get("reclaimed_mb") or 0.0) / 1024.0
+    src = ""
+    if own is not None or other is not None:
+        src = ("显存去向：本程序 %.2f GB（本进程 %.2f GB + 预览 worker %.2f GB，其中可回收 %.2f GB）"
+               " · 其它程序 %s · 空闲 %.2f GB。"
+               % (float(own or 0.0) / 1024.0,
+                  float(plan.get("own_inproc_mb") or 0.0) / 1024.0,
+                  float(plan.get("own_preview_mb") or 0.0) / 1024.0,
+                  rec_left,
+                  ("?" if other is None else "%.2f GB" % (float(other or 0.0) / 1024.0)),
+                  (0.0 if free is None else float(free) / 1024.0)))
+        if got_back > 0:
+            src += "（本轮已经回收预览模型 %.2f GB）" % got_back
+        elif rec_left > 0:
+            src += "（预览 worker 忙，这 %.2f GB 还没回收掉 —— 导出前会再收一次）" % rec_left
     return ("%s：显存不够 —— 需要 %.2f GB（%s），可用 %.2f GB（空闲 %s MB，预留 %d%% + %d MB）。"
+            "%s"
             "建议：① 关掉占 GPU 的程序（浏览器硬件加速/游戏/另一个导出）后重试；"
             "② 换更小的 .dfm，或把「帧预算」调低（请求的是 %d 帧）；"
             "③ 设 %s=1 改用 CPU 跑（慢约 %.0f 倍，但能出片）。"
@@ -8752,6 +9229,7 @@ def _vram_refuse_msg(plan: dict, what: str = "这个任务") -> str:
                ("?" if free is None else int(free)),
                int(round(float(plan.get("safety") or 0.0) * 100)),
                int(plan.get("reserve_mb") or 0),
+               src,
                int(plan.get("requested_frames") or 0),
                _VRAM_ENV_CPU, _VRAM_CPU_SLOW))
 
@@ -8762,14 +9240,28 @@ def _vram_log_lines(plan: dict, tag: str = "") -> list:
     src = str(plan.get("source") or "?")
     if plan.get("free_mb") is None:
         return ["%s：显存探不到（%s）→ %s" % (tag, src, plan.get("reason") or "不降档")]
-    lines = ["%s：显存 空闲 %s / 共 %s MB（%s）· 预算 %.0f MB = 空闲 - %d%% - %d MB"
+    lines = ["%s：显存 空闲 %s / 共 %s MB（%s）· 预算 %.0f MB = 空闲 - %d%% - %d MB + 可回收 %.0f MB"
              % (tag, plan.get("free_mb"), plan.get("total_mb") or "?", src,
                 float(plan.get("avail_mb") or 0.0),
                 int(round(float(plan.get("safety") or 0.0) * 100)),
-                int(plan.get("reserve_mb") or 0)),
-             "%s：需求拆项 模型 %.0f + context %d + 检测/遮罩 %.0f MB/份"
+                int(plan.get("reserve_mb") or 0),
+                float(plan.get("reclaim_left_mb") or 0.0)),
+             # 显存去向：谁占的（本程序/其它程序）。用户那句「我什么都没跑」就是靠这一行回答
+             "%s：显存去向 本程序 %.0f MB（本进程 %.0f + 预览 worker %.0f）· 其它程序 %s MB"
+             " · 可回收 %.0f MB%s"
+             % (tag, float(plan.get("own_mb") or 0.0),
+                float(plan.get("own_inproc_mb") or 0.0),
+                float(plan.get("own_preview_mb") or 0.0),
+                ("?" if plan.get("other_mb") is None else int(plan.get("other_mb"))),
+                float(plan.get("reclaimable_mb") or 0.0),
+                ("" if not plan.get("reclaimed_mb")
+                 else "（已回收 %.0f MB / %.0fms）"
+                      % (float(plan.get("reclaimed_mb") or 0.0),
+                         float(plan.get("reclaim_ms") or 0.0)))),
+             "%s：需求拆项 模型 %.0f + context %d%s + 检测/遮罩 %.0f MB/份"
              " + 帧 %d×%.2f + dfm 批 %s MB（ORT arena %d MB 含在预留里）"
              % (tag, float(plan.get("model_mb") or 0), int(plan.get("ctx_mb") or 0),
+                ("（本进程已持有，不计入）" if plan.get("resident_mb") else ""),
                 float(plan.get("aux_mb") or 0),
                 int(plan.get("frames") or 0), float(plan.get("frame_mb") or 0.0),
                 plan.get("batch_mb") if plan.get("batch_mb") is not None else "?",
@@ -8779,12 +9271,15 @@ def _vram_log_lines(plan: dict, tag: str = "") -> list:
                      % (tag, int(plan.get("procs") or 1), int(plan.get("requested_procs") or 1),
                         float(plan.get("peak_mb") or plan.get("need_mb") or 0)))
     else:
-        lines.append("%s：计划 帧预算 %d / dfm 批 %d%s · 预计峰值 %s（可用 %.0f MB）"
+        lines.append("%s：计划 帧预算 %d / dfm 批 %d%s · 预计峰值 %s（可用 %.0f MB）%s"
                      % (tag, int(plan.get("frames") or 0), int(plan.get("batch") or 0),
                         "（已降档）" if plan.get("downgraded") else "",
                         (("%.0f MB" % plan["peak_mb"]) if plan.get("peak_mb") is not None
                          else "装不下（没有一档塞得进预算）"),
-                        float(plan.get("avail_mb") or 0.0)))
+                        float(plan.get("avail_mb") or 0.0),
+                        ("（会话已在本进程里，%.0f MB 不计入需求）"
+                         % float(plan.get("resident_mb") or 0.0))
+                        if plan.get("resident_mb") else ""))
     # 逐档记账：拿到「采用」那一档就停（后面的档位这次用不上，刷日志只会淹掉重点）；
     # 全都装不下时把 12 档全列出来 —— 拒绝的理由要看得出「差多少」。
     _stop = False
@@ -8859,14 +9354,21 @@ def _preview_guard(dfms, label: str = "预览") -> dict:
                      "msg": "%s：模型已常驻，不再额外占显存（空闲 %s MB / 增量 0 MB）"
                             % (label, plan.get("free_mb"))})
         return _vram_apply(plan, label, sticky=True)
-    return _vram_guard(paths, {"mode": "none", "procs": 1}, label=label, sticky=True)
+    # 预览从不回收**自己**（worker 里的模型正是它要用的），但可以放掉父进程里那些
+    # 「导出留下的」dfm/XSeg 会话 —— 没有任务在跑时那是纯占用（见 _vram_release_inproc）。
+    return _vram_guard(paths, {"mode": "none", "procs": 1, "reclaim_inproc": True},
+                       label=label, sticky=True, reclaim=False)
 
 
 def _vram_guard(dfms, opts: dict = None, label: str = "任务",
-                sticky: bool = False) -> dict:
+                sticky: bool = False, reclaim: bool = None) -> dict:
     """加载模型**之前**的一次预算检查：装得下返回计划，装不下抛 400（消息带数字）。
 
     sticky=True（预览用）：只在「要在 CPU 上跑」时短路全链路，不允许把别人的 CPU 开关关掉。
+
+    reclaim：算账之前先回收**我们自己**占的显存（常驻预览 worker 里那份 dfm 会话）。
+    默认 = 非 sticky，也就是所有导出/阶段闸门都回收，预览自己不回收（它正是要靠那份
+    常驻模型才快，而且 _preview_guard 有「已常驻 = 增量 0」的特例）。
     """
     if isinstance(dfms, (str, Path)):
         paths = [str(dfms)]
@@ -8875,7 +9377,10 @@ def _vram_guard(dfms, opts: dict = None, label: str = "任务",
     opts = dict(opts or {})
     if not opts.get("size_px"):
         opts["size_px"] = _dfm_size_hint(paths[0] if paths else "")
-    plan = _vram_plan(_vram_models_mb(paths), dict(opts, label=label))
+    if reclaim is None:
+        reclaim = (not sticky)
+    plan = _vram_plan(_vram_models_mb(paths),
+                      dict(opts, label=label, reclaim=bool(reclaim)))
     _vram_apply(plan, label, sticky=bool(sticky))
     if not plan.get("ok"):
         msg = plan.get("msg") or _vram_refuse_msg(plan, label)
@@ -9578,10 +10083,12 @@ def _stage_xseg(model):
         _stage_log("遮罩：缓存的遮罩器不能再用（%s）→ 重新加载并重新判定后端" % why)
         with _XSEG_SESS_LOCK:
             _XSEG_SESS.pop(key, None)
+    _own_f0 = _vram_measure_begin()
     m = _xseglib.XSegMasker(str(res["path"]),
                             workspace=(None if cpu else WORKSPACE),
                             engine_name=res["engine"],
                             providers=(["CPUExecutionProvider"] if cpu else None))
+    _vram_measure_end("xseg:" + Path(str(res["path"])).name, _own_f0)
     if cpu:
         _stage_log("遮罩：★ 当前在 CPU 上跑 ★ %s 走 CPU EP（DFL_ALLOW_CPU_FALLBACK=1）"
                    % Path(str(res["path"])).name)
@@ -11359,6 +11866,11 @@ def _stage_worker(cfg: dict):
                     # 前端靠它决定「能不能再点一次导出」）
                     "active": False,
                 })
+            # 同一条理由：分段链收尾也把本进程会话放掉（下一次预览/导出懒加载）
+            try:
+                _vram_release_inproc("分段导出结束")
+            except Exception:                               # noqa: BLE001
+                pass
             _vid_close_log()
 
 
@@ -11531,6 +12043,31 @@ def _stage_gpu_paths(cfg: dict, stage: str) -> list:
     return []
 
 
+def _stage_model_resident(stage: str, paths: list, cfg: dict) -> bool:
+    """这个阶段要的那份模型是不是**已经在当前进程里**了（缓存命中 = 不再新占显存）。
+
+    阶段链是同一个后端进程里连着跑的：pred 建的 dfm session、faces 加载的检测器、
+    mask 建的 XSeg 都常驻在缓存里。闸门如果还把「一份新会话」算进需求，等于把已经
+    吃掉的那 2GB 再算一遍 —— 于是第 3 个阶段开始必被拒（而它其实一个字节都不用再分配）。
+    """
+    paths = [str(p) for p in (paths or []) if str(p or "")]
+    if not paths:
+        return False
+    if stage in ("pred", "merge"):
+        live = {str(k).split("|")[0] for k in list(_DFM_SESS)}
+        return all(p in live for p in paths)
+    if stage == "faces":
+        return _det_cached(cfg.get("det_align"))
+    if stage == "mask":
+        try:
+            with _XSEG_SESS_LOCK:
+                live = {str(k[1]) for k in list(_XSEG_SESS) if len(k) > 1}
+            return all(p in live for p in paths)
+        except Exception:                                   # noqa: BLE001
+            return False
+    return False
+
+
 def _stage_vram_gate(cfg: dict, stage: str) -> dict:
     """阶段起手前的显存闸门 —— **在起 job / 加载模型 / 开线程之前**跑。
 
@@ -11545,6 +12082,16 @@ def _stage_vram_gate(cfg: dict, stage: str) -> dict:
     paths = _stage_gpu_paths(cfg, stage)
     opts = {"mode": "none", "procs": 1, "label": label,
             "aux": bool(stage not in ("frames", "encode"))}
+    # 这一份会话是不是**已经**在本进程里了（pred → mask → merge 是同一条链，上一个
+    # 阶段加载的 dfm 还在 _DFM_SESS 里）。在的话就不再算一份新会话 —— 那 2GB 已经在
+    # 卡上、也已经在「空闲」里扣过了，再算一遍就是重复计数（阶段 3 之后必被拒）。
+    try:
+        if paths and _stage_model_resident(stage, paths, cfg):
+            opts["resident"] = True
+    except Exception:                                       # noqa: BLE001
+        pass
+    # 真装不下时允许放掉本进程里**别人的**会话（没有任务在跑才敢，见 _vram_plan）
+    opts["reclaim_inproc"] = True
     return _vram_guard(paths, opts, label=label)
 
 
@@ -11740,7 +12287,8 @@ def _fused_frame_mb(size_px: int) -> float:
 
 
 def _fused_budget(want: int, free_mb, total_mb, size_px: int, model_mb: float = 0.0,
-                  batch: int = 0, label: str = "快速导出") -> dict:
+                  batch: int = 0, label: str = "快速导出",
+                  resident: bool = False) -> dict:
     """fused 的帧预算 —— 现在就是 _vram_plan 的一层壳（老调用方读的键一个都不改）。
 
     和以前那一版（只按 30/16/8 降帧）的区别只有两点，但都是这次要治的病：
@@ -11749,10 +12297,15 @@ def _fused_budget(want: int, free_mb, total_mb, size_px: int, model_mb: float = 
         让 OOM 在流水线里炸；现在由调用方明确拒绝（或按 DFL_ALLOW_CPU_FALLBACK 走 CPU）。
 
     free_mb 传 None = 「按 _vram_probe 自己探」（env 伪造值优先）；调用方已经探过了就传进来。
+
+    resident=True：这份会话**已经在当前进程里加载好了**（_fused_run 加载完 dfm 之后
+    拿实测尺寸再判一次那一拍）。那一拍里会话的「权重 + context」已经在卡上，再算一遍
+    就是重复计数 —— 384 模型实测「文件 1567MB / 建会话后整卡 +2.3GB」，重复计数会让
+    一个本来跑得动的单子被判死（用户截图那一单就是这么被拒的）。
     """
     opts = {"mode": "frames", "size_px": int(size_px or _VRAM_BASE_PX),
             "frames": int(want or 0), "batch": int(batch or 0), "procs": 1,
-            "label": label}
+            "label": label, "resident": bool(resident)}
     if free_mb is not None:
         opts["free_mb"] = int(free_mb)
         if total_mb is not None:
@@ -12202,8 +12755,12 @@ def _fused_run(cfg: dict) -> dict:
     if size_px != int(size_hint):
         _vid_log("快速导出：文件名给的尺寸 %d 与实测 %d 不一致 → 按实测重算预算"
                  % (int(size_hint), size_px))
+        # **resident=True**：这一拍 dfm 已经在本进程里加载好了（size_px 是它自己报的），
+        # 会话那 2GB 已经在卡上了 —— 再算一遍就是重复计数，会把可跑的单子判死。
+        # 只判增量：检测/遮罩（检测器上面已经加载了）+ 帧缓冲 + dfm 批。
         bud = _fused_budget(want_frames, None, None, size_px,
-                            model_mb=model_mb, batch=int(batch_target))
+                            model_mb=model_mb, batch=int(batch_target),
+                            resident=True)
         _vram_apply(bud, "快速导出")
         for _ln in _vram_log_lines(bud, "快速导出"):
             _vid_log(_ln)
@@ -13117,6 +13674,13 @@ def _fused_worker(cfg: dict):
         _vid_log("快速导出结束：%s · %.2f s%s"
                  % ("成功" if ok else ("已取消" if cancelled else "失败"), wall,
                     ("（不支持续跑）" if cancelled else "")))
+        # 收尾把本进程的 dfm/XSeg 会话放掉（成功/失败/取消都放）：留着它下一次预览
+        # 会被自己的后端堵死 —— 见 _vram_release_inproc 的注释。预览 worker 不重载，
+        # 下次预览再懒加载。
+        try:
+            _vram_release_inproc("快速导出结束")
+        except Exception:                                   # noqa: BLE001
+            pass
         _vid_close_log()
 
 

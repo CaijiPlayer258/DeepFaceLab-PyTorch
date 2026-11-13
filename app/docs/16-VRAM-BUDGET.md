@@ -2,7 +2,8 @@
 
 > 「三条路」（融合视频导出 / 项目导出 / 预览）共用一份预算：**按预算跑，跑不了就明说**。
 > 代码：`app/server/routes_merge.py` 的 `_vram_plan` 一段（搜 `显存预算（三条路共用）`）。
-> 验收：`app/tools/vram_plan_accept.py`。
+> 验收：`app/tools/vram_plan_accept.py`（三档伪造显存）、`app/tools/vram_reclaim_accept.py`
+> （**预览常驻 → 导出**这条真实路径 + 「谁占的显存」）。
 
 ## 1. 为什么要有这一层
 
@@ -19,15 +20,35 @@ HTTP 400（消息里带「需要 X GB / 可用 Y GB / 建议」）；用户显�
 ## 2. 公式
 
 ```
-可用预算 avail = free × (1 - 0.20) - 512MB
+free          = min(torch.mem_get_info, nvidia-smi.memory.free)
+可用预算 avail = free × (1 - 0.20) + 可回收 - 512MB
                  ↑ 20% 是驱动/碎片/arena 增长余量，512MB 给桌面合成器
+                 ↑ 可回收 = 我们自己的预览 worker 里那份常驻会话（导出前会真回收掉）
 一份会话 sess  = model_mb(权重，≈ .dfm 文件体积) + 512MB(CUDA context)
 固定开销 fixed = sess × 进程数 + 300MB(检测器 + 2D106 + XSeg)
 帧缓冲         = frames × size²×3×4×4/1MB        （416 → 7.92MB/帧）
 dfm 批         = f(batch)                         （查表，见下）
-总需求 need    = fixed + 帧缓冲 + dfm 批
+总需求 need    = fixed + 帧缓冲 + dfm 批          （resident：会话那项不计，见 §2.2）
 可行 ⟺ need ≤ avail
 ```
+
+### 2.1 free 为什么是两个来源取小
+
+Windows/WDDM 上 `torch.cuda.mem_get_info` 报的空闲**比 nvidia-smi 高**：本机空载
+实测 6999 vs 5693 MiB。差的 1.3GB 不是谁算错 —— mem_get_info 报的是「驱动还愿意
+答应多少」（不够就换页/回落共享内存），真分配下去立刻变成 nvidia-smi 的 used。
+拿它当预算是**乐观到 OOM**；nvidia-smi 的 free 才是「这张卡上所有进程之外还剩
+多少」。所以两边都探、取小，`source` 写成 `min(torch 6999 / smi 5693)`，计划里另带
+`free_torch_mb` / `free_smi_mb` 两个键，排障时一眼看见差多少。
+
+### 2.2 三种「容易把可跑的活判死」的口径
+
+| 情形 | 以前 | 现在 |
+|---|---|---|
+| 预览过一帧（worker 里 dfm 常驻 2.0GB），再点导出 | 只看 free → 空闲 1.4GB → **拒绝** | 起算前先 `_vram_reclaim()` 把 worker 卸掉，等驱动真回收（轮询 ≤4s）再探 → 空闲 3.4GB |
+| 导出过程中，加载完 dfm 后拿实测尺寸重算一次（文件名没带尺寸时必走） | 把「会话 1567+512MB」**又算一遍**，而它已经在卡上了 | `resident=True`：会话那项不计入需求，只判增量（检测/遮罩 + 帧 + 批） |
+| 六阶段连着跑（pred → mask → merge） | 每个阶段的闸门都按「一份新会话」算 | 阶段要的模型已经在 `_DFM_SESS` / 检测器缓存 / `_XSEG_SESS` 里时 `resident=True`（`_stage_model_resident`）；真装不下且没有任务在跑 → `_vram_release_inproc()` 放掉旧会话再算一遍 |
+| worker 忙/回收超时 | —— | 那 2GB 仍算进 `avail`（可回收），消息里注明「导出前会再收一次」 |
 
 `dfm 批` 的实测台阶（416，RTX 5070 Laptop 8GB，ort-CUDA；数字是「整卡增量 − 会话本身」）：
 
@@ -85,6 +106,22 @@ batch 4 起 ORT 的 arena 换到另一个池子 → 台阶不是直线，所以 
 <WORKSPACE>/_vram_free_mb.txt（一行整数 MB）复现：它比 DFL_VRAM_FREE_MB 多一个能力 ——
 **同一个后端进程里改得动**（env 换档必须重启，那等于把「缓存有没有坏」这件事测没了）。
 
+### 3.2 导出收尾：把本进程的会话放掉（不是重载预览）
+
+一单跑完（成功/失败/取消都算）立刻 `_vram_release_inproc()`：清 `_DFM_SESS` / `_XSEG_SESS`
+＋ `gc` ＋ `torch.cuda.empty_cache()`，并把它从「本程序占用」的账上划掉。
+
+为什么必须放：一份 384 会话建好 2.3GB，**跑完 12 帧之后 ORT 的 arena 还会再涨**
+（本机实测整卡 used 7049/8151 → 空闲只剩 843MB）。留着它，用户下一次预览要新建
+2.4GB 会话，会被自己的后端拒掉 —— 这就是用户那句「我什么都没跑」的另一半。
+
+**预览 worker 不重载**（收起时它本来就是空的）：下一次预览/导出各自懒加载，
+实测冷加载 3.5~4.2s；这比「导出完立刻把 2GB 重新占回去」抖来抖去强。
+
+同一条规则也用在后端进程身上：预览闸门（`_preview_guard`）在装不下且**没有任务在跑**
+时，会先 `_vram_release_inproc()` 把自己进程里那些「导出留下的」会话放掉再算一遍 ——
+于是「六阶段跑完再回编辑页预览」不会被自己的后端堵死。
+
 ## 4. 开关
 
 | 环境变量 | 作用 |
@@ -114,8 +151,21 @@ provider、预览 worker 收 `DFL_FORCE_CPU_EP=1`。日志与 status 都写「�
 ## 6. 验收
 
 ```
-runtime\server\Scripts\python.exe app\tools\vram_plan_accept.py
+runtime\server\Scripts\python.exe app\tools\vram_plan_accept.py      # 三档伪造显存
+runtime\server\Scripts\python.exe app\tools\vram_reclaim_accept.py   # 预览常驻 → 导出
 ```
+
+`vram_reclaim_accept.py` 验的是**真实路径**（真后端 + 真 GPU，不要伪造 free）：
+
+| 案例 | 断言 |
+|---|---|
+| P0 | 我们的 free 与 nvidia-smi 原始行差 ≤256MB；`source` 写明两个来源 |
+| A1 | 预览一帧之后 worker 里 `models` 非空、`used_mb` ≥500MB、整卡空闲明显下降 |
+| A2 | 预览常驻着按下 dry_run：**ok=True**（不再 400）、`reclaimed_mb` ≥1GB、日志有「回收预览模型 X MB … 空闲 A → B」 |
+| A3 | 真导出 12 帧 phase=done、成片 12 帧、全程无 OOM |
+| A4 | 导出结束后 worker 不重载；再预览能出图（懒加载）、`spawns` 仍是 1 |
+| B1 | 自己可回收 + 别的进程占 2GB → 仍然放行；`other_mb` 认得出那 2GB |
+| B2 | 别的进程占 4.6GB → 400，消息里有「本程序 / 其它程序」两栏，结构化字段 `own_mb/other_mb` 有数 |
 
 三档伪造显存（416 dfm）：1200 → 拒绝（需要 1.44GB / 可用 0.44GB）、3000 → 降档
 （30 帧 / 批 8→2）、8000 → 正常（30 帧 / 批 8）；`DFL_ALLOW_CPU_FALLBACK=1 + 1200`
