@@ -127,12 +127,17 @@ def _read_gray(path):
     return img.astype(np.float32) / 255.0
 
 
-def _prepare_mask(face: dict, frame_shape, cfg: dict, size: int, timings: dict):
+def _prepare_mask(face: dict, frame_shape, cfg: dict, size: int, timings: dict,
+                  fmat=None):
     """按 mask_mode 组出工作遮罩（0..1，size×size），再做 erode/blur。
 
     对应 4.0 export_pipeline.py:840-893。mask_mode：
       0 full（全 1）· 1 dst hull · 2 prd · 3 dst · 4 prd×dst · 5 prd+dst
       6 xseg-prd · 7 xseg-dst · 8 xseg-prd×xseg-dst · 9 全部相乘
+
+    fmat=None（视频/项目 facelib 那条路）时按 68 点算 facelib WHOLE_FACE 矩阵；
+    aligned 原生合成把 image_to_face_mat 传进来（mask_mode==1 的 dst hull 要用它
+    把原帧的凸包搬到**对齐画布**上，不然又变成两张画布混用）。
     """
     import cv2
     ensure_engine_path()
@@ -150,11 +155,13 @@ def _prepare_mask(face: dict, frame_shape, cfg: dict, size: int, timings: dict):
     xseg_dst = face.get("xseg_dst")
 
     wrk = None
-    if mask_mode == 1:
+    if mask_mode == 1 and lm is not None:
         # dst hull：先把原帧的凸包画出来，再用正变换搬到脸空间（和 4.0 一模一样）
         hull = get_image_hull_mask(frame_shape, lm)
-        fmat = get_transform_mat(lm, int(size), FaceType.WHOLE_FACE, scale=1.0)
-        wrk = cv2.warpAffine(hull, fmat, (int(size), int(size)),
+        m1 = fmat
+        if m1 is None:
+            m1 = get_transform_mat(lm, int(size), FaceType.WHOLE_FACE, scale=1.0)
+        wrk = cv2.warpAffine(hull, m1, (int(size), int(size)),
                              flags=cv2.INTER_CUBIC)
     elif mask_mode in (2, 4, 5):
         if prd_dfm is not None:
@@ -516,6 +523,127 @@ def compose_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
         out[y0:y1, x0:x1] = np.clip(blended * 255.0, 0, 255).astype(np.uint8)
     else:
         # 多张脸：整帧浮点累加，最后只回一次 u8（和 4.0 完全一致）
+        work = frame_bgr.astype(np.float32) / 255.0
+        for fw, mw, roi_f, roi_u8, (x0, y0, x1, y1) in layers:
+            sub = work[y0:y1, x0:x1]
+            blended = _blend_layer(sub, fw, mw, mode, dst_u8=roi_u8)
+            work[y0:y1, x0:x1] = blended
+        out = np.clip(work * 255.0, 0, 255).astype(np.uint8)
+    timings["blend_ms"] = timings.get("blend_ms", 0.0) + (time.time() - t_b) * 1000.0
+    return out
+
+
+# ---------------- aligned 原生画布合成（项目模式默认） ----------------
+def compose_aligned_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
+                          roi: bool = True) -> np.ndarray:
+    """一帧的合成（纯 CPU）——**aligned 原生画布**：贴回只用 image_to_face_mat。
+
+    和 :func:`compose_frame` 的唯一区别就是「画布」：
+
+      compose_frame         fmat = get_transform_mat(lm68, S, WHOLE_FACE)   ← facelib 画布
+      compose_aligned_frame fmat = 调用方给的 image_to_face_mat            ← aligned 画布
+
+    整条链（dfm 输入 / 遮罩 / 色彩迁移 / 反贴）都在**同一个** S×S 画布上走，所以
+    这里**一个 68 点都不用**：不需要 get_transform_mat，也没有「68 点 → WHOLE_FACE
+    矩阵」这一步。aligned 画布和 facelib 画布本来就不是同一张（同一个 68 点上，
+    facelib 的 WHOLE_FACE 比 aligned 的 align_mat_from_68 放大约 13%，见
+    app/docs/23-ALIGNED-COMPOSE.md），混用就是「合成结果和原帧的脸错位几十像素」。
+
+    faces : [{"mat": 原帧→画布 的 2×3（**已把画布尺寸折进 pred 的 S**）,
+              "pred": (S,S,3) 0..1,
+              "dw": (S,S,3) 0..1 可选 —— 画布上的原帧脸（色彩迁移的参考）。
+                    给了就不再把原帧 ROI 重新 warp 到画布（那是画布空间的重复采样）；
+                    不给则退回 compose_frame 的做法。
+              "landmarks": (68,2) 或 None（只有 mask_mode==1 的 dst hull 要它）,
+              "prd_dfm"/"dst_dfm"/"xseg_prd"/"xseg_dst": (S,S) 或 (256,256) 0..1}]
+    cfg   : 同 compose_frame
+    timings: 同 compose_frame
+
+    反贴语义（**别把两次求逆叠在一起**）：cv2.WARP_INVERSE_MAP 的含义是「M 是
+    dst→src」，而 image_to_face_mat 正是 原帧→画布（= 贴回时的 dst→src），所以正确
+    写法是 warpAffine(canvas, mat, (W,H), WARP_INVERSE_MAP)。先 invertAffineTransform
+    再 WARP_INVERSE_MAP 等于恒等，会把脸贴到别处（实测差 82 LSB）。
+    """
+    import cv2
+
+    timings = timings if isinstance(timings, dict) else {}
+    if not faces:
+        return frame_bgr
+    mode = str(cfg.get("mode") or "overlay").strip().lower()
+    ct = ct_code(cfg.get("color_transfer_mode", cfg.get("ct_mode")))
+    hm_thr = int(cfg.get("hist_match_threshold", 255) or 255)
+    h, w = frame_bgr.shape[:2]
+    layers = []
+
+    for f in faces:
+        mat = f.get("mat")
+        if mat is None:
+            raise ValueError("compose_aligned_frame 需要 mat（image_to_face_mat）")
+        m = np.asarray(mat, np.float64)
+        if m.shape != (2, 3) or not np.all(np.isfinite(m)):
+            raise ValueError("mat 不是合法的 2x3 仿射矩阵：%r" % (np.shape(mat),))
+        fo = np.clip(np.asarray(f["pred"], np.float32), 0, 1)
+        sz = int(fo.shape[0])
+        wrk = _prepare_mask(f, frame_bgr.shape, cfg, sz, timings, fmat=m)   # 遮罩准备
+
+        box = _roi_of_face(m, sz, frame_bgr.shape) if roi else None
+        if roi and box is None:
+            continue                        # 脸整个在帧外：贴上去也看不见
+        if box is None:
+            x0, y0, x1, y1 = 0, 0, w, h
+        else:
+            x0, y0, x1, y1 = box
+        rw, rh = x1 - x0, y1 - y0
+
+        t_p = time.time()
+        roi_u8 = frame_bgr[y0:y1, x0:x1]
+        roi_f = roi_u8.astype(np.float32) / 255.0
+        timings["prep_ms"] = timings.get("prep_ms", 0.0) + (time.time() - t_p) * 1000.0
+
+        # ROI 偏移折进平移项：M' = M · T(o)（ROI 原点 o 折进去以后，正反两次 warp
+        # 用的是同一个 M'，与整帧调用逐字节等价 —— 和 compose_frame 同一套做法）。
+        fwd = np.array(m, dtype=np.float64)
+        fwd[0, 2] += m[0, 0] * x0 + m[0, 1] * y0
+        fwd[1, 2] += m[1, 0] * x0 + m[1, 1] * y0
+
+        t_ct = time.time()
+        if ct or "hist-match" in mode:
+            dw = f.get("dw")
+            if dw is None:
+                dw = cv2.warpAffine(roi_f, fwd, (sz, sz), flags=cv2.INTER_CUBIC)
+            else:
+                dw = np.asarray(dw, np.float32)
+                if dw.shape[:2] != (sz, sz):
+                    dw = cv2.resize(dw, (sz, sz), interpolation=cv2.INTER_CUBIC)
+            if ct:
+                fo = _color_transfer(fo, dw, wrk, ct, timings)
+            if "hist-match" in mode:
+                fo = _imagelib().color_hist_match(fo, dw, hist_match_threshold=hm_thr)
+        timings["ct_ms"] = timings.get("ct_ms", 0.0) + (time.time() - t_ct) * 1000.0
+
+        t_p = time.time()
+        mw = cv2.warpAffine(wrk, fwd, (rw, rh),
+                            flags=cv2.WARP_INVERSE_MAP | cv2.INTER_CUBIC)
+        mw = np.clip(mw, 0, 1)
+        if mw.ndim == 2:
+            mw = mw[..., None]
+        fw = cv2.warpAffine(fo, fwd, (rw, rh),
+                            flags=cv2.WARP_INVERSE_MAP | cv2.INTER_CUBIC)
+        fw = np.clip(fw, 0, 1)
+        timings["paste_ms"] = timings.get("paste_ms", 0.0) + (time.time() - t_p) * 1000.0
+        layers.append((fw, mw, roi_f, roi_u8, (x0, y0, x1, y1)))
+
+    if not layers:
+        return frame_bgr
+
+    t_b = time.time()
+    if len(layers) == 1:
+        fw, mw, roi_f, roi_u8, (x0, y0, x1, y1) = layers[0]
+        blended = _blend_layer(roi_f, fw, mw, mode, dst_u8=roi_u8)
+        out = frame_bgr if roi is False else frame_bgr.copy()
+        out[y0:y1, x0:x1] = np.clip(blended * 255.0, 0, 255).astype(np.uint8)
+    else:
+        # 多张脸：整帧浮点累加，最后只回一次 u8（和 compose_frame/4.0 一致）
         work = frame_bgr.astype(np.float32) / 255.0
         for fw, mw, roi_f, roi_u8, (x0, y0, x1, y1) in layers:
             sub = work[y0:y1, x0:x1]

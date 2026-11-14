@@ -9,9 +9,19 @@
      —— 那是切脸阶段（②）自己写进去的。这一版直接读它，**一帧都不检测**；
      只有连 landmarks 都没有的对齐脸（5 点模式切的）才回退检测，并且计数报出来。
   ② **合成单线程**：老路把合成放在 worker 子进程里，由 MergeMaskedFace 一帧一次
-     单线程跑完整帧（seamlessClone 156ms + ct 95ms ≈ 330ms/帧）。这一版改用视频
-     fused 那条路同一个合成器 _merge_compose.compose_frame（ROI 版，纯 CPU，
-     默认 8 线程并行），dfm 与 XSeg 只在 GPU 那一条线程上跑。
+     单线程跑完整帧（seamlessClone 156ms + ct 95ms ≈ 330ms/帧）。这一版把合成
+     压进 ROI（纯 CPU，默认 4 线程），dfm 与 XSeg 只在 GPU 那一条线程上跑。
+
+     合成的**画布**有两条路，DFL_PROJ_COMPOSE=facelib|aligned 选（默认 aligned）：
+
+       aligned  compose_aligned_frame：画布 = ② 切脸写进 DFLJPG 的那张对齐脸本身
+                （image_to_face_mat 就是「从原帧裁出这张脸」的矩阵，贴回用它的逆），
+                dfm 的输入直接来自 aligned 像素，**整条链只有一张画布**；
+       facelib  compose_frame：画布 = 用 DFLJPG 的 68 点现算的 facelib WHOLE_FACE
+                矩阵，dfm 的输入是「原帧再 warp 一遍」的结果（老行为，A/B 用）。
+
+     两张画布不是同一张（同一套 68 点上差 13% 缩放 → 在原帧里差几十像素），混用
+     就是错位。历史原因与像素差见 app/docs/23-ALIGNED-COMPOSE.md。
   ③ **没有 dfm 批**：老路一帧一次 dfm 前向（batch=1）。这一版按 dfm 攒批，
      一次喂 4~8 张对齐脸（_dfm_run_batch，和 ③ 换脸阶段同一个函数）。
 
@@ -43,7 +53,10 @@ from pathlib import Path
 
 # 开关：DFL_PROJ_PIPELINE=legacy 回到老路（worker 子进程 + MergeMaskedFace）。
 _ENV_PIPE = "DFL_PROJ_PIPELINE"
-_ENV_COMPOSE = "DFL_PROJ_COMPOSE"        # 合成线程数（默认 8）
+# 合成的画布：aligned（默认，image_to_face_mat 原生画布）| facelib（68 点现算 WHOLE_FACE）。
+# 兼容老写法：值全是数字时不当模式用，仍旧当「合成线程数」。
+_ENV_COMPOSE = "DFL_PROJ_COMPOSE"
+_ENV_COMPOSE_N = "DFL_PROJ_COMPOSE_THREADS"   # 合成线程数（默认 4）
 _ENV_READ = "DFL_PROJ_READ"              # 读帧/对齐线程数（默认 3）
 _ENV_ENC = "DFL_PROJ_ENC"                # 编码线程数（默认 2）
 _ENV_DFM_BATCH = "DFL_PROJ_DFM_BATCH"    # dfm 攒批目标（默认 max(计划 batch, 4)）
@@ -60,6 +73,54 @@ def enabled() -> bool:
     """走不走流水线。DFL_PROJ_PIPELINE=legacy → 回老路（对拍 / 排障用）。"""
     v = str(os.environ.get(_ENV_PIPE) or "").strip().lower()
     return not (v in ("legacy", "old", "0", "off", "false", "no"))
+
+
+# 画布模式：只看 DFL_PROJ_COMPOSE 里的字符串值。数字（老写法）不算模式。
+_COMPOSE_FACELIB = ("facelib", "face", "legacy", "old", "off", "false", "no")
+_COMPOSE_ALIGNED = ("aligned", "align", "native", "new", "on", "true", "yes", "1")
+
+
+def compose_mode() -> str:
+    """合成的画布：aligned（默认）| facelib。
+
+    aligned  = 画布就是 aligned/ 里那张对齐脸（DFLJPG 的 image_to_face_mat），
+               整条链只有一张画布，贴回用它的逆 —— 少一次重采样，也不存在
+               「68 点 → WHOLE_FACE 矩阵」这一步。
+    facelib  = 老行为：用 68 点现算 facelib 的 WHOLE_FACE 矩阵，pred 与贴回都在
+               那张画布上（A/B、排障用）。
+    """
+    v = str(os.environ.get(_ENV_COMPOSE) or "").strip().lower()
+    if v in _COMPOSE_FACELIB:
+        return "facelib"
+    if v in _COMPOSE_ALIGNED:
+        return "aligned"
+    return "aligned"                   # 默认；数字/空/认不出来的都归这里
+
+
+def compose_threads(default=4) -> int:
+    """合成线程数。DFL_PROJ_COMPOSE_THREADS 优先；老写法 DFL_PROJ_COMPOSE=8 也认。"""
+    v = str(os.environ.get(_ENV_COMPOSE_N) or "").strip()
+    if v:
+        return _int_env(_ENV_COMPOSE_N, default, 1, 16)
+    old = str(os.environ.get(_ENV_COMPOSE) or "").strip()
+    if old.isdigit():
+        return _int_env(_ENV_COMPOSE, default, 1, 16)
+    return max(1, min(16, int(default)))
+
+
+def _resize_canvas(img, dst):
+    """对齐画布 → dst×dst。缩小用 INTER_AREA（带预滤波），放大用 INTER_CUBIC。
+
+    和「原帧 warp 到画布」不同：这里源和目标都在画布空间，是纯重采样，也不涉及
+    任何矩阵 —— mat 由调用方按 dst/S_al 线性缩放，几何仍然精确。
+    """
+    import cv2
+    h = int(img.shape[0])
+    dst = int(dst)
+    if h == dst:
+        return img
+    return cv2.resize(img, (dst, dst),
+                      interpolation=(cv2.INTER_AREA if dst < h else cv2.INTER_CUBIC))
 
 
 def _int_env(name, default, lo, hi) -> int:
@@ -201,7 +262,8 @@ def run(cfg: dict):
     from . import routes_merge as rm
     import cv2
     import numpy as np
-    from ._merge_compose import compose_frame, ensure_engine_path
+    from ._merge_compose import (compose_aligned_frame, compose_frame,
+                                ensure_engine_path)
     ensure_engine_path()
     from facelib import FaceType
     from facelib.LandmarksProcessor import get_transform_mat
@@ -266,7 +328,8 @@ def run(cfg: dict):
     batch_plan = max(1, int(cfg.get("batch") or 1))
     batch = _int_env(_ENV_DFM_BATCH, max(_DFM_BATCH_MIN, batch_plan),
                      1, _DFM_BATCH_MAX)
-    n_cmp = _int_env(_ENV_COMPOSE, 4, 1, 16)
+    npmode = compose_mode()
+    n_cmp = compose_threads(4)
     n_read = _int_env(_ENV_READ, 4, 1, 8)
     n_enc = _int_env(_ENV_ENC, 6, 1, 8)
     png_level = _int_env(_ENV_PNG, 3, 0, 9)
@@ -286,7 +349,7 @@ def run(cfg: dict):
         with prof_lock:
             prof[key] = prof.get(key, 0.0) + (time.perf_counter() - t_start) * 1000.0
     stats = {"done": 0, "swapped": 0, "copied": 0, "skipped": 0, "failed": 0,
-             "faces": 0, "detected": 0}
+             "faces": 0, "detected": 0, "aligned": 0, "no_mat": 0}
     failed_frames = []
     face_miss = []
     swap_ms = []
@@ -369,17 +432,23 @@ def run(cfg: dict):
                       "合成 %d 线程 · 编码 %d 线程 · dfm 攒批 %d 张"
                       % (want_w, n_cmp, n_enc, batch))
     sz0 = sizes.get(plan_paths[0], 0)
-    line = ("流水线：一份 dfm 会话（%s · %dx%d）· 攒批 %s 张 · 合成 %s 线程 · "
+    line = ("流水线：一份 dfm 会话（%s · %dx%d）· 攒批 %s 张 · 合成 %s 线程（%s 画布）· "
             "读帧 %s · 编码 %s · 队列 %s（DFL_PROJ_PIPELINE=legacy 可回退老路）"
-            % (Path(plan_paths[0]).name, sz0, sz0, batch, n_cmp, n_read, n_enc,
-               _QDEPTH))
+            % (Path(plan_paths[0]).name, sz0, sz0, batch, n_cmp, npmode, n_read,
+               n_enc, _QDEPTH))
     rm._proj_log(line)
     # 这一行同时进 status.pipeline_line：status 的 log 只回最后 12 行，120 帧跑完
     # 它早被「合成 N/120」挤掉了 —— 验收/排障要能随时读到「这一单按什么档跑的」。
     rm._proj_set(workers=1, batch=int(batch), compose=int(n_cmp), pipeline="fused",
-                 pipeline_line=line,
+                 pipeline_line=line, compose_mode=str(npmode),
                  adaptive={"src": "pipeline", "note": "流水线：档位不再是 worker×线程，"
                                                      "dfm 攒批 + 合成线程见日志"})
+    if npmode == "aligned":
+        rm._proj_log("合成画布：aligned（dfm 输入直接取自 DFLJPG 的对齐脸 · 贴回用 "
+                     "image_to_face_mat 的逆 · 68 点不参与合成）")
+    else:
+        rm._proj_log("合成画布：facelib（68 点 → WHOLE_FACE 矩阵 · 原帧再 warp 一次）"
+                     " —— DFL_PROJ_COMPOSE=aligned 可切回原生画布")
     rm._proj_log("对齐元数据：%d 张脸的 68 点直接取自 DFLJPG（%d 张缺 landmarks，按需回退检测）"
                  % (sum(len(v) for v in face_map.values()), info["no_lm"]))
     rm._proj_log("预热 %.1fs（一份会话 + %s）"
@@ -475,35 +544,61 @@ def run(cfg: dict):
                     continue
                 try:
                     for face, mi in use:
-                        lm = face["lm"]
-                        if lm is None:
-                            lm = _fallback_lm(frame)
-                            stats["detected"] += 1
-                            if lm is None:
-                                continue        # 没点就跳过这张脸
-                            face["lm"] = lm
                         dfm = str(models[mi]["dfm"])
                         sz = int(sizes.get(dfm) or 256)
-                        fmat = get_transform_mat(np.asarray(lm, np.float32), sz,
-                                                 FaceType.WHOLE_FACE, scale=1.0)
-                        warped = cv2.warpAffine(frame, fmat, (sz, sz),
-                                                flags=cv2.INTER_CUBIC)
-                        d256 = None
-                        if need_dst:
-                            # XSeg 的 dst 画布：和 MergeMaskedFace 里那一趟同序
-                            # （原帧 → facelib WHOLE_FACE 画布 → 256）。256 那张矩阵
-                            # 就是 S 那张乘 256/S（同一套模板只差缩放，实测 1e-13），
-                            # 所以不用再算一次 get_transform_mat。
-                            m256 = np.array(fmat, np.float64) * (256.0 / float(sz))
-                            d256 = cv2.warpAffine(frame, m256, (256, 256),
-                                                  flags=cv2.INTER_CUBIC)
-                        job["faces"].append({
-                            "k": int(face["k"]), "lm": np.asarray(lm, np.float32),
-                            "dfm": dfm, "size": sz, "mi": int(mi),
-                            "dfm_in": np.clip(warped.astype(np.float32) / 255.0, 0, 1),
-                            "dst256": d256,
-                            "pred": None, "prd": None, "dst": None,
-                            "xp": None, "xd": None})
+                        fc = {"k": int(face["k"]), "lm": face["lm"],
+                              "dfm": dfm, "size": sz, "mi": int(mi),
+                              "dfm_in": None, "dst256": None,
+                              "mat": None, "dw": None, "canvas": "facelib",
+                              "pred": None, "prd": None, "dst": None,
+                              "xp": None, "xd": None}
+                        if npmode == "aligned" and face.get("mat") is not None:
+                            # ---- aligned 原生：dfm 输入就是 ② 切脸写出来的那张脸
+                            # 画布尺寸可能是 512、也可能是 462（老版本按框裁的），
+                            # 一律缩到模型输入 S：mat 乘以 S/S_al，几何仍然精确
+                            # （整张画布按比例缩放，仿射矩阵线性缩放即等价）。
+                            aligned = rm._app_mod._imread_any(str(face["file"]))
+                            if aligned is None:
+                                raise RuntimeError("对齐脸读不出来：%s" % face["file"])
+                            s_al = int(aligned.shape[0])
+                            img = (aligned if s_al == sz
+                                   else _resize_canvas(aligned, sz))
+                            arr = np.clip(img.astype(np.float32) / 255.0, 0, 1)
+                            fc["dfm_in"] = arr
+                            fc["dw"] = arr          # ct 的参考就是画布上的这张脸
+                            fc["mat"] = (np.asarray(face["mat"], np.float64)
+                                         * (float(sz) / float(s_al)))
+                            fc["canvas"] = "aligned"
+                            if need_dst:
+                                fc["dst256"] = _resize_canvas(aligned, 256)
+                            stats["aligned"] += 1
+                        else:
+                            # ---- facelib 画布（老行为 / 没有 image_to_face_mat 的兜底）
+                            lm = face["lm"]
+                            if lm is None:
+                                lm = _fallback_lm(frame)
+                                stats["detected"] += 1
+                                if lm is None:
+                                    continue        # 没点就跳过这张脸
+                                face["lm"] = lm
+                            if npmode == "aligned":
+                                stats["no_mat"] += 1      # 缺 mat，退回 facelib 画布
+                            fmat = get_transform_mat(np.asarray(lm, np.float32), sz,
+                                                     FaceType.WHOLE_FACE, scale=1.0)
+                            warped = cv2.warpAffine(frame, fmat, (sz, sz),
+                                                    flags=cv2.INTER_CUBIC)
+                            fc["lm"] = np.asarray(lm, np.float32)
+                            fc["dfm_in"] = np.clip(warped.astype(np.float32) / 255.0,
+                                                   0, 1)
+                            if need_dst:
+                                # XSeg 的 dst 画布：和 MergeMaskedFace 里那一趟同序
+                                # （原帧 → facelib WHOLE_FACE 画布 → 256）。256 那张矩阵
+                                # 就是 S 那张乘 256/S（同一套模板只差缩放，实测 1e-13），
+                                # 所以不用再算一次 get_transform_mat。
+                                m256 = np.array(fmat, np.float64) * (256.0 / float(sz))
+                                fc["dst256"] = cv2.warpAffine(frame, m256, (256, 256),
+                                                              flags=cv2.INTER_CUBIC)
+                        job["faces"].append(fc)
                 except Exception as e:                      # noqa: BLE001
                     traceback.print_exc()
                     job["kind"] = "err"
@@ -621,22 +716,35 @@ def run(cfg: dict):
             fail["err"] = fail["err"] or ("gpu: %r" % (e,))
             quit_event.set()
 
-    # ---------- ③ 合成（compose_frame，ROI 版）----------
+    # ---------- ③ 合成（ROI 版；画布按 npmode 分两条）----------
     def _composer():
         try:
             while not quit_event.is_set():
                 job = _get(q_cmp)
                 if job is END:
                     return
-                args = []
+                # 按**画布**分组：aligned 那群走 compose_aligned_frame（image_to_face_mat），
+                # facelib 那群走 compose_frame（68 点现算 WHOLE_FACE）。正常一帧里只有
+                # 一种；缺 image_to_face_mat 的个别脸会退到 facelib，这时按组各贴一次。
+                grp_a, grp_l = [], []
                 for fc in job["faces"]:
-                    args.append({"landmarks": fc["lm"], "pred": fc["pred"],
-                                 "prd_dfm": fc["prd"], "dst_dfm": fc["dst"],
-                                 "xseg_prd": fc["xp"], "xseg_dst": fc["xd"]})
+                    common = {"pred": fc["pred"], "prd_dfm": fc["prd"],
+                              "dst_dfm": fc["dst"], "xseg_prd": fc["xp"],
+                              "xseg_dst": fc["xd"], "landmarks": fc["lm"]}
+                    if fc.get("canvas") == "aligned":
+                        common["mat"] = fc["mat"]
+                        common["dw"] = fc["dw"]
+                        grp_a.append(common)
+                    else:
+                        grp_l.append(common)
                 t_cmp = time.perf_counter()
                 try:
-                    out = compose_frame(job["frame"], args, comp_cfg,
-                                        job.setdefault("timings", {}))
+                    out = job["frame"]
+                    tms = job.setdefault("timings", {})
+                    if grp_a:
+                        out = compose_aligned_frame(out, grp_a, comp_cfg, tms)
+                    if grp_l:
+                        out = compose_frame(out, grp_l, comp_cfg, tms)
                 except Exception as e:                      # noqa: BLE001
                     job["kind"] = "err"
                     job["error"] = "第 %d 帧合成失败：%s" % (job["i"], str(e)[:160])
@@ -850,6 +958,9 @@ def run(cfg: dict):
     except Exception:                                       # noqa: BLE001
         pass
     n_face = max(1, int(stats["swapped"]))
+    if stats["aligned"] or stats["no_mat"]:
+        rm._proj_log("合成画布统计：aligned %d 张 · facelib 兜底 %d 张（缺 image_to_face_mat）"
+                     % (int(stats["aligned"]), int(stats["no_mat"])))
     rm._proj_log("分段耗时（每帧 ms · 除以本段线程数才是墙钟）：读帧/warp %.1f（%d 线程）"
                  " · dfm %.1f · xseg %.1f · 合成 %.1f（%d 线程）· 编码 %.1f（%d 线程）"
                  " · 落盘 %.1f —— 按 %d 张有脸帧算"

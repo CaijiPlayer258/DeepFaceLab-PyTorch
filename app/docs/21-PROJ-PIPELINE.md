@@ -85,14 +85,27 @@ B1 = 29.1 ms/张 · B4 = 28.7 · B8 = 31.0 —— 攒批 4 张每张省 ~0.4ms�
 * **取消/断点续跑**：取消后 merged/ 里留下的一定是**前缀**（提交严格按帧序）；
   续跑按「文件存在且非空」跳过 —— 和老路一个判据。
 * 开关：`DFL_PROJ_PIPELINE=legacy` 回到老路（worker 子进程 + MergeMaskedFace），
-  A/B 与排障用；`DFL_PROJ_COMPOSE / _READ / _ENC / _DFM_BATCH / _PNG_LEVEL` 调线程与攒批。
+  A/B 与排障用；`DFL_PROJ_READ / _ENC / _DFM_BATCH / _PNG_LEVEL` 调线程与攒批。
+* **画布**：`DFL_PROJ_COMPOSE=aligned|facelib`（默认 aligned，见 [23](23-ALIGNED-COMPOSE.md)）；
+  合成线程数改成 `DFL_PROJ_COMPOSE_THREADS`（默认 4）；老写法 `DFL_PROJ_COMPOSE=8`
+  仍按线程数解释（全数字不当模式用）。
 * 收尾（对账 + ffmpeg 编码）抽成 `_proj_finish()`，两条路共用一份实现。
 
 ---
 
 ## 三、两条「能不能更省」的质疑，核实结果
 
-### 3.1 「贴回只依赖 image_to_face_mat，不需要 68 点」—— **不成立（本仓库）**
+### 3.1 「贴回只依赖 image_to_face_mat，不需要 68 点」—— **成立，但要整条链都在 aligned 画布上**（见 [23-ALIGNED-COMPOSE](23-ALIGNED-COMPOSE.md)）
+
+> **2026-11 更正**：这一节原来写的是「不成立」，那个结论是**混用两张画布**得出的 ——
+> 它拿 facelib 画布的矩阵 A 去贴 aligned 画布的像素（或反之），当然错几十像素。
+> 正确做法是**整条链只用一张画布**：dfm 输入、遮罩、ct、反贴全在 aligned 画布上走，
+> 67 行就变成：`warpAffine(pred, image_to_face_mat, (W,H), WARP_INVERSE_MAP)`。
+> 已经实现成 `_merge_compose.compose_aligned_frame()`，项目模式默认走它
+> （`DFL_PROJ_COMPOSE=facelib` 可回退）。实测：同一张画布内闭环误差 **0.078 px**，
+> 而混用两张画布是 **13 px**（画布四角 19~38 px）—— 全部数字在 23 页。
+
+原来的核实数据仍然有效，但只说明一件事：**两张矩阵不是同一张**。
 
 `compose_frame` 贴回用的矩阵是 **facelib 的 WHOLE_FACE**：`get_transform_mat(lm68, S,
 WHOLE_FACE)`。而 `aligned/` 的画布是 app 自己的 68 点模板（`_align.align_mat_from_68`，
@@ -105,17 +118,16 @@ padding 0.40 + 中心下移 7%）。两张矩阵**不是同一张** —— 这�
 |---|---|
 | 逐脸 C = A·B⁻¹（aligned→facelib 画布）把四角+中心映射到画布的坐标 | 逐点**标准差 2.8~21.2 px**、极差最大 **74 px** |
 | 用第一张的 C₀ 当常数代替逐脸 C，画布四角+中心映回原帧的误差 | **mean 73.1 px / p95 173.6 / max 249.6 px** |
+| 原图同 68 点上两个模板的缩放比（C 的线性部分，40 张真实对齐脸） | **1.13 ~ 1.15**（facelib 画布的脸大 13%） |
 
-结论：**image_to_face_mat 单独不足以还原贴回矩阵**，会整体错位几十像素。
-所以这一版保留「读 DFLJPG 的 68 点」，但它是**读数据**（`get_transform_mat` 单次
-0.23ms，且 256 那张由 S 那张乘 256/S 得到，实测差 1e-13），不是**算数据** ——
-检测与 2D106 回归那 67ms/帧才是不再需要的那部分。
+结论（更正后）：**在同一张画布内**，image_to_face_mat 的逆就是贴回矩阵，68 点一个都
+不需要；**跨画布**则没有任何一张矩阵能救（补偿矩阵 C 是逐脸的，不是常数）——所以不是
+「补一张矩阵」，而是「别换画布」。
 
-> 真要彻底不要 68 点，只有一条路：把整条链的画布换成 aligned 画布（`image_to_face_mat`
-> 的逆变换贴回）。那样 dfm 的输入就从「facelib WHOLE_FACE 裁出来的脸」变成「app 模板
-> 裁出来的脸」，构图（人脸占画布的比例/位置）变了 —— 384/416 这两份模型是按 facelib
-> 的 whole_face 裁法训的，换裁法等于给它喂错构图。**这是产品取舍，不是免费加速**，
-> 本页不采用；要做的话得连训练侧一起改。
+> 产品取舍仍在，只是换了位置：aligned 画布比 facelib 画布**宽 13%**（模板形状差异，
+> 不是代码 bug），所以 dfm 看到的构图会和「按 facelib 裁法训的模型」差 13% 缩放。
+> 谁的画布和模型训练时用的一致，那个模式就占优 —— 这条只能对着训练数据确认，
+> 23 页把两条路的像素差与帧率给全了，不替产品做选择。
 
 ### 3.2 「色彩迁移必须在 aligned 小图上算，不能在整帧上算」—— **本来就是（视频/项目都是 S×S 域）**
 
