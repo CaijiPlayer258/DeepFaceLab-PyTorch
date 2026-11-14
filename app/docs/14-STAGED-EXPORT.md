@@ -133,6 +133,10 @@ tinymog 上还**丢过一张脸**（12 张里少 1 张）。要「检测结果�
 下一步能榨出两位数的地方只剩 GPU 那侧：给 dfm 编 TRT 引擎（现在日志明确回退
 `onnxruntime(CUDA)`，dfm 20.7ms/帧是最大的一块）。
 
+> ⚠️ **按用户要求，dfm 默认不使用 TRT**（`DFL_DFM_TRT=0`，ONNX only）：磁盘上就算有
+> `_engines/dfm_*.engine` 也一律忽略。上面这条结论留着当「这块卡上 dfm 还剩多少余量」的参照，
+> **不是待办**；真要对照就显式 `DFL_DFM_TRT=1`，那组数字不属于本页口径。
+
 **像素一致性怎么验**：`fused_export_accept.py --cases a,b`（同一段 120 帧，fused vs 分段）
 本期实测 **mean=0.0000 LSB / max=0 / 120 帧全等**，PASS 23 / FAIL 0。注意这条链本身有
 **跑一次一个样**的噪声底：同一配置连跑两次，实测 mean 0.28~0.46 LSB、max 31~60（dfm 攒批的

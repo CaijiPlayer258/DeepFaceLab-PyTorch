@@ -82,6 +82,23 @@ iperov 当年的设计背景：
 
 **判定顺序**：原生 TRT（有 .engine）→ ort-CUDA → CPU。任何回落都要在 status / 日志里写明实际后端与原因，禁止静默。
 
-**报告口径**：涉及推理性能时，必须按「原生 TRT / ort-CUDA / ort-CPU」三分类给结论，并附 `session.get_providers()` 与引擎文件名；笼统说「用了 GPU」不算结论。
+> **⚠️ dfm 例外（用户硬规则，优先于上面的顺序）**：`.dfm` 的推理**默认只用 onnxruntime**
+> （CUDA EP / fp32）—— **不编 TRT 引擎、不降精度**。磁盘上就算有 `_engines/dfm_*.engine` 也不加载：
+> `DFL_DFM_TRT` 默认 **0**，并且必须打一行
+>
+> ```
+> [dfm] 发现 TRT 引擎 dfm_416_af9afd7fb186_sm1200_trt101339.bf16.engine（457.7MB）但按 DFL_DFM_TRT=0忽略，使用 onnxruntime CUDA
+> ```
+>
+> 要做 TRT 对照只能显式 `DFL_DFM_TRT=1`（仅供实验，**按用户要求默认不使用 TRT**，默认口径不算它）。
+> **范围只限 dfm**：XSeg / 检测器（tinymog · retinaface_10g）/ 2D106 的引擎照旧命中，不受这条影响。
+>
+> **连带的语义变化（要知道）**：dfm 走引擎时，fused 攒批与分段逐张的 fp32 结果**逐字节相同**
+> （验收里 `fused vs 分段 = 0.0000 LSB`）。换成 onnxruntime 后这条不再成立 —— ORT/cuDNN
+> 按 batch 组成选卷积核，两条路实测差 **0.30 / 0.54 / 0.66 / 0.68 / 0.70 LSB**（5 次）。
+> 那不是精度退化（两边都是 fp32、都是 ONNX）；`fused_export_accept` 的门槛因此从 0.5 调到
+> **1.0 LSB**（理由写在该脚本 `TOL_MEAN` 的注释里）。`DFL_DFM_TRT=1` 时仍能看到 0.0000。
+
+**报告口径**：涉及推理性能时，必须按「原生 TRT / ort-CUDA / ort-CPU」三分类给结论，并附 `session.get_providers()` 与引擎文件名；笼统说「用了 GPU」不算结论。**dfm 那一档永远报 ort-CUDA**（默认 ONNX only），除非报告里显式注明 `DFL_DFM_TRT=1`。
 
 缺 `.engine` 时用 `POST /api/engines/build` 生成（`app/server/_trt_build.py`，Python Builder API）。

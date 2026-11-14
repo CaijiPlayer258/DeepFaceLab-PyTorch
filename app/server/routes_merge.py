@@ -8961,15 +8961,81 @@ def _sess_batch_cap(sess) -> int:
     return 8                                            # 动态 batch（ort）
 
 
-def _dfm_session(dfm: str):
-    """常驻的 dfm session：**原生 TRT 引擎优先 → ort-CUDA → 最后才 CPU（并且喊出来）**。
+# ---------------------------------------------------------------
+# dfm 的推理后端开关：**默认只用 onnxruntime（CUDA EP / fp32）**
+# ---------------------------------------------------------------
+# 用户硬规则：**dfm 只走 onnxruntime，不编 TRT 引擎、不降精度。**
+# 所以 .engine 对 dfm 是「默认关」的一档加速：磁盘上就算躺着 dfm 的引擎，
+# 也要按开关忽略，并且**明确喊一行日志**（禁止静默换后端）。
+# 想回到旧行为（原生 TRT 优先）做对照实验，就显式设 DFL_DFM_TRT=1。
+# 注意范围：这个开关**只管 dfm**。XSeg / 检测 / 2D106 的 TRT 不受影响
+# （它们的入口是 _stage_xseg / _xseg.py，压根不读这两个变量）。
+_DFM_TRT_ENV = "DFL_DFM_TRT"          # 0（默认）= 禁；1 = 允许原生 TRT 引擎
+_DFM_ENGINE_ENV = "DFL_DFM_ENGINE"    # 老变量，语义同上（只为兼容显式写 1 的人）
+_DFM_TRT_ON = ("1", "true", "yes", "on", "trt", "engine")
 
-    为什么不是「一律 ort-CUDA」：这台机子上 416 dfm 的实测（stage_perf_profile.py）
-        ort-CUDA 35.9 ms/张（27.9 张/秒）· 原生 TRT(bf16) 30.9 ms/张（32.3 张/秒）
-    差的 16% 全在 ORT 的 EP 调度 + 15 个 Memcpy 节点上；有 .engine 就该用它。
-    没有引擎时照旧走 ort-CUDA —— 唯一的硬要求是**不能静默退到 CPU**：
-    CPU 单张 527 ms（1.9 张/秒），而 ORT 在 CUDA provider 加载失败时只会打一行
-    warning 就继续跑，所以这里自己把 providers 拿出来核对并打醒目日志。
+
+def _dfm_trt_enabled() -> bool:
+    """dfm 能不能用 .engine —— **默认不能**（用户要求 ONNX only）。"""
+    for k in (_DFM_TRT_ENV, _DFM_ENGINE_ENV):
+        v = str(os.environ.get(k) or "").strip().lower()
+        if v in _DFM_TRT_ON:
+            return True                          # 显式要求，尊重
+        if v:
+            return False                         # 显式关（"0"）压过后面那个变量
+    return False                                 # 谁都没设 → 关（ONNX only）
+
+
+def _dfm_trt_why() -> str:
+    """一句话说明「现在是按哪个变量关的」，给日志用。"""
+    for k in (_DFM_TRT_ENV, _DFM_ENGINE_ENV):
+        v = str(os.environ.get(k) or "").strip()
+        if v:
+            return "%s=%s" % (k, v)
+    return "%s=0（默认）" % _DFM_TRT_ENV
+
+
+def _dfm_mb(n) -> str:
+    try:
+        return "%.1fMB" % (float(n) / (1024.0 * 1024.0))
+    except Exception:                                   # noqa: BLE001
+        return "?MB"
+
+
+def _dfm_engines_on_disk(ws, name: str) -> list:
+    """磁盘上属于这个 dfm 的 .engine（不校验 md5/SM，只为「发现了但忽略」那行日志）。
+
+    按体积从大到小：bf16 引擎几百 MB，int8 的几十 MB，用户看到的最大那个才是重点。
+    """
+    out = []
+    try:
+        d = Path(ws) / "_engines"
+        if not d.is_dir():
+            return out
+        out = list(d.glob("%s_*.engine" % name))
+        out.sort(key=lambda p: p.stat().st_size, reverse=True)
+    except Exception:                                   # noqa: BLE001
+        return []
+    return out
+
+
+def _dfm_session(dfm: str):
+    """常驻的 dfm session：**默认 ort-CUDA（fp32）**；CPU 只在真装不下时（且喊出来）。
+
+    用户硬规则：**dfm 只走 onnxruntime，不编 TRT 引擎、不降精度。**
+    所以判定顺序是：
+
+        DFL_DFM_TRT=1（显式要求，仅供对照实验）→ 原生 TRT 引擎 → ort-CUDA
+        DFL_DFM_TRT=0（**默认**）              → ort-CUDA（磁盘上的 .engine 忽略 + 喊一行）
+        显存装不下 + DFL_ALLOW_CPU_FALLBACK=1  → CPU EP（慢 ~17 倍，日志写死）
+
+    历史背景（留给想看数的人）：416 dfm 上 ort-CUDA 35.9 ms/张（27.9 张/秒）、
+    原生 TRT(bf16) 30.9 ms/张（32.3 张/秒）—— 那 ~16% 就是换掉 ONNX 的代价，
+    按用户口径**不换**：这条链上 dfm 永远是 onnxruntime，日志里 provider 列表为准。
+
+    唯一的硬要求是**不能静默退到 CPU**：CPU 单张 527 ms（1.9 张/秒），而 ORT 在
+    CUDA provider 加载失败时只会打一行 warning 就继续跑，所以这里自己把
+    providers 拿出来核对、打醒目日志。
 
     session 按路径常驻，切模型才重建。
     """
@@ -9004,6 +9070,21 @@ def _dfm_session(dfm: str):
         backend = "ort-cuda"
         if cpu:
             info = {"reason": "DFL_ALLOW_CPU_FALLBACK=1（显存预算装不下，主动回落 CPU）"}
+        elif not _dfm_trt_enabled():
+            # 用户硬规则：**dfm 只用 onnxruntime**。引擎在磁盘上也不加载 —— 但必须喊出来，
+            # 否则「A/B 报告里 416 其实是 TRT 的数字」这种事下次还会悄悄发生。
+            engs = _dfm_engines_on_disk(ws, _dfm_engine_name(key))
+            if engs:
+                more = ("（另有 %d 份同类引擎一起忽略）" % (len(engs) - 1)) if len(engs) > 1 else ""
+                _stage_log("[dfm] 发现 TRT 引擎 %s（%s）但按 %s忽略，使用 onnxruntime CUDA%s"
+                           % (engs[0].name, _dfm_mb(engs[0].stat().st_size),
+                              _dfm_trt_why(), more))
+            else:
+                _stage_log("[dfm] 按 %s走 ONNX only（磁盘上没有 dfm 的 .engine）"
+                           % _dfm_trt_why())
+            info = {"reason": "%s —— 按用户要求 dfm 只走 onnxruntime，"
+                              "磁盘上有 .engine 也不加载" % _dfm_trt_why()}
+            sess = None
         else:
             try:
                 from . import _engines as _E
@@ -9046,11 +9127,14 @@ def _dfm_session(dfm: str):
                 backend = "ort-cpu"
                 _stage_log("换脸：★ 警告 ★ dfm 掉到 CPU 了（%s）—— 这张卡上会慢 ~15 倍"
                            "（416 实测 527 ms/张）。查 cublasLt64_12.dll / cudnn64_9.dll "
-                           "是否在 PATH 上（torch/lib），或改用原生 TRT 引擎。"
+                           "是否在 PATH 上（torch/lib）；dfm 的 TRT 只能靠"
+                           " DFL_DFM_TRT=1 显式打开（默认 ONNX only）。"
                            % (info.get("reason") or "CUDA provider 没加载上"))
             else:
-                _stage_log("换脸：dfm 走 onnxruntime(%s)（没有 dfm 的 TRT 引擎：%s）"
-                           % (provs[0], str(info.get("reason") or "未查询")[:120]))
+                # 验收要的证据就在这一行：provider 列表 = 真后端，不是"听说用了 GPU"
+                _stage_log("换脸：dfm 走 onnxruntime(%s) · providers=%s · 后端=ort-cuda（%s）"
+                           % (provs[0], list(provs),
+                              str(info.get("reason") or "未查询")[:140]))
         nchw = len(shape) >= 4 and shape[1] in (1, 3)
         try:
             size = int(shape[2] if nchw else shape[1])

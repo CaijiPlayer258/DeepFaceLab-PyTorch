@@ -1,6 +1,8 @@
 # 19 · 速度报告（ONNX only）
 
 > 口径先说死：**dfm 只走 onnxruntime（CUDA EP），不编 TRT 引擎、不降精度**。
+> 这条现在是**代码默认**：`DFL_DFM_TRT=0`（磁盘上就算躺着 `_engines/dfm_*.engine` 也忽略，
+> 日志会打一行 `[dfm] 发现 TRT 引擎 … 但按 DFL_DFM_TRT=0忽略，使用 onnxruntime CUDA`）。
 > 本页所有数字来自同一个脚本、同一份 JSON（`D:\MyProject\_speed41\speed.json`），
 > 每格跑 3 次取中位；格子之间的差异只来自配置，不来自"换了一次机器"。
 >
@@ -229,4 +231,9 @@ runtime\server\Scripts\python.exe app\tools\speed_bench.py --json D:\MyProject\_
 | `vram_plan_accept` / `vram_force_accept` / `vram_reclaim_accept` | 51 / 45 / 26 PASS · 0 FAIL |
 
 > 注意：**这些数字都是 ONNX 路径**（基准工作区里没有 `_engines/`，dfm 走 ort-CUDA）。
-> 谁要是把 `workspace/_engines` 建起来，dfm 会自动切 TRT 引擎 —— 那已经不是本页口径。
+> 而且从这一版起，**即使把 `workspace/_engines` 建起来、里面躺着 dfm 的 bf16 引擎，
+> dfm 也不会切走**：`DFL_DFM_TRT` 默认 0（ONNX only），引擎一律忽略并打日志。
+> 要做 TRT 对照必须显式 `DFL_DFM_TRT=1` —— **按用户要求默认不使用 TRT**，那组数字不属于本页。
+>
+> （历史口径提醒：dfm 走 TRT bf16 时 416 那份能到 33.68 帧/秒，换回 ONNX 是 25.32，
+> −24.8%；384 这份本来就没引擎，所以本页数字不受影响。见 23-ALIGNED-COMPOSE §六。）
