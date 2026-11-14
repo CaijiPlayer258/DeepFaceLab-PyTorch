@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """模型库 / 规格 / GPU（从 app.py 按路径前缀抽出）。"""
 from __future__ import annotations
+import numpy as np
 
 import asyncio
 import base64

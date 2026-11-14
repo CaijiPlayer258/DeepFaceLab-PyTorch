@@ -35,6 +35,7 @@
 「绝不因解码不了而失败」这条底线。
 """
 from __future__ import annotations
+import numpy as np
 
 import os
 import subprocess

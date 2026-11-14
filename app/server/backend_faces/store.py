@@ -30,6 +30,7 @@
   同一时刻只有一个请求能改 index，10 个 move 并发也不会写出半个 JSON。
 """
 from __future__ import annotations
+import numpy as np
 
 import contextlib
 import json

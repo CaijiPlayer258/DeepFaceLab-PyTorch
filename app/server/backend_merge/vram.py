@@ -7,6 +7,7 @@
 旧行号 → 现文件 的对照表：app/server/backend_merge/MAPPING.md。
 """
 from __future__ import annotations
+import numpy as np
 
 import json
 import os
