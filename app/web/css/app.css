@@ -3124,6 +3124,10 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
 }
 
+/* 6px 横条 + 「45% / 帧数 / 剩余」那行 —— **导出进度页已经不用了**（进度改由图里
+   「缓存帧」列的水位表达，帧数/速度/剩余挪进 .mgpipe-hd 右侧）。但**项目导出页**
+   （.mgview[data-view="project"] 里的 mgpjFill/mgpjPct…）用的还是这两个类，
+   所以规则不许顺手删 —— 删了那一页的进度条会散架。 */
 #p-merge .mgprog-bar {
   position: relative;
   height: 6px;
@@ -5488,11 +5492,6 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   background: var(--panel-2);
 }
 #p-merge .mgprog-res[hidden] { display: none !important; }
-#p-merge .mgprog-res-hd {
-  font-size: 11px;
-  letter-spacing: .02em;
-  color: var(--ink-3);
-}
 #p-merge .mgprog-res-txt {
   font-size: 12px;
   line-height: 1.6;
@@ -5519,8 +5518,6 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
    会让人以为"跑过又失败了"。所以拒绝态把六步 / 进度条 / 帧数 / 取消键全部收起，
    只留一句「显存不足：需要 X GB，可用 Y GB」和出口按钮。
    .mgprog-bar / .mgprog-meta 自己有 display，得显式写 [hidden] 才压得住。 */
-#p-merge .mgprog-bar[hidden],
-#p-merge .mgprog-meta[hidden],
 #p-merge .mgprog-steps[hidden],
 #p-merge .mgprog-foot[hidden] { display: none !important; }
 #p-merge .mgprog-res.is-rej .mgprog-res-txt { color: #ef4444; }
@@ -5724,7 +5721,6 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   background: transparent;
   box-shadow: none;
 }
-#p-merge .mgprog-res-hd { font-size: 11px; }
 #p-merge .mgprog-res-acts {
   display: flex;
   width: 100%;
@@ -5954,6 +5950,10 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   --mgp-lit-mid: rgba(61, 220, 132, .09);
   --mgp-lit-line: rgba(61, 220, 132, .55);
   --mgp-stall: rgba(240, 180, 41, .10);
+  /* 水位：缓存列（在攒）与成片杯（已编码）。蓝色是「液体」，和 ok/warn/bad 那套
+     状态色分开 —— 图上绿色是「刚有过交接」，蓝色是「攒了多少」，两件事。 */
+  --mgp-water: color-mix(in srgb, var(--brand) 30%, transparent);
+  --mgp-water-out: color-mix(in srgb, var(--brand) 46%, transparent);
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -5965,6 +5965,8 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   --mgp-lit-mid: rgba(15, 157, 88, .07);
   --mgp-lit-line: rgba(15, 157, 88, .45);
   --mgp-stall: rgba(194, 116, 11, .10);
+  --mgp-water: color-mix(in srgb, var(--brand) 26%, transparent);
+  --mgp-water-out: color-mix(in srgb, var(--brand) 40%, transparent);
 }
 #p-merge .mgpipe-hd {
   display: flex;
@@ -5979,11 +5981,42 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   color: var(--ink);
 }
 #p-merge .mgpipe-sub { font-size: 11.5px; color: var(--ink-3); }
+/* 右侧：水位小杯 + 帧数 + 剩余 + 速度。
+   以前这里是三行（顶部横条 / 45% / 32-72 帧 / 剩余）—— 现在页面上的数字进度只剩这一行。 */
 #p-merge .mgpipe-right {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   font-size: 11.5px;
   color: var(--ink-3);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+#p-merge .mgpipe-right > span { flex: none; }
+#p-merge .mgpipe-right #mgpFrames { color: var(--ink-2); }
+#p-merge .mgpipe-right #mgPipeRight { min-width: 66px; text-align: right; }
+
+/* 水位小杯（标题区）：10×16 的竖杯，从下往上填 —— 和「成片」那一格同一个数。
+   容器只画壳，水面是里层的 <i>：scaleY(level)，transform-origin 在底边。 */
+#p-merge .mgpipe-cup {
+  position: relative;
+  display: inline-block;
+  width: 10px;
+  height: 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--panel-2);
+}
+#p-merge .mgpipe-cup i {
+  position: absolute;
+  inset: 0;
+  display: block;
+  background: var(--mgp-water);
+  transform: scaleY(0);
+  transform-origin: 50% 100%;
+  transition: transform .3s cubic-bezier(.25,.46,.45,.94);
 }
 #p-merge .mgpipe-sep { height: 1px; background: var(--line); }
 #p-merge .mgpipe-body { padding: 8px 6px 6px; }
@@ -6036,6 +6069,57 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   animation: mgpipeLit 1.15s cubic-bezier(.22, .8, .25, 1) forwards;
 }
 
+/* ---------- 水位：只填「缓存帧」那一列（+ 右侧「成片」那一格） ----------
+   填充比例 = 这一列里**现存的帧** / 总帧数（后端 compose.ticks − encode.ticks）；
+   成片杯 = 已经编码出来的帧 / 总帧数（encode.ticks）。两个数都来自 status，前端不编。
+   实现：水面是贴在 lane 方块里的一整块 rect，用 clip-path 保留方块的圆角，
+   再 scaleY(level)（origin 在底边）—— transform 是 CSS 能平滑过渡的那一档，
+   每 250ms 更新一次、300ms 补间，所以看起来是水位在涨/在落，不是跳格子。 */
+#p-merge .mgpipe .water {
+  fill: var(--mgp-water);
+  transform: scaleY(0);
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+  transition: transform .3s cubic-bezier(.25,.46,.45,.94);
+  pointer-events: none;
+}
+#p-merge .mgpipe .water.out { fill: var(--mgp-water-out); }
+
+/* 「成片」那一格的壳（不是 lane：lane 只数真线程）。
+   只画一圈细线，不铺底色 —— 一块 20×236 的实心面板太抢眼，图上应该是「一杯水」。 */
+#p-merge .mgpipe .outcup {
+  fill: none;
+  stroke: var(--line-strong);
+  stroke-width: 1;
+  opacity: .7;
+}
+
+/* 水温读数的标签（这一格是「成片」，和六列同一档字号，但不进 t-stage 那一组） */
+#p-merge .mgpipe .t-out {
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: .02em;
+  fill: var(--ink-2);
+}
+
+/* ---------- 无脸旁路：切脸之后直接汇入缓存帧，绕开 换脸/遮罩/合成 ----------
+   det#0 右侧 → 沉到所有 lane 底下 → 升到 e0 左边。颜色比主路淡（同一条 --line-strong、
+   更低的 opacity），虚线 = 「这不是主路」。只有本单真的有无脸帧（no_face_ticks>0）才出现，
+   线上带一句「无脸 N 帧」—— 不然「切脸 1439 / 换脸 1204」这 235 帧看着像丢了。 */
+#p-merge .mgpipe .bypass path {
+  fill: none;
+  stroke: var(--line-strong);
+  stroke-width: 1;
+  stroke-dasharray: 5 5;
+  opacity: .5;
+}
+#p-merge .mgpipe .bypass .t-bypass {
+  font-size: 10px;
+  fill: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+#p-merge .mgpipe .bypass[hidden] { display: none; }
+
 /* ---------- 列标题的状态色（进行中 / 完成 / 失败），颜色只上标题，不上方块 ---------- */
 #p-merge .mgpipe .col.done .t-stage { fill: var(--ok); }
 #p-merge .mgpipe .col.err .t-stage { fill: var(--bad); }
@@ -6044,6 +6128,9 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 /* ---------- 减动效：只留稳态颜色，光点也不放（JS 那边同步关） ---------- */
 @media (prefers-reduced-motion: reduce) {
   #p-merge .mgpipe .lane.lit { animation: none; }
+  /* 水位也直接到位：减动效的人要的是「别晃」，不是「没有水位」 */
+  #p-merge .mgpipe .water,
+  #p-merge .mgpipe-cup i { transition: none; }
   .mgeff-mask,
   .mgeff-sheet { animation: none !important; }
 }

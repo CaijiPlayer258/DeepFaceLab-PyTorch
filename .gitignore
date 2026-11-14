@@ -23,6 +23,9 @@ venv/
 dist/
 build/
 node_modules/
+.idea/
+*.iml
+
 
 # ── 杂项 ─────────────────────────────────────────────────────
 .DS_Store

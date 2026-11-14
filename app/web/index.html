@@ -1070,7 +1070,9 @@
           <div class="mgprog">
             <div class="mgprog-hd">
               <b id="mgpHdTitle">正在导出</b>
-              <span class="mgprog-file" id="mgpFile">—</span>
+              <!-- 文件名：没拿到就 **不渲染** 这个空壳。以前这里是「正在导出 —」，
+                   一个孤零零的破折号既不是文件名也不是状态（用户指出的噪音之一）。 -->
+              <span class="mgprog-file" id="mgpFile" hidden></span>
             </div>
 
             <!-- 生效配置不一致横幅：后端把 [eff-warn] 塞进 status.eff_warnings[]，
@@ -1089,14 +1091,9 @@
                  这里折成右下角一个文字入口 + 抽屉（点开才渲染，不占版面）。
                  横幅必须留着 —— 它是「界面设了、后端没按它跑」的唯一提示。 -->
 
-            <div class="mgprog-bar" id="mgpBar">
-              <i id="mgpFill" style="width:0%"></i>
-            </div>
-            <div class="mgprog-meta" id="mgpMeta">
-              <span id="mgpPct">0%</span>
-              <span id="mgpFrames">—</span>
-              <span id="mgpEta">剩余 —</span>
-            </div>
+            <!-- 顶部那条 6px 进度条 + 「45% / 32-72 帧 / 剩余 30 秒」整行**拆掉**了。
+                 进度不再用一条横条 + 一个百分数表示：它变成图里「缓存帧」那一列的水位
+                 （见下），帧数/速度/剩余挪进流水线卡片的标题行。页面上只留一处进度。 -->
             <!-- 流水线实况（SVG）
                  ------------------------------------------------------------
                  为什么是这张图：快速导出（fused，默认路径）里六段是**并行**跑的，
@@ -1113,10 +1110,18 @@
                  结构由 app.js 的 MG_PIPE 生成；这里只留一个空 svg 当挂载点。 -->
             <div class="mgprog-steps" id="mgpStepsBox">
               <div class="mgpipe" id="mgPipe">
+                <!-- 标题行 = 页面唯一的「数字进度」：一颗小水杯（和「成片」同一档水位）
+                     + 帧数 + 剩余 + 速度。百分比在这里已经不存在了。 -->
                 <div class="mgpipe-hd">
                   <b>流水线</b>
                   <span class="mgpipe-sub" id="mgPipeSub">六段并行 · 每格一条 lane</span>
-                  <span class="mgpipe-right" id="mgPipeRight">— 帧/秒</span>
+                  <span class="mgpipe-right">
+                    <span class="mgpipe-cup" id="mgPipeCup" role="img"
+                          aria-label="水位：已完成帧占总帧数的比例"><i id="mgPipeCupFill"></i></span>
+                    <span id="mgpFrames">—</span>
+                    <span id="mgpEta">剩余 —</span>
+                    <span id="mgPipeRight">— 帧/秒</span>
+                  </span>
                 </div>
                 <div class="mgpipe-sep"></div>
                 <div class="mgpipe-body">
@@ -1131,7 +1136,9 @@
                  导出中 hidden（这时只有下面那颗「取消导出」）；终态一出来就顶上来，
                  给「返回导出设置」和「再次导出」两个出口，参数一个都不丢。 -->
             <div class="mgprog-res" id="mgpResult" hidden>
-              <div class="mgprog-res-hd" id="mgpResultHd">结果</div>
+              <!-- 「结果」这行小标题删掉了：成功/失败/取消三种终态下面那行字已经说清楚了，
+                   它只是又一个噪音标签。 -->
+
               <!-- 一行结论：完成路径 = 成片/取消说明；被拒路径 = 「显存不足：需要 X GB，可用 Y GB」 -->
               <div class="mgprog-res-txt" id="mgpResultText"></div>
               <div class="mgprog-res-acts">

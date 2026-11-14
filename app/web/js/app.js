@@ -6557,12 +6557,19 @@ function mgStageEmpty(on) {
     var MG_PIPE = (function () {
       var NS = "http://www.w3.org/2000/svg";
       var KEYS = ["frames", "det", "dfm", "xseg", "compose", "encode"];
+      /* 最后一列不叫「导出」了：这一段真的只是把合成好的帧**编码/缓存**出来，
+         真正写出成片是后面 ffmpeg 那一趟（也计时到这一段）。用户看到的「导出」两个字
+         出现在这一列会以为进度已经到写视频了，所以叫「缓存帧」。后端/日志里那个
+         内部名 encode 不动。 */
       var NAME = { frames: "切帧", det: "切脸", dfm: "换脸",
-                   xseg: "遮罩", compose: "合成", encode: "导出" };
+                   xseg: "遮罩", compose: "合成", encode: "缓存帧" };
       /* viewBox 尺寸定死（和 UI 设计稿同一比例）：进度卡铺满内容区（≈1200~1400px），
          所以 1200×340 渲染出来接近 1:1～1.15:1，9.5px 的 lane 名字不会缩成 6px。
          高度不变 → 换 lane 数也不会让页面跳动。 */
       var W = 1200, H = 340, PADL = 56, TOPY = 58, BOXW = 74, GAP = 7;
+      /* 右侧留 84px 给「成片」那一格（水位杯 + 标题）。它**不是第七列**：没有 lane、
+         没有 t-stage，只画一杯水 —— 六列仍然是六列（验收按 text.t-stage 数）。 */
+      var RGT = 84, OUTW = 20;
       /* 光点密度由**两个物理上限**决定，不再按「每次轮询硬切 10 个」：
            · PULSE_PER_S：每秒最多放多少个（按 POLL_MS 折算成每次轮询的预算）；
            · MAX_PULSE  ：同屏最多几个在飞（≈ 40 帧/秒 × 8 张脸 × 0.6s 飞行时间的极端值）。
@@ -6585,12 +6592,14 @@ function mgStageEmpty(on) {
       var raf = 0;
       var sig = "";            /* lanes 的签名：变了才重建结构 */
       var prev = {};           /* key -> 上次的 ticks */
+      var prevNf;              /* 上次的 det.no_face_ticks（旁路光点按它的增量放） */
       var lastAt = {};         /* key -> ticks 上次变化的时刻 */
       var stallNow = {};       /* key -> 现在卡没卡 */
       var state = {};          /* key -> "" / on / done / err（列标题颜色） */
       var seq = 0;             /* 光点序号：多 lane 时按它轮转 */
       var lastFlashed = [];    /* 最近一拍真正点亮过的 lane（验收拍照时按它重挂） */
       var lastSpawn = 0;       /* 最近一拍实际放出去几个光点（验收要看「按预算稀释」有没有生效） */
+      var lastBypass = 0;      /* 其中走旁路的几个（无脸帧） */
       var layers = null;
       /* 截图专用：把光点的时钟按住（>0 = 定格在这个时刻），只给验收拍照用。
          光点只有 470–750ms 的命，一张 headless 截图往返就可能比它长 —— 拍照时
@@ -6652,10 +6661,13 @@ function mgStageEmpty(on) {
         var svg = $("mgPipeSvg");
         if (!svg) return false;
         while (svg.firstChild) svg.removeChild(svg.firstChild);
-        layers = { edge: mk("g", { "class": "edges" }), box: mk("g", {}),
+        layers = { defs: mk("defs", {}), edge: mk("g", { "class": "edges" }),
+                   bypass: mk("g", { "class": "bypass" }), box: mk("g", {}),
                    lbl: mk("g", {}), pulse: mk("g", { "class": "pulses" }) };
         geo = {}; edgesIn = {}; edgesOut = {}; waists = {}; pulses = []; pool = [];
-        var colW = (W - PADL * 2) / (KEYS.length - 1);
+        bypassD = "";
+        bLabel = null;
+        var colW = (W - PADL - RGT) / (KEYS.length - 1);
         var space = H - TOPY - 46;
         var i, j, k;
         for (i = 0; i < KEYS.length; i++) {
@@ -6677,19 +6689,63 @@ function mgStageEmpty(on) {
           col.appendChild(t2);
           layers.lbl.appendChild(col);
           geo[k] = { cx: cx, off: off, lanes: [], count: t2, col: col };
+          /* 水位只填「缓存帧」这一列 —— 别的列是线程/队列，没有「攒了多少帧」这回事 */
+          var cup = (k === "encode" && !off);
           for (j = 0; j < n; j++) {
             var y = y0 + j * (laneH + GAP);
             var rect = mk("rect", { x: cx - BOXW / 2, y: y, width: BOXW, height: laneH,
                                     rx: 7, "class": off ? "lane off" : "lane" });
             rect.setAttribute("data-lane", k + "#" + j);   /* key#序号：排障/拍照直接定位 */
             layers.box.appendChild(rect);
+            var water = null;
+            if (cup) {
+              /* 水面：一块和方块同样大小的 rect，用 clip-path 拿到圆角，再 scaleY(level)。
+                 夹在方块和它的名字之间（层级正好：水盖住底色、不盖住 t-lane 字）。 */
+              var cid = "mgpW" + i + "_" + j;
+              var cp = mk("clipPath", { id: cid });
+              cp.appendChild(mk("rect", { x: cx - BOXW / 2, y: y, width: BOXW,
+                                          height: laneH, rx: 7 }));
+              layers.defs.appendChild(cp);
+              /* rx=0：圆角由 clipPath 给。给水面自己 rx 的话，scaleY 会把圆角压扁，
+                 顶边变成圆弧 —— 看着像「一小块色块」而不是「一条水平水面线」。 */
+              water = mk("rect", { x: cx - BOXW / 2, y: y, width: BOXW, height: laneH,
+                                   "class": "water", "data-level": "0" });
+              /* clip-path 必须挂在**不被缩放**的外层 g 上：直接挂在水面上时，
+                 clip 用的是元素自身的用户坐标系，会跟着 scaleY 一起被压扁 ——
+                 结果是「一颗越来越小的药丸」，而不是「一条水平的水面线」。 */
+              var wg = mk("g", { "clip-path": "url(#" + cid + ")" });
+              wg.appendChild(water);
+              layers.box.appendChild(wg);
+            }
             var tx = mk("text", { x: cx, y: y + laneH / 2 + 3.2, "text-anchor": "middle",
                                   "class": "t-lane" });
             tx.textContent = ln[j];
             layers.box.appendChild(tx);
-            geo[k].lanes.push({ y: y + laneH / 2, rect: rect, txt: tx });
+            geo[k].lanes.push({ y: y + laneH / 2, y0: y, h: laneH,
+                                rect: rect, txt: tx, water: water });
           }
         }
+        /* 六列之后的「成片」：一只窄水杯（缓存里的水倒进这里）。它不进 KEYS、没有 lane，
+           所以 text.t-stage 仍然只有 6 个、rect.lane 仍然只数真线程。 */
+        var ocx = W - 14 - OUTW / 2;
+        var ocid = "mgpWout";
+        var ocp = mk("clipPath", { id: ocid });
+        ocp.appendChild(mk("rect", { x: ocx - OUTW / 2, y: TOPY, width: OUTW,
+                                     height: space, rx: 7 }));
+        layers.defs.appendChild(ocp);
+        /* 壳子用 .outcup 而不是 .lane：rect.lane 只数真线程（验收按它数 lane），
+           给它挂 lane 会让「lane 方块数 == status 里的线程数」这条断言多出一个 */
+        layers.box.appendChild(mk("rect", { x: ocx - OUTW / 2, y: TOPY, width: OUTW,
+                                            height: space, rx: 7, "class": "outcup" }));
+        var owater = mk("rect", { x: ocx - OUTW / 2, y: TOPY, width: OUTW, height: space,
+                                  "class": "water out", "data-level": "0" });
+        var owg = mk("g", { "clip-path": "url(#" + ocid + ")" });
+        owg.appendChild(owater);
+        layers.box.appendChild(owg);
+        var otxt = mk("text", { x: ocx, y: 24, "text-anchor": "middle", "class": "t-out" });
+        otxt.textContent = "成片";
+        layers.lbl.appendChild(otxt);
+        geo.out = { cx: ocx, water: owater };
         /* 连线：源侧 lane → 腰点、腰点 → 目标侧 lane（相邻两列共用同一个腰点）。
            空列（off）不连线，光点会跳过它。 */
         for (i = 0; i < KEYS.length - 1; i++) {
@@ -6717,12 +6773,133 @@ function mgStageEmpty(on) {
             edgesOut[i + ":" + bi] = { d: dout, el: pout };
           }
         }
+        svg.appendChild(layers.defs);
         svg.appendChild(layers.edge);
+        svg.appendChild(layers.bypass);  /* 旁路在连线之上、方块之下（不挡文字） */
         svg.appendChild(layers.box);
         svg.appendChild(layers.lbl);
         svg.appendChild(layers.pulse);   /* 光点在最上层 */
         sig = signature(lanes);
+        lenCache = {};                   /* 连线/旁路的 d 都变了：量过的长度作废 */
+        /* 结构重建后把上一拍的读数补回去：水位/旁路是「数据」，不是「结构」 */
+        setWater(waterLv.cache, waterLv.out);
+        drawBypass();
         return true;
+      }
+
+      /* ============================================================
+         水位（进度）：只填「缓存帧」那一列 + 右侧「成片」那一格
+         ------------------------------------------------------------
+         两个数都来自 status.stages，前端不编：
+           cache = (compose.ticks − encode.ticks) / 总帧数   ← 缓存里**现存**的帧
+           out   = encode.ticks / 总帧数                     ← 已经编码出来的帧
+         为什么是差值：帧从合成那一列流进缓存、再被编码那一列取走。合成 72 而编码 40
+         就是「缓存里还压着 32 帧」—— 这就是缓存水位该显示的东西（用户口径：
+         用 encode 与 compose 的差值推「已倒出多少」，不要新造后端字段）。
+         快速导出（fused）是边合成边编码，这个差值就只有队列里那几十帧 —— 按真实比例，
+         不做「先攒满再倒」的假动画。
+         ============================================================ */
+      var waterLv = { cache: 0, out: 0 };
+      function wkey(v) { return Math.round(v * 1000) / 1000; }
+      function setWater(cache, out) {
+        cache = Math.max(0, Math.min(1, Number(cache) || 0));
+        out = Math.max(0, Math.min(1, Number(out) || 0));
+        waterLv.cache = cache;
+        waterLv.out = out;
+        var g = geo.encode;
+        if (g && g.lanes.length) {
+          var first = g.lanes[0], last = g.lanes[g.lanes.length - 1];
+          var top = first.y0, bot = last.y0 + last.h;
+          var span = Math.max(1, bot - top);
+          /* 整列当一个杯子：水位线 y = 杯底 − level×杯高；每条 lane 只显示
+             「自己这一段里被淹到的部分」→ 视觉上是一杯水往上漫，而不是六条一样高的条。 */
+          var levelY = bot - cache * span;
+          for (var i = 0; i < g.lanes.length; i++) {
+            var ln = g.lanes[i];
+            if (!ln.water) continue;
+            var k = Math.max(0, Math.min(1, (ln.y0 + ln.h - levelY) / ln.h));
+            ln.water.setAttribute("data-level", String(wkey(k)));
+            ln.water.style.transform = "scaleY(" + wkey(k) + ")";
+          }
+        }
+        if (geo.out && geo.out.water) {
+          geo.out.water.setAttribute("data-level", String(wkey(out)));
+          geo.out.water.style.transform = "scaleY(" + wkey(out) + ")";
+        }
+        var cup = $("mgPipeCupFill");
+        if (cup) {
+          cup.setAttribute("data-level", String(wkey(out)));
+          cup.style.transform = "scaleY(" + wkey(out) + ")";
+        }
+      }
+
+      /* ============================================================
+         无脸旁路：切脸之后直接汇入「缓存帧」，绕开 换脸 / 遮罩 / 合成
+         ------------------------------------------------------------
+         事实：一张脸都没检出的帧不需要 dfm/xseg，合成也是原帧直通，最后只走编码。
+         所以图上从 det 右侧拉一条**淡线**沉到所有 lane 下面、再升到编码列 —— 线上写
+         「无脸 N 帧」。不画的话，「切脸 1439 / 换脸 1204」这 235 帧看着像丢了
+         （用户就是这么理解的，还自己在截图上补了一条红线）。
+         只有这一单真有 no_face_ticks>0 时才出现；0 就没有这条线，也不留空节点。
+         ============================================================ */
+      var bypassN = 0, bypassD = "", bLabel = null;
+      function bypassGeom() {
+        var A = geo.det, B = geo.encode;
+        if (!A || !B || A.off || B.off || !A.lanes.length || !B.lanes.length) return null;
+        var a0 = A.lanes[0], b0 = B.lanes[0];
+        var x1 = A.cx + BOXW / 2, y1 = a0.y;
+        var x2 = B.cx - BOXW / 2, y2 = b0.y;
+        /* 沉到**所有列**的 lane 底下（再往下 20px）：只看首尾两列不够 —— 中间那列
+           合成有 8 条 lane，比切脸/编码都深，旁路会从它最后两条中间穿过去。 */
+        var bot = 0, i2, g2, l2;
+        for (i2 = 0; i2 < KEYS.length; i2++) {
+          g2 = geo[KEYS[i2]];
+          if (!g2 || g2.off) continue;
+          for (l2 = 0; l2 < g2.lanes.length; l2++) {
+            bot = Math.max(bot, g2.lanes[l2].y0 + g2.lanes[l2].h);
+          }
+        }
+        var yb = Math.min(H - 12, (bot || (a0.y0 + a0.h)) + 20);
+        var mx = (x1 + x2) / 2;
+        var r = function (v) { return Math.round(v * 10) / 10; };
+        return { d: "M" + r(x1) + "," + r(y1) +
+                    " C" + r(x1 + 90) + "," + r(y1) + " " + r(x1 + 90) + "," + r(yb) +
+                    " " + r(mx) + "," + r(yb) +
+                    " C" + r(x2 - 90) + "," + r(yb) + " " + r(x2 - 90) + "," + r(y2) +
+                    " " + r(x2) + "," + r(y2),
+                 label: { x: mx, y: yb - 6 } };
+      }
+      function drawBypass() {
+        if (!layers) return;
+        var g = layers.bypass;
+        while (g.firstChild) g.removeChild(g.firstChild);
+        bypassD = "";
+        bLabel = null;
+        if (!bypassN) return;
+        var bg = bypassGeom();
+        if (!bg) return;
+        bypassD = bg.d;
+        var p = mk("path", { d: bg.d });        /* 颜色/虚线/透明度全在 CSS 里 */
+        p.setAttribute("data-bypass", "no-face");
+        g.appendChild(p);
+        bLabel = mk("text", { x: bg.label.x, y: bg.label.y, "text-anchor": "middle",
+                              "class": "t-bypass" });
+        bLabel.textContent = "无脸 " + bypassN + " 帧";
+        g.appendChild(bLabel);
+      }
+      function setBypass(n) {
+        n = Math.max(0, Math.floor(Number(n) || 0));
+        var had = bypassN > 0;
+        var shown = !!(layers && layers.bypass && layers.bypass.firstChild);
+        bypassN = n;
+        if (n > 0 && shown) {                 /* 已经画着：只改读数，不重建（250ms 一拍） */
+          if (bLabel && bLabel.textContent !== ("无脸 " + n + " 帧")) {
+            bLabel.textContent = "无脸 " + n + " 帧";
+          }
+          return;
+        }
+        if (n === 0 && !shown && !had) return;   /* 本来就没有：不碰 DOM */
+        drawBypass();
       }
 
       function setCount(k, ticks) {
@@ -6830,7 +7007,9 @@ function mgStageEmpty(on) {
           rememberFlash(k, ai);
           if (!B || reduceMotion()) continue;
           var bi = B.lanes.length ? ((seq * 7 + 3) % B.lanes.length) : 0;
-          var ein = edgesIn[si + ":" + ai], eout = edgesOut[si + ":" + bi];
+          /* 出边要挂在**去的那一列左边那个**腰点上：to 跳过空列时 to-1 != si，
+             以前一律写 si 会取到别的腰点（只在有空列时才错，且会取到 undefined 而不画）。 */
+          var ein = edgesIn[si + ":" + ai], eout = edgesOut[(to - 1) + ":" + bi];
           if (ein && eout) addPulse(si + ":" + ai + ":" + bi, ein.d + " " + eout.d, at);
         }
       }
@@ -6908,6 +7087,25 @@ function mgStageEmpty(on) {
         }
         var lanes = lanesOf(live);
         if (signature(lanes) !== sig) build(lanes);
+
+        /* ---- 水位 + 无脸旁路：两个读数都只用 status 里的真数字 ----
+           水位 = 这一单攒了多少帧（缓存列）/ 已经变成成片的多少帧（成片杯）；
+           旁路 = 这一单有多少帧根本没有脸（det.no_face_ticks，后端低成本计数）。
+           收工那一拍：缓存清零、成片满格（cache 目录删了/帧都进了成片）。 */
+        var framesTotal = Number(((d.vid || {}).total) || d.frames_total || d.total || 0);
+        var composed = Math.max(0, Number((live.compose || {}).ticks) || 0);
+        var coded = Math.max(0, Number((live.encode || {}).ticks) || 0);
+        var cacheLv = framesTotal > 0 ? ((composed - coded) / framesTotal) : 0;
+        var outLv = framesTotal > 0 ? (coded / framesTotal) : 0;
+        var finished = !d.running &&
+                       (d.ok === true || d.phase === "done" || d.state === "done");
+        if (finished) { cacheLv = 0; outLv = 1; }
+        setWater(cacheLv, outLv);
+        var nf = Math.max(0, Number((live.det || {}).no_face_ticks) || 0);
+        var dnf = (prevNf === undefined) ? 0 : Math.max(0, nf - prevNf);
+        prevNf = nf;
+        setBypass(nf);
+
         var t = nowMs();
         var running = !!d.running;
         var wants = [], total = 0, i, k, row, ticks, delta, n;
@@ -6937,14 +7135,23 @@ function mgStageEmpty(on) {
           wantSpawn += n;
         }
         lastSpawn = wantSpawn;
-        if (wantSpawn > 0) {
-          var slotMs = POLL_MS / wantSpawn;
+        /* 无脸帧也真的走旁路：按 no_face_ticks 的增量在旁路线上放几个点（同一份 status
+           的真实数字）。预算被主路占满时就不放 —— 旁路是配角，不能把主路的点挤掉。 */
+        var bSpawn = 0;
+        if (dnf > 0 && bypassD && !reduceMotion()) {
+          bSpawn = Math.max(0, Math.min(budget - wantSpawn,
+                                        Math.max(1, Math.round(dnf * scale))));
+        }
+        lastBypass = bSpawn;
+        if (wantSpawn + bSpawn > 0) {
+          var slotMs = POLL_MS / (wantSpawn + bSpawn);
           var slot = 0;
           var sched = function () { slot += 1; return t + slot * slotMs; };
           lastSeen = {};
           for (i = 0; i < KEYS.length; i++) {
             if (plan[i] > 0) spawn(KEYS[i], plan[i], sched);
           }
+          for (i = 0; i < bSpawn; i++) addPulse("bypass", bypassD, sched());
         }
         kick();
       }
@@ -6955,6 +7162,10 @@ function mgStageEmpty(on) {
         lastFlashed = [];
         lastSeen = {};
         lastSpawn = 0;
+        lastBypass = 0;
+        prevNf = undefined;      /* 换一单：旁路光点不补放历史增量 */
+        setWater(0, 0);
+        setBypass(0);
         kick();                       /* 上一张照片可能把时钟按住了：重开后要重新起 ticker */
         for (i = 0; i < pulses.length; i++) recycle(pulses[i]);
         pulses = [];
@@ -6983,6 +7194,8 @@ function mgStageEmpty(on) {
                     stalled: {}, ticks: {}, state: {}, lanes: {},
                     edges: 0, edges_in: 0, edges_out: 0, waists: {},
                     last_flashed: lastFlashed, last_spawn: lastSpawn,
+                    last_bypass: lastBypass, water: { cache: waterLv.cache, out: waterLv.out },
+                    bypass: bypassN, bypass_drawn: !!bypassD,
                     max_pulse: MAX_PULSE, pulse_per_s: PULSE_PER_S, poll_ms: POLL_MS,
                     built: !!layers };
         var i, k;
@@ -7048,15 +7261,12 @@ function mgStageEmpty(on) {
       d = d || {};
       var box = $("mgpResult");
       var txt = $("mgpResultText");
-      var hd = $("mgpResultHd");
       var cb = $("mgpCancel");
       if (cb) cb.hidden = true;
-      ["mgpStepsBox", "mgpBar", "mgpMeta", "mgpFoot"].forEach(function (id) {
+      ["mgpStepsBox", "mgpFoot"].forEach(function (id) {
         var el = $(id);
         if (el) el.hidden = true;
       });
-      /* 小标题（"结果"）在拒绝态是多余的：卡片大标题已经写了「导出未启动」 */
-      if (hd) hd.hidden = true;
       var ttl = $("mgpHdTitle");
       /* 强制尝试撞 OOM 那一档是「跑过才失败」，别再说「未启动」—— 用户会以为没动过 */
       if (ttl) ttl.textContent = d.vram_oom ? "确实不够（已回滚）" : "导出未启动";
@@ -7080,8 +7290,6 @@ function mgStageEmpty(on) {
         fb.title = "按最小档真跑一次；真 OOM 会自动回滚到这一页，不会把后端搞坏";
       }
       if (box) { box.hidden = false; box.classList.add("is-rej"); }
-      var pct = $("mgpPct"); if (pct) pct.textContent = "0%";
-      var fill = $("mgpFill"); if (fill) fill.style.width = "0%";
       return box;
     }
     /* 回到「正常进度页」的样子（用户改完设置再点一次时先把拒绝态收起来） */
@@ -7090,11 +7298,9 @@ function mgStageEmpty(on) {
       if (box) box.classList.remove("is-rej");
       var fb0 = $("mgpForceTry");
       if (fb0) { fb0.hidden = true; fb0.style.display = "none"; }   /* 离开被拒态就收起「仍然尝试」 */
-      var hd = $("mgpResultHd");
-      if (hd) { hd.hidden = false; hd.textContent = "结果"; }
       var ttl = $("mgpHdTitle");
       if (ttl) ttl.textContent = "正在导出";
-      ["mgpStepsBox", "mgpBar", "mgpMeta", "mgpFoot"].forEach(function (id) {
+      ["mgpStepsBox", "mgpFoot"].forEach(function (id) {
         var el = $(id);
         if (el) el.hidden = false;
       });
@@ -7407,6 +7613,18 @@ function mgStageEmpty(on) {
       }
     })();
 
+    /* 文件名栏：有名字才显示。以前占位是一根「—」，标题就变成「正在导出 —」——
+       既不是文件名也不是状态（用户点名的噪音）。全部写入点都走这里。 */
+    function mgpSetFile(txt, tip) {
+      var el = $("mgpFile");
+      if (!el) return;
+      var s = String(txt == null ? "" : txt);
+      el.textContent = s;
+      el.hidden = !s;
+      if (tip !== undefined) { if (tip) el.title = tip; else el.removeAttribute("title"); }
+    }
+    window.mgpSetFile = mgpSetFile;
+
     function mgpReset() {
       mgpRejectHide();
       /* 图整张回到「还没开单」：光点/点亮/卡住/计数/列标题状态全清。
@@ -7415,11 +7633,9 @@ function mgStageEmpty(on) {
       MG_PIPE.reset();
       var sub = $("mgPipeSub");
       if (sub) sub.textContent = "六段并行 · 每格一条 lane";
-      var fill = $("mgpFill"); if (fill) fill.style.width = "0%";
-      var pct = $("mgpPct"); if (pct) pct.textContent = "0%";
       var fr = $("mgpFrames"); if (fr) fr.textContent = "—";
       var eta = $("mgpEta"); if (eta) eta.textContent = "剩余 —";
-      var fileEl = $("mgpFile"); if (fileEl) fileEl.textContent = "—";
+      mgpSetFile("");
       /* 生效配置：换一单就重新开始 —— 上一单点过的「关闭横幅」不该延续到这一单 */
       MGP_EFF = { eff: null, warns: [], dismissed: false, open: false, paintKey: "" };
       mgpEffClose(false);
@@ -7468,6 +7684,13 @@ function mgStageEmpty(on) {
       mgpRejectHide();
       var cb = $("mgpCancel");
       if (cb) cb.hidden = true;               /* 终态不再有「取消导出」 */
+      /* 标题：终态就别再写「正在导出」了 —— 结果面板写着「导出完成」、标题写着
+         「正在导出」，同一屏两句话打架。 */
+      var ttl2 = $("mgpHdTitle");
+      if (ttl2) {
+        ttl2.textContent = okAll ? "导出完成"
+          : (d.phase === "cancelled" ? "已取消" : "导出失败");
+      }
       if (txt) {
         var bits = [];
         if (okAll) {
@@ -7499,14 +7722,12 @@ function mgStageEmpty(on) {
       var p = Math.max(0, Math.min(100, Number(d.stage_pct) || 0));
       var overall = Math.round((idx * 100 + p) / MGP_STAGES.length);
       if (d.phase === "done") overall = Math.round(((idx + 1) * 100) / MGP_STAGES.length);
-      var fill = $("mgpFill"); if (fill) fill.style.width = overall + "%";
-      var pct = $("mgpPct"); if (pct) pct.textContent = overall + "%";
       var total = Number(d.frames_total) || 0, done = Number(d.frames_done) || 0;
       var rate = Number(d.frame_fps) || 0;
       var fr = $("mgpFrames");
       if (fr) {
         fr.textContent = total
-          ? (done + " / " + total + " 帧" + (rate > 0 ? (" · " + rate.toFixed(1) + " 帧/秒") : ""))
+          ? (done + " / " + total + " 帧")
           : (d.msg || "准备中…");
       }
       var eta = $("mgpEta");
@@ -7524,8 +7745,7 @@ function mgStageEmpty(on) {
       else if (st === "mask") tip = ((d.mask_source === "DFM") ? "用模型遮罩" : (d.mask_source || "")) + " · " + (Number(counts.masks) || 0) + " 张";
       else if (st === "merge") tip = total ? (done + "/" + total) : (d.msg || "");
       else if (st === "encode") tip = "crf16 · yuv420p";
-      var fileEl = $("mgpFile");
-      if (fileEl && d.cache_dir) fileEl.textContent = String(d.cache_dir).split(/[\\/]/).pop();
+      if (d.cache_dir) mgpSetFile(String(d.cache_dir).split(/[\\/]/).pop());
       var state = (d.phase === "failed" ? "err" : (d.phase === "done" ? "done" : "on"));
       mgpPaint(idx, { state: state, tip: tip });
       /* 分段链也有流水线实况：/stage/status 里的 stages_live（和 /export/status 的
@@ -7564,8 +7784,6 @@ function mgStageEmpty(on) {
       if (okAll) {
         mgpPaint(MGP_STAGES.length - 1, { state: "done", tip: "mp4" });
         mgpChainDone();
-        var fill = $("mgpFill"); if (fill) fill.style.width = "100%";
-        var pct = $("mgpPct"); if (pct) pct.textContent = "100%";
         var eta = $("mgpEta"); if (eta) eta.textContent = "完成";
         toast("导出完成", String(d2.out_video || "").slice(-60) || "六个阶段全部完成", "success");
       } else if (d2.phase === "cancelled") {
@@ -7767,15 +7985,12 @@ function mgStageEmpty(on) {
       if (!d.running && !okAll && !p) {
         p = Math.max(0, Math.min(100, Number(d.pct_at_failure) || 0));
       }
-      var shown = okAll ? 100 : Math.max(d.running ? 2 : 0, Math.min(99, p));
-      var fill = $("mgpFill"); if (fill) fill.style.width = shown + "%";
-      var pct = $("mgpPct"); if (pct) pct.textContent = shown + "%";
-
       var fr = $("mgpFrames");
       if (fr) {
         if (total) {
-          fr.textContent = done + " / " + total + " 帧" +
-            (rate > 0 ? (" · " + rate.toFixed(1) + " 帧/秒") : "");
+          /* 速度只写在标题右侧那一个地方（#mgPipeRight）：这里再来一次就是同一行里
+             两个「11.3 帧/秒」（用户看到的噪音之一）。 */
+          fr.textContent = done + " / " + total + " 帧";
         } else {
           fr.textContent = d.msg || "准备中…";
         }
@@ -7798,10 +8013,9 @@ function mgStageEmpty(on) {
         }
       }
       /* 文件名栏：把「融合流水线」这件事直接写出来（六步全亮却不标一句会让人以为卡住） */
-      var fileEl = $("mgpFile");
-      if (fileEl && d.video) {
-        fileEl.textContent = String(d.video).split(/[\\/]/).pop() + " · 融合流水线";
-        fileEl.title = "六段同时在内存里跑，不建 <名字>_cache/；不支持续跑（取消即整段重跑）";
+      if (d.video) {
+        mgpSetFile(String(d.video).split(/[\\/]/).pop() + " · 融合流水线",
+                   "六段同时在内存里跑，不建 <名字>_cache/；不支持续跑（取消即整段重跑）");
       }
       mgpFusedSteps(okAll ? "done" : (d.running ? "on" : (wasCancel ? "idle" : "err")));
       /* 流水线实况：这一份 status 就是那张图的唯一输入（stages → lane/曲线/光点） */
@@ -7949,16 +8163,13 @@ function mgStageEmpty(on) {
       if (MGP_TIMER) clearInterval(MGP_TIMER);
       mgpReset();
       mgpPaint(0, { state: "on" });
-      var fill = $("mgpFill"), pct = $("mgpPct");
       MGP_TIMER = setInterval(function () {
         k += 1;
         if (k > MGP_STAGES.length) { clearInterval(MGP_TIMER); MGP_TIMER = null; return; }
         var demoTips = ["486 帧", "512 张脸", "512 张换脸", "512 张遮罩", "486/486", "crf16"];
         mgpPaint(k - 1, { state: "done", tip: demoTips[k - 1] || "" });
         if (k < MGP_STAGES.length) mgpPaint(k, { state: "on" });
-        var stepPct = Math.round(k * 100 / MGP_STAGES.length);
-        if (fill) fill.style.width = stepPct + "%";
-        if (pct) pct.textContent = stepPct + "%";
+
       }, 700);
     }
     window.mgDemoProgress = mgDemoProgress;
@@ -8337,8 +8548,6 @@ function mgStageEmpty(on) {
       if (fired) return;
       fetch("/api/merge/export/status").then(function (r) { return r.json(); }).then(function (d) {
         if (fired) return;
-        var fill = document.getElementById("mgpFill");
-        var pctEl = document.getElementById("mgpPct");
         var frEl = document.getElementById("mgpFrames");
         var msg = document.getElementById("mgpEta");
         /* 终态语义：后端 ok 是「任务成功」标志，取消时是 ok=false + cancelled=true。
@@ -8357,14 +8566,9 @@ function mgStageEmpty(on) {
           p = Math.max(0, Math.min(100, Number(d.pct_at_failure) || 0));
         }
         if (msg) msg.textContent = text ? String(text).slice(0, 60) : "合成中…";
-        var fileEl = document.getElementById("mgpFile");
-        if (fileEl && d.out && String(d.out) !== "—") {
-          fileEl.textContent = String(d.out).split(/[\\/]/).pop();
+        if (d.out && String(d.out) !== "—") {
+          if (window.mgpSetFile) window.mgpSetFile(String(d.out).split(/[\\/]/).pop());
         }
-        /* 只有真成功才满格；取消/失败停在实际位置，且不越过 99% */
-        var shown = okAll ? 100 : Math.max(d.running ? 2 : 0, Math.min(99, p));
-        if (fill) fill.style.width = shown + "%";
-        if (pctEl) pctEl.textContent = shown + "%";
 
         /* 阶段直接用后端的 @@P stage：0 搭目录/载模型 · 3 换脸 · 5 合成 · 6 编码 */
         var srv = Number(d.stage);

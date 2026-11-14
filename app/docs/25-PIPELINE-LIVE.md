@@ -1,8 +1,10 @@
 # 25 · 流水线实况（导出进度页的 SVG 图）
 
 > 一句话：进度页原来那排「六个圆点」换成 **6 列 lane + 腰点收束的贝塞尔连线 + 光点**，
+> 顶部那条 6px 横条换成了 **「缓存帧」列的水位 + 右侧「成片」杯**，
+> 图上还多了 **一条「无脸旁路」**（切脸之后直接进缓存，绕开换脸/遮罩/合成）。
 > 数据只有一处来源 —— `GET /api/merge/export/status` 的 `stages`。
-> 验收：`app/tools/accept/progress_lit_accept.py`（47 条断言 + 3 张截图）。
+> 验收：`app/tools/accept/progress_lit_accept.py`（75 条断言 + 4 张截图）。
 
 ## 1. 后端：`_stage_tick` + `_StageMeter`（唯一数据源）
 
@@ -26,7 +28,8 @@
 ```json
 "stages": {
   "frames":  {"ticks": 66,  "inflight": 1,  "lanes": ["解码"],            "ms": 2.4},
-  "det":     {"ticks": 64,  "inflight": 6,  "lanes": ["det#0"],           "ms": 123.52},
+  "det":     {"ticks": 64,  "inflight": 6,  "lanes": ["det#0"],           "ms": 123.52,
+              "no_face_ticks": 12},
   "dfm":     {"ticks": 220, "inflight": 64, "lanes": ["dfm#0"],           "ms": 158.98, "batch": 8},
   "xseg":    {"ticks": 36,  "inflight": 0,  "lanes": ["xse#0"],           "ms": 34.84},
   "compose": {"ticks": 36,  "inflight": 0,  "lanes": ["t0","t1", "…t7"],  "ms": 118.18},
@@ -40,6 +43,9 @@
 - `inflight` = 该段**下游那个队列**的 `qsize()`（frames→q_dec、det→q_det、dfm→q_gpu、
   xseg→q_cmp、compose→q_enc、encode→0）。
 - `ms` = 每帧 ms（和 `<成片>.log` 里 `profile（每帧 ms）` 同一口径）。
+- `det.no_face_ticks` = **这一单有多少帧根本没有脸**（快速导出：合成时 args 为空；
+  分段链：切脸那一阶段一帧写不出任何 aligned）。一次自增，不扫目录。它就是图上那条
+  「无脸旁路」的唯一数据源 —— 也解释了「切脸 1439 / 换脸 1204」差的那 235 帧去哪了。
 - 分段链的 `/api/merge/stage/status` 里那个 `stages` 是**每段元数据**（done/msg/…），
   所以实况那一份叫 `stages_live`，别混。
 
@@ -86,6 +92,36 @@
 - 视觉 token：只读 `app.css` 现成变量（panel / panel-2 / line / line-strong / ok / warn /
   shadow），层级靠「面 + 1px 描边」，不发光、不缩放、不描彩色边。
 
+### 2.1 水位（进度不再是一条横条 + 一个百分数）
+
+- **只填「缓存帧」那一列**（其余列是线程/队列，没有「攒了多少帧」这回事），另外六列
+  之后还有一只窄杯「成片」。两个数都从 `stages` 的 ticks 推，前端不编：
+  - `cache = (compose.ticks − encode.ticks) / 总帧数` —— 缓存里**现存**的帧；
+  - `out   = encode.ticks / 总帧数` —— 已经编码出来的帧。
+  分段链就是这个形状：合成涨到 72（缓存满）→ 编码把它吃光（缓存 0、成片 1）。
+  快速导出是**边合成边编码**，差值只有队列里那几十帧 —— 按真实比例，不做「先攒满再倒」
+  的假动画（用户明确要求）。
+- 实现：水面是一块贴满整格的 `rect.water`，**外面套一个不动的 `<g clip-path>`**，
+  自身 `scaleY(level)`（`transform-box:fill-box`，origin 在底边），
+  CSS `transition: transform .3s`；轮询 250ms 一拍，所以是「水位在涨/在落」，不是跳格子。
+  clip 必须在外层 g 上：挂在水面自己身上时 clip 会跟着 scaleY 一起压扁，水面永远是一颗
+  越缩越小的药丸，而不是一条水平的水面线。
+- 整列当**一个杯子**：水位线 y = 杯底 − level×杯高，每条 lane 只显示「自己那一段被淹到的
+  部分」—— 底部先满、顶部后满，而不是六条一样高的条。
+- 标题区同时给一颗 10×16 的小杯（`#mgPipeCup`，和「成片」同一档水位）＋ 帧数/剩余/速度；
+  **页面上不再有任何百分数**（顶部 `.mgprog-bar` 与 `#mgpPct` 整块删掉，但那两个 class
+  仍被「项目导出」页用着，CSS 不能删）。
+
+### 2.2 无脸旁路（帧数差额要看得见）
+
+- `<g class="bypass">`：从 `det` 右侧出发 → 沉到**所有列** lane 的底下（`+20px`）→
+  升到 `encode` 列左侧；一段两个 `C`，两端切线水平。颜色和主路**同一条 token**
+  （`--line-strong`）、opacity `.5`（主路 `.75`）、虚线 `5 5`、不带光点主色。
+- 只有 `det.no_face_ticks > 0` 时才建节点（0 → 整条不出现，不留空 group）；
+  线上写「无脸 N 帧」（`text.t-bypass`，i18n 走 `PATTERNS` 那条正则）。
+- `no_face_ticks` 的增量也会在旁路线上放几个光点（和主路同一份 `sched()` 铺在
+  250ms 窗口里，预算不够就让路给主路）—— 就是「这一帧没脸，它从主路拐下去了」。
+
 ## 3. 常驻 eff 面板（已拆）
 
 `#mgpEff`（14 字段常驻面板）与相关 CSS 一起删掉；**告警横幅 `#mgpEffWarn` 保留**
@@ -103,8 +139,10 @@ runtime\server\Scripts\python.exe app\tools\accept\progress_lit_accept.py
   ticks 单调不减 / inflight 整数 / DOM 没有 #mgpEff 有 #mgpEffWarn / 抽屉 14 字段 /
   六列 / 腰点收束（条数 = 源+目标、进出同一坐标集合、单段一个 C）/ 光点在曲线上 /
   上限 60 / 点亮 1.15s 且 1.25s 后摘 / 卡住变琥珀再复原 / 图上没有「在飞」/ 节点复用 / 减动效；
-- 截图 3 张进 `%TEMP%\dfl_progress_lit_accept\`：`prog-live.png` / `prog-stall.png` /
-  `prog-done.png`；
+- 截图 4 张进 `%TEMP%\dfl_progress_lit_accept\`：`prog-live.png`（进行中，缓存水位
+  ~0.44 + 旁路在场）/ `prog-encode.png`（编码中，缓存降、成片升）/ `prog-done.png`
+  （完成，缓存 0、成片满）/ `prog-noface0.png`（无脸帧 0 → 旁路不出现）；
+  素材 = 60 帧有脸 + **12 帧彩条**（真·无脸帧），所以 `no_face_ticks` 是真的 12，不是 fixture；
 - `--shots-only`：复用上次的 status/eff（不跑导出）只重拍截图，改样式时用这个；
 - `--no-browser`：只跑后端那半段（快，用来改后端时的冒烟）。
 

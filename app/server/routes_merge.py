@@ -8850,6 +8850,9 @@ def _stage_do_faces(cfg: dict) -> dict:
             faces_total += n
             if n:
                 with_faces += 1
+            else:
+                # 这一帧一张脸都没送出（检出 0 张 / 全被拒收）→ 进度页旁路线上的那一帧
+                _STAGE_METER.note_no_face()
             el = max(0.001, time.time() - t0)
             _stage_progress("faces", 100.0 * (pos + 1) / total,
                             "切脸 %d/%d 帧（第 %d..%d 帧）· %d 张脸 · %.2f 帧/秒"
@@ -15051,6 +15054,7 @@ class _StageMeter:
         self.queues = {}
         self.ms = {}
         self.batch = {}
+        self.no_face = 0            # 无脸帧（切脸之后没脸可送去换脸的那些）
         self.armed = False          # 开过单没（没开过 → status 里干脆不出现 stages）
         self.on = False             # 现在还在跑没（收单后不再涨）
 
@@ -15061,6 +15065,7 @@ class _StageMeter:
             self.queues = {}
             self.ms = {}
             self.batch = {}
+            self.no_face = 0
             self.armed = True
             self.on = True
 
@@ -15084,6 +15089,7 @@ class _StageMeter:
                 self.queues = {}
                 self.ms = {}
                 self.batch = {}
+                self.no_face = 0
             self.armed = True
             self.on = True
 
@@ -15101,6 +15107,17 @@ class _StageMeter:
             if not self.on:
                 return
             self.ticks[key] = int(self.ticks.get(key) or 0) + max(1, int(n))
+
+    def note_no_face(self, n: int = 1) -> None:
+        """一帧「没有脸可换」：切脸之后直接进缓存/编码，换脸/遮罩/合成都不碰它。
+
+        进度页那条旁路线就是按它画的（「切脸 1439 / 换脸 1204」差的那 235 帧，
+        不画出来用户以为丢帧）。一次自增，和 tick 同一个量级，不额外扫目录。
+        """
+        with self.lock:
+            if not self.on:
+                return
+            self.no_face = int(self.no_face or 0) + max(0, int(n))
 
     def note_ms(self, ms: dict) -> None:
         with self.lock:
@@ -15131,6 +15148,9 @@ class _StageMeter:
                 row = {"ticks": int(self.ticks.get(k) or 0),
                        "inflight": inflight,
                        "lanes": list(self.lanes.get(k) or [])}
+                if k == "det":
+                    # 切脸这一格的「无脸帧」计数：图上那条旁路线只在 >0 时出现
+                    row["no_face_ticks"] = int(self.no_face or 0)
                 if k in self.ms:
                     row["ms"] = round(float(self.ms[k]), 2)
                 if k in self.batch:
@@ -15979,6 +15999,9 @@ def _fused_run(cfg: dict) -> dict:
                 job.rec["faces"] = len(args)
                 job.rec["swapped"] = len(args)
                 job.rec["no_face"] = not args
+                if not args:
+                    # 这一帧没有脸：换脸/遮罩都没碰它，合成也是原帧直通 → 走旁路那条线
+                    _STAGE_METER.note_no_face()
                 job.frame = None
                 _stage_tick("compose")           # 交接点：合成 → PNG 编码
                 _put(q_enc, (job, out_frame))
