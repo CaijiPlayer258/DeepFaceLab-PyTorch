@@ -8018,14 +8018,16 @@ def _stage_read_frame(path):
 def _stage_dst_face_mat(meta: dict, size: int = 256):
     """aligned/*.jpg → 合成画布(size) 的仿射矩阵（2×3）；元数据不全返回 None。
 
-    **为什么不是「直接 resize 到 256」**：aligned 是切脸阶段用 app 自己的 68 点模板
-    （_align.align_mat_from_68，padding 0.40 + 整脸中心下移 7%）裁出来的，而 ③ 换脸、
-    ⑤ 合成、XSeg 的 pred 分支用的都是 facelib 的 WHOLE_FACE 变换（get_transform_mat）。
-    两张矩阵实测不是同一张：68 点残差均值 6.1~7.2 px、缩放差 5.5%（0.562 vs 0.590）、
-    旋转差 1.2°、水平错位 5.7 px。这条链的「合成画布」是 facelib 那一套
+    **为什么不是「直接 resize 到 256」**：这条链的「合成画布」是 facelib 那一套
     （compose_frame 用 get_transform_mat 把 pred 反贴回原帧），所以 dst 遮罩必须落在
-    同一张画布上 —— 否则 mask_mode 8/7 的遮罩会整体错开 ~6 px（256 网格上），贴回原帧
-    就是边缘多一条挖进脸里的缝。
+    同一张画布上 —— 否则 mask_mode 8/7 的遮罩会整体错开，贴回原帧就是边缘多一条
+    挖进脸里的缝。
+
+    **2026-12 更正**：_align.align_mat_from_68 现在只拟合 33 点、与 facelib 逐位等价
+    （见 app/docs/24-ALIGN-WHOLEFACE.md），重切之后的 aligned 芯片本来就是 facelib
+    画布，所以这张补偿矩阵对它们约等于恒等。历史数据（重切前切的）仍然需要它：那时
+    两张画布确实不是同一张（1203 张实测中位缩放差 0.36%、旋转 2.5°，尾部到 13%；
+    早期在 256 画布上量到的是「残差 6.1~7.2 px、缩放差 5.5%」）。
 
     这里把 aligned 先按 image_to_face_mat 的逆变换放回原帧坐标，再用法线（facelib）
     变换压到 size —— 一张矩阵、一次重采样，像素仍然来自 aligned 本身，不需要 1080p 原帧。
@@ -8806,6 +8808,10 @@ def _stage_do_faces(cfg: dict) -> dict:
                     continue
                 if crop is None or not meta_f:
                     skipped += 1
+                    _why = (meta_f or {}).get("reject_reason") if isinstance(meta_f, dict) else ""
+                    if _why:
+                        _stage_log("切脸拒收 %s 第 %d 张：%s"
+                                   % (frames[rows[pos]].name, k, _why))
                     continue
                 # 配对键 / 68 点 / face_mat 三样都写进 DFLJPG 的 APP15
                 meta_f.update({
@@ -11931,10 +11937,11 @@ def _stage_do_mask(cfg: dict) -> dict:
       再用 facelib 的 WHOLE_FACE 变换压到 256 —— 解码原帧这一步是纯浪费：同一张脸就在
       aligned/*.jpg 里（切脸阶段 68 点仿射 _align.align_mat_from_68 的直接产物）。
       现在读 aligned，再用一张补偿矩阵（image_to_face_mat⁻¹ × facelib WHOLE_FACE，见
-      _stage_dst_face_mat）映射到合成画布。**为什么要补偿**：app 的 68 点模板和 facelib
-      那张不是同一张（实测 68 点残差 6.1~7.2 px、缩放差 5.5%、旋转差 1.2°），而这条链的
-      合成画布是 facelib 的（③ pred、⑤ compose_frame 都用它）—— 直接 resize 会让 dst 遮罩
-      整体错开 ~6 px（256 网格），mask_mode 8/7 贴回原帧就是边缘一条挖进脸里的缝。
+      _stage_dst_face_mat）映射到合成画布。**为什么要补偿**：这条链的合成画布是 facelib 的
+      （③ pred、⑤ compose_frame 都用它），而 aligned 芯片在 2026-12 之前是另一张画布
+      （68 点拟合，中位 0.36% 缩放 + 2.5° 旋转，尾部 13%）—— 直接 resize 会让 dst 遮罩
+      整体错开，mask_mode 8/7 贴回原帧就是边缘一条挖进脸里的缝。重切之后两边已经是同一张
+      矩阵，这张补偿对它们约等于恒等，留着是为了兼容没重切过的老项目。
       dst 输入整条读下来实测 5.6 ms/张（解码 3.4 + 元数据 0.6 + 矩阵 0.5 + 映射 1.1），
       省掉的是 1080p 解码（≈24 ms）和每张脸重算一遍的 68 点变换。
       读不出来 / 损坏的那一张**跳过并计数**（failed + 日志点名 + meta 的 dst_bad_aligned），
@@ -15226,6 +15233,11 @@ def _fused_run(cfg: dict) -> dict:
                         continue
                     if crop is None or not meta_f:
                         got["skipped"] += 1
+                        _why = ((meta_f or {}).get("reject_reason")
+                                if isinstance(meta_f, dict) else "")
+                        if _why:
+                            _vid_log("快速导出：第 %d 帧第 %d 张脸拒收：%s"
+                                     % (job.idx, k, _why))
                         continue
                     # compose 用的 landmarks = DFLJPG 里那份（align_face_68 已 round(4)）
                     lm_f = np.asarray(meta_f["source_landmarks"], np.float32)

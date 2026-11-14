@@ -545,9 +545,17 @@ def compose_aligned_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
 
     整条链（dfm 输入 / 遮罩 / 色彩迁移 / 反贴）都在**同一个** S×S 画布上走，所以
     这里**一个 68 点都不用**：不需要 get_transform_mat，也没有「68 点 → WHOLE_FACE
-    矩阵」这一步。aligned 画布和 facelib 画布本来就不是同一张（同一个 68 点上，
-    facelib 的 WHOLE_FACE 比 aligned 的 align_mat_from_68 放大约 13%，见
-    app/docs/23-ALIGNED-COMPOSE.md），混用就是「合成结果和原帧的脸错位几十像素」。
+    矩阵」这一步。
+
+    **2026-12 更正**：aligned 画布和 facelib 画布现在是**同一张**。align_mat_from_68
+    已经改成只拟合 33 点、模板直接从 facelib 取，与 get_transform_mat 逐位等价
+    （1203 张实测 zoom 1.00000 / rot 0.0000° / 四角 0.000 px）。以前这里写的
+    「放大约 13%」是错的：13% 是分布的**尾部**（p95），中位只有 +0.4%，主因是
+    3° 旋转（中位 2.5°，p05..p95 −4.9°..+4.9°）加姿态相关的缩放，根因是
+    **拟合点数**（68 点 vs 33 点）—— 多出来的下颌/下巴点落在单位方形外面，
+    把最小二乘拽偏。详见 app/docs/23-ALIGNED-COMPOSE.md §2.2 与
+    app/docs/24-ALIGN-WHOLEFACE.md。旧芯片（重切之前切的）仍然差 3°/0.4%，
+    所以「混用两张画布」在**没重切过的老数据**上还是那句：错位几十像素。
 
     faces : [{"mat": 原帧→画布 的 2×3（**已把画布尺寸折进 pred 的 S**）,
               "pred": (S,S,3) 0..1,

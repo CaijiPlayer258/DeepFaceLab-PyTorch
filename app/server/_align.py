@@ -12,7 +12,11 @@ DFLIMG.has_data() 判断，没有 APP15 段的一律当「不是 DFL 图片」�
 TEMPLATE_68 是经验模板：从 4.0 现有 data_src/aligned 里随机取 1200 张
 whole_face 对齐脸的 landmarks 求均值得到，坐标就是 DFL 512 对齐空间里人脸
 该在的位置，不是拍脑袋编的。UNIT_68 是同一份模板反推回「单位方形」空间的
-结果 —— 所有拟合都在单位空间里做，padding 只算一次。
+结果（其中 33 个 DFL 点被钉成 facelib 的 landmarks_2D_new）—— 5 点路径用它，
+68 点的**外点检查**也用它。padding 只算一次。
+
+终裁矩阵本身（align_mat_from_68）现在**只拟合 33 点**，与 facelib 逐位等价，
+见下面 2026-12 那段；68 点保留，但只当证人。
 
 ────────────────────────────────────────────────────────────────────────
 2026-11 起：**5 点只做几何，68 点只从模型来**
@@ -37,6 +41,31 @@ whole_face 对齐脸的 landmarks 求均值得到，坐标就是 DFL 512 对齐�
      并记进 skipped + 日志，不写文件、不写估算值；
   3) 元数据里带 landmarks_source：'model68'（来自模型）/ 'none'（没有点）。
      看到 'none' 就说明这张图没有可信关键点，别再拿它算掩码或排序。
+
+────────────────────────────────────────────────────────────────────────
+2026-12 起：**终裁矩阵与 iperov 的 get_transform_mat 逐位等价**
+────────────────────────────────────────────────────────────────────────
+以前 align_mat_from_68 拿**全部 68 点**去拟合 UNIT_68（33 点 facelib 模板 + 35 点
+经验模板）。真实人脸不是那 35 个点的均值：下颌/下巴落在单位方形外面
+（x∈[-0.12,1.05]、y∈[0.02,1.16]），最小二乘被它们拽着走。1203 张真实对齐脸实测，
+与 facelib 的 WHOLE_FACE 矩阵相比：缩放中位 **+0.36%**、旋转中位 **+2.53°**
+（p05..p95 −4.9°..+4.9°）、画布四角平均差 **34.2 px**（最大 149.6 px）。
+
+现在只拟合 **33 点**（17..48 + 54）到 facelib 的 landmarks_2D_new —— 和
+facelib.LandmarksProcessor.get_transform_mat 用的是同一份模板、同一串几何代码，
+所以同一组 68 点算出来的矩阵与它逐位相同（1203 张实测：zoom 1.00000、
+rot 0.0000°、四角位移 0.000 px）。**模板只从 facelib 取，不手抄**。
+
+68 点仍然全用上，但**只做外点检查**：拟出 T 后把 68 个点都映射进单位空间，与
+UNIT_68 比残差（换算成芯片像素），超过阈值就整张脸判 rejected、写日志、不进
+aligned。理由：33 点定几何，68 点当证人 —— 拟合权重越少越不容易被坏点带偏，
+而"多出来的 35 个点对不对"恰好是检测跑飞的最好证据。阈值见 outlier_limit
+（DFL_ALIGN_OUTLIER_PX）。
+
+注意：这个残差**和姿态强相关**（同一个模板贴侧脸当然贴不上）。1203 张实测
+|yaw|<15° 时 p50 55 px、|yaw|>45° 时 p50 168 px（芯片像素）。所以默认阈值按
+"灾难性失败"来定（0.55 × 画布边长，见 OUTLIER_FRACTION），不是按 p99 定 ——
+实测 resid/S 最大 0.370，按 p99（0.34）定等于把侧脸全扔掉。
 """
 from __future__ import annotations
 
@@ -233,23 +262,37 @@ def _affine_from_unit_square(mat_unit, output_size=SIZE, padding=PADDING,
 
 _IDENTITY = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
 
-# DFL 自己的 33 点单位模板（facelib/LandmarksProcessor.landmarks_2D_new）：
-# 索引 17..48 + 54，其余点它没有，需要从经验模板补。
-_TPL_2D_NEW = np.array([
-    [0.000213256, 0.106454], [0.0752622, 0.038915], [0.18113, 0.0187482],
-    [0.29077, 0.0344891], [0.393397, 0.0773906], [0.586856, 0.0773906],
-    [0.689483, 0.0344891], [0.799124, 0.0187482], [0.904991, 0.038915],
-    [0.98004, 0.106454], [0.490127, 0.203352], [0.490127, 0.307009],
-    [0.490127, 0.409805], [0.490127, 0.515625], [0.36688, 0.587326],
-    [0.426036, 0.609345], [0.490127, 0.628106], [0.554217, 0.609345],
-    [0.613373, 0.587326], [0.121737, 0.216423], [0.187122, 0.178758],
-    [0.265825, 0.179852], [0.334606, 0.231733], [0.260918, 0.245099],
-    [0.182743, 0.244077], [0.645647, 0.231733], [0.714428, 0.179852],
-    [0.793132, 0.178758], [0.858516, 0.216423], [0.79751, 0.244077],
-    [0.719335, 0.245099], [0.254149, 0.780233], [0.726104, 0.780233],
-], dtype=np.float64)
+# DFL 自己的 33 点单位模板 = facelib.LandmarksProcessor.landmarks_2D_new。
+#
+# **只从 facelib 取，不手抄**：这份模板是"唯一真相"，抄一份就等于多一个可能
+# 漂移的副本 —— facelib 改成 6 位有效数字，我们这边的副本却停在 5 位，芯片就会
+# 悄悄挪 0.01 px，而且没有任何报错。以前这里确实是一份手抄的 float64 字面量
+# （和 facelib 的 float32 差 2.9e-08），现在直接 import。
+#
+# facelib 在 app/engine 下；正常运行时 _merge_compose.ensure_engine_path() 已经
+# 把它 append 进 sys.path。单独 import（脚本/测试）时这里再兜一次 —— append 不
+# insert，绝不抢同名模块。
+_TPL_2D_NEW = None          # 懒加载缓存，见 landmarks_2d_new()
+_REAL_IDX = list(range(17, 49)) + [54]       # facelib 认的 33 个下标：17..48 + 54
 
-_REAL_IDX = list(range(17, 49)) + [54]
+
+def landmarks_2d_new():
+    """facelib 的 33 点单位模板（float64 视图），首次调用时 import 并缓存。"""
+    global _TPL_2D_NEW
+    if _TPL_2D_NEW is not None:
+        return _TPL_2D_NEW
+    try:
+        from facelib.LandmarksProcessor import landmarks_2D_new as _tpl
+    except Exception:                       # noqa: BLE001 —— 引擎不在 sys.path 上
+        import sys
+        root = Path(__file__).resolve().parents[1] / "engine"
+        if str(root) not in sys.path:
+            sys.path.append(str(root))
+        from facelib.LandmarksProcessor import landmarks_2D_new as _tpl
+    _TPL_2D_NEW = np.asarray(_tpl, dtype=np.float64).copy()
+    if _TPL_2D_NEW.shape != (33, 2):
+        raise RuntimeError("facelib landmarks_2D_new 形状异常：%r" % (_TPL_2D_NEW.shape,))
+    return _TPL_2D_NEW
 
 
 def _build_unit_68():
@@ -258,11 +301,12 @@ def _build_unit_68():
     经验模板来自真实对齐脸，它和 DFL 的 33 点模板之间差一个相似变换，
     先用这 33 点把两者对齐，再把剩下 35 个点搬进 DFL 的单位空间。
     """
+    tpl = landmarks_2d_new()
     emp_unit = transform_points(
         TEMPLATE_68, _affine_from_unit_square(_IDENTITY, SIZE), invert=True)
-    T = umeyama(emp_unit[_REAL_IDX], _TPL_2D_NEW, True)
+    T = umeyama(emp_unit[_REAL_IDX], tpl, True)
     mapped = transform_points(emp_unit, T[0:2])
-    mapped[_REAL_IDX] = _TPL_2D_NEW
+    mapped[_REAL_IDX] = tpl
     return mapped.astype(np.float64)
 
 
@@ -297,44 +341,154 @@ def align_mat_from_5(kps5, output_size=SIZE, padding=PADDING,
     return _affine_from_unit_square(mat_unit, output_size, padding, whole_face_shift)
 
 
+# ---------------- 终裁矩阵：拟合 33 点，与 facelib 逐位等价 ----------------
+#
+# 两道外点阈值，各管一种失败：
+#
+# ① 绝对（芯片像素）：DFL_ALIGN_OUTLIER_PX。默认 0.55 × 画布边长。
+#    为什么不是实测 p99：残差和 |yaw| 强相关（见文件头），p99 挑出来的全是侧脸
+#    （实测 resid/S 最大 0.370，p99 就是 0.34），0.55 留 1.5 倍余量，只打
+#    「点跑到画布外」级别的失败 —— 检测整体跑飞、点到别的脸上、背景上。
+#
+# ② 相对（同一张脸内部）：DFL_ALIGN_OUTLIER_REL = max 残差 / 该脸残差中位数。
+#    姿态会把**所有**点的残差一起抬高，比值不动；只有「某几个点单独跑掉」才会
+#    把比值顶上去 —— 这才是「外点」的原意。2424 张真实脸实测最大 10.60，
+#    默认 12 不误伤，同时能抓住「3 个下颌点推出 2 个单位」这种局部崩坏（比值 ~10
+#    到 20，看画布）。
+OUTLIER_FRACTION = 0.55
+OUTLIER_REL = 12.0
+
+
+def outlier_limit(output_size=SIZE):
+    """当前生效的外点阈值（芯片像素）；0 = 关闭。
+
+    DFL_ALIGN_OUTLIER_PX：
+      off / 0 / none       关闭
+      auto（默认）/ 空      OUTLIER_FRACTION × output_size
+      数字                 绝对像素
+    """
+    raw = (os.environ.get("DFL_ALIGN_OUTLIER_PX") or "auto").strip().lower()
+    if raw in ("0", "off", "none", "no", "false", "disable"):
+        return 0.0
+    if raw in ("", "auto", "default", "on", "true"):
+        return float(output_size) * OUTLIER_FRACTION
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return float(output_size) * OUTLIER_FRACTION
+
+
+def outlier_rel_limit():
+    """相对外点阈值（max/median）；0 = 关闭。DFL_ALIGN_OUTLIER_REL。"""
+    raw = (os.environ.get("DFL_ALIGN_OUTLIER_REL") or "auto").strip().lower()
+    if raw in ("0", "off", "none", "no", "false", "disable"):
+        return 0.0
+    if raw in ("", "auto", "default", "on", "true"):
+        return float(OUTLIER_REL)
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return float(OUTLIER_REL)
+
+
+def align_fit(kps68, output_size=SIZE, padding=PADDING,
+              whole_face_shift=WHOLE_FACE_SHIFT):
+    """68 点 → (mat, T, resid_px, px_per_unit)；算不出来返回 (None, None, None, None)。
+
+    mat        原图 → 对齐图的仿射矩阵（= iperov get_transform_mat 的同一张）
+    T          原图 → 单位方形的相似变换（3×3）
+    resid_px   68 个点各自的残差（芯片像素）：点映射进单位空间后与 UNIT_68 比，
+               再乘「芯片像素 / 单位」。33 个拟合点这里是拟合残差，其余 35 个是
+               「这张脸和平均脸差多少」—— 外点检查看的是这一列的最大值。
+    """
+    src = np.asarray(kps68, dtype=np.float64)
+    if src.ndim != 2 or src.shape != (68, 2) or not np.all(np.isfinite(src)):
+        return None, None, None, None
+
+    tpl = landmarks_2d_new()
+    T = umeyama(src[_REAL_IDX], tpl, True)          # 只拟合 facelib 认的 33 点
+    if not np.all(np.isfinite(T)):
+        return None, None, None, None
+    mat = _affine_from_unit_square(T[0:2], output_size, padding, whole_face_shift)
+    if not np.all(np.isfinite(mat)):
+        return None, None, None, None
+
+    # 单位 → 芯片 = mat（原图→芯片）∘ T⁻¹（单位→原图）；px_per_unit 就是它的缩放
+    try:
+        unit2chip = np.vstack([mat, [0.0, 0.0, 1.0]]) @ np.linalg.inv(T)
+    except np.linalg.LinAlgError:
+        return None, None, None, None
+    px_per_unit = float(np.hypot(unit2chip[0, 0], unit2chip[1, 0]))
+    act_unit = transform_points(src, T[0:2])                  # 实际点：原图 → 单位（T 是仿射）
+    resid = np.linalg.norm(act_unit - UNIT_68, axis=1) * px_per_unit
+    if not np.all(np.isfinite(resid)):
+        return None, None, None, None
+    return mat, T, resid, px_per_unit
+
+
 def align_mat_from_68(kps68, output_size=SIZE, padding=PADDING,
                      whole_face_shift=WHOLE_FACE_SHIFT):
-    """68 点（原图坐标）→ 原图到对齐图的仿射矩阵。
+    """68 点（原图坐标）→ 原图到对齐图的仿射矩阵；**与 facelib 逐位等价**。
 
-    和 :func:`align_mat_from_5` 同一套模板 / 内缩 / 中心偏移，唯一区别是拟合用的
-    对应点从 5 个变成 68 个：umeyama 拿全部 68 对点求最小二乘相似变换，眼睛/鼻尖/
-    嘴角那 5 个点的单点误差被摊到整张脸上，旋转和缩放的估计明显更稳
-    （5 点时嘴角抖 2px 就能让整张图转半度、缩一圈）。
+    拟合只用 33 点（17..48 + 54）对 facelib 的 landmarks_2D_new —— 和
+    facelib.LandmarksProcessor.get_transform_mat 完全同一份模板、同一串几何代码
+    （padding 0.40 / 整脸下移 7% / 三对角点求仿射都没动）。所以同一组 68 点，
+    这里算出来的矩阵和 iperov 的 WHOLE_FACE 矩阵是同一个东西（1203 张实测
+    zoom 1.00000 / rot 0.0000° / 四角 0.000 px）。
+
+    剩下的 35 个点不参与拟合，只给 align_face_68 做外点检查 —— 为什么以前用
+    全部 68 点会错，见文件头。
 
     拿不到 68 个点（数量不对 / 有 NaN / 退化）返回 None —— 调用方必须报错，
     **不许退回 5 点**。
     """
-    src = np.asarray(kps68, dtype=np.float64)
-    if src.ndim != 2 or src.shape != (68, 2) or not np.all(np.isfinite(src)):
-        return None
-    T = umeyama(src, UNIT_68, True)
-    if not np.all(np.isfinite(T)):
-        return None
-    mat = _affine_from_unit_square(T[0:2], output_size, padding, whole_face_shift)
-    if not np.all(np.isfinite(mat)):
-        return None
+    mat, _T, _resid, _ppu = align_fit(kps68, output_size, padding, whole_face_shift)
     return mat
 
 
 def align_face_68(img_bgr, kps68, box=None, size=SIZE, interpolation=None):
-    """68 点仿射裁一张对齐脸。返回 (对齐图, 元数据 dict)；失败返回 (None, None)。
+    """68 点仿射裁一张对齐脸。返回 (对齐图, 元数据 dict)；失败返回 (None, meta)。
 
     人脸库（extract / add 两条路）统一走这里：插值默认 INTER_CUBIC —— 和合成链路
     （MergeMaskedFace 那条路）保持一致，比 5 点 + INTER_LINEAR 的边缘更干净。
     border 仍按 DFL 的规矩填纯黑。
+
+    **外点检查**：几何只用 33 点拟合（= facelib 逐位等价），68 个点全映射进单位
+    空间与 UNIT_68 比残差。max 残差超过 outlier_limit(size) 就判这张脸检测异常：
+    不返回图，返回的 meta 里 rejected=True + reject_reason + align_resid_px，
+    调用方据此跳过并记账（不进 aligned）。阈值可用 DFL_ALIGN_OUTLIER_PX 调。
     """
     import cv2
     size = int(size)
     if interpolation is None:
         interpolation = cv2.INTER_CUBIC
-    mat = align_mat_from_68(kps68, size)
+    mat, _T, resid, _ppu = align_fit(kps68, size)
     if mat is None:
         return None, None
+
+    resid_max = float(resid.max())
+    resid_med = float(np.median(resid))
+    resid_rel = resid_max / max(1e-6, resid_med)
+    limit = outlier_limit(size)
+    limit_rel = outlier_rel_limit()
+    bad = ((limit > 0 and resid_max > limit)
+           or (limit_rel > 0 and resid_rel > limit_rel))
+    if bad:
+        reason = ("68 点残差 %.1f px / 中位 %.1f px = %.1f 倍（阈值 %.1f px / %.1f 倍）"
+                  % (resid_max, resid_med, resid_rel, limit, limit_rel))
+        _say("[align] rejected：%s" % reason)
+        return None, {
+            "face_type": "whole_face",
+            "align": "68",
+            "landmarks_source": "none",
+            "rejected": True,
+            "reject_reason": reason,
+            "align_resid_px": round(resid_max, 3),
+            "align_resid_rel": round(resid_rel, 3),
+            "align_resid_limit_px": round(limit, 3),
+            "align_resid_limit_rel": round(limit_rel, 3),
+        }
+
     aligned = cv2.warpAffine(img_bgr, mat, (size, size),
                              flags=int(interpolation),
                              borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
@@ -359,6 +513,9 @@ def align_face_68(img_bgr, kps68, box=None, size=SIZE, interpolation=None):
         "image_to_face_mat": np.asarray(mat, dtype=np.float64).tolist(),
         "align": "68",
         "landmarks_source": "model68",     # 这 68 个点是 2D106 的输出（按下标挑的）
+        # 外点检查的实际读数（芯片像素 / 相对倍数）：写进元数据，重切/排查不用再算
+        "align_resid_px": round(resid_max, 3),
+        "align_resid_rel": round(resid_rel, 3),
     }
     return aligned, meta
 
@@ -384,8 +541,9 @@ def align_mode() -> str:
 COARSE_SIZE = 192
 # 粗裁视野 = 终裁视野 × 1.3。侧脸时 5 点算出来的紧框会把额头/下巴/耳朵切掉，
 # 2D106 看到切边的脸，出的点会整体往画面中心缩；多给 30% 余量就没这问题。
-# 这不会污染最终构图：终裁是「68 点 → UNIT_68」的相似变换拟合，模板把构图钉死了，
-# 粗裁多看到多少、少看到多少，都会被那一步吸收掉（缩放/平移都在相似变换里）。
+# 这不会污染最终构图：终裁是「33 点 → facelib 的 landmarks_2D_new」的相似变换拟合，
+# 模板把构图钉死了，粗裁多看到多少、少看到多少，都会被那一步吸收掉（缩放/平移都在
+# 相似变换里）。粗裁只影响 2D106 看得清不清楚，不进入几何。
 COARSE_EXPAND = 1.30
 
 

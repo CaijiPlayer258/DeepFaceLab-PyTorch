@@ -2845,7 +2845,8 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     q_frames: "queue.Queue" = queue.Queue(maxsize=q_cap)
     q_detect: "queue.Queue" = queue.Queue(maxsize=q_cap)
     stop = threading.Event()
-    stats = {"seen": 0, "made": 0, "fallback": 0, "skipped": 0}
+    # rejected = 68 点外点检查判「检测异常」的张数（在 skipped 里再细分一项）
+    stats = {"seen": 0, "made": 0, "fallback": 0, "skipped": 0, "rejected": 0}
     # 帧速度（JOB.fps = 解到第几帧 / el）与 SSE 的 elapsed 共用 JOB.t0：
     # 前端算「张/秒」用的是 elapsed，两边各用各的 t0 会让两个速度一快一慢。
     t0 = JOB.t0 or time.time()
@@ -2924,7 +2925,12 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
                     continue
                 it["img"] = None            # 别把整帧攥在 _pending 里
                 if crop is None:
-                    _skip(it["idx"], "68 点仿射失败（点数/数值不合法）")
+                    # meta_f 此时是「拒收记录」：reject_reason / align_resid_px
+                    _why = (meta_f or {}).get("reject_reason") if isinstance(meta_f, dict) else None
+                    if _why:
+                        with lock:
+                            stats["rejected"] += 1
+                    _skip(it["idx"], _why or "68 点仿射失败（点数/数值不合法）")
                     continue
             else:
                 crop, meta_f = it["crop"], it["meta"]
@@ -3238,7 +3244,7 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
         "ok": True, "error": "",
         "align": _amode, "lm106": lm106 is not None,
         "mode": mode, "frames": stats["seen"], "faces": stats["made"],
-        "skipped": stats["skipped"],
+        "skipped": stats["skipped"], "rejected": stats["rejected"],
         "wall": wall, "fps": stats["seen"] / wall,
         "cost": {k: cost[k] for k in ("read", "put1", "get1", "det", "put2", "get2", "emit",
                                       "coarse", "lm106", "final", "jpeg")},
@@ -3248,8 +3254,9 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
         "hwaccel": _hwaccel.current(),
     }
     # 一行结论：模式 / 帧 / 脸 / 跳过 / 墙钟。自检脚本和人都直接看这行。
-    _log("[align] 完成：DFL_ALIGN=%s 帧=%d 脸=%d 跳过=%d 墙钟=%.2fs (%.1f 帧/秒)"
+    _log("[align] 完成：DFL_ALIGN=%s 帧=%d 脸=%d 跳过=%d%s 墙钟=%.2fs (%.1f 帧/秒)"
          % (_amode, stats["seen"], stats["made"], stats["skipped"],
+            ("（其中外点判异常 %d）" % stats["rejected"]) if stats["rejected"] else "",
             wall, stats["seen"] / wall))
     if _amode == "68" and stats["made"] == 0 and stats["skipped"]:
         _log("[align] 一张都没写出来：%d 张脸全部拿不到 68 点。"

@@ -280,11 +280,13 @@ def _face_crop68(img, det, box, size):
     if lm is None:
         return None, None, "no_landmarks68"
     try:
-        crop, _meta = align_face_68(img, lm, box, size)
+        crop, meta = align_face_68(img, lm, box, size)
     except Exception:
-        crop = None
+        crop, meta = None, None
     if crop is None:
-        return None, lm, "align_failed"
+        # 外点检查判异常时 meta 里带着原因（resid / 阈值），原样上抛给调用方记账
+        why = (meta or {}).get("reject_reason") if isinstance(meta, dict) else ""
+        return None, lm, ("align_rejected: " + why) if why else "align_failed"
     return crop, lm, ""
 
 
@@ -703,7 +705,8 @@ def add_face(body: dict):
 
     crop, _meta = align_face_68(img, kps, box, size)
     if crop is None:
-        raise store.FacesError("68 点退化（共线/面积为 0），这张脸对齐不出来", 400)
+        _why = (_meta or {}).get("reject_reason") if isinstance(_meta, dict) else ""
+        raise store.FacesError(_why or "68 点退化（共线/面积为 0），这张脸对齐不出来", 400)
 
     p, created = store.resolve_project_for_write(proj, default=store.default_project())
     if created:

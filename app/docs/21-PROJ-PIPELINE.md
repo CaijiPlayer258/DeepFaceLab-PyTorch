@@ -107,6 +107,12 @@ B1 = 29.1 ms/张 · B4 = 28.7 · B8 = 31.0 —— 攒批 4 张每张省 ~0.4ms�
 
 原来的核实数据仍然有效，但只说明一件事：**两张矩阵不是同一张**。
 
+> **2026-12 更正**：`_align.align_mat_from_68` 已改成只拟合 33 点（= facelib），
+> 重切后的 aligned 芯片与 `get_transform_mat` 逐位等价，两张画布合成一张；
+> `_stage_dst_face_mat` 对重切过的数据约等于恒等（留着兼容老项目）。
+> 详见 [24-ALIGN-WHOLEFACE](24-ALIGN-WHOLEFACE.md)。下面这段「不是同一张」的推导
+> 是**历史状态**，保留是为了说清当初为什么要补偿。
+
 `compose_frame` 贴回用的矩阵是 **facelib 的 WHOLE_FACE**：`get_transform_mat(lm68, S,
 WHOLE_FACE)`。而 `aligned/` 的画布是 app 自己的 68 点模板（`_align.align_mat_from_68`，
 padding 0.40 + 中心下移 7%）。两张矩阵**不是同一张** —— 这正是 `_stage_dst_face_mat`
