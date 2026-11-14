@@ -6611,7 +6611,7 @@ function mgStageEmpty(on) {
       var box = $("mgpResult");
       if (box) box.classList.remove("is-rej");
       var fb0 = $("mgpForceTry");
-      if (fb0) fb0.hidden = true;             /* 离开被拒态就收起「仍然尝试」 */
+      if (fb0) { fb0.hidden = true; fb0.style.display = "none"; }   /* 离开被拒态就收起「仍然尝试」 */
       var hd = $("mgpResultHd");
       if (hd) { hd.hidden = false; hd.textContent = "结果"; }
       var ttl = $("mgpHdTitle");
@@ -6795,7 +6795,8 @@ function mgStageEmpty(on) {
     }
     function mgpResultShow(okAll, d) {
     /* 结果态（成功/失败）都收起「仍然尝试」—— 它只属于「被拒」那一屏 */
-    (function () { var fb = $("mgpForceTry"); if (fb) fb.hidden = true; })();
+    (function () { var fb = $("mgpForceTry"); if (fb) { fb.hidden = true; fb.style.display = "none"; }
+      var rz = $("mgpResult"); if (rz) rz.classList.remove("is-rej"); })();
       d = d || {};
       var box = $("mgpResult");
       var txt = $("mgpResultText");
