@@ -361,34 +361,71 @@ def _save(d: dict, workspace=None):
 
 
 def record_gain(kind: str, gpu_n: int, cpu_n: int, fps, workspace=None) -> dict:
-    """记一次实测帧率，学会「加 CPU session 到底值不值」。
+    """记一次实测帧率，学会「加 CPU session / 把整段挪到 CPU EP 到底值不值」。
 
     为什么要记而不是算：理论收益（1 + gpu_ms/cpu_ms）只说这一段的容量，端到端还要
-    过别的瓶颈，实测才作数。规则：
-        cpu=0 的那次 = 基线；
-        cpu>0 且比基线高 ≥5% → 以后**自动档**就开 CPU（auto_cpu_ok=True）；
-        不到 5% → 自动档继续只开 GPU（多开只是抢核，用户不该为它买单）。
+    过别的瓶颈，实测才作数。规则（按 文件名 = gpu_n x cpu_n 记账）：
+        1x0 = 基线（今天的默认档）；
+        1x1 / 1x2 比基线高 ≥5% → 自动档多挂 CPU session（auto_cpu_ok / auto_cpu2_ok）；
+        2x0 比基线高 ≥5% → 自动档开第二份 GPU session（auto_gpu_ok）；
+        0x1（检测整段走 CPU EP）比基线高 ≥5% → DFL_DET_EP=auto 的门②通过
+            （auto_cpu_ep_ok，见 server/_detect.py 的 decide）；
+        不到 5% → 一律维持现状（多开只是抢核，用户不该为它买单）。
     """
     row = dict(_load(workspace).get("gain:%s" % kind) or {})
     runs = dict(row.get("runs") or {})
-    fps = None if fps is None else round(float(fps), 2)
     if fps is None:
         return row
-    runs["%dx%d" % (int(gpu_n), int(cpu_n))] = fps
+    try:
+        fps = round(float(fps), 2)
+    except (TypeError, ValueError):
+        return row
+    tag = "%dx%d" % (int(gpu_n), int(cpu_n))
+    runs[tag] = fps
     row["runs"] = runs
-    base = runs.get("1x0")
+    base = runs.get("1x0")                       # 1×GPU + 0×CPU = 今天的默认档
     if base:
-        for tag, key in (("1x1", "auto_cpu_ok"), ("1x2", "auto_cpu2_ok"),
-                         ("2x0", "auto_gpu_ok")):
-            v = runs.get(tag)
+        for t, key in (("1x1", "auto_cpu_ok"), ("1x2", "auto_cpu2_ok"),
+                       ("2x0", "auto_gpu_ok")):
+            v = runs.get(t)
             if v is not None:
                 row[key] = bool(float(v) >= float(base) * 1.05)
+        # 0×GPU + 1×CPU：**检测整段走 CPU EP**（DFL_DET_EP=cpu）那一档。
+        # 这是 _detect.decide() 的「门②」：只有它净增 ≥5% 才让 auto 真的切 CPU。
+        # 和 1x1（GPU 检测 + 一路 CPU 检测 session）不是一回事，别混。
+        ce = runs.get("0x1")
+        if ce is not None:
+            row["cpu_ep_fps"] = ce
+            row["cpu_ep_gain_pct"] = round(100.0 * (float(ce) / float(base) - 1.0), 2)
+            row["auto_cpu_ep_ok"] = bool(float(ce) >= float(base) * 1.05)
         row["base"] = base
         row["base_at"] = round(time.time(), 1)
+        row["now"] = fps
+        row["now_tag"] = tag
+        row["gain_pct"] = round(100.0 * (float(fps) / float(base) - 1.0), 2)
+        row["hybrid_cpu"] = int(cpu_n)
     d = _load(workspace)
     d["gain:%s" % kind] = row
     _save(d, workspace)
     return row
+
+
+def cpu_ep_ok(kind: str, workspace=None) -> bool:
+    """检测整段走 CPU EP 到底赚不赚：只有实测记录里 0x1 那一档净增 ≥5% 才为真。
+
+    这是 DFL_DET_EP=auto 的第二道门（见 server/_detect.py 的 decide）。
+    没有记录 = 没验证过 = False（不动默认）。
+    """
+    return bool((_load(workspace).get("gain:%s" % kind) or {}).get("auto_cpu_ep_ok"))
+
+
+def cpu_ep_gain(kind: str, workspace=None):
+    """实测记录里 0x1（检测走 CPU EP）相对 1x0 的净增百分比；没记录 → None。
+
+    只用来把「为什么」写进日志：False 和「没量过」是两件事，日志里不能混成一句。
+    """
+    v = (_load(workspace).get("gain:%s" % kind) or {}).get("cpu_ep_gain_pct")
+    return None if v is None else float(v)
 
 
 def auto_cpu_ok(kind: str, n: int = 1, workspace=None) -> bool:

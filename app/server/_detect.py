@@ -24,6 +24,162 @@ def _det_log(key, msg):
     print(msg, flush=True)
 
 
+# ============================================================
+# 检测走哪个 EP：DFL_DET_EP = auto | gpu | cpu（默认 auto）
+# ============================================================
+# 为什么要这个开关：融合流水线里 dfm / XSeg / 检测**共用同一个 GPU 流**。
+# dfm 一次前向 30~38ms（416），而 tinymog 单张前向只要 1.4ms —— 检测插进去的代价
+# 不是那 1.4ms，而是「排在一批 dfm 后面 + 一次上下文切换」。把这种**小到可以忽略**
+# 的模型挪到 CPU，GPU 流就少一个插队者；反过来说，retinaface_10g 前向 9.9ms、CPU 上
+# 49.9ms（慢 5 倍），挪过去只会把整条线拖死。
+#
+# 判据是**实测**，不是型号名。auto 是两道门（细节见 decide()）：
+#   门① 单张前向（640 canvas，不含 letterbox/NMS）GPU ≤ DFL_DET_EP_GPU_MS（默认 1.5ms）
+#        → 它在 GPU 上占的时间已小到没收益，收益只能来自「不再排队」→ **候选**；
+#   门② 这台机器/这个模型上量到过「检测走 CPU 净增 ≥5%」的端到端记录（工作区
+#        _sess_bench.json 的 gain:detect）→ 才真的切。两门都过才走 CPU，否则留在 GPU。
+# 为什么非要门②：门①只证明「值得试」。本机 1080p 120 帧 · 384 dfm · 6 轮交错 A/B 的
+# 实测是 **19.16 → 18.42 帧/秒（配对中位 −3.86%，6 轮全负）**：省下 1.4ms 的 GPU，
+# 赔上 26~29ms 的 CPU 忙时间，还跟 8 条合成线程抢核（合成 129.8 → 133.8 ms/帧）。
+# 拿实测去选，而不是拿「前向很小」去选 —— 这就是门②存在的理由。
+# 数字都是 2026-11 本机（RTX 5070 Laptop 8GB / 32 逻辑核）实测中位：
+#   tinymog        GPU 1.4ms（TRT bf16 + CUDA Graph） / CPU 8.9~12.5ms（intra_op=3）
+#   retinaface_10g GPU 9.9ms（ORT-CUDA fp32）         / CPU 49.9~150ms
+#   insightface_2d106 / xseglite 不在这里：2d106 本来就在 CPU；xseg 留 GPU（CPU 慢 11 倍）
+# 拿不到实测时退回 KNOWN_GPU_FWD_MS 这张已知表（同一台机器量的），表里也没有
+# 就**留在 GPU**（不认识的东西不动它 —— 赌错一次就是整条线慢一倍）。
+ENV_EP = "DFL_DET_EP"                    # auto | gpu | cpu
+ENV_THREADS = "DFL_DET_EP_THREADS"       # CPU EP 的 intra_op 线程数（2..4）
+ENV_GPU_MS = "DFL_DET_EP_GPU_MS"         # auto 的判据阈值（单张 GPU 前向 ms）
+
+AUTO_GPU_MS = 1.5
+CPU_THREADS_MIN, CPU_THREADS_MAX, CPU_THREADS_DEFAULT = 2, 4, 3
+
+KNOWN_GPU_FWD_MS = {
+    "tinymog": 1.4,             # TRT bf16 + CUDA Graph，前向（不含 letterbox）
+    "retinaface_10g": 9.9,      # ORT-CUDA fp32
+}
+
+
+def _env_str(name):
+    import os
+    return str(os.environ.get(name) or "").strip()
+
+
+def mode() -> str:
+    """auto | gpu | cpu（写错/为空 = auto，不抛异常：一个错字不该让导出起不来）。"""
+    v = _env_str(ENV_EP).lower()
+    return v if v in ("auto", "gpu", "cpu") else "auto"
+
+
+def threads() -> int:
+    """CPU EP 用几个 intra_op 线程。2~4：合成那 8 条线程 + 编码 3 条 + 对齐 4 条
+    已经把核占得差不多了，检测再要 8 条就是互相抢（实测 T8 只比 T4 快 20%，
+    代价是合成段变慢）。"""
+    try:
+        v = int(float(_env_str(ENV_THREADS) or CPU_THREADS_DEFAULT))
+    except (TypeError, ValueError):
+        v = CPU_THREADS_DEFAULT
+    return max(CPU_THREADS_MIN, min(CPU_THREADS_MAX, v))
+
+
+def auto_gpu_ms() -> float:
+    try:
+        v = float(_env_str(ENV_GPU_MS) or AUTO_GPU_MS)
+    except (TypeError, ValueError):
+        v = AUTO_GPU_MS
+    return v if v > 0 else AUTO_GPU_MS
+
+
+def norm_name(name) -> str:
+    """'tinymog.onnx' / 'weights\\tinymog.onnx' → 'tinymog'（表是按规范名写的）。"""
+    s = str(name or "").strip().replace("\\", "/").rsplit("/", 1)[-1]
+    return s[:-len(".onnx")] if s.lower().endswith(".onnx") else s
+
+
+def decide(name, gpu_fwd_ms=None, gain_ok=None, gain_pct=None) -> dict:
+    """→ {"ep": "gpu"|"cpu", "why": [...], "gpu_fwd_ms", "thr", "src", "mode"}
+
+    why 是给人看的一句话（日志直接打）；src = 这个数是实测的还是查表的。
+
+    **auto 是两道门，缺一不可**：
+      门① 物理：单张前向 GPU ≤ thr —— 只有这种模型「挪走能省的 GPU 时间」小到可以忽略，
+           收益才只可能来自「不再排队」。
+      门② 端到端：工作区里得有「检测走 CPU 那档净增 ≥5%」的实测（_sess_bench.json 的
+           gain:detect → auto_cpu_ep_ok，见 routes_merge 收尾处的 record_gain）。
+           为什么非要有这道门：门①只证明「值得试」，不证明「真的赚」。本机实测
+           （1080p 120 帧 · 384 dfm · 6 轮交错 A/B）tinymog 前向 1.42ms 过门①，
+           端到端却是 **19.16 → 18.42 帧/秒（配对中位 −3.86%，6 轮全负）**：
+           省下 1.4ms 的 GPU，赔上 29ms 的 CPU 忙时间，还跟 8 条合成线程抢核
+           （compose 129.8 → 133.8ms）。**没到 +5% 就不动默认**。
+      所以全新工作区上 auto == 现状（GPU）；跑过一次 DFL_DET_EP=cpu 并记下 fps 之后，
+      这台机器/这个模型上的 auto 才开始按实测走。
+    """
+    m = mode()
+    key = norm_name(name)
+    thr = auto_gpu_ms()
+    why = []
+    if m == "gpu":
+        why.append("%s=gpu（显式）→ 全部留在 GPU 流" % ENV_EP)
+        return {"ep": "gpu", "why": why, "gpu_fwd_ms": gpu_fwd_ms,
+                "thr": thr, "src": "explicit", "mode": m}
+    if m == "cpu":
+        why.append("%s=cpu（显式）→ 检测走 CPU EP（intra_op=%d）"
+                   % (ENV_EP, threads()))
+        return {"ep": "cpu", "why": why, "gpu_fwd_ms": gpu_fwd_ms,
+                "thr": thr, "src": "explicit", "mode": m}
+    # ---- auto ----
+    src = "measured"
+    ms = gpu_fwd_ms
+    if ms is None:
+        ms = KNOWN_GPU_FWD_MS.get(key)
+        src = "known-table" if ms is not None else "unknown"
+    if ms is None:
+        why.append("%s=auto 但 %s 既没量到前向、已知表里也没有 → 留在 GPU（不拿没量过的模型赌）"
+                   % (ENV_EP, key))
+        return {"ep": "gpu", "why": why, "gpu_fwd_ms": None,
+                "thr": thr, "src": src, "mode": m}
+    if float(ms) <= thr:
+        head = ("%s=auto · %s 单张前向 GPU %.2f ms ≤ 阈值 %.2f ms（%s）→ 门①过"
+                % (ENV_EP, key, float(ms), thr, src))
+        if not gain_ok:
+            if gain_pct is None:
+                tail = ("；门②没过：工作区里还没有『检测走 CPU 净增 ≥5%』的实测"
+                        "（_sess_bench.json 的 gain:detect）→ 留在 GPU。要试就显式 "
+                        "DFL_DET_EP=cpu 跑一遍（本机实测 −3.86%，不值得默认开）")
+            else:
+                tail = ("；门②没过：实测记录里 CPU 那档是 %+.2f%%（要 ≥+5%%）→ 留在 GPU"
+                        % float(gain_pct))
+            why.append(head + tail)
+            return {"ep": "gpu", "why": why, "gpu_fwd_ms": float(ms),
+                    "thr": thr, "src": src, "mode": m, "gate2": False,
+                    "gain_pct": gain_pct}
+        why.append(head + "；门②也过（实测 CPU 那档 %+.2f%%）→ 走 CPU EP（intra_op=%d）"
+                   % (float(gain_pct if gain_pct is not None else 0.0), threads()))
+        return {"ep": "cpu", "why": why, "gpu_fwd_ms": float(ms),
+                "thr": thr, "src": src, "mode": m, "gate2": True,
+                "gain_pct": gain_pct}
+    why.append("%s=auto · %s 单张前向 GPU %.2f ms > 阈值 %.2f ms（%s）→ 留在 GPU"
+               "（CPU 上只会更慢，挪走就是拖死流水线）"
+               % (ENV_EP, key, float(ms), thr, src))
+    return {"ep": "gpu", "why": why, "gpu_fwd_ms": float(ms),
+            "thr": thr, "src": src, "mode": m}
+
+
+def cpu_session_options(nthr=None):
+    """CPU EP 的 SessionOptions：图优化全开 + 固定 intra_op（inter_op=1）。
+
+    inter_op=1 是有意的：检测是「一次一张」的串行负载，ORT 的 inter_op 线程池
+    在这儿只会多一次唤醒，实测反而慢 ~0.3ms。
+    """
+    import onnxruntime as ort
+    so = ort.SessionOptions()
+    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    so.intra_op_num_threads = int(nthr or threads())
+    so.inter_op_num_threads = 1
+    return so
+
+
 def _prep_ctx(img_bgr, input_size, pad):
     """整帧 → {'canvas','scale','w','h'}：letterbox + 填边，**只此一份**。
 
@@ -87,13 +243,18 @@ class RetinaFaceDet:
     STEPS = (8, 16, 32)
 
     def __init__(self, model_path, input_size=640, thresh=0.5, nms_thresh=0.4, graph_max_batch=None,
-                 workspace=None, engine_name=None):
+                 workspace=None, engine_name=None, providers=None, sess_options=None):
         import onnxruntime as ort
-        try:
-            from ._ortcuda import providers as _prov
-            _providers = _prov()          # 装了 onnxruntime-gpu 就用 CUDA
-        except Exception:
-            _providers = ["CPUExecutionProvider"]
+        if providers is not None:
+            # 显式给了 providers 就用它（DFL_DET_EP=cpu 那条路要的：不建 CUDA session，
+            # 也不碰 TRT 引擎 —— 给 CPU 用的检测器不该先占一块显存再把会话扔掉）
+            _providers = list(providers)
+        else:
+            try:
+                from ._ortcuda import providers as _prov
+                _providers = _prov()          # 装了 onnxruntime-gpu 就用 CUDA
+            except Exception:
+                _providers = ["CPUExecutionProvider"]
         # 优先用编译好的 TRT 引擎（引擎名按 onnx 的 md5 + SM 命名）
         self.sess = None
         if workspace is not None:
@@ -107,7 +268,8 @@ class RetinaFaceDet:
         if self.sess is None:
             _det_log(("retina", "ort", str(model_path)),
                      "[RetinaFaceDet] 使用 onnxruntime（providers=%s）" % (list(_providers),))
-            self.sess = ort.InferenceSession(str(model_path), providers=_providers)
+            self.sess = ort.InferenceSession(str(model_path), sess_options=sess_options,
+                                             providers=_providers)
         self.input_name = self.sess.get_inputs()[0].name
         self.input_size = int(input_size)
         self.thresh = float(thresh)
@@ -237,7 +399,7 @@ class TinyMogDet:
     PRECISION = ("int8", "bf16")
 
     def __init__(self, model_path, input_size=640, thresh=0.5, nms_thresh=0.4, graph_max_batch=None,
-                 providers=None, workspace=None, engine_name=None):
+                 providers=None, workspace=None, engine_name=None, sess_options=None):
         import onnxruntime as ort
 
         if providers is None:
@@ -262,7 +424,8 @@ class TinyMogDet:
             _det_log(("tinymog", "ort", str(model_path)),
                      "[TinyMogDet] 没有可用的 TRT 引擎，使用 onnxruntime（providers=%s）"
                      % (list(providers),))
-            self.sess = ort.InferenceSession(str(model_path), providers=list(providers))
+            self.sess = ort.InferenceSession(str(model_path), sess_options=sess_options,
+                                             providers=list(providers))
         else:
             prec = getattr(self.sess, "precision", "?")
             mb = self.sess.max_batch() if hasattr(self.sess, "max_batch") else None
@@ -282,6 +445,7 @@ class TinyMogDet:
                              "[TinyMogDet] int8 引擎只支持单张、又没有 bf16 引擎 → "
                              "批量检测回退 onnxruntime")
                     self.sess_batch = ort.InferenceSession(str(model_path),
+                                                           sess_options=sess_options,
                                                            providers=list(providers))
         self.input_name = self.sess.get_inputs()[0].name
         self.batch_input_name = (self.sess_batch.get_inputs()[0].name

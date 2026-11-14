@@ -237,3 +237,114 @@ runtime\server\Scripts\python.exe app\tools\speed_bench.py --json D:\MyProject\_
 >
 > （历史口径提醒：dfm 走 TRT bf16 时 416 那份能到 33.68 帧/秒，换回 ONNX 是 25.32，
 > −24.8%；384 这份本来就没引擎，所以本页数字不受影响。见 23-ALIGNED-COMPOSE §六。）
+
+---
+
+## 九、把检测从 GPU 队列挪到 CPU（`DFL_DET_EP`）—— 实测「不值得」
+
+> 假设：fused 里 dfm / XSeg / 检测**共用同一个 GPU 流**。tinymog 单张前向只有 1.4 ms，
+> 但它插在 33 ms 的 dfm 前面就要排队；把它挪到 CPU，GPU 流就少一个插队者。
+> 问题是「省下的那点 GPU 时间」值不值「赔上的 CPU 时间」—— 只能实测。
+
+### 9.1 两张表
+
+**表 1 · 384 模型（用户口径）· 1080×1920 · 120 帧 · tinymog · XSegLite · seamless+mt · 预算 30**
+A/B **交错**跑（每轮 A、B 各一次、各自冷启动后端），6 轮取中位。为什么必须交错：
+先串行跑完 A 再跑 B 会把热降频/后台进程算成配置差 —— 同一段片 416 模型串行 3 次中位给 B 判成
+−4.6%，5 次中位是 −0.3%，**跑法本身的漂移就有 4 个百分点**。
+
+| 配置 | 帧/秒 | GPU% | CPU% | detect ms/帧 | dfm ms/帧 | xseg ms/帧 | 合成 ms/帧 |
+|---|---|---|---|---|---|---|---|
+| **A** detect on GPU（现状） | **19.16** | 31 | 480 | 27.76 | 33.87 | 7.88 | 129.84 |
+| **B** detect on CPU（`DFL_DET_EP=cpu`，intra_op=3） | 18.42 | 43 | 459 | 29.34 | 33.86 | 7.35 | 133.82 |
+
+**配对差（同轮 A→B，6 对）中位 −3.86%**，6 对**全负**（18.72→17.86 · 19.14→18.52 ·
+19.17→18.32 · 19.17→18.84 · 19.51→18.87 · 19.05→18.02）。
+→ **没有 ≥5% 的提升，反而是负的：不值得默认开。**
+
+**表 2 · 416 模型 + 线程数扫描**（5 次中位，串行；同一个 sandbox）
+
+| 配置 | 帧/秒 | 相对 A | detect ms/帧 |
+|---|---|---|---|
+| A（detect on GPU） | 19.23 | — | 26.45 |
+| B（CPU，intra_op=3） | 19.17 | −0.3% | 28.51 |
+| B2（CPU，intra_op=2） | 18.05 | −6.1% | 26.40 |
+| B4（CPU，intra_op=4） | 17.78 | −7.5% | 27.62 |
+
+线程给多不给多都不是解：**3 是这台机器上的最优点，仍然打不平**。416 上 B≈A（−0.3%）、
+384 上 B 明确更慢（−3.86%）—— 384 的 dfm 更贵，本该更该腾 GPU，方向却是反的，
+因为 384 的合成/编码也更重，CPU 侧本来就没余量。
+
+### 9.2 瓶颈到底在 GPU 的哪一段
+
+A 档（384）每帧 52.2 ms 墙钟的拆分：
+
+| 段 | ms/帧 | 占墙钟 | 说明 |
+|---|---|---|---|
+| **dfm（换脸）** | **33.87** | **64.9%** | 一次前向 1~2 张，GPU 上最大的一笔 |
+| **xseg（遮罩）** | **7.88** | 15.1% | XSegLite 256，走 TRT 引擎 |
+| detect（检测） | 27.76 忙 | 49.9%（各轮 50~56%） | **其中前向只有 1.42 ms（2.7%）**，其余 ~26 ms 是在等 dfm/xseg 让出 GPU 流 |
+| 合成（8 线程） | 129.84 / 8 ≈ 16.2 每线程 | 33.3%（每线程） | 纯 CPU |
+| 编码（3 线程） | 79.78 / 3 ≈ 26.6 每线程 | 51.0%（每线程） | PNG → ffmpeg |
+
+**检测段真正的 GPU 时间只有 1.42 ms/帧。** 把它全砍掉，理论上限也只有 +2.7%；
+而实测挪到 CPU 之后：detect 忙时间 27.76 → 29.34 ms，合成 129.84 → 133.82 ms（跟那 3 条
+CPU 线程抢核），GPU 线程的空等反而从 4~5% 涨到 8.5~9.7%（在等 CPU 侧的检测结果）。
+**要提 fps 只有两条路：砍 dfm（64.9%）或砍 xseg（15.1%）。**
+
+### 9.3 框与像素（能换不能换的判据）
+
+`app/tools/accept/det_ep_parity.py`（30 帧真片，GPU 那份 = fused 现状，CPU 那份 = `DFL_DET_EP=cpu`）：
+
+| 项 | 值 | 判据 |
+|---|---|---|
+| 原始输出 max\|Δ\|（cls/bbox/kps × 3 stride） | 0.0115 | — |
+| 解码框 max\|Δ\| | **0.211 px** | ≤ 0.5 → 可以换 |
+| 解码 5 点 max\|Δ\| | 0.294 px | ≤ 0.5 |
+| detect() 人脸列表（round 0.1 之后） | 26/30 帧「不完全相同」 | 见下 |
+
+两条补充事实：
+1. **差异不是「EP」造成的，是精度造成的。** 把 GPU 那侧也换成 onnxruntime-CUDA（fp32，
+   不用 TRT 引擎）再对拍，仍然是 0.204 px —— 因为 ORT 的 CUDA EP 默认走 TF32（10 位尾数，
+   和 bf16 一个量级）。要逐位一致只能用 fp32 数学，代价是 tinymog 前向 1.4 → 5.8 ms。
+2. **端到端像素基本不变**：A/B 各跑一次带 `DFL_FUSED_DUMP=30,60,90,120` 的导出，
+   `*_lm.json` **4/4 逐字节相同**；`composed` 3/4 帧**逐位相同**，唯一有差的那帧
+   mean 0.0045 LSB / max 4 LSB / 27076 个像素（共 6.22 M）非零；dfm 输出 `*_pred.png`
+   max 1 LSB。所以「换 EP 会不会换脸」的答案是**不会**，但「像素逐位不变」做不到 ——
+   框差 0.2 px 会以亚像素的形式进到 warp 里。
+
+### 9.4 开关与默认值
+
+| 环境变量 | 取值 | 默认 | 说明 |
+|---|---|---|---|
+| `DFL_DET_EP` | `auto` / `gpu` / `cpu` | `auto` | 检测走哪个 EP |
+| `DFL_DET_EP_THREADS` | 2~4 | 3 | CPU EP 的 `intra_op_num_threads`（`inter_op=1`） |
+| `DFL_DET_EP_GPU_MS` | ms | 1.5 | `auto` 的**门①**：单张前向 GPU ≤ 这个才考虑挪 |
+
+`auto` 是**两道门**，缺一不可：
+
+- **门①（物理）**：单张前向 GPU ≤ 1.5 ms。只有这种模型「挪走能省的 GPU 时间」小到可以忽略，
+  收益才可能来自「不再排队」。实测：tinymog 1.42 ms（过）、retinaface_10g 10.4 ms（不过，
+  CPU 上 150 ms，挪过去就是拖死流水线）。量不到就查已知表，表里也没有 → 留在 GPU。
+- **门②（端到端）**：工作区 `_sess_bench.json` 的 `gain:detect` 里得有 `0x1`（检测走 CPU）
+  相对 `1x0` **净增 ≥5%** 的记录。没有记录 = 没验证过 = 留在 GPU。
+
+所以**全新工作区上 `auto` 等于现状**（检测在 GPU）；跑过一次 `DFL_DET_EP=cpu` 并记下 fps
+之后，这台机器上 `auto` 才按实测走。本机记下的就是上面那个 −3.86%，因此 auto 继续选 GPU。
+
+> 为什么不是「门①一过就切 CPU」：门①只证明「值得试」，不证明「真的赚」。这一轮实测就是
+> 反例 —— 前向 1.42 ms 过门①，端到端 −3.86%。把门①当结论就是把「−3.86%」写成默认值。
+
+### 9.5 复现
+
+```
+# 框/像素对拍（不用起后端）
+runtime\server\Scripts\python.exe app\tools\accept\det_ep_parity.py --det tinymog --frames 30
+# 同一份工具换成 onnxruntime-CUDA 那侧，证明「差在精度不在 EP」
+runtime\server\Scripts\python.exe app\tools\accept\det_ep_parity.py --det tinymog --gpu-impl ort
+
+# 端到端 A/B（自己起后端、自己采样 GPU%/CPU%、自己算落后帧数）
+runtime\server\Scripts\python.exe app\tools\bench\det_ep_ab.py --runs 6 --interleave 1 --model 张元英 --configs A,B
+runtime\server\Scripts\python.exe app\tools\bench\det_ep_ab.py --runs 5 --configs A,B,B2,B4 --model 阿証証証証-416
+```
+

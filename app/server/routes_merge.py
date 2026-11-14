@@ -14253,31 +14253,31 @@ def _detect_for(name, ep="gpu"):
             _stage_log("异构池：第二份 GPU 检测器起不来（%s）" % str(e)[:160])
             return None
     else:
-        # CPU 那一路：**RetinaFaceDet 没有 providers 通道**（它自己去问
-        # _ortcuda.providers()，那里只要有 CUDA 就给 CUDA），所以先按原样造好、
-        # 再把 sess 换成 CPU EP 那份 —— 不动那两个类的签名，预览/导出那 6 个
-        # 调用点就都不受影响（也就没有回归面）。
+        # CPU 那一路（DFL_DET_EP=cpu|auto 选 CPU 的那档，见 _det_ep_resolve）。
+        # 现在的做法是**直接按 CPU EP 造**，两个类都开了会话通道（providers / sess_options）：
+        # 以前是「先照原样造好（会顺手加载 TRT 引擎、建一块 CUDA context）、再把 sess 换掉」，
+        # 给 CPU 用的检测器白占 5MB 引擎 + 一份 context，而且日志里会冒出
+        # 「[TRT] tinymog: 使用 bf16 引擎」这种把人带偏的行。
+        # intra_op 线程数：DFL_DET_EP_THREADS（默认 3，夹在 2..4）；老的 DFL_SESS_THREADS
+        # 仍然优先（那是池级口径，显式设了就听它的）。
         try:
             from .app import _DET_ONNX, _detector_path
-            import onnxruntime as ort
+            from . import _detect as _dk
             canon = _detector_val(name)
             p = _detector_path(_DET_ONNX[canon])
             if p is None:
                 return None
+            nthr = _sess.int_env(_sess.ENV_THREADS, 0) or _dk.threads()
+            so = _dk.cpu_session_options(nthr)
             from ._detect import RetinaFaceDet, TinyMogDet
-            so = ort.SessionOptions()
-            so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-            nthr = _sess.int_env(_sess.ENV_THREADS, 0)
-            if nthr > 0:
-                so.intra_op_num_threads = int(nthr)
-                so.inter_op_num_threads = 1
             if canon == "tinymog":
-                det = TinyMogDet(str(p), workspace=WORKSPACE, providers=["CPUExecutionProvider"])
+                det = TinyMogDet(str(p), workspace=None, providers=["CPUExecutionProvider"],
+                                 sess_options=so)
             else:
-                det = RetinaFaceDet(p, 640)
-            det.sess = ort.InferenceSession(str(p), sess_options=so,
-                                            providers=["CPUExecutionProvider"])
-            det.input_name = det.sess.get_inputs()[0].name
+                det = RetinaFaceDet(p, 640, providers=["CPUExecutionProvider"],
+                                    sess_options=so)
+            _stage_log("检测：CPU EP · intra_op=%d · inter_op=1 · %s"
+                       % (int(nthr), Path(str(p)).name))
         except Exception as e:                              # noqa: BLE001
             _stage_log("异构池：CPU 检测器起不来（%s）" % str(e)[:160])
             return None
@@ -14380,9 +14380,10 @@ def _detect_bench(name, w: int, h: int) -> dict:
     算得偏快，配比就偏激进。
     """
     import numpy as np
-    key = "detect:%s:%dx%d" % (_detector_val(name), int(w or 1080), int(h or 1920))
+    key = "detect:%s:%dx%d:%dt" % (_detector_val(name), int(w or 1080), int(h or 1920),
+                                   _dv_threads())
     row = _sess_ensure(key)
-    if row.get("gpu_ms") and row.get("cpu_ms"):
+    if row.get("gpu_ms") and row.get("cpu_ms") and row.get("gpu_fwd_ms") is not None:
         return row
     frame = np.zeros((int(h or 1920), int(w or 1080), 3), np.uint8)
     out = {"key": key, "at": round(time.time(), 1)}
@@ -14394,6 +14395,7 @@ def _detect_bench(name, w: int, h: int) -> dict:
             out["%s_err" % ep] = str(e)[:160]
         if det is None:
             out["%s_ms" % ep] = None
+            out["%s_fwd_ms" % ep] = None
             continue
         try:
             ms = _sess.bench(lambda: _detect_on(det, frame, 0.5), n=2, warmup=1)
@@ -14401,13 +14403,98 @@ def _detect_bench(name, w: int, h: int) -> dict:
             out["%s_err" % ep] = str(e)[:160]
             ms = None
         out["%s_ms" % ep] = ms
+        # 前向单独量：DFL_DET_EP=auto 的判据就是这个数（见 server/_detect.py 的 decide）。
+        # 为什么不用 gpu_ms（整帧）：那里面有 letterbox(0.4~0.9ms)+NMS/解码(0.1ms)，
+        # 这部分两个 EP 完全一样，混进去只会把「模型本身多贵」稀释掉。
+        # warmup=1 必须留着：TRT 的第一张要捕获 CUDA Graph（16ms），算进去就是假数。
+        try:
+            ctx = det.prep(frame) if hasattr(det, "prep") else None
+            out["%s_fwd_ms" % ep] = (None if ctx is None else
+                                     _sess.bench(lambda: det._forward(ctx["canvas"]),
+                                                 n=3, warmup=1))
+        except Exception as e:                              # noqa: BLE001
+            out["%s_err" % ep] = str(e)[:160]
+            out["%s_fwd_ms" % ep] = None
     _sess_bench_put(key, out)
     return out
 
 
+def _dv_threads() -> int:
+    """CPU 检测会话的 intra_op 线程数（缓存键带上它：线程数一改，cpu_ms 就不是同一个数）。"""
+    try:
+        from . import _detect as _dk
+        nthr = _sess.int_env(_sess.ENV_THREADS, 0) or _dk.threads()
+        return int(nthr)
+    except Exception:                                       # noqa: BLE001
+        return 0
+
+
+def _det_ep_resolve(det_name, w=None, h=None) -> dict:
+    """这一单检测走哪个 EP → {"ep","why","gpu_fwd_ms","cpu_fwd_ms","thr","src","mode","bench"}。
+
+    判据与阈值在 server/_detect.py 的 decide()（DFL_DET_EP=auto 时用实测的前向 ms，
+    量不到就查已知表）。这里只负责「把实测喂进去 + 把结论摆成字典」，不自己拍数。
+    """
+    b = _detect_bench(det_name, w or 1920, h or 1080)
+    from . import _detect as _dk
+    pol = _dk.decide(det_name, b.get("gpu_fwd_ms"),
+                     gain_ok=_sess.cpu_ep_ok("detect", WORKSPACE),
+                     gain_pct=_sess.cpu_ep_gain("detect", WORKSPACE))
+    pol["bench"] = b
+    pol["cpu_fwd_ms"] = b.get("cpu_fwd_ms")
+    pol["name"] = _detector_val(det_name)
+    return pol
+
+
+def _det_ep_line(pol) -> str:
+    """一行日志：选了哪个 EP + 为什么 + 两边的实测数字。"""
+    if not pol:
+        return "-"
+    return ("检测 EP：%s · %s · GPU 前向 %s ms / CPU 前向 %s ms（整帧 GPU %s / CPU %s ms）"
+            % (str(pol.get("ep") or "?").upper(), "；".join(pol.get("why") or []),
+               (("%.2f" % pol["gpu_fwd_ms"]) if pol.get("gpu_fwd_ms") is not None else "未量到"),
+               (("%.2f" % pol["cpu_fwd_ms"]) if pol.get("cpu_fwd_ms") is not None else "未量到"),
+               (pol.get("bench") or {}).get("gpu_ms"),
+               (pol.get("bench") or {}).get("cpu_ms")))
+
+
+def _det_ep_apply(plan: dict, pol: dict, over=None) -> dict:
+    """把「检测走哪个 EP」落进配比。
+
+    · ep=cpu：这个检测器**整段**挪出 GPU 流 → 池里就只留 CPU 那一路（gpu=0, cpu=1）。
+      为什么不是「两边各一份、谁快谁上」：检测是逐帧串行的（一张脸一帧），
+      两路只会让同一帧的 letterbox/NMS 做两遍，而 GPU 那一路正是要躲开的东西。
+    · ep=gpu：不动 GPU 份数（derive 已经按显存/边际算过了），但**清零 CPU 份数** ——
+      「政策说要 GPU」时再挂一路 CPU 检测器就是把同一帧分回 GPU 队列之外，
+      端到端反而多一份排队（这就是这次实验 A 档的口径）。
+      请求体显式给了 sess_cpu（比如做实验）就尊重它，不清零。
+    """
+    why = plan.setdefault("why", [])
+    ep = str((pol or {}).get("ep") or "gpu")
+    plan["det_ep"] = dict(pol or {})
+    if ep == "cpu":
+        if int(plan.get("gpu") or 0) != 0 or int(plan.get("cpu") or 0) != 1:
+            why.append("检测 EP=CPU → 池改成 0×GPU + 1×CPU（原 %d×GPU + %d×CPU）"
+                       % (int(plan.get("gpu") or 0), int(plan.get("cpu") or 0)))
+        plan["gpu"] = 0
+        plan["cpu"] = 1
+    else:
+        if int(plan.get("gpu") or 0) < 1:
+            why.append("检测 EP=GPU → 至少 1 份 GPU 检测会话")
+            plan["gpu"] = 1
+        exp_cpu = (over or {}).get("cpu")
+        if not (isinstance(exp_cpu, str) and exp_cpu.strip()) and exp_cpu not in (0,) \
+                and int(plan.get("cpu") or 0) > 0:
+            why.append("检测 EP=GPU → CPU 那几路（%d 份）清零，别让同一帧又排到 CPU"
+                       % int(plan.get("cpu") or 0))
+            plan["cpu"] = 0
+    return plan
+
+
 def _fused_det_plan(det_name, w, h, over=None) -> dict:
-    """检测池的配比：探测 → 微基准 → derive。over = 请求体覆盖（sess_gpu/sess_cpu/…）。"""
+    """检测池的配比：探测 → 微基准 → derive → EP 政策。over = 请求体覆盖（sess_gpu/sess_cpu/…）。"""
     b = _detect_bench(det_name, w, h)
+    pol = _det_ep_resolve(det_name, w, h)
     gp = _sess.probe(*(_vram_free_mb()[:2]))
     # 验收/复现用：把「机器档位」换成低配/中配/高配的**事实**（不改真探测，
     # 只影响这一次推导 —— 生产路径上没人设 DFL_SESS_LEVEL，一行都不走）。
@@ -14424,6 +14511,7 @@ def _fused_det_plan(det_name, w, h, over=None) -> dict:
                         mem_per_gpu_mb=mem_gpu, mem_per_cpu_mb=260.0,
                         stage_busy=_SESS_BUSY.get("detect"), over=over)
     plan["bench"] = b
+    _det_ep_apply(plan, pol, over)
     return plan
 
 
@@ -15068,7 +15156,17 @@ def _fused_run(cfg: dict) -> dict:
     if lm is None:
         raise _BadInput("2D106 关键点模型不可用（weights/insightface_2d106.onnx）—— "
                         "没有 68 点就跑不了快速导出", 500)
-    det = _detector(det_name)
+    # 检测走哪个 EP（DFL_DET_EP=auto|gpu|cpu）—— 必须在**拿检测器**之前定，
+    # 否则日志里那行「单帧 ms」量的是 GPU 那份、跑的是 CPU 那份，数字对不上账。
+    det_pol = _det_ep_resolve(det_name, probe.get("w"), probe.get("h"))
+    _vid_log("快速导出 %s" % _det_ep_line(det_pol))
+    det = _detect_for(det_name, det_pol.get("ep") or "gpu")
+    if det is None:                       # CPU 那一路起不来（极少数机器）→ 老实退回 GPU 并喊出来
+        _vid_log("快速导出：检测器 %s EP 起不来 → 退回 GPU（%s）"
+                 % (str(det_pol.get("ep")).upper(), det_name))
+        det = _detector(det_name)
+        det_pol["ep"] = "gpu"
+        det_pol["fallback"] = True
     # 「用了哪个检测器 + 它到底多贵」必须在起流水线之前就落进 <成片>.log：
     # 界面上选的是 TinyMog、日志里出现 retinaface_10g 这种对不上账的问题，只有这里能复盘。
     _dp = _det_quick_profile(det, probe.get("w"), probe.get("h"))
@@ -15799,6 +15897,8 @@ def _fused_run(cfg: dict) -> dict:
                 if _o is not None:
                     det_sess.append(("cpu", _o))
             _vid_log("快速导出 检测池：%s" % _sess.plan_line(det_plan))
+            _vid_log("快速导出 检测池 EP：%s"
+                     % _det_ep_line(det_plan.get("det_ep") or det_pol))
             _vid_log("快速导出 检测池 基准：GPU %s ms / CPU %s ms（1080p 零图，2 张取中位）"
                      "· 实际起来 %d 路（GPU %d / CPU %d）"
                      % ((det_plan.get("bench") or {}).get("gpu_ms"),
@@ -15944,17 +16044,29 @@ def _fused_run(cfg: dict) -> dict:
     try:
         _SESS_BUSY["detect"] = round(float(util.get("detect") or 0.0) / 100.0, 3)
         _SESS_PLAN_LAST["detect"] = dict(det_plan or {})
-        # 顺带学一次「加 CPU session 值不值」：cpu=0 那次是基线，cpu>0 且净增 ≥5%
-        # 才允许自动档开 CPU（见 _sess.record_gain）。第一次导出就把基线记下来。
-        _g = _sess.record_gain("detect", int((det_plan or {}).get("cpu") or 0), rate,
-                               WORKSPACE)
+        # 顺带学两件事（见 _sess.record_gain 的注释）：
+        #   ① 1x1 / 1x2（多挂一路 CPU 检测 session）值不值；
+        #   ② 0x1（检测整段走 CPU EP）值不值 —— 这是 DFL_DET_EP=auto 的门②。
+        # 以前这行的参数少传了一个（把 rate 当 cpu_n、把 WORKSPACE 当 fps），
+        # float(Path) 每次都抛 TypeError 被下面 except 吞掉 —— 于是 gain:detect
+        # 永远写不进磁盘，「按实测学」这条回路其实一直没通电。
+        _g = _sess.record_gain("detect", int((det_plan or {}).get("gpu") or 0),
+                               int((det_plan or {}).get("cpu") or 0), rate, WORKSPACE)
         if _g.get("gain_pct") is not None:
-            _vid_log("快速导出 检测池 实测增益：%s%%（基线 %.2f → %s %.2f 帧/秒 · CPU×%s）→ "
+            _vid_log("快速导出 检测池 实测增益：%s%%（基线 1×GPU %.2f → 本次 %s %.2f 帧/秒）→ "
                      "自动档%s"
                      % (_g.get("gain_pct"), float(_g.get("base") or 0),
-                        "现在", float(rate), int(_g.get("hybrid_cpu") or 0),
+                        _g.get("now_tag") or "-", float(rate),
                         ("会开 CPU session" if _g.get("auto_cpu_ok")
                          else "仍然只开 GPU（净增 <5%）")))
+        if _g.get("cpu_ep_gain_pct") is not None:
+            _vid_log("快速导出 检测 EP 实测：CPU %.2f 帧/秒 对基线 1×GPU %.2f = %+.2f%% → "
+                     "DFL_DET_EP=auto 的门②%s（工作区 _sess_bench.json 的 gain:detect）"
+                     % (float(_g.get("cpu_ep_fps") or 0), float(_g.get("base") or 0),
+                        float(_g.get("cpu_ep_gain_pct") or 0),
+                        ("已通过（≥+5%%），以后 auto 会选 CPU EP"
+                         if _g.get("auto_cpu_ep_ok")
+                         else "未通过（<+5%），auto 固定留在 GPU")))
     except Exception:                                       # noqa: BLE001
         pass
     _vid_stats(done=written, total=written, fps=round(rate, 2), eta_s=0,
