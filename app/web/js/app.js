@@ -6536,41 +6536,424 @@ function mgStageEmpty(on) {
     }
 
     /* ============================================================
-       分段导出的四步动画（复用「模型转换」的 Stepper）
+       六阶段状态机 + 流水线实况（SVG）
        ------------------------------------------------------------
-       动画资产不新画：节点/连线/当前步高亮全部来自 #p-train-convert 那一套
-       （index.html: <div class="cvsteps"><div class="cvst">…，css/app.css:
-       「模型转换页（Stepper）」那一段 .cvsteps .cvst / .cvic / .cvline）。
-       这里只把同一份结构放进 #mgpSteps，文案换成 切帧 → 切脸 → 合成 → 导出。
+       这一页有两条后端的路，但只有一张图：
+         · fused（快速导出，默认）：六段**并行**，只有帧进度；
+         · 分段链（frames→faces→pred→mask→merge→encode）：串行，一段一段来。
+       图本身（6 列 lane + 贝塞尔曲线 + 光点）的数据**全部**来自 status：
+         status.stages[key] = {ticks, inflight, lanes[], ms?, batch?}
+       前端一条都不写死 —— lane 有几条就是图上几个方块（合成池 8 线程 = t0..t7，
+       编码 6 线程 = e0..e5），ticks 只增、光点按**增量**放，inflight 就是列间那句
+       「在飞 N」。没有这份数据时（老后端 / 还没开单）列是占位的「—」，不瞎猜。
+       点亮：某条 lane 的列 tick 了 → 那条 lane 瞬间到峰值、1.15s 暗回常态。
+       卡住：某列 >600ms 没 tick 且还没完成 → 整列琥珀；恢复自动复原。
        ============================================================ */
     var MGP_STAGES = ["frames", "faces", "pred", "mask", "merge", "encode"];
-    var MGP_TIMER = null;
+    /* 分段链的阶段名 → status.stages 的 key（两套名字，只在这张表里对一次） */
+    var MG_KEY = { frames: "frames", faces: "det", pred: "dfm",
+                   mask: "xseg", merge: "compose", encode: "encode" };
 
-    function mgpNodes() {
-      var box = $("mgpSteps");
-      if (!box) return [];
-      return Array.prototype.slice.call(box.querySelectorAll(".cvst"));
+    var MG_PIPE = (function () {
+      var NS = "http://www.w3.org/2000/svg";
+      var KEYS = ["frames", "det", "dfm", "xseg", "compose", "encode"];
+      var NAME = { frames: "切帧", det: "切脸", dfm: "换脸",
+                   xseg: "遮罩", compose: "合成", encode: "导出" };
+      /* viewBox 尺寸定死（和 UI 设计稿同一比例）：进度卡铺满内容区（≈1200~1400px），
+         所以 1200×340 渲染出来接近 1:1～1.15:1，9.5px 的 lane 名字不会缩成 6px。
+         高度不变 → 换 lane 数也不会让页面跳动。 */
+      var W = 1200, H = 340, PADL = 56, TOPY = 58, BOXW = 74, GAP = 7;
+      var MAX_PULSE = 60;      /* 同屏最多 60 个光点，超了丢最旧的（别把 rAF 拖死） */
+      var LIT_MS = 1250;       /* 1.15s 动画 + 余量，之后摘 .lit 回稳态 */
+      var STALL_MS = 600;      /* 某列多久没 tick 算卡住 */
+      var TICK_MAX = 10;       /* 一次轮询最多补几个光点（20 帧/秒 × 0.5s ≈ 10） */
+
+      var geo = {};            /* key -> {cx, off, lanes:[{y,rect,txt}], count, queue, col} */
+      var edges = {};          /* "si:ai:bi" -> <path>（曲线本体，光点直接在它身上走） */
+      var pulses = [];         /* 活跃光点 {c, path, L, t0, dur} */
+      var pool = [];           /* 复用起来的 <circle>：不每个 tick 重建 DOM */
+      var flashes = [];        /* 待点亮 [{k, i}]（合到下一帧一起做，减少强制重排） */
+      var raf = 0;
+      var sig = "";            /* lanes 的签名：变了才重建结构 */
+      var prev = {};           /* key -> 上次的 ticks */
+      var lastAt = {};         /* key -> ticks 上次变化的时刻 */
+      var stallNow = {};       /* key -> 现在卡没卡 */
+      var state = {};          /* key -> "" / on / done / err（列标题颜色） */
+      var seq = 0;             /* 光点序号：多 lane 时按它轮转 */
+      var layers = null;
+      /* 截图专用：把光点的时钟按住（>0 = 定格在这个时刻），只给验收拍照用。
+         光点只有 470–750ms 的命，一张 headless 截图往返就可能比它长 —— 拍照时
+         用 mgpPipeFreeze() 把它们钉在曲线上，运行时代码路径完全不看这个值。 */
+      var freezeAt = 0;
+
+      function nowMs() {
+        return (window.performance && window.performance.now)
+          ? window.performance.now() : Date.now();
+      }
+      function reduceMotion() {
+        try {
+          return !!(window.matchMedia &&
+                    window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+        } catch (e) { return false; }
+      }
+      function mk(tag, attrs) {
+        var e = document.createElementNS(NS, tag), k;
+        for (k in (attrs || {})) {
+          if (Object.prototype.hasOwnProperty.call(attrs, k)) e.setAttribute(k, attrs[k]);
+        }
+        return e;
+      }
+      /* 三次贝塞尔：源 lane → 列间中线 → 目标 lane（照 pipeline4 的 curve()，
+         两段在中线处 C 连续，所以看起来是**一条平滑的 S**，不是直角折线）。 */
+      function curve(a, b, jx) {
+        var my = (a.y + b.y) / 2;
+        return "M" + a.x + "," + a.y +
+          " C" + (a.x + (jx - a.x) * 0.55) + "," + a.y +
+          " " + (jx - (jx - a.x) * 0.12) + "," + my + " " + jx + "," + my +
+          " C" + (jx + (b.x - jx) * 0.12) + "," + my +
+          " " + (b.x - (b.x - jx) * 0.55) + "," + b.y + " " + b.x + "," + b.y;
+      }
+      function lanesOf(st) {
+        var out = {}, i, k, row;
+        for (i = 0; i < KEYS.length; i++) {
+          k = KEYS[i];
+          row = (st && st[k]) || {};
+          out[k] = (row.lanes && row.lanes.length) ? row.lanes.slice(0) : [];
+        }
+        return out;
+      }
+      function signature(lanes) {
+        var parts = [], i;
+        for (i = 0; i < KEYS.length; i++) parts.push((lanes[KEYS[i]] || []).join(","));
+        return parts.join("|");
+      }
+      /* status.stages 的「实况」形状：必须有 lanes 或 ticks。
+         分段链的 /stage/status 也带一个 stages（那是每段的元数据），别混。 */
+      function isLive(st) {
+        if (!st || !st.frames) return false;
+        return !!(st.frames.lanes || typeof st.frames.ticks === "number");
+      }
+
+      function build(lanes) {
+        var svg = $("mgPipeSvg");
+        if (!svg) return false;
+        while (svg.firstChild) svg.removeChild(svg.firstChild);
+        layers = { edge: mk("g", {}), box: mk("g", {}),
+                   lbl: mk("g", {}), pulse: mk("g", {}) };
+        geo = {}; edges = {}; pulses = []; pool = [];
+        var colW = (W - PADL * 2) / (KEYS.length - 1);
+        var space = H - TOPY - 46;
+        var i, j, k;
+        for (i = 0; i < KEYS.length; i++) {
+          k = KEYS[i];
+          var cx = PADL + i * colW;
+          var ln = (lanes[k] || []).slice(0);
+          var off = !ln.length;                 /* 这一单不用这一段：占位，不假装有线程 */
+          if (off) ln = ["—"];
+          var n = ln.length;
+          var laneH = Math.min(24, Math.max(14, space / n - GAP));
+          var y0 = TOPY + (space - (n * laneH + (n - 1) * GAP)) / 2;
+          var col = mk("g", { "class": "col" });
+          col.setAttribute("data-k", k);
+          var t1 = mk("text", { x: cx, y: 24, "text-anchor": "middle", "class": "t-stage" });
+          t1.textContent = NAME[k] || k;
+          col.appendChild(t1);
+          var t2 = mk("text", { x: cx, y: 40, "text-anchor": "middle", "class": "t-count" });
+          t2.textContent = "— 帧";
+          col.appendChild(t2);
+          layers.lbl.appendChild(col);
+          geo[k] = { cx: cx, off: off, lanes: [], count: t2, queue: null, col: col };
+          for (j = 0; j < n; j++) {
+            var y = y0 + j * (laneH + GAP);
+            var rect = mk("rect", { x: cx - BOXW / 2, y: y, width: BOXW, height: laneH,
+                                    rx: 7, "class": off ? "lane off" : "lane" });
+            layers.box.appendChild(rect);
+            var tx = mk("text", { x: cx, y: y + laneH / 2 + 3.2, "text-anchor": "middle",
+                                  "class": "t-lane" });
+            tx.textContent = ln[j];
+            layers.box.appendChild(tx);
+            geo[k].lanes.push({ y: y + laneH / 2, rect: rect, txt: tx });
+          }
+        }
+        /* 连线：每个源 lane × 每个目标 lane 一条；空列（off）不连线，光点会跳过它 */
+        for (i = 0; i < KEYS.length - 1; i++) {
+          var A = geo[KEYS[i]], B = geo[KEYS[i + 1]];
+          if (A.off || B.off) continue;
+          for (var ai = 0; ai < A.lanes.length; ai++) {
+            for (var bi = 0; bi < B.lanes.length; bi++) {
+              var d = curve({ x: A.cx + BOXW / 2, y: A.lanes[ai].y },
+                            { x: B.cx - BOXW / 2, y: B.lanes[bi].y },
+                            (A.cx + B.cx) / 2);
+              var p = mk("path", { d: d, fill: "none", stroke: "var(--line-strong)",
+                                   "stroke-width": 1, opacity: ".75" });
+              layers.edge.appendChild(p);
+              edges[i + ":" + ai + ":" + bi] = p;
+            }
+          }
+          /* 列间那句「在飞 N」：挂在两列 lane 区间的中线上（mock 同位置） */
+          var ys = [];
+          for (j = 0; j < A.lanes.length; j++) ys.push(A.lanes[j].y);
+          for (j = 0; j < B.lanes.length; j++) ys.push(B.lanes[j].y);
+          var qy = (Math.min.apply(null, ys) + Math.max.apply(null, ys)) / 2;
+          var qt = mk("text", { x: (A.cx + B.cx) / 2, y: qy - 10,
+                                "text-anchor": "middle", "class": "t-queue" });
+          layers.edge.appendChild(qt);
+          geo[KEYS[i]].queue = qt;
+        }
+        svg.appendChild(layers.edge);
+        svg.appendChild(layers.box);
+        svg.appendChild(layers.lbl);
+        svg.appendChild(layers.pulse);   /* 光点在最上层 */
+        sig = signature(lanes);
+        return true;
+      }
+
+      function setCount(k, ticks) {
+        var g = geo[k];
+        if (!g || !g.count) return;
+        var txt = (ticks === null || ticks === undefined) ? "— 帧" : (ticks + " 帧");
+        if (g.count.textContent !== txt) g.count.textContent = txt;
+      }
+      function setQueue(k, n) {
+        var g = geo[k];
+        if (!g || !g.queue) return;
+        var txt = (n > 0) ? ("在飞 " + n) : "";
+        if (g.queue.textContent !== txt) g.queue.textContent = txt;
+      }
+      function markStall(k, on) {
+        on = !!on;
+        if (stallNow[k] === on) return;
+        stallNow[k] = on;
+        var g = geo[k];
+        if (!g) return;
+        for (var i = 0; i < g.lanes.length; i++) {
+          if (on) g.lanes[i].rect.classList.add("stall");
+          else g.lanes[i].rect.classList.remove("stall");
+        }
+      }
+      function setStates(m) {
+        var changed = false, i, k;
+        for (i = 0; i < KEYS.length; i++) {
+          k = KEYS[i];
+          var st = (m && m[k]) || "";
+          if (state[k] === st) continue;
+          state[k] = st;
+          changed = true;
+          var g = geo[k];
+          if (g && g.col) {
+            g.col.classList.remove("on", "done", "err");
+            if (st) g.col.classList.add(st);
+          }
+        }
+        return changed;
+      }
+      function flashOne(k, i) {
+        flashes.push({ k: k, i: i });
+      }
+      function recycle(p) {
+        p.c.setAttribute("opacity", "0");
+        pool.push(p.c);
+      }
+      function addPulse(path) {
+        if (!layers) return;
+        if (pulses.length >= MAX_PULSE) recycle(pulses.shift());   /* 超上限丢最旧的 */
+        var c = pool.pop() || mk("circle", { r: 2.4, fill: "var(--ok)" });
+        if (!c.parentNode) layers.pulse.appendChild(c);
+        c.setAttribute("opacity", ".9");
+        pulses.push({ c: c, path: path, L: path.getTotalLength(),
+                      t0: nowMs(), dur: 470 + Math.random() * 280 });
+      }
+      /* 一次 tick：点亮发起的那条 lane，再沿曲线放一个光点过去。
+         多 lane 的阶段（合成/编码）拿不到「是哪一条 lane 干的」—— status 里不带这个，
+         每帧都带一份会让 500ms 的那次轮询白白变大。所以按 tick 序号**轮转**，
+         保证光点始终落在**真实存在的 lane** 上（不是编出来的位置）。 */
+      function spawn(k, n) {
+        var si = KEYS.indexOf(k);
+        if (si < 0) return;
+        if (si === KEYS.length - 1) {
+          for (var z = 0; z < n; z++) { seq += 1; flashOne(k, seq % Math.max(1, geo[k].lanes.length)); }
+          return;
+        }
+        var to = si + 1;
+        while (to < KEYS.length && geo[KEYS[to]] && geo[KEYS[to]].off) to += 1;
+        var A = geo[k];
+        var B = (to < KEYS.length) ? geo[KEYS[to]] : null;
+        for (var j = 0; j < n; j++) {
+          seq += 1;
+          var ai = A.lanes.length ? (seq % A.lanes.length) : 0;
+          flashOne(k, ai);
+          if (!B || reduceMotion()) continue;
+          var bi = B.lanes.length ? ((seq * 7 + 3) % B.lanes.length) : 0;
+          var path = edges[si + ":" + ai + ":" + bi];
+          if (path) addPulse(path);
+        }
+      }
+      function kick() {
+        if (raf) return;
+        raf = window.requestAnimationFrame(tick);
+      }
+      function tick(t) {
+        raf = 0;
+        if (freezeAt > 0) t = freezeAt;      /* 截图定格（见 freezeAt 的说明） */
+        /* ① 点亮：摘类 → 强制重排 → 挂类（动画才会重放；衰减途中再来一次会重新点亮，
+              不同 lane 各挂各的，互不打断）。合到一帧里做，减少强制重排次数。 */
+        while (flashes.length) {
+          var f = flashes.shift();
+          var g = geo[f.k];
+          var lane = g && g.lanes[f.i];
+          if (!lane) continue;
+          lane.rect.classList.remove("lit");
+          void lane.rect.getBoundingClientRect();
+          lane.rect.classList.add("lit");
+          /* 每条 lane 自己记「这是第几次亮」：1.25s 后只允许**自己那一次**摘类。
+             没有这个守卫时，同一 lane 在 1.25s 内又亮一次，前一次的定时器会把
+             后一次的 .lit 提前摘掉（动画被掐断、图上忽然全灭）—— 而「叠加」正是
+             用户要的效果：衰减中再来一次应该重新点亮，不是提前熄掉。 */
+          lane.gen = (lane.gen || 0) + 1;
+          /* 注意把 lane 本身也捕进来：只捕 rect 的话闭包里那个 lane 是外层循环变量，
+             循环结束后指向最后一条 lane —— 守卫会比错对象，个别 lane 就一直亮着。 */
+          (function (ln, rect, mine) {
+            window.setTimeout(function () {
+              if (mine !== ln.gen) return;        /* 已经被更新的一次点亮接管 */
+              rect.classList.remove("lit");
+            }, LIT_MS);
+          })(lane, lane.rect, lane.gen);
+        }
+        /* ② 光点：沿曲线 getPointAtLength 走；只写 cx/cy/opacity，不读布局。 */
+        for (var i = pulses.length - 1; i >= 0; i--) {
+          var p = pulses[i];
+          var kk = Math.min(1, (t - p.t0) / p.dur);
+          var pt = p.path.getPointAtLength(p.L * kk);
+          p.c.setAttribute("cx", pt.x.toFixed(1));
+          p.c.setAttribute("cy", pt.y.toFixed(1));
+          p.c.setAttribute("opacity", (0.9 * (1 - kk * 0.5)).toFixed(2));
+          if (kk >= 1) { recycle(p); pulses.splice(i, 1); }
+        }
+        /* 定格时只画这一帧就停（不然 pulses 永远不结束 = 白烧 rAF） */
+        if (!freezeAt && (pulses.length || flashes.length)) kick();
+      }
+
+      /* 喂一拍 status：列标题计数、在飞数、点亮、光点、卡住，全在这里 */
+      function paint(d) {
+        d = d || {};
+        var right = $("mgPipeRight");
+        var rate = Number((d.vid || {}).frame_fps || d.frame_fps || 0);
+        if (right) right.textContent = rate > 0 ? (rate.toFixed(1) + " 帧/秒") : "— 帧/秒";
+        var live = isLive(d.stages) ? d.stages
+                 : (isLive(d.stages_live) ? d.stages_live : null);
+        if (!live) {
+          /* 还没开单 / 后端还没起流水线（模型加载那几秒）：先把六列摆出来当占位，
+             别让这块是个空白框；真 lanes 一到，签名变了会自动重建。 */
+          if (!layers) build(lanesOf(null));
+          for (var z = 0; z < KEYS.length; z++) { setCount(KEYS[z], null); setQueue(KEYS[z], 0); }
+          return;
+        }
+        var lanes = lanesOf(live);
+        if (signature(lanes) !== sig) build(lanes);
+        var t = nowMs();
+        var running = !!d.running;
+        for (var i = 0; i < KEYS.length; i++) {
+          var k = KEYS[i], row = live[k] || {};
+          var ticks = Math.max(0, Number(row.ticks) || 0);
+          var inflight = Math.max(0, Number(row.inflight) || 0);
+          setCount(k, ticks);
+          setQueue(k, inflight);
+          var delta = (prev[k] === undefined) ? 0 : (ticks - prev[k]);
+          if (delta > 0) {
+            lastAt[k] = t;
+            spawn(k, Math.min(delta, TICK_MAX));
+          } else if (lastAt[k] === undefined) {
+            lastAt[k] = t;                 /* 第一次看到它：从这里开始算「多久没动」 */
+          }
+          prev[k] = ticks;
+          /* 卡住 = 还在跑 + 这一段没完成 + 已经 >600ms 没 tick（tick 一恢复就自动复原） */
+          markStall(k, running && state[k] !== "done" &&
+                       (t - (lastAt[k] || t)) > STALL_MS);
+        }
+        kick();
+      }
+
+      function reset() {
+        var i;
+        freezeAt = 0;
+        kick();                       /* 上一张照片可能把时钟按住了：重开后要重新起 ticker */
+        for (i = 0; i < pulses.length; i++) recycle(pulses[i]);
+        pulses = [];
+        flashes = [];
+        prev = {};
+        lastAt = {};
+        seq = 0;
+        for (i = 0; i < KEYS.length; i++) {
+          stallNow[KEYS[i]] = false;
+          markStall(KEYS[i], false);
+          setCount(KEYS[i], null);
+          setQueue(KEYS[i], 0);
+          /* 换一单 / 重连：把上一单残留的 .lit 也摘掉（否则它要等各自的 1.25s
+             定时器才消失，图上会有一片「没人点也亮着」的方块） */
+          var g = geo[KEYS[i]];
+          if (g) {
+            for (var j = 0; j < g.lanes.length; j++) g.lanes[j].rect.classList.remove("lit", "stall");
+          }
+        }
+        setStates({});
+        var right = $("mgPipeRight");
+        if (right) right.textContent = "— 帧/秒";
+      }
+
+      function debug() {
+        var out = { keys: KEYS, sig: sig, pulses: pulses.length, pool: pool.length,
+                    stalled: {}, ticks: {}, state: {}, lanes: {}, edges: 0, built: !!layers };
+        var i, k;
+        for (i = 0; i < KEYS.length; i++) {
+          k = KEYS[i];
+          out.stalled[k] = !!stallNow[k];
+          out.ticks[k] = (prev[k] === undefined ? null : prev[k]);
+          out.state[k] = state[k] || "";
+          out.lanes[k] = geo[k] ? geo[k].lanes.length : 0;
+        }
+        for (i in edges) { if (Object.prototype.hasOwnProperty.call(edges, i)) out.edges += 1; }
+        return out;
+      }
+
+      function freeze(at) {
+        freezeAt = (Number(at) > 0) ? Number(at) : 0;
+        if (!freezeAt) kick();
+      }
+
+      return { paint: paint, reset: reset, setStates: setStates, debug: debug,
+               freeze: freeze, KEYS: KEYS, isLive: isLive };
+    })();
+
+    /* 列标题的状态（和分段链那套 mgpPaint 保持同一个入参口径） */
+    function mgpWant(opts) {
+      if (opts.state === "err") return "err";
+      if (opts.state === "done") return "done";
+      if (opts.state === "idle") return "";
+      return "on";
     }
-
-    /* 画到第 upto 步：前面全部 done（连线也连上），当前步 on / done / err */
+    /* 画到第 upto 步：前面全部 done，当前步 on / done / err / idle */
     function mgpPaint(upto, opts) {
       opts = opts || {};
-      var nodes = mgpNodes();
-      for (var k = 0; k < nodes.length; k++) {
-        var n = nodes[k], ic = n.querySelector(".cvic"), tip = n.querySelector(".cvtip");
-        var state = "";
-        if (k < upto) state = "done";
-        else if (k === upto) state = (opts.state === "err" ? "err" : (opts.state === "done" ? "done" : "on"));
-        n.className = "cvst" + (state ? " " + state : "");
-        if (ic) ic.textContent = (state === "done" ? "✓" : (state === "err" ? "!" : String(k + 1)));
-        if (tip && k === upto && opts.tip !== undefined) tip.textContent = String(opts.tip || "");
+      var st = mgpWant(opts);
+      var m = {}, k;
+      for (k = 0; k < MGP_STAGES.length; k++) {
+        m[MG_KEY[MGP_STAGES[k]]] = (k < upto) ? "done" : (k === upto ? st : "");
       }
+      MG_PIPE.setStates(m);
     }
-
-    /* ---------- 「被拒绝」态（显存不足）----------
-       和「失败」不是一回事：后端在**起 job 之前**就 400 了，一个字节都没跑。
-       所以六步 / 进度条 / 帧数 / 取消键全部收起，只留一行错误 + 「返回导出设置」。
-       以前这里把六步画成「并行中」就那么停着，用户看到的是"跑过、然后全失败"。 */
+    /* 融合流水线：六段并行，六个列标题同一个状态 */
+    function mgpFusedSteps(st) {
+      var v = (st === "done" ? "done" : (st === "err" ? "err" : (st === "idle" ? "" : "on")));
+      var m = {}, k;
+      for (k = 0; k < MGP_STAGES.length; k++) m[MG_KEY[MGP_STAGES[k]]] = v;
+      MG_PIPE.setStates(m);
+    }
+    /* 整条链跑完：老接口保留（调用点在这页有好几处），只在图上写一句结论。
+       不再「六个点一起发光」—— 发光那一套随竖排六步一起去掉了。 */
+    function mgpChainDone() {
+      var sub = $("mgPipeSub");
+      if (sub) sub.textContent = "六段全部完成";
+    }
     function mgpRejectShow(d, onForce) {
       d = d || {};
       var box = $("mgpResult");
@@ -6774,7 +7157,7 @@ function mgStageEmpty(on) {
          · 横幅：请求体/界面默认值对不上时出现（可关闭，换一单重新出现）；
          · 面板：这次真正生效的 14 个字段，值 + 来源（界面 / 推断 / 默认）。
        ============================================================ */
-    var MGP_EFF = { eff: null, warns: [], dismissed: false };
+    var MGP_EFF = { eff: null, warns: [], dismissed: false, open: false, paintKey: "" };
     var MGP_EFF_LABEL = [
       ["detector", "检测器"], ["mask_source", "遮罩来源"], ["ct_mode", "色域迁移"],
       ["blend", "融合方式"], ["erode", "遮罩腐蚀"], ["blur", "遮罩羽化"],
@@ -6815,22 +7198,20 @@ function mgStageEmpty(on) {
       box.hidden = false;
       box.classList.remove("hide");
     }
-    /* 后端回显 -> 面板。eff / warns 都来自 status（或 POST 响应），只读 */
-    function mgpEffRender(eff, warns) {
-      var box = $("mgpEff"), grid = $("mgpEffGrid"), routeEl = $("mgpEffRoute");
-      if (eff) MGP_EFF.eff = eff;
-      if (warns && warns.length) MGP_EFF.warns = warns;
-      eff = MGP_EFF.eff;
-      if (!box || !grid) return;
-      if (!eff) { box.hidden = true; return; }
-      /* 同一份配置（status 每 500ms 轮询一次）不重画：DOM 只在配置真变了时动 */
+    /* 画抽屉里的 14 个格子。force=false 时按 paintKey 判重：
+       status 每 500ms 轮询一次，同一份配置不重画 DOM。 */
+    function mgpEffPaint(force) {
+      var grid = $("mgpEffGrid"), routeEl = $("mgpEffRoute");
+      var eff = MGP_EFF.eff;
+      if (!grid || !eff) return false;
       var paintKey = String(eff.route || "") + "|" + String(eff.at || "") + "|" +
                      String(eff.kind || "") + "|" + String((MGP_EFF.warns || []).length);
-      if (MGP_EFF.paintKey === paintKey) return;
+      if (!force && MGP_EFF.paintKey === paintKey) return true;
       MGP_EFF.paintKey = paintKey;
       if (routeEl) {
-        routeEl.textContent = String(eff.route || "") +
-          (eff.kind ? (" · " + String(eff.kind)) : "");
+        var line = String(eff.route || "") + (eff.kind ? (" · " + String(eff.kind)) : "");
+        routeEl.textContent = line;
+        routeEl.title = line;
       }
       grid.innerHTML = "";
       for (var i = 0; i < MGP_EFF_LABEL.length; i++) {
@@ -6848,11 +7229,48 @@ function mgStageEmpty(on) {
         item.appendChild(k); item.appendChild(b); item.appendChild(s);
         grid.appendChild(item);
       }
+      return true;
+    }
+
+    /* 打开抽屉：**点开才渲染**这 14 个格子（常驻面板已经拆掉了，不占版面也不占渲染） */
+    function mgpEffOpen() {
+      var box = $("mgpEffDrawer"), btn = $("mgpEffOpen");
+      if (!box || !MGP_EFF.eff) return;
+      MGP_EFF.open = true;
+      mgpEffPaint(true);
       box.hidden = false;
-      mgpEffShowWarn(MGP_EFF.warns.length ? MGP_EFF.warns
-                                          : (eff.warnings || []));
+      if (btn) btn.setAttribute("aria-expanded", "true");
+      var sheet = $("mgpEffSheet");
+      if (sheet && sheet.focus) { try { sheet.focus({ preventScroll: true }); } catch (e) { /* 老内核 */ } }
+    }
+    function mgpEffClose(giveFocus) {
+      var box = $("mgpEffDrawer"), btn = $("mgpEffOpen");
+      MGP_EFF.open = false;
+      if (box) box.hidden = true;
+      if (btn) {
+        btn.setAttribute("aria-expanded", "false");
+        if (giveFocus && btn.focus) {
+          try { btn.focus({ preventScroll: true }); } catch (e) { /* 老内核 */ }
+        }
+      }
+    }
+
+    /* 后端回显 -> 横幅 + 抽屉。eff / warns 都来自 status（或 POST 响应），只读。
+       抽屉关着的时候只记数据、不动 DOM —— 14 个字段不再常驻进度页。 */
+    function mgpEffRender(eff, warns) {
+      if (eff) MGP_EFF.eff = eff;
+      if (warns && warns.length) MGP_EFF.warns = warns;
+      eff = MGP_EFF.eff;
+      /* 没有回显就别给一个点开是空的入口 */
+      var openBtn = $("mgpEffOpen");
+      if (openBtn) openBtn.disabled = !eff;
+      if (!eff) { mgpEffClose(false); return; }
+      mgpEffShowWarn(MGP_EFF.warns.length ? MGP_EFF.warns : (eff.warnings || []));
+      if (MGP_EFF.open) mgpEffPaint(false);
     }
     window.mgpEffRender = mgpEffRender;
+    window.mgpEffOpen = mgpEffOpen;
+    window.mgpEffClose = mgpEffClose;
     window.__mgpEff = function () { return MGP_EFF; };
 
     /* 横幅的 × ：只关本次挂载（换一单在 mgpReset 里复位，和训练页横幅同一个口径） */
@@ -6867,29 +7285,70 @@ function mgStageEmpty(on) {
       }
     })();
 
+    /* 右下角入口 + 抽屉的三个出口：点入口开、点 × 关、点遮罩关、Esc 关 */
+    (function bindEffDrawer() {
+      var open = $("mgpEffOpen"), close = $("mgpEffClose"), mask = $("mgpEffMask");
+      if (open && !open.dataset.bound) {
+        open.dataset.bound = "1";
+        open.addEventListener("click", function () { mgpEffOpen(); });
+      }
+      if (close && !close.dataset.bound) {
+        close.dataset.bound = "1";
+        close.addEventListener("click", function () { mgpEffClose(true); });
+      }
+      if (mask && !mask.dataset.bound) {
+        mask.dataset.bound = "1";
+        mask.addEventListener("click", function () { mgpEffClose(true); });
+      }
+      if (!document.__mgpEffEsc) {
+        document.__mgpEffEsc = 1;
+        document.addEventListener("keydown", function (e) {
+          if (!e || e.key !== "Escape") return;
+          var box = $("mgpEffDrawer");
+          if (box && !box.hidden) { e.stopPropagation(); mgpEffClose(true); }
+        }, true);
+      }
+    })();
+
     function mgpReset() {
       mgpRejectHide();
-      var nodes = mgpNodes();
-      for (var k = 0; k < nodes.length; k++) {
-        nodes[k].className = "cvst";
-        var ic = nodes[k].querySelector(".cvic");
-        if (ic) ic.textContent = String(k + 1);
-        var tip = nodes[k].querySelector(".cvtip");
-        if (tip) tip.textContent = "";
-      }
+      /* 图整张回到「还没开单」：光点/点亮/卡住/计数/列标题状态全清。
+         结构（lane 数与曲线）留着 —— 下一单的 status.stages 一到，签名对得上就复用，
+         对不上才重建（切 lane 数是重建的唯一理由）。 */
+      MG_PIPE.reset();
+      var sub = $("mgPipeSub");
+      if (sub) sub.textContent = "六段并行 · 每格一条 lane";
       var fill = $("mgpFill"); if (fill) fill.style.width = "0%";
       var pct = $("mgpPct"); if (pct) pct.textContent = "0%";
       var fr = $("mgpFrames"); if (fr) fr.textContent = "—";
       var eta = $("mgpEta"); if (eta) eta.textContent = "剩余 —";
       var fileEl = $("mgpFile"); if (fileEl) fileEl.textContent = "—";
       /* 生效配置：换一单就重新开始 —— 上一单点过的「关闭横幅」不该延续到这一单 */
-      MGP_EFF = { eff: null, warns: [], dismissed: false };
-      var effBox = $("mgpEff"); if (effBox) effBox.hidden = true;
+      MGP_EFF = { eff: null, warns: [], dismissed: false, open: false, paintKey: "" };
+      mgpEffClose(false);
       var effGrid = $("mgpEffGrid"); if (effGrid) effGrid.innerHTML = "";
+      var openBtn = $("mgpEffOpen"); if (openBtn) openBtn.disabled = true;
       mgpEffHideWarn();
     }
     window.mgpReset = mgpReset;
+    /* 重连/恢复和验收脚本要用的同一套入口（改状态机只改一处，别各写一份）：
+       mgpPaint/mgpFusedSteps = 列标题状态，mgpPipe = 喂一拍 status（stages 那份实况），
+       __mgpPipe = 只读快照（验收要断言光点/卡住/曲线条数，别去扒 SVG 内部结构）。 */
     window.mgpPaint = mgpPaint;
+    window.mgpFusedSteps = mgpFusedSteps;
+    window.mgpChainDone = mgpChainDone;
+    window.mgpPipe = function (d) { MG_PIPE.paint(d || {}); };
+    window.mgpPipeReset = function () { MG_PIPE.reset(); };
+    window.__mgpPipe = function () { return MG_PIPE.debug(); };
+    /* 截图专用：把光点钉在曲线上（0 = 恢复）。只影响动画时钟，不影响任何判定。 */
+    window.mgpPipeFreeze = function (at) {
+      var v = Number(at) || 0;
+      MG_PIPE.freeze(v);
+      return v;
+    };
+    /* 一进来就把六列摆出来（lane 是「—」占位）：这块面板不该在开单之前是一个空白框。
+       真正的 lanes 一到（status.stages），签名变了会自动重建 —— 所以这里只画骨架。 */
+    MG_PIPE.paint({});
 
     /* 终态结果面板（进度页）：导出中藏起来，只留「取消导出」；
        完成/失败/取消才顶上来，给「返回导出设置」+「再次导出」两个出口。 */
@@ -6972,6 +7431,9 @@ function mgStageEmpty(on) {
       if (fileEl && d.cache_dir) fileEl.textContent = String(d.cache_dir).split(/[\\/]/).pop();
       var state = (d.phase === "failed" ? "err" : (d.phase === "done" ? "done" : "on"));
       mgpPaint(idx, { state: state, tip: tip });
+      /* 分段链也有流水线实况：/stage/status 里的 stages_live（和 /export/status 的
+         stages 是同一个 _StageMeter，只是那个响应里的 stages 早被每段元数据占着） */
+      MG_PIPE.paint(d);
     }
 
     var MGP_POLL = null;
@@ -7004,11 +7466,14 @@ function mgStageEmpty(on) {
       }
       if (okAll) {
         mgpPaint(MGP_STAGES.length - 1, { state: "done", tip: "mp4" });
+        mgpChainDone();
         var fill = $("mgpFill"); if (fill) fill.style.width = "100%";
         var pct = $("mgpPct"); if (pct) pct.textContent = "100%";
         var eta = $("mgpEta"); if (eta) eta.textContent = "完成";
         toast("导出完成", String(d2.out_video || "").slice(-60) || "六个阶段全部完成", "success");
       } else if (d2.phase === "cancelled") {
+        /* 取消：当前这一步不是 done，也不该继续摆出「进行中」的亮蓝色 —— 收回 idle（灰） */
+        mgpPaint(idx, { state: "idle", tip: "已取消" });
         toast("已取消导出", "已完成的阶段留着，下次从这里接着跑", "info");
       } else {
         mgpPaint(idx, { state: "err", tip: "失败" });
@@ -7187,19 +7652,7 @@ function mgStageEmpty(on) {
     var MGP_FUSED_TIMER = null;
     window.__mgFusedRunning = false;
 
-    function mgpFusedSteps(state) {
-      /* 六段并行：running 时全亮「进行中」；完成打勾；失败打叉。
-         没有第几步之说 —— 谁也不是在等谁。 */
-      var nodes = mgpNodes();
-      for (var k = 0; k < nodes.length; k++) {
-        var n = nodes[k], ic = n.querySelector(".cvic"), tip = n.querySelector(".cvtip");
-        n.className = "cvst " + (state === "done" ? "done" : (state === "err" ? "err" : "on"));
-        if (ic) ic.textContent = (state === "done" ? "✓" : (state === "err" ? "!" : String(k + 1)));
-        if (tip) {
-          tip.textContent = (state === "done" ? "" : (state === "err" ? "失败" : "并行中"));
-        }
-      }
-    }
+    /* （六段的列标题状态由上面 MG_PIPE 那段里的 mgpFusedSteps 负责，这里不再重复定义） */
 
     function mgpFusedPaint(d) {
       d = d || {};
@@ -7250,7 +7703,9 @@ function mgStageEmpty(on) {
         fileEl.textContent = String(d.video).split(/[\\/]/).pop() + " · 融合流水线";
         fileEl.title = "六段同时在内存里跑，不建 <名字>_cache/；不支持续跑（取消即整段重跑）";
       }
-      mgpFusedSteps(okAll ? "done" : (d.running ? "on" : (wasCancel ? "on" : "err")));
+      mgpFusedSteps(okAll ? "done" : (d.running ? "on" : (wasCancel ? "idle" : "err")));
+      /* 流水线实况：这一份 status 就是那张图的唯一输入（stages → lane/曲线/光点） */
+      MG_PIPE.paint(d);
     }
 
     function mgFusedStopPoll() {
@@ -7279,6 +7734,7 @@ function mgStageEmpty(on) {
             var cb = $("mgpCancel");
             if (cb) { cb.disabled = false; cb.textContent = "取消导出"; }
             if (okAll) {
+              mgpChainDone();            /* 收尾：六个圆点同时轻微发光一次 */
               toast("导出完成", String(d.out || "").slice(-60), "success");
             } else if (d.vram_oom) {
               /* 强制尝试撞 OOM：后端已经把现场收干净（放掉本进程会话 + 重算当下的账），

@@ -2237,7 +2237,11 @@ def merge_export_status():
             "mode": mode or "project",
             # 生效配置 + 一致性警告（进度页「当前生效」面板 / 顶部横幅读这两个键）
             "eff": snap.get("eff"), "eff_warnings": list(snap.get("eff_warnings") or []),
-            "warnings": list(snap.get("warnings") or [])}
+            "warnings": list(snap.get("warnings") or []),
+            # 流水线实况（进度页那条 SVG 图的唯一数据源）：六个 key =
+            # frames/det/dfm/xseg/compose/encode，每个给 ticks / inflight / lanes(+ms/batch)。
+            # 没开过单时是空 dict —— 前端据此显示「等待流水线…」，不猜 lane 数。
+            "stages": _STAGE_METER.snapshot()}
     if mode == "video":
         # 视频模式多给一段明细：逐帧记录（每张脸用了谁）+ 计数 + 结束时的缓存状态。
         # 老前端不认识这些字段，多给不会影响它（缺字段才是坑）。
@@ -8297,6 +8301,8 @@ def _stage_extract_frames_ffmpeg(cfg: dict, frames_dir):
 
 def _stage_do_frames(cfg: dict) -> dict:
     """阶段 1 · 切帧：视频 -> frames/000001.png…（保留原 fps，PNG 无损）。"""
+    # 流水线实况：分段链里这一段只有一路 ffmpeg 解码（一条 lane，名字就叫「解码」）
+    _STAGE_METER.set_lanes({"frames": ["解码"]})
     cache = Path(cfg["cache"])
     video = Path(cfg["video"])
     meta = cfg["meta"]
@@ -8400,6 +8406,7 @@ def _stage_frames_inproc(cfg: dict, frames_dir, meta, w, h) -> int:
             except Exception as e:                          # noqa: BLE001
                 raise _BadInput("解码到第 %d 帧失败：%s" % (idx + 1, str(e)[:160]), 500)
             frame = np.frombuffer(raw, np.uint8).reshape((h, w, 3)).copy()
+            _stage_tick("frames")        # 交接点：解码 → frames/*.png（下一段从这里读）
             _stage_write_atomic(frames_dir / _stage_frame_name(idx),
                                 _stage_imencode(frame, ".png"))
             idx += 1
@@ -8562,6 +8569,8 @@ def _stage_do_faces(cfg: dict) -> dict:
 
     cache = Path(cfg["cache"])
     meta = cfg["meta"]
+    # 流水线实况：切脸 = 1 个检测 session（读线程不算 lane，它们不产 bit）
+    _STAGE_METER.set_lanes({"det": ["det#0"]})
     st = meta["stages"].setdefault("faces", {})
     frames = _stage_files(_stage_frames_dir(cache))
     if not frames:
@@ -8830,6 +8839,7 @@ def _stage_do_faces(cfg: dict) -> dict:
                         meta_f["yaw"], meta_f["pitch"], meta_f["roll"] = yaw, pitch, roll
                 except Exception:                               # noqa: BLE001
                     pass
+                _stage_tick("det")       # 交接点：切脸 → aligned/*.jpg（下一段从这里读）
                 t_en = time.perf_counter()
                 write_dfljpg(aligned_dir / _stage_face_name(rows[pos], k), crop, meta_f,
                              quality=int(cfg.get("jpeg_quality") or _STAGE_JPEG_QUALITY),
@@ -11377,6 +11387,8 @@ def _stage_do_pred(cfg: dict) -> dict:
     from facelib.LandmarksProcessor import get_transform_mat
     from ._align import read_dfljpg_meta
 
+    # 流水线实况：换脸 = 1 个 dfm session（一条 lane；写盘线程不产 bit，不算 lane）
+    _STAGE_METER.set_lanes({"dfm": ["dfm#0"]})
     cache = Path(cfg["cache"])
     meta = cfg["meta"]
     st = meta["stages"].setdefault("pred", {})
@@ -11510,6 +11522,7 @@ def _stage_do_pred(cfg: dict) -> dict:
             if item is None:
                 return
             gi, key, face, prd, dst = item
+            _stage_tick("dfm")       # 交接点：dfm 换脸 → pred/*.png
             tw = time.perf_counter()
             try:
                 _stage_write_atomic(
@@ -11957,6 +11970,8 @@ def _stage_do_mask(cfg: dict) -> dict:
     import sys as _sys
     import numpy as np
 
+    # 流水线实况：遮罩 = 1 个 XSeg session（DFM 来源时这块不推理，仍然是 1 条 lane）
+    _STAGE_METER.set_lanes({"xseg": ["xse#0"]})
     cache = Path(cfg["cache"])
     meta = cfg["meta"]
     st = meta["stages"].setdefault("mask", {})
@@ -12235,6 +12250,7 @@ def _stage_do_mask(cfg: dict) -> dict:
             if item is None:
                 return
             gi, key, prd_u8, dst_u8 = item
+            _stage_tick("xseg")      # 交接点：XSeg 遮罩 → mask/*.png
             tw = time.perf_counter()
             try:
                 _copy_dfm_masks(key)
@@ -12684,6 +12700,7 @@ def _stage_do_merge(cfg: dict) -> dict:
         t_e = time.time()
         data = _stage_imencode_png(out, png_level)
         tim["encode_ms"] = (time.time() - t_e) * 1000.0
+        _stage_tick("compose")   # 交接点：合成 → merged/*.png
         t_w = time.time()
         _stage_write_atomic(fp, data)
         tim["write_ms"] = (time.time() - t_w) * 1000.0
@@ -12691,6 +12708,8 @@ def _stage_do_merge(cfg: dict) -> dict:
 
     from concurrent.futures import ThreadPoolExecutor
     chunk = max(threads * 2, 8)
+    # 流水线实况：合成 lane 数 = 这个池**实际**的线程数（不分段链写死 8）
+    _STAGE_METER.set_lanes({"compose": ["t%d" % _i for _i in range(int(threads))]})
     prog = {"done": cursor}
 
     def _report():
@@ -12960,10 +12979,19 @@ def _stage_do_encode(cfg: dict) -> dict:
         _stage_log("导出：音轨从源视频 %.4f s 起 copy、长 %.4f s（帧边界误差 ≤ 1 帧）"
                    % (t0_audio, dur))
 
+    _STAGE_METER.set_lanes({"encode": ["e0"]})   # ffmpeg 一个进程 = 一条 lane
+    _enc_seen = {"n": 0}
+
     def _on_prog(done):
         pct = (100.0 * done / total) if total else 0
         _stage_progress("encode", pct, "编码 %d/%d 帧" % (done, total),
                         frames_done=min(done, total), frames_total=total)
+        # 交接点：编码 → 成片。一次回调可能跨好几帧（ffmpeg 的 -progress 有节流），
+        # 所以按增量补 tick —— 图上的光点才和「真的编了几帧」对得上。
+        _n = int(done) - int(_enc_seen["n"])
+        if _n > 0:
+            _enc_seen["n"] = int(done)
+            _stage_tick("encode", _n)
 
     enc = _vid_encode(cmd, part, total, on_progress=_on_prog)
     code, tail, sec = enc["code"], enc["tail"], enc["seconds"]
@@ -13557,6 +13585,9 @@ def _stage_brief_meta(cfg: dict, extra: dict = None) -> dict:
         "out_video": str(cfg.get("out") or ""),
         "counts": _stage_counts(cache),
         "stages": _stage_stages_meta(meta),
+        # 流水线实况（进度页那张 SVG 图的数据源）。这里不能叫 stages —— 那个键从 4.0
+        # 起就是「每段的元数据」（done/msg/…），两个形状混一个键名是最容易出幻觉的坑。
+        "stages_live": _STAGE_METER.snapshot(),
         "stages_done": _stage_done_list(meta),
         "next_stage": _stage_next(meta),
         "frame_swapped": bool(meta.get("frame_swapped")),
@@ -13589,6 +13620,7 @@ def _stage_worker(cfg: dict):
     stages = list(cfg.get("stages") or ["frames"])
     ok, err, cancelled = True, "", False
     try:
+        _STAGE_METER.begin()          # 流水线实况：这一单开始记（串行六段累同一份）
         for stage in stages:
             _stage_check_cancel()
             # 链式导出不走 precheck：范围指纹/游标失效必须在这里也算一遍（和单阶段口径一致）
@@ -14730,6 +14762,138 @@ class _FusedFrame:
                     "no_face": False, "dfm": "", "branch": ""}
 
 
+# ============================================================
+# 流水线实况：交接点计数（导出进度页那条 SVG 图的**唯一**数据源）
+# ------------------------------------------------------------
+# 进度页从「六个圆点」换成「6 列 lane + 贝塞尔曲线 + 光点」之后，前端要三样东西，
+# 少一样图就是假的：
+#   ticks     这个交接点一共过了多少帧/张脸（只增）—— 光点按**增量**放，列标题显示「N 帧」
+#   inflight  这个交接点**下游那个队列**的当前长度（q.qsize()）—— 列间那句「在飞 N」
+#   lanes     这个阶段**真的有**几条 lane（线程数）：合成池 8 线程就是 t0..t7，
+#             编码 6 线程就是 e0..e5，dfm/xseg/det 各一个 session 就是 1 条（带 #0）
+# 开销：一次 dict 自增 + 一次 time.monotonic()，一把锁（临界区就两行）。tick 里不拼字符串、
+# 不进 JSON、不碰队列；只有 status 那一拍（500ms 一次）才 snapshot，qsize() 是 O(1)。
+# 为什么不用「每帧发一次请求」：那样 20 帧/秒就是 20 个请求，界面比片还重。
+# ============================================================
+_STAGE_KEYS = ("frames", "det", "dfm", "xseg", "compose", "encode")
+# 每段的耗时取自 _FusedTicks 的同名 key（per-frame ms，和 <成片>.log 里那份同一个口径）
+_STAGE_MS_SRC = {"frames": "decode", "det": "detect", "dfm": "dfm",
+                 "xseg": "xseg", "compose": "compose", "encode": "encode"}
+
+
+class _StageMeter:
+    """交接点计数器：{key: ticks} + 每段的 lane 名 + 下游队列。
+
+    一个进程里同时只会跑一单导出（起单处有互斥），所以这里是**单例**：
+    reset() 开一单，stop() 收一单（收单后保留最后一份快照，界面上那张图不会突然塌掉）。
+    """
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.ticks = {k: 0 for k in _STAGE_KEYS}
+        self.lanes = {k: [] for k in _STAGE_KEYS}
+        self.queues = {}
+        self.ms = {}
+        self.batch = {}
+        self.armed = False          # 开过单没（没开过 → status 里干脆不出现 stages）
+        self.on = False             # 现在还在跑没（收单后不再涨）
+
+    def reset(self, lanes=None) -> None:
+        with self.lock:
+            self.ticks = {k: 0 for k in _STAGE_KEYS}
+            self.lanes = {k: list((lanes or {}).get(k) or []) for k in _STAGE_KEYS}
+            self.queues = {}
+            self.ms = {}
+            self.batch = {}
+            self.armed = True
+            self.on = True
+
+    def bind(self, queues: dict) -> None:
+        """key -> 下游那个 queue（inflight 就是它的 qsize()）。"""
+        with self.lock:
+            self.queues = dict(queues or {})
+
+    def stop(self) -> None:
+        """收单：不再涨，但保留 lanes/ticks 给界面画最后一帧（inflight 归零）。"""
+        with self.lock:
+            self.on = False
+            self.queues = {}
+
+    def begin(self) -> None:
+        """一单开始（分段链 / 项目流水是**串行**跑的）：上一单收过单就清空重来。"""
+        with self.lock:
+            if not self.on:
+                self.ticks = {k: 0 for k in _STAGE_KEYS}
+                self.lanes = {k: [] for k in _STAGE_KEYS}
+                self.queues = {}
+                self.ms = {}
+                self.batch = {}
+            self.armed = True
+            self.on = True
+
+    def set_lanes(self, lanes: dict) -> None:
+        """只补空的 lane：分段链一次只跑一段，lane 数每段才定，但不能把上一段的清掉
+        （六段是**同一单**里串行跑的，tick 要一路累上去 —— 图上的「N 帧」才对得上）。"""
+        with self.lock:
+            for k, v in (lanes or {}).items():
+                if v and not self.lanes.get(k):
+                    self.lanes[k] = list(v)
+
+    def tick(self, key: str, n: int = 1) -> None:
+        """交接点 +n（n>1 只给「一次回调跨了好几帧」那种地方用，比如 ffmpeg 编码进度）。"""
+        with self.lock:
+            if not self.on:
+                return
+            self.ticks[key] = int(self.ticks.get(key) or 0) + max(1, int(n))
+
+    def note_ms(self, ms: dict) -> None:
+        with self.lock:
+            for k, v in (ms or {}).items():
+                if v is not None:
+                    self.ms[k] = float(v)
+
+    def note_batch(self, batch: dict) -> None:
+        with self.lock:
+            for k, v in (batch or {}).items():
+                if v is not None:
+                    self.batch[k] = int(v)
+
+    def snapshot(self) -> dict:
+        """status.stages 的那一块（没开过单就是空 dict，前端据此显示「等待流水线…」）。"""
+        with self.lock:
+            if not self.armed:
+                return {}
+            out = {}
+            for k in _STAGE_KEYS:
+                qq = self.queues.get(k)
+                inflight = 0
+                if qq is not None:
+                    try:
+                        inflight = int(qq.qsize())
+                    except Exception:                          # noqa: BLE001
+                        inflight = 0
+                row = {"ticks": int(self.ticks.get(k) or 0),
+                       "inflight": inflight,
+                       "lanes": list(self.lanes.get(k) or [])}
+                if k in self.ms:
+                    row["ms"] = round(float(self.ms[k]), 2)
+                if k in self.batch:
+                    row["batch"] = int(self.batch[k])
+                out[k] = row
+            return out
+
+
+_STAGE_METER = _StageMeter()
+
+
+def _stage_tick(key: str, n: int = 1) -> None:
+    """交接点 +1 —— 在**入队/交给下一阶段之前**调用（六个 key 见 _STAGE_KEYS）。
+
+    故意做成模块级函数：埋点处只写一行，读的人一眼知道「这里是交接点」。
+    """
+    _STAGE_METER.tick(key, n)
+
+
 class _FusedTicks:
     """逐段累计耗时（和原型同一套口径：每段的总忙时间 / 帧数 = 每帧 ms）。"""
 
@@ -15059,6 +15223,15 @@ def _fused_run(cfg: dict) -> dict:
             no_face=int(got["no_face"]))
         _vid_stats(done=int(done), total=int(total), fps=round(rate, 2), eta_s=eta,
                    frame_budget=budget, fused=True, peak_live=int(live["peak"]))
+        # 每段的「每帧 ms」+ dfm 当前的攒批（界面 lane 旁边那个小字）；_report 自己
+        # 就把频率压到 0.25s 一拍，所以这里不用再节流。
+        try:
+            _pm = ticks.dump(int(done))
+            _STAGE_METER.note_ms({k: _pm.get(v) for k, v in _STAGE_MS_SRC.items()})
+            _STAGE_METER.note_batch(
+                {"dfm": int(batch_of.get(str(cfg["dfm"])) or batch_target)})
+        except Exception:                                  # noqa: BLE001
+            pass
 
     # ---- 显存保护：dfm 批大小按 session 实测阶梯选（每个 dfm 一次）----
     batch_of = {}
@@ -15135,6 +15308,7 @@ def _fused_run(cfg: dict) -> dict:
                     job.det_ctx = _det_prep(det, frame)
                     if job.det_ctx is not None:
                         ticks.add("det_prep", time.perf_counter() - t_prep)
+                _stage_tick("frames")            # 交接点：解码 → 检测队列
                 if not _put(q_dec, job):
                     break
         except BaseException as e:                             # noqa: BLE001
@@ -15185,6 +15359,7 @@ def _fused_run(cfg: dict) -> dict:
                 job.boxes = sorted(list(boxes or []),
                                    key=lambda b: float((b.get("box") or [0, 0, 0, 0])[0]))
                 job.rec["detected"] = len(job.boxes)
+                _stage_tick("det")               # 交接点：检测 → 对齐/预处理
                 _put(q_det, job)
         except BaseException as e:                             # noqa: BLE001
             _fail("detect", e)
@@ -15315,6 +15490,7 @@ def _fused_run(cfg: dict) -> dict:
                     # 第二张的脸就丢了（这是原型里没暴露、但生产上必须堵的洞）。
                     nf = len(job.faces)
                     for f in job.faces:
+                        _stage_tick("dfm")           # 交接点：对齐 → dfm/xseg（每张脸一次）
                         if not _put(q_gpu, (job, f, nf)):
                             break
         except BaseException as e:                             # noqa: BLE001
@@ -15455,6 +15631,7 @@ def _fused_run(cfg: dict) -> dict:
                             rec[0] -= 1
                             if rec[0] <= 0:
                                 pend_frames.pop(id(job), None)
+                                _stage_tick("xseg")      # 交接点：dfm/xseg → 合成
                                 _put(q_cmp, job)
 
         def size_px_of(dfm_path):
@@ -15531,6 +15708,7 @@ def _fused_run(cfg: dict) -> dict:
                 job.rec["swapped"] = len(args)
                 job.rec["no_face"] = not args
                 job.frame = None
+                _stage_tick("compose")           # 交接点：合成 → PNG 编码
                 _put(q_enc, (job, out_frame))
         except BaseException as e:                             # noqa: BLE001
             _fail("compose", e)
@@ -15560,6 +15738,7 @@ def _fused_run(cfg: dict) -> dict:
                 t = time.perf_counter()
                 data = _stage_imencode_png(img, png_level)
                 ticks.add("encode", time.perf_counter() - t)
+                _stage_tick("encode")            # 交接点：PNG 编码 → 写盘
                 t = time.perf_counter()
                 _stage_write_atomic(frames_dir / ("%06d.png" % job.n), data)
                 ticks.add("write", time.perf_counter() - t)
@@ -15630,6 +15809,22 @@ def _fused_run(cfg: dict) -> dict:
             det_sess = []
             _vid_log("快速导出 检测池：推导失败（%s）→ 退回单路" % str(e)[:160])
     n_det = len(det_sess) or 1
+
+    # ---- 流水线实况：lane 数 = **实际**线程数（不是写死的）----
+    # 合成池 n_cmp 条（t0..t7）、编码 n_enc 条（e0..e5）、dfm/xseg 各一个 session 就 1 条、
+    # det 有几路异构 session 就有几条。xseg 不用（遮罩不来自模型）时给空列表 ——
+    # 界面画成「不用」，不假装有一条在跑的 lane。
+    _STAGE_METER.reset(lanes={
+        "frames": ["解码"],
+        "det": ["det#%d" % _i for _i in range(n_det)],
+        "dfm": ["dfm#0"],
+        "xseg": (["xse#0"] if need_xseg else []),
+        "compose": ["t%d" % _i for _i in range(n_cmp)],
+        "encode": ["e%d" % _i for _i in range(n_enc)],
+    })
+    # 每个阶段的「下游队列」= 列间那句「在飞 N」（inflight 直接读 qsize()）
+    _STAGE_METER.bind({"frames": q_dec, "det": q_det, "dfm": q_gpu,
+                       "xseg": q_cmp, "compose": q_enc})
 
     ths = {}
     t_all = time.time()
@@ -15875,6 +16070,9 @@ def _fused_worker(cfg: dict):
         traceback.print_exc()
         ok, err = False, "%s: %s" % (e.__class__.__name__, str(e)[:600])
     finally:
+        # 流水线实况收单：不再涨，但**保留** lanes/ticks —— 进度页那张图在「完成」
+        # 那一刻要还是满的（收单就清空的话，界面会当场塌成一排占位格）。
+        _STAGE_METER.stop()
         # 强制尝试失败：先回滚现场（放掉本进程会话 + 重算当下的账 + 改写 err）再收尾 ——
         # 见 _vram_oom_rollback / _vram_forced_rollback。顺序反了用户看到的就是
         # 「导出失败」，而不是「确实不够，已回滚」。

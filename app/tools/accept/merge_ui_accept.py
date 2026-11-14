@@ -147,7 +147,7 @@ PROBE = r"""
   }
   var prog = q('#p-merge .mgview[data-view="progress"]');
   var mgprog = q('.mgprog', prog);
-  var steps = q('#mgpSteps');
+  var steps = q('#mgPipeSvg');        /* 进度页那张图（6 列 lane + 曲线） */
   var groups = qa('.mggrp', view);
   var out = {
     viewport: {w: window.innerWidth, h: window.innerHeight},
@@ -190,16 +190,16 @@ PROBE = r"""
       steps_client: steps ? steps.clientWidth : null,
       steps_box: (function(){ var s = q('.mgprog-steps'); return s ? {sw: s.scrollWidth, cw: s.clientWidth,
         ox: getComputedStyle(s).overflowX} : null; })(),
-      nodes: qa('#mgpSteps .cvst').length,
-      label_wrap: qa('#mgpSteps .cvnm').map(function(n){ return rect(n).h; }),
-      tip_wrap: qa('#mgpSteps .cvtip').map(function(n){ return rect(n).h; }),
+      /* 流水线实况：6 列标题 + N 个 lane 方块（N 由后端 lanes 决定，这里只看形状） */
+      pipe_cols: qa('#mgPipeSvg text.t-stage').length,
+      pipe_lanes: qa('#mgPipeSvg rect.lane').length,
+      label_wrap: qa('#mgPipeSvg text.t-stage').map(function(n){ return rect(n).h; }),
+      tip_wrap: qa('#mgPipeSvg text.t-lane').map(function(n){ return rect(n).h; }),
       overlap: (function(){
-        var bad = 0;
-        qa('#mgpSteps .cvsh').forEach(function(h){
-          var n = q('.cvnm', h), t = q('.cvtip', h);
-          if (!n || !t || !t.textContent) return;
-          if (rect(n).r > rect(t).l + 0.5) bad += 1;
-        });
+        var bad = 0, ts = qa('#mgPipeSvg text.t-stage');
+        for (var i = 1; i < ts.length; i++) {
+          if (rect(ts[i - 1]).r > rect(ts[i]).l + 0.5) bad += 1;
+        }
         return bad;
       })()
     }
@@ -226,7 +226,9 @@ def main():
     args = ap.parse_args()
     tag = args.tag
 
-    from tools.merge_accept import Browser, _edge_path       # noqa: E402
+    # tools/ 按用途分了子目录（accept/bench/migrate/audit），这个 import 当年没跟着改，
+    # 一直指向 app/tools/merge_accept.py（已经不在了）→ 脚本一开场就 ModuleNotFoundError。
+    from tools.accept.merge_accept import Browser, _edge_path       # noqa: E402
     edge = _edge_path()
     if not edge:
         raise SystemExit("找不到 Edge（装 Edge 或设 EDGE_PATH）")
@@ -336,7 +338,10 @@ def main():
               "进度 %.1f / 训练 %s（差 %.1f）"
               % (float(pr["card_w"] or 0), base_w,
                  abs(float(pr["card_w"] or 0) - float(base_w or 0))))
-        check(pr["nodes"] == 6, "B 六步 Stepper 六个节点都在", "%s" % pr["nodes"])
+        check(pr["pipe_cols"] == 6, "B 流水线图六列标题都在", "%s" % pr["pipe_cols"])
+        check(int(pr["pipe_lanes"] or 0) >= 6,
+              "B 流水线图有 lane 方块（≥6，数量由后端 lanes 决定）",
+              "%s 个" % pr["pipe_lanes"])
         check(pr["card_scroll"] <= pr["card_client"] + 1,
               "B 进度卡内部没有横向溢出",
               "scroll=%s client=%s" % (pr["card_scroll"], pr["card_client"]))
@@ -349,16 +354,18 @@ def main():
         pr2 = p2["progress"]
         shots["progress640"] = SHOTS / ("%s-progress-640.png" % tag)
         shot(b, shots["progress640"])
-        say("640 视口：卡片 %.1f · 六步区 %s · 列表 scroll/client %s"
+        say("640 视口：卡片 %.1f · 流水线图 %s · 容器 scroll/client %s"
             % (float(pr2["card_w"] or 0), pr2["steps_w"], pr2["steps_box"]))
-        check(float(pr2["steps_w"] or 0) >= 420 - 0.5,
-              "B 640px 时六步列表仍 ≥ 420px（不被卡片挤扁）",
+        # 流水线图（SVG）是**等比缩放**的：它跟着卡片缩，不横向滚动、也不被挤扁到看不见
+        # （竖排六步那版才需要「可横向滚动 + ≥420px」，那条口径随 UI 一起废掉）。
+        check(float(pr2["steps_w"] or 0) >= 300 - 0.5,
+              "B 640px 时流水线图仍 ≥ 300px（等比缩放，不横向溢出）",
               "steps_w=%s" % pr2["steps_w"])
-        check(pr2["steps_box"] and pr2["steps_box"]["sw"] >= pr2["steps_box"]["cw"] - 1,
-              "B 640px 时六步区可横向滚动（scrollWidth ≥ clientWidth）",
+        check(pr2["steps_box"] and pr2["steps_box"]["sw"] <= pr2["steps_box"]["cw"] + 1,
+              "B 640px 时流水线容器自己不横向溢出（scrollWidth ≤ clientWidth）",
               "%s" % (pr2["steps_box"],))
         check(bool(pr2["label_wrap"]) and max(pr2["label_wrap"] + [0]) <= 26,
-              "B 640px 时 .cvnm 不换行（单行高度 ≤26px）", "%s" % pr2["label_wrap"])
+              "B 640px 时列标题不换行（单行高度 ≤26px）", "%s" % pr2["label_wrap"])
         check(pr2["overlap"] == 0, "B 640px 时名字与提示不重叠",
               "重叠 %s 处" % pr2["overlap"])
         check(pr2["card_scroll"] <= pr2["card_client"] + 1,

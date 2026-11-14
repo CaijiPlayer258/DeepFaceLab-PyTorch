@@ -22,6 +22,7 @@
 | `accept/eff_accept.py` | `[eff]` 生效配置 + 三类告警 + 前端横幅 | 40 s |
 | `accept/merge_accept.py` | 合成器界面（时间轴/预览/导出按钮） | 76 s |
 | `accept/merge_ui_accept.py` | 合成器设置页布局与行数 | 30 s |
+| `accept/progress_lit_accept.py` | 导出进度页「流水线实况」：status.stages 六键 / lanes == 实际线程数 / 两段贝塞尔 + 光点 / 点亮 1.15s / 卡住变琥珀 / 抽屉 14 字段（47 条 + 3 张截图） | 150 s |
 | `accept/test_faces_api.py` | 人脸库 API | 30 s |
 | `accept/fdb_accept.py` · `face_group_accept.py` | 人脸库/分组语义 | 60 s |
 

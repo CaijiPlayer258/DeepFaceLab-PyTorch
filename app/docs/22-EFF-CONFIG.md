@@ -80,14 +80,20 @@
 
 ## 前端
 
-进度页（`#p-merge .mgview[data-view=progress]`）顶部：
+进度页（`#p-merge .mgview[data-view=progress]`）：
 
 - `#mgpEffWarn`：可关闭横幅（复用 `.alert.warn.loadbanner`），文案 = `eff_warnings[].text`；
-  换一单在 `mgpReset()` 里复位（关掉不该延续到下一单）。
-- `#mgpEff`：只读「当前生效（后端回显）」面板，14 个字段 + 来源标签
-  （界面 / 推断 / 默认）；`src_note` 放 `title`。
+  换一单在 `mgpReset()` 里复位（关掉不该延续到下一单）。**这个必须留着** ——
+  它是「界面设了、后端没按它跑」的唯一提示。
+- `#mgpEffOpen`：右下角的文字入口「查看生效配置」（没有 `eff` 回显时是 `disabled`）。
+- `#mgpEffDrawer`：右侧抽屉（`.mgeff-drawer` / `.mgeff-sheet`），里面是那 14 个字段 +
+  来源标签（界面 / 推断 / 默认），`src_note` 放 `title`。**点开才渲染**（`mgpEffPaint(true)`）——
+  以前那块常驻面板（旧的 `#mgpEff`）已删掉：太丑、也占版面，字段展示以后归「控制台输出」界面。
+  三个出口：`#mgpEffClose` / 点遮罩 / Esc。
 - 渲染入口：`window.mgpEffRender(eff, effWarnings)`，由 `mgpFusedPaint` /
-  `mgpStatusPaint` 在每次轮询时调用。
+  `mgpStatusPaint` 在每次轮询时调用；抽屉关着时它只记数据、不动 DOM。
+- 六阶段是**横排**（`#mgpSteps > .mgps-n`）：fused 下六段并行，六个节点可以同时是 on，
+  只有真的 done 才点亮（`data-lit` 时间戳 + `.lit`，去重见 `mgpLight()`）。
 
 ## 怎么加字段
 
@@ -105,3 +111,9 @@ runtime\server\Scripts\python.exe app\tools\eff_accept.py
 覆盖：正常路径（detector=tinymog → src=ui、无 warn）、老 bug 复现（不带 detector +
 quality=high → [eff-warn] + status.warnings + 前端横幅截图）、`[req-unused]`、脱敏
 （路径/base64）、六阶段链的 [eff]。截图写到 `%TEMP%\dfl_eff_accept\banner.png`。
+
+进度页 / 抽屉 / 点亮动效另有一份 UI 验收（最快的一个，先跑它）：
+
+```
+runtime\server\Scripts\python.exe app\tools\accept\progress_lit_accept.py
+```

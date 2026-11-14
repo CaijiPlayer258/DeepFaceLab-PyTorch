@@ -1775,6 +1775,31 @@
     "融合方式（模式）": "Blending mode"
   });
 
+  /* 导出进度页 · 生效配置抽屉（14 字段不再常驻版面，只留右下角一个文字入口 + 抽屉）。
+     横幅（#mgpEffWarn）的标题带「（N 项）」是运行时拼的整句，对不上字典；这里只收
+     固定文案，带数字的那句留给中文原文（和别处带数字的句子同一个口径）。
+     「界面 / 推断 / 默认」是字段后面那枚来源小标签。 */
+  Object.assign(DICT, {
+    "查看生效配置": "View effective config",
+    "当前生效（后端回显）": "Effective config (backend echo)",
+    "生效配置与界面可能不一致": "Effective config may differ from the UI",
+    "界面": "UI",
+    "推断": "Inferred",
+    "默认": "Default",
+    "已取消": "Cancelled",
+    "并行中": "running"
+  });
+
+  /* 导出进度页 · 流水线实况（6 列 lane + 曲线 + 光点）。
+     只收**固定**文案：图里的「N 帧」「在飞 N」「12.4 帧/秒」都是运行时拼的整句，
+     对不上字典（和别处带数字的句子同一个口径）；lane 名（t0 / e3 / det#0）是标识符，
+     本来就不翻。列标题（切帧/切脸/换脸/遮罩/合成/导出）上面已经有词条，复用。 */
+  Object.assign(DICT, {
+    "流水线": "Pipeline",
+    "六段并行 · 每格一条 lane": "Six lanes in parallel · one lane per cell",
+    "六段全部完成": "All six stages done"
+  });
+
   window.I18N = {
     apply: apply,
     refresh: function () { apply(lang); },

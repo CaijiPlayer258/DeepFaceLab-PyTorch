@@ -3155,16 +3155,6 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
   padding: 14px 0 2px;
   border-top: 1px solid var(--line);
 }
-/* 四步动画（复用「模型转换」的 Stepper）：这里只调间距，节点/连线/高亮的样式
-   全部来自下面那段 .cvsteps 规则，两页是同一套视觉语言 */
-#p-merge .cvsteps { padding: 2px 0 0; }
-#p-merge .cvsteps .cvst { padding: 7px 0; }
-#p-merge .cvsteps .cvnm { flex: 0 0 44px; }
-#p-merge .cvsteps .cvtip {
-  font-size: 11.5px;
-  color: var(--ink-3);
-  font-variant-numeric: tabular-nums;
-}
 
 #p-merge .mgprog-foot {
   display: flex;
@@ -3302,7 +3292,6 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
 }
 /* 进度条走主题色 */
 .bar i { background: var(--brand); }
-#p-merge .cvsteps .cvst.on .cvic { background-image: linear-gradient(rgba(255,255,255,.08), rgba(255,255,255,.08)); }
 #p-merge .mgp-btn.btn.pri,
 #p-merge #mgStartExport2 {
   background: var(--solid) !important;
@@ -5637,18 +5626,13 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   gap: 16px;
 }
 #p-merge .mgprog-hd { gap: 10px; }
-/* 六步列表：窄窗口不许被挤扁 —— 容器横向滚动，列表本身最少 420px */
+/* 六阶段横排：flex 会自己收窄，窄窗口换 3+3 网格，所以**不需要**横向滚动。
+   这里以前是 overflow-x:auto + overflow-y:hidden（竖向 Stepper 时代的补丁）；
+   横向的圆点自带发光，overflow:hidden 会把光晕切掉半圈，改成可见。 */
 #p-merge .mgprog-steps {
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: visible;
   padding-bottom: 2px;
 }
-#p-merge .mgprog-steps::-webkit-scrollbar { height: 6px; }
-#p-merge .mgprog-steps::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 3px; }
-#p-merge .cvsteps { min-width: 420px; }
-/* 名字与提示不许折行（折了就变成两行，看着像重影） */
-#p-merge .cvsteps .cvnm,
-#p-merge .cvsteps .cvtip { white-space: nowrap; }
 #p-merge .mgprog-foot { padding-top: 0; }
 
 /* 进度页的「取消导出」：.btn 的底色/字色带 !important，不改这里会是一颗白胶囊
@@ -5666,9 +5650,6 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   border-color: #ef4444;
   background: rgba(239, 68, 68, .10) !important;
 }
-/* 阶段列表的行距按训练页的节奏（一行 ≈ 44px，和 .cfgrow 一致） */
-#p-merge .mgprog .cvsteps .cvst { padding: 11px 0; }
-#p-merge .mgprog .cvsteps .cvline { top: 36px; bottom: -11px; }
 
 
 /* ============================================================================
@@ -5797,10 +5778,12 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 }
 
 /* ============================================================
-   生效配置（[eff] 回显）：进度页顶部的横幅 + 只读小面板
+   生效配置（[eff] 回显）：横幅留在页上，14 个字段折进抽屉
    ------------------------------------------------------------
-   横幅复用 .alert.warn / .loadbanner（左侧强调条 + 图标），面板是等宽小格子：
-   「我设的」和「它在跑的」要能一眼对上，所以值用粗体、来源用小标签（界面/推断/默认）。
+   横幅复用 .alert.warn / .loadbanner（左侧强调条 + 图标），**必须留在进度页顶部** ——
+   它是「界面设了、后端没按它跑」的唯一提示。
+   14 字段的只读快照不再常驻版面（太丑、也没必要）：右下角一个文字入口 + 右侧抽屉，
+   点开才渲染。值用粗体、来源用等宽小标签（界面/推断/默认），「我设的」和「它在跑的」对得上。
    ============================================================ */
 #p-merge .mgeff-warn {
   margin: 0 0 12px;
@@ -5812,46 +5795,122 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 }
 #p-merge .mgeff-warn[hidden] { display: none !important; }
 
-#p-merge .mgeff {
-  margin: 0 0 12px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--panel, rgba(255,255,255,.02));
-  padding: 10px 12px;
+/* ---------- 右下角的轻入口：文字链接，不抢进度条的视觉 ---------- */
+#p-merge .mgprog-efflnk {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: -8px;                 /* 压掉 .mgprog 的 16px gap，贴住卡片右下角 */
 }
-#p-merge .mgeff[hidden] { display: none !important; }
-#p-merge .mgeff-hd {
+#p-merge .mgprog-lnk {
+  padding: 2px 0;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--ink-3);
+  cursor: pointer;
+  transition: color .12s ease, border-color .12s ease;
+}
+#p-merge .mgprog-lnk:hover:not(:disabled) {
+  color: var(--ink-2);
+  border-bottom-color: var(--line-strong);
+}
+#p-merge .mgprog-lnk:disabled { opacity: .45; cursor: default; }
+#p-merge .mgprog-lnk:focus-visible {
+  outline: 2px solid var(--line-strong);
+  outline-offset: 2px;
+}
+
+/* ---------- 抽屉：右侧滑出，遮罩沿用 .modal 那一套（同一档 z-index / 同一层灰） ---------- */
+.mgeff-drawer { position: fixed; inset: 0; z-index: 260; display: flex; justify-content: flex-end; }
+.mgeff-drawer[hidden] { display: none !important; }
+.mgeff-mask {
+  position: absolute;
+  inset: 0;
+  background: rgba(12, 12, 16, .38);
+  backdrop-filter: blur(2px);
+  animation: mgpMaskIn .14s ease 1 both;
+}
+@keyframes mgpMaskIn { from { opacity: 0 } to { opacity: 1 } }
+
+.mgeff-sheet {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(430px, 92vw);
+  height: 100%;
+  box-sizing: border-box;
+  padding: 18px 18px 24px;
+  overflow-y: auto;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: var(--shadow-high);
+  animation: mgpSheetIn .22s cubic-bezier(.2,.8,.2,1) 1 both;
+}
+@keyframes mgpSheetIn { from { transform: translateX(24px); opacity: 0 } to { transform: none; opacity: 1 } }
+.mgeff-sheet:focus { outline: none; }
+
+.mgeff-hd {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
 }
-#p-merge .mgeff-hd b { font-size: 12px; font-weight: 650; color: var(--ink); }
-#p-merge .mgeff-route {
+.mgeff-hd b { font-size: 12.5px; font-weight: 650; color: var(--ink); }
+.mgeff-route {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--mono, ui-monospace, Consolas, monospace);
   font-size: 11px;
   color: var(--ink-3);
 }
-#p-merge .mgeff-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
-  gap: 6px 10px;
+.mgeff-x {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color .12s ease, color .12s ease;
 }
-#p-merge .mgeff-i {
+.mgeff-x:hover { border-color: var(--line-strong); color: var(--ink); }
+
+.mgeff-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 4px;
+}
+.mgeff-i {
   display: flex;
   align-items: baseline;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
-  padding: 3px 6px;
+  padding: 5px 8px;
   border-radius: 6px;
-  background: rgba(127,127,127,.06);
+  background: var(--panel-2);
 }
-#p-merge .mgeff-i .k {
+.mgeff-i .k {
+  flex: none;
+  width: 68px;
   font-size: 11.5px;
   color: var(--ink-3);
-  flex: none;
 }
-#p-merge .mgeff-i .v {
+.mgeff-i .v {
+  flex: 1;
+  min-width: 0;
   font-size: 12px;
   font-weight: 600;
   color: var(--ink);
@@ -5859,8 +5918,7 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-#p-merge .mgeff-i .s {
-  margin-left: auto;
+.mgeff-i .s {
   flex: none;
   font-style: normal;
   font-size: 10.5px;
@@ -5870,8 +5928,128 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   border: 1px solid var(--line);
   color: var(--ink-3);
 }
-#p-merge .mgeff-i .s.ui { color: #7dd3a0; border-color: rgba(125,211,160,.35); }
-#p-merge .mgeff-i .s.inferred { color: #f0b429; border-color: rgba(240,180,41,.42); }
-#p-merge .mgeff-i .s.default { color: var(--ink-3); }
+.mgeff-i .s.ui { color: var(--ok); border-color: var(--line-strong); }
+.mgeff-i .s.inferred { color: var(--warn); border-color: var(--line-strong); }
+.mgeff-i .s.default { color: var(--ink-3); }
+
+/* ============================================================
+   流水线实况（进度页）：6 列 lane + 三次贝塞尔曲线 + 光点
+   ------------------------------------------------------------
+   为什么不再是「六个圆点」：快速导出（fused）里六段是**并行**跑的，圆点只能表达
+   「进行中 / 完成」，表达不了「谁把东西交给谁」「队列里还压着几个」「哪个池有几条
+   线程」。所以换成 6 列 × N 条 lane 的图：方块 = 一条真线程，曲线 = 数据流方向，
+   光点 = 正在传的那一帧（从**实际的那条 lane** 出发、落到下一列**实际的那条 lane**）。
+   视觉口径（和 UI设计规范 / shadcn 那套一致）：
+     · 只用现成 token（panel / panel-2 / line / line-strong / ok / warn），
+       层级靠「面 + 1px 描边」，**不靠阴影与发光**；
+     · lane 方块不发光、不大圆角、不描彩色边；
+     · 点亮只做「底色 + 描边」的呼吸（低饱和），不缩放、不外发光；
+     · 卡住（某列 >600ms 没 tick）用 --warn 的低透明版，恢复就复原。
+   浅色主题自动跟随：点亮/卡住那三组 rgba 在下面按 data-theme 各给一套，
+   别的地方一律读变量（这里写死深色值就是「不跟随」）。
+   ============================================================ */
+#p-merge .mgpipe {
+  /* 点亮 / 卡住的三个面（深色取值；浅色在下面的 [data-theme="light"] 块里覆盖） */
+  --mgp-lit: rgba(61, 220, 132, .16);
+  --mgp-lit-mid: rgba(61, 220, 132, .09);
+  --mgp-lit-line: rgba(61, 220, 132, .55);
+  --mgp-stall: rgba(240, 180, 41, .10);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+[data-theme="light"] #p-merge .mgpipe {
+  --mgp-lit: rgba(15, 157, 88, .14);
+  --mgp-lit-mid: rgba(15, 157, 88, .07);
+  --mgp-lit-line: rgba(15, 157, 88, .45);
+  --mgp-stall: rgba(194, 116, 11, .10);
+}
+#p-merge .mgpipe-hd {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 13px 16px 11px;
+}
+#p-merge .mgpipe-hd b {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: .01em;
+  color: var(--ink);
+}
+#p-merge .mgpipe-sub { font-size: 11.5px; color: var(--ink-3); }
+#p-merge .mgpipe-right {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+#p-merge .mgpipe-sep { height: 1px; background: var(--line); }
+#p-merge .mgpipe-body { padding: 8px 6px 6px; }
+#p-merge .mgpipe-svg { display: block; width: 100%; height: auto; }
+
+/* ---------- 图里的文字层级 ---------- */
+#p-merge .mgpipe .t-stage {
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: .02em;
+  fill: var(--ink-2);
+}
+#p-merge .mgpipe .t-count {
+  font-size: 10.5px;
+  fill: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+#p-merge .mgpipe .t-lane {
+  font-size: 9.5px;
+  fill: var(--ink-3);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+#p-merge .mgpipe .t-queue {
+  font-size: 9.5px;
+  fill: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+/* ---------- lane 方块：次级面 + 1px 描边（和面板内部其它次级块同一档） ---------- */
+#p-merge .mgpipe .lane {
+  fill: var(--panel-2);
+  stroke: var(--line-strong);
+  stroke-width: 1;
+}
+/* 这一列这一单根本不用（例如遮罩来自 dfm，没有 XSeg 模型）：压到最弱，别假装有 lane */
+#p-merge .mgpipe .lane.off { fill: var(--panel); stroke: var(--line); }
+#p-merge .mgpipe .lane.off + .t-lane { fill: var(--line-strong); }
+
+/* ---------- 卡住：某列 >600ms 没 tick（还没完成）→ 琥珀色低透明 ---------- */
+#p-merge .mgpipe .lane.stall { fill: var(--mgp-stall); stroke: var(--warn); }
+
+/* ---------- 点亮：瞬间到峰值（6% ≈ 69ms）→ 1.15s 暗回常态 ----------
+   用 class 摘/挂 + 强制重排来重启，所以「衰减途中再来一次」会重新点亮（叠加天然成立），
+   不同 lane 各挂各的动画，互不打断。 */
+@keyframes mgpipeLit {
+  0%   { fill: var(--panel-2); stroke: var(--line-strong); }
+  6%   { fill: var(--mgp-lit); stroke: var(--ok); }
+  40%  { fill: var(--mgp-lit-mid); stroke: var(--mgp-lit-line); }
+  100% { fill: var(--panel-2); stroke: var(--line-strong); }
+}
+#p-merge .mgpipe .lane.lit {
+  animation: mgpipeLit 1.15s cubic-bezier(.22, .8, .25, 1) forwards;
+}
+
+/* ---------- 列标题的状态色（进行中 / 完成 / 失败），颜色只上标题，不上方块 ---------- */
+#p-merge .mgpipe .col.done .t-stage { fill: var(--ok); }
+#p-merge .mgpipe .col.err .t-stage { fill: var(--bad); }
+#p-merge .mgpipe .col.on .t-stage { fill: var(--ink); }
+
+/* ---------- 减动效：只留稳态颜色，光点也不放（JS 那边同步关） ---------- */
+@media (prefers-reduced-motion: reduce) {
+  #p-merge .mgpipe .lane.lit { animation: none; }
+  .mgeff-mask,
+  .mgeff-sheet { animation: none !important; }
+}
 
 

@@ -37,7 +37,10 @@ def _roots() -> tuple:
     拿不到再按仓库布局退一级（parents[2]），最后才用文件自己的父目录兜底。
     """
     here = Path(__file__).resolve()
-    app_dir = here.parents[1]                       # app/tools/xxx.py → app/
+    # 脚本在 app/tools/audit/ 里（2024 年那一轮把 tools 根下的脚本分流进了子目录）：
+    # parents[2] = app/，parents[3] = 仓库根。以前的 parents[1] 是按「tools 根下」
+    # 算的，挪进 audit/ 之后算出来是 app/tools，然后一路拼出 app/app/web/index.html。
+    app_dir = here.parents[2]                       # app/tools/audit/xxx.py → app/
     try:
         if str(app_dir) not in sys.path:
             sys.path.insert(0, str(app_dir))
@@ -47,10 +50,10 @@ def _roots() -> tuple:
             return root, root / "app"
     except Exception:
         pass
-    for root in (here.parents[2], here.parents[1]):     # 标准布局：<root>/app/tools/
+    for root in (here.parents[3], here.parents[2]):     # 标准布局：<root>/app/tools/<组>/
         if (root / "app" / "web" / "index.html").is_file():
             return root, root / "app"
-    return here.parents[2], here.parents[2] / "app"
+    return here.parents[3], here.parents[3] / "app"
 
 
 ROOT, APP = _roots()

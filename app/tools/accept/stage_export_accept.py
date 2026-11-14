@@ -726,7 +726,7 @@ UI_SNAP = r"""
 
 def case_ui(video):
     try:
-        from tools.merge_accept import Browser, _edge_path
+        from tools.accept.merge_accept import Browser, _edge_path
     except Exception as e:                                 # noqa: BLE001
         return check(False, "f 浏览器自动化不可用（tools.merge_accept）", str(e)[:160])
     edge = _edge_path()

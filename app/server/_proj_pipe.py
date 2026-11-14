@@ -460,6 +460,15 @@ def run(cfg: dict):
     q_cmp = queue.Queue(maxsize=_QDEPTH)
     q_enc = queue.Queue(maxsize=_QDEPTH)
     q_done = queue.Queue()
+    # 流水线实况（导出进度页那条 SVG 图的数据源，见 server/routes_merge.py 的 _StageMeter）：
+    # lane 数一律取**这一单实际的线程数** —— 合成 n_cmp 条、编码 n_enc 条、dfm 一份会话 1 条。
+    # 这一条链没有检测/切帧（aligned 已经是产物），所以 frames/det/xseg 三列留空。
+    rm._STAGE_METER.reset(lanes={
+        "dfm": ["dfm#0"],
+        "compose": ["t%d" % _i for _i in range(max(1, int(n_cmp)))],
+        "encode": ["e%d" % _i for _i in range(max(1, int(n_enc)))],
+    })
+    rm._STAGE_METER.bind({"dfm": q_gpu, "compose": q_enc})
     it = iter(range(len(frames)))
     it_lock = threading.Lock()
     shut_lock = threading.Lock()
@@ -611,6 +620,7 @@ def run(cfg: dict):
                     continue
                 _acc("prep", t_prep)
                 for fc in job["faces"]:
+                    rm._stage_tick("dfm")        # 交接点：读帧/warp → dfm（每张脸一次）
                     if not _put(q_gpu, (job, fc)):
                         return
         except BaseException as e:                          # noqa: BLE001
@@ -757,6 +767,7 @@ def run(cfg: dict):
                 # 和老路 worker 里的 swap_ms 可比；排队等位不算在内（那是流水线深度，
                 # 31 帧/秒时当然能积到 1~2 秒，混进来会让人以为单帧变慢了）。
                 job["swap_ms"] = (time.time() - (job.get("t_gpu") or job["t0"])) * 1000.0
+                rm._stage_tick("compose")        # 交接点：dfm/遮罩/合成 → 编码
                 _put(q_enc, job)
         except BaseException as e:                          # noqa: BLE001
             fail["err"] = fail["err"] or ("compose: %r" % (e,))
@@ -792,6 +803,7 @@ def run(cfg: dict):
                     job["error"] = "编码失败：%s" % str(e)[:120]
                 _acc("encode", t_enc)
                 job["out"] = None
+                rm._stage_tick("encode")         # 交接点：编码 → 写盘
                 _put(q_done, (job["i"], job))
         except BaseException as e:                          # noqa: BLE001
             fail["err"] = fail["err"] or ("encode: %r" % (e,))
@@ -915,6 +927,8 @@ def run(cfg: dict):
     finally:
         samp_stop.set()
         quit_event.set()
+        # 流水线实况收单：不再涨，但保留 lane/ticks 给界面画最后一帧
+        rm._STAGE_METER.stop()
         for th in ths:
             try:
                 th.join(timeout=5.0)

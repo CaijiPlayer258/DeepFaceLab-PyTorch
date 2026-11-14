@@ -1085,16 +1085,9 @@
               <div class="albd" id="mgpEffWarnBody"></div>
             </div>
 
-            <!-- 「当前生效」（只读）：后端回的 [eff] 配置，和上面横幅是同一份数据。
-                 用户能直接对照「我设的」与「它在跑的」；每个值后面的小标签是来源：
-                 界面 = 请求体给的 / 推断 = 后端从别的字段推的 / 默认 = 后端默认。 -->
-            <div class="mgeff" id="mgpEff" hidden>
-              <div class="mgeff-hd">
-                <b>当前生效（后端回显）</b>
-                <span class="mgeff-route" id="mgpEffRoute">—</span>
-              </div>
-              <div class="mgeff-grid" id="mgpEffGrid"></div>
-            </div>
+            <!-- 「当前生效」（只读）不再常驻：14 个字段以后归「控制台输出」界面，
+                 这里折成右下角一个文字入口 + 抽屉（点开才渲染，不占版面）。
+                 横幅必须留着 —— 它是「界面设了、后端没按它跑」的唯一提示。 -->
 
             <div class="mgprog-bar" id="mgpBar">
               <i id="mgpFill" style="width:0%"></i>
@@ -1104,33 +1097,32 @@
               <span id="mgpFrames">—</span>
               <span id="mgpEta">剩余 —</span>
             </div>
-
-            <!-- 六步动画：直接复用「模型转换」那套 Stepper（节点 + 连线 + 当前步高亮），
-                 文案换成 切帧 → 切脸 → 换脸 → 遮罩 → 合成 → 导出。每完成一个阶段推进一格。 -->
+            <!-- 流水线实况（SVG）
+                 ------------------------------------------------------------
+                 为什么是这张图：快速导出（fused，默认路径）里六段是**并行**跑的，
+                 「六个圆点」只能表达进行中/完成，表达不了「谁把东西交给谁」「队列里
+                 还压着几个」「哪个池有几条线程」。这里换成 6 列 × N 条 lane：
+                   方块 = **一条真线程**（lane 名与条数全都来自 status.stages，
+                 前端不写死：合成池 8 线程就是 t0..t7，编码 6 线程就是 e0..e5），
+                   曲线 = 数据流方向（三次贝塞尔，两段在列间中线处平滑衔接），
+                   光点 = 正在传的那一帧（每次 tick 一个，从实际那条 lane 出发），
+                   列间那句「在飞 N」= status.stages[key].inflight（0 时不显示）。
+                 点亮：lane 瞬间到峰值 → 1.15s 暗回常态（可叠加）；>600ms 没 tick
+                 且没完成 → 整列琥珀色。结构和曲线一次建好、之后只改文字和坐标，
+                 不每个 tick 重建 DOM（这是「别再卡」的一半）。
+                 结构由 app.js 的 MG_PIPE 生成；这里只留一个空 svg 当挂载点。 -->
             <div class="mgprog-steps" id="mgpStepsBox">
-              <div class="cvsteps" id="mgpSteps">
-                <div class="cvst" id="mgpS1" data-s="frames">
-                  <div class="cvline"><i></i></div>
-                  <div class="cvsh"><span class="cvic">1</span><span class="cvnm">切帧</span><span class="cvtip"></span></div>
+              <div class="mgpipe" id="mgPipe">
+                <div class="mgpipe-hd">
+                  <b>流水线</b>
+                  <span class="mgpipe-sub" id="mgPipeSub">六段并行 · 每格一条 lane</span>
+                  <span class="mgpipe-right" id="mgPipeRight">— 帧/秒</span>
                 </div>
-                <div class="cvst" id="mgpS2" data-s="faces">
-                  <div class="cvline"><i></i></div>
-                  <div class="cvsh"><span class="cvic">2</span><span class="cvnm">切脸</span><span class="cvtip"></span></div>
-                </div>
-                <div class="cvst" id="mgpS3" data-s="pred">
-                  <div class="cvline"><i></i></div>
-                  <div class="cvsh"><span class="cvic">3</span><span class="cvnm">换脸</span><span class="cvtip"></span></div>
-                </div>
-                <div class="cvst" id="mgpS4" data-s="mask">
-                  <div class="cvline"><i></i></div>
-                  <div class="cvsh"><span class="cvic">4</span><span class="cvnm">遮罩</span><span class="cvtip"></span></div>
-                </div>
-                <div class="cvst" id="mgpS5" data-s="merge">
-                  <div class="cvline"><i></i></div>
-                  <div class="cvsh"><span class="cvic">5</span><span class="cvnm">合成</span><span class="cvtip"></span></div>
-                </div>
-                <div class="cvst" id="mgpS6" data-s="encode">
-                  <div class="cvsh"><span class="cvic">6</span><span class="cvnm">导出</span><span class="cvtip"></span></div>
+                <div class="mgpipe-sep"></div>
+                <div class="mgpipe-body">
+                  <svg id="mgPipeSvg" class="mgpipe-svg" viewBox="0 0 1200 340"
+                       preserveAspectRatio="xMidYMid meet" role="img"
+                       aria-label="导出流水线实况：六列 lane、数据流曲线与在飞帧数"></svg>
                 </div>
               </div>
             </div>
@@ -1154,6 +1146,30 @@
             <div class="mgprog-foot" id="mgpFoot">
               <button class="btn" id="mgpCancel">取消导出</button>
             </div>
+
+            <!-- 右下角的轻入口（文字链接）：14 个字段折进抽屉，信息不丢、也不占版面。
+                 没有 eff 回显时禁用 —— 点开一片空白的弹层比没有入口更糟。 -->
+            <div class="mgprog-efflnk">
+              <button class="mgprog-lnk" id="mgpEffOpen" type="button"
+                      aria-haspopup="dialog" aria-controls="mgpEffDrawer" disabled>查看生效配置</button>
+            </div>
+          </div>
+
+          <!-- 生效配置抽屉（不是常驻面板）：点「查看生效配置」才打开，打开时才渲染这 14 个字段。
+               值后面那个小标签是来源：界面 = 请求体给的 / 推断 = 后端从别的字段推的 / 默认 = 后端默认。
+               右下角入口 + 抽屉 = 「信息还在、版面不占」，且 14 字段以后整体搬去控制台界面时只删这一块。 -->
+          <div class="mgeff-drawer" id="mgpEffDrawer" hidden>
+            <div class="mgeff-mask" id="mgpEffMask"></div>
+            <aside class="mgeff-sheet" role="dialog" aria-modal="true"
+                   aria-labelledby="mgpEffTitle" tabindex="-1" id="mgpEffSheet">
+              <div class="mgeff-hd">
+                <b id="mgpEffTitle">当前生效（后端回显）</b>
+                <span class="mgeff-route" id="mgpEffRoute">—</span>
+                <button class="mgeff-x" id="mgpEffClose" type="button"
+                        title="关闭" aria-label="关闭">×</button>
+              </div>
+              <div class="mgeff-grid" id="mgpEffGrid"></div>
+            </aside>
           </div>
         </div>
 

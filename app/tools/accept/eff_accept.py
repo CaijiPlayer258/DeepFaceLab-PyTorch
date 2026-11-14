@@ -356,14 +356,19 @@ def _shot_banner(eff, warns):
             ev("(function(){var d=%s; window.mgpEffRender(d.eff, d.warns); return true;})()"
                % payload)
             time.sleep(0.5)
+            # 14 个字段不再常驻：点右下角的「查看生效配置」才渲染进抽屉
+            ev("(function(){var o=document.getElementById('mgpEffOpen');"
+               "if(o) o.click(); return true;})()")
+            time.sleep(0.4)
             state = ev("(function(){var b=document.getElementById('mgpEffWarn');"
                        "var body=document.getElementById('mgpEffWarnBody');"
                        "var g=document.getElementById('mgpEffGrid');"
-                       "var p=document.getElementById('mgpEff');"
+                       "var p=document.getElementById('mgpEffDrawer');"
                        "return JSON.stringify({banner: !!b && !b.hidden,"
                        "text: body?String(body.textContent):'',"
                        "items: g?g.children.length:0,"
-                       "panel: !!p && !p.hidden});})()")
+                       "panel: !!p && !p.hidden,"
+                       "gone: !document.getElementById('mgpEff')});})()")
             rect = ev("(function(){var e=document.querySelector('#p-merge .mgview"
                       "[data-view=\"progress\"] .mgprog');"
                       "if(!e) return '';var r=e.getBoundingClientRect();"
@@ -460,9 +465,11 @@ def main(argv=None):
                 check(ui.get("banner") is True, "F1 顶部横幅可见", str(ui.get("banner")))
                 check("detector" in str(ui.get("text")), "F2 横幅文案里有 detector",
                       str(ui.get("text"))[:160])
-                check(int(ui.get("items") or 0) >= len(FIELDS), "F3 面板 14 个字段",
+                check(ui.get("gone") is True, "F3 常驻面板 #mgpEff 已删除", str(ui.get("gone")))
+                check(int(ui.get("items") or 0) >= len(FIELDS), "F4 抽屉里 14 个字段",
                       "items=%s" % ui.get("items"))
-                check(ui.get("panel") is True, "F4 面板可见", str(ui.get("panel")))
+                check(ui.get("panel") is True, "F5 抽屉（#mgpEffDrawer）可见",
+                      str(ui.get("panel")))
         else:
             say("--no-browser：跳过截图")
 
