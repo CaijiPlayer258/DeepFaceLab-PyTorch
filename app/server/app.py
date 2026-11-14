@@ -802,7 +802,9 @@ _HOT_OPTIONS = {
 # 合成导出：调 4.0 的 main.py merge --pipeline（ONNX DFM，不需要 torch 权重）
 # ============================================================
 _merge_job = {"running": False, "log": [], "ok": None, "error": None, "out": "",
-              "pct": 0, "msg": ""}
+              "pct": 0, "msg": "",
+              # 生效配置（见 server/_eff.py）：导出启动时写入，/export/status 回给界面
+              "eff": None, "eff_warnings": [], "warnings": []}
 
 
 # 界面上的「遮罩来源 × 遮罩模式」→ MergeStudio 的 mask_mode 整数

@@ -1073,6 +1073,29 @@
               <span class="mgprog-file" id="mgpFile">—</span>
             </div>
 
+            <!-- 生效配置不一致横幅：后端把 [eff-warn] 塞进 status.eff_warnings[]，
+                 这里只负责显示（可关闭，换一单就重新出现）。复用 .alert.warn/.loadbanner
+                 那一套（左侧强调条 + 图标 + 标题），和训练页的模块加载横幅同一种东西。 -->
+            <div class="alert warn loadbanner mgeff-warn" id="mgpEffWarn" hidden aria-live="polite">
+              <div class="alhd">
+                <span class="lbico" aria-hidden="true">!</span>
+                <b id="mgpEffWarnTitle">生效配置与界面可能不一致</b>
+                <button class="alx" id="mgpEffWarnX" type="button" title="关闭" aria-label="关闭">×</button>
+              </div>
+              <div class="albd" id="mgpEffWarnBody"></div>
+            </div>
+
+            <!-- 「当前生效」（只读）：后端回的 [eff] 配置，和上面横幅是同一份数据。
+                 用户能直接对照「我设的」与「它在跑的」；每个值后面的小标签是来源：
+                 界面 = 请求体给的 / 推断 = 后端从别的字段推的 / 默认 = 后端默认。 -->
+            <div class="mgeff" id="mgpEff" hidden>
+              <div class="mgeff-hd">
+                <b>当前生效（后端回显）</b>
+                <span class="mgeff-route" id="mgpEffRoute">—</span>
+              </div>
+              <div class="mgeff-grid" id="mgpEffGrid"></div>
+            </div>
+
             <div class="mgprog-bar" id="mgpBar">
               <i id="mgpFill" style="width:0%"></i>
             </div>

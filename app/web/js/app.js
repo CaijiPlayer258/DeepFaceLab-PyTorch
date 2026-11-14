@@ -6765,6 +6765,108 @@ function mgStageEmpty(on) {
     }
     window.mgVramPreflight = mgVramPreflight;
 
+    /* ============================================================
+       生效配置（后端 [eff] 的回显）—— 进度页顶部的横幅 + 只读小面板
+       ------------------------------------------------------------
+       为什么要有这一块：检测器那个 bug 里日志写着 retinaface_10g、界面写着 TinyMog，
+       两边各自都对，就是没人对得上账。后端现在每一单都回一份 eff（字段 + 来源）和
+       eff_warnings[]，这里只负责摆出来：
+         · 横幅：请求体/界面默认值对不上时出现（可关闭，换一单重新出现）；
+         · 面板：这次真正生效的 14 个字段，值 + 来源（界面 / 推断 / 默认）。
+       ============================================================ */
+    var MGP_EFF = { eff: null, warns: [], dismissed: false };
+    var MGP_EFF_LABEL = [
+      ["detector", "检测器"], ["mask_source", "遮罩来源"], ["ct_mode", "色域迁移"],
+      ["blend", "融合方式"], ["erode", "遮罩腐蚀"], ["blur", "遮罩羽化"],
+      ["models", "模型"], ["faces_project", "人脸库"], ["library_enabled", "人脸库启用"],
+      ["fast_export", "快速导出"], ["frame_range", "帧范围"], ["workers", "并发"],
+      ["batch", "批大小"], ["jpeg_quality", "JPEG 质量"]
+    ];
+
+    function mgpEffSrcText(s) {
+      return s === "ui" ? "界面" : (s === "inferred" ? "推断" : "默认");
+    }
+    function mgpEffFmt(v) {
+      if (v === true) return "开";
+      if (v === false) return "关";
+      if (v === null || v === undefined || v === "") return "—";
+      if (Object.prototype.toString.call(v) === "[object Array]") {
+        return v.length ? v.join("、") : "—";
+      }
+      return String(v);
+    }
+    function mgpEffHideWarn() {
+      var box = $("mgpEffWarn");
+      if (box) { box.hidden = true; box.classList.add("hide"); }
+    }
+    function mgpEffShowWarn(warns) {
+      var box = $("mgpEffWarn");
+      if (!box) return;
+      var texts = [];
+      for (var i = 0; i < (warns || []).length; i++) {
+        var w = warns[i] || {};
+        var t = w && w.text ? String(w.text) : String(w || "");
+        if (t) texts.push(t);
+      }
+      if (!texts.length || MGP_EFF.dismissed) { mgpEffHideWarn(); return; }
+      var title = $("mgpEffWarnTitle"), body = $("mgpEffWarnBody");
+      if (title) title.textContent = "生效配置与界面可能不一致（" + texts.length + " 项）";
+      if (body) body.textContent = texts.join("\n");
+      box.hidden = false;
+      box.classList.remove("hide");
+    }
+    /* 后端回显 -> 面板。eff / warns 都来自 status（或 POST 响应），只读 */
+    function mgpEffRender(eff, warns) {
+      var box = $("mgpEff"), grid = $("mgpEffGrid"), routeEl = $("mgpEffRoute");
+      if (eff) MGP_EFF.eff = eff;
+      if (warns && warns.length) MGP_EFF.warns = warns;
+      eff = MGP_EFF.eff;
+      if (!box || !grid) return;
+      if (!eff) { box.hidden = true; return; }
+      /* 同一份配置（status 每 500ms 轮询一次）不重画：DOM 只在配置真变了时动 */
+      var paintKey = String(eff.route || "") + "|" + String(eff.at || "") + "|" +
+                     String(eff.kind || "") + "|" + String((MGP_EFF.warns || []).length);
+      if (MGP_EFF.paintKey === paintKey) return;
+      MGP_EFF.paintKey = paintKey;
+      if (routeEl) {
+        routeEl.textContent = String(eff.route || "") +
+          (eff.kind ? (" · " + String(eff.kind)) : "");
+      }
+      grid.innerHTML = "";
+      for (var i = 0; i < MGP_EFF_LABEL.length; i++) {
+        var key = MGP_EFF_LABEL[i][0], name = MGP_EFF_LABEL[i][1];
+        var src = eff[key + "_src"] || "default";
+        var item = document.createElement("div");
+        item.className = "mgeff-i";
+        item.setAttribute("data-k", key);
+        var k = document.createElement("span"); k.className = "k"; k.textContent = name;
+        var b = document.createElement("b"); b.className = "v";
+        b.textContent = mgpEffFmt(eff[key]);
+        var s = document.createElement("i"); s.className = "s " + src;
+        s.textContent = mgpEffSrcText(src);
+        if (eff.src_note && eff.src_note[key]) s.title = String(eff.src_note[key]);
+        item.appendChild(k); item.appendChild(b); item.appendChild(s);
+        grid.appendChild(item);
+      }
+      box.hidden = false;
+      mgpEffShowWarn(MGP_EFF.warns.length ? MGP_EFF.warns
+                                          : (eff.warnings || []));
+    }
+    window.mgpEffRender = mgpEffRender;
+    window.__mgpEff = function () { return MGP_EFF; };
+
+    /* 横幅的 × ：只关本次挂载（换一单在 mgpReset 里复位，和训练页横幅同一个口径） */
+    (function bindEffWarnX() {
+      var x = $("mgpEffWarnX");
+      if (x && !x.dataset.bound) {
+        x.dataset.bound = "1";
+        x.addEventListener("click", function () {
+          MGP_EFF.dismissed = true;
+          mgpEffHideWarn();
+        });
+      }
+    })();
+
     function mgpReset() {
       mgpRejectHide();
       var nodes = mgpNodes();
@@ -6780,6 +6882,11 @@ function mgStageEmpty(on) {
       var fr = $("mgpFrames"); if (fr) fr.textContent = "—";
       var eta = $("mgpEta"); if (eta) eta.textContent = "剩余 —";
       var fileEl = $("mgpFile"); if (fileEl) fileEl.textContent = "—";
+      /* 生效配置：换一单就重新开始 —— 上一单点过的「关闭横幅」不该延续到这一单 */
+      MGP_EFF = { eff: null, warns: [], dismissed: false };
+      var effBox = $("mgpEff"); if (effBox) effBox.hidden = true;
+      var effGrid = $("mgpEffGrid"); if (effGrid) effGrid.innerHTML = "";
+      mgpEffHideWarn();
     }
     window.mgpReset = mgpReset;
     window.mgpPaint = mgpPaint;
@@ -6832,6 +6939,7 @@ function mgStageEmpty(on) {
     /* 阶段状态 -> 总进度条 + 帧数/速度 + 当前步右侧小字 */
     function mgpStatusPaint(d, idx) {
       d = d || {};
+      if (d.eff) mgpEffRender(d.eff, d.eff_warnings);
       var p = Math.max(0, Math.min(100, Number(d.stage_pct) || 0));
       var overall = Math.round((idx * 100 + p) / MGP_STAGES.length);
       if (d.phase === "done") overall = Math.round(((idx + 1) * 100) / MGP_STAGES.length);
@@ -7095,6 +7203,7 @@ function mgStageEmpty(on) {
 
     function mgpFusedPaint(d) {
       d = d || {};
+      if (d.eff) mgpEffRender(d.eff, d.eff_warnings);
       var v = d.vid || {};
       var total = Number(v.total || d.total || 0);
       var done = Number(v.done || d.frames_done || 0);

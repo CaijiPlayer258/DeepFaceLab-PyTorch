@@ -5796,3 +5796,82 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   font-variant-numeric: tabular-nums;
 }
 
+/* ============================================================
+   生效配置（[eff] 回显）：进度页顶部的横幅 + 只读小面板
+   ------------------------------------------------------------
+   横幅复用 .alert.warn / .loadbanner（左侧强调条 + 图标），面板是等宽小格子：
+   「我设的」和「它在跑的」要能一眼对上，所以值用粗体、来源用小标签（界面/推断/默认）。
+   ============================================================ */
+#p-merge .mgeff-warn {
+  margin: 0 0 12px;
+}
+#p-merge .mgeff-warn .albd {
+  white-space: pre-line;
+  font-family: var(--mono, ui-monospace, Consolas, monospace);
+  font-size: 11.5px;
+}
+#p-merge .mgeff-warn[hidden] { display: none !important; }
+
+#p-merge .mgeff {
+  margin: 0 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel, rgba(255,255,255,.02));
+  padding: 10px 12px;
+}
+#p-merge .mgeff[hidden] { display: none !important; }
+#p-merge .mgeff-hd {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+#p-merge .mgeff-hd b { font-size: 12px; font-weight: 650; color: var(--ink); }
+#p-merge .mgeff-route {
+  font-family: var(--mono, ui-monospace, Consolas, monospace);
+  font-size: 11px;
+  color: var(--ink-3);
+}
+#p-merge .mgeff-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 6px 10px;
+}
+#p-merge .mgeff-i {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  padding: 3px 6px;
+  border-radius: 6px;
+  background: rgba(127,127,127,.06);
+}
+#p-merge .mgeff-i .k {
+  font-size: 11.5px;
+  color: var(--ink-3);
+  flex: none;
+}
+#p-merge .mgeff-i .v {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#p-merge .mgeff-i .s {
+  margin-left: auto;
+  flex: none;
+  font-style: normal;
+  font-size: 10.5px;
+  line-height: 1.5;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--ink-3);
+}
+#p-merge .mgeff-i .s.ui { color: #7dd3a0; border-color: rgba(125,211,160,.35); }
+#p-merge .mgeff-i .s.inferred { color: #f0b429; border-color: rgba(240,180,41,.42); }
+#p-merge .mgeff-i .s.default { color: var(--ink-3); }
+
+
