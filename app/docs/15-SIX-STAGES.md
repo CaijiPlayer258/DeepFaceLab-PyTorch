@@ -64,7 +64,7 @@ pp（seamless 之后再把结果 warp 回脸空间做二次色彩迁移）；`mt
 别再为了「逐像素相同」把预览接回 compose —— 那会把耗时翻一倍（实测 497 ms/帧），还会让
 预览变成「有 cache 一个样、没 cache 另一个样」。
 
-验这条边界的工具：`app/tools/preview_fast_accept.py` —— 连续 10 帧预览断言
+验这条边界的工具：`app/tools/accept/preview_fast_accept.py` —— 连续 10 帧预览断言
 `<视频>_cache/` 不存在；故意摆一个脏 cache（frames/pred/mask 里塞半成品）再预览，
 目录一个字节不许动、出图与 cache 外那份逐像素相同。
 
@@ -95,10 +95,10 @@ PNG 写回 level 1；多线程跑帧（cv2 释放 GIL）。
 
 ## 验收
 
-`python app/tools/stage6_accept.py`（真后端 + 1080×1920 样片 + 现有 dfm，全在 %TEMP%）：
+`python app/tools/accept/stage6_accept.py`（真后端 + 1080×1920 样片 + 现有 dfm，全在 %TEMP%）：
 六步顺序跑通、每步只产出自己的目录、遮罩产物读回断言、409 闸门、来源切换失效、
 ③④ 取消续跑、纯 CPU 断言（推理调用 0 / session 不增 / 显存不涨）、fps ≥ 20、
 成片 vs 单帧预览 mean ≤ 8、与 4.0 逐像素对拍 mean ≤ 2 / max ≤ 8、预览 vs 导出帧
 （两条代码路径，容差 8，无损对拍实测 mean 0.02~0.03 —— 已经不是"逐像素 0"，那条 0 差
 是靠预览读 cache 里的 pred/mask 凑出来的，现在预览不读 cache）。预览零 cache 另见
-`app/tools/preview_fast_accept.py`。
+`app/tools/accept/preview_fast_accept.py`。

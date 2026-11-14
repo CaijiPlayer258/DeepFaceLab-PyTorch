@@ -22,7 +22,7 @@ _model_input_size = 256  # Overridden by model_loader
 #
 # 开关：环境变量 DFL_MERGE_ROI=0 退回整帧版（逐位对拍/出问题时逃生）。
 # 逐位一致的依据见 _compose_roi_standard 的注释；对拍脚本见
-# app/tools/roi_parity_accept.py。
+# app/tools/accept/roi_parity_accept.py。
 # ----------------------------------------------------------------------------
 _ROI_ENV = "DFL_MERGE_ROI"
 

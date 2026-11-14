@@ -52,7 +52,7 @@ def _params_cache_path(dat_path):
 def _read_params_cache(dat_path):
     """缓存必须和 data.dat 一一对应：文件大小 + mtime 对不上就当没有。
 
-    外部工具（tools/clear_Iter_str.py、转换器、ipe rov 原版）会直接改 data.dat，
+    外部工具（tools/migrate/clear_Iter_str.py、转换器、ipe rov 原版）会直接改 data.dat，
     靠这对指纹保证我们不会拿一份过期的参数去覆盖它。
     """
     try:
@@ -434,7 +434,7 @@ class ModelBase(object):
             io.log_info('  ' + line)
         if len(report) > 12:
             io.log_info(f"  …（其余 {len(report) - 12} 行报告："
-                        f"python tools/import_legacy_dat.py --dat {self.model_data_path}）")
+                        f"python tools/migrate/import_legacy_dat.py --dat {self.model_data_path}）")
         self._legacy_dat = {'report': report, 'counts': counts, 'reasons': reasons}
         return migrated
 
@@ -463,7 +463,7 @@ class ModelBase(object):
             io.log_info("[LEGACY] 当前目录里连 TF 权重（.npy）都没有，这份 dat 只能当参数模板：")
         # 注意顺序：转换脚本是拿 dat 里的 options 建网络骨架的，老 dat（archi=dfhd 等）
         # 直接喂给它只会 ValueError: Unsupported SAEHD archi_type —— 先迁 dat 再转。
-        io.log_info('        python tools/import_legacy_dat.py '
+        io.log_info('        python tools/migrate/import_legacy_dat.py '
                     f'--dat "{self.model_data_path}" '
                     f'--apply --out "<目标模型目录>/{stem}_data.dat" --convert')
 

@@ -1190,7 +1190,7 @@ class SAEHDModel(ModelBase):
                           f"事件见上方 [DFL-LOAD-EVENT] 行。")
                     if _event.get('reason') in ('corrupt', 'shape'):
                         print(f"       若源为 DFL 的 .npy，请先运行 "
-                              f"python tools/convert_dfl_tf_to_torch.py --strict 核对转换报告后再重试。")
+                              f"python tools/migrate/convert_dfl_tf_to_torch.py --strict 核对转换报告后再重试。")
                 status = '已重置'
             else:
                 status = '已加载'

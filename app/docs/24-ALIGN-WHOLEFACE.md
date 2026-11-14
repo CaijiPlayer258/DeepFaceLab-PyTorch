@@ -70,7 +70,7 @@ aligned 画布与 facelib 画布不是同一个东西。
 
 ---
 
-## 四、回归门（`app/tools/align_wf_accept.py`，16 项全 PASS）
+## 四、回归门（`app/tools/accept/align_wf_accept.py`，16 项全 PASS）
 
     汇总：PASS 16 · FAIL 0 · 用时 21.4s
 

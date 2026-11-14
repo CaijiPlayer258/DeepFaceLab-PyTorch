@@ -9,7 +9,7 @@
 
 ## 1. 怎么量的
 
-`app/tools/export_mem_probe.py`（真后端 + 真视频 + 现成 dfm，全程 psutil）：
+`app/tools/bench/export_mem_probe.py`（真后端 + 真视频 + 现成 dfm，全程 psutil）：
 
 * 按角色分：**后端**（serve.py）、**预览 worker**（preview_worker_*.py）、**ffmpeg 子进程**；
 * 每个角色记 **RSS（工作集＝任务管理器「内存」）/ private（提交）/ USS（独占）**；

@@ -203,7 +203,7 @@ class RetinaFaceDet:
         单独拆出来是为了让调用方在**别的线程**先把这一步做掉（decode 线程有富余，
         检测线程是硬底）：detect() = prep() + detect_ctx()，两步的分界线就是
         「CPU 的 resize / 填边」与「前向 + NMS」，拆开前后逐位一致（同一个函数、
-        同一个插值、同一张 canvas），见 app/tools/det_prep_parity.py。
+        同一个插值、同一张 canvas），见 app/tools/accept/det_prep_parity.py。
         """
         return _prep_ctx(img_bgr, self.input_size, 0)
 

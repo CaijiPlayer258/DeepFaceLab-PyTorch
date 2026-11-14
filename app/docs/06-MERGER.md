@@ -77,7 +77,7 @@ POST /api/merge/face-debug  {"frame":0,"face":0,"settings":{…},"models":[…]}
   （默认 256×256），缺哪一项就给同尺寸黑图 —— 六格永远都有图。
 * 结果是六张 data URL，前端自己排版，所以点任意一格能放大（再点一次 / `Esc` 缩回去）。
 * 前端把它当**盖在舞台上的一层**：底图、描边 canvas、chip 一个都不动，点「返回」
-  收起来以后画面与进入前逐像素一致（验收：`app/tools/merge_face_debug_accept.py`）。
+  收起来以后画面与进入前逐像素一致（验收：`app/tools/accept/merge_face_debug_accept.py`）。
 
 ## 二之三、没有模型 / 没有人脸：直接回原帧（不合成）
 
@@ -197,8 +197,8 @@ staging（硬链接）→ 载入 DFM → 逐帧合成 → ffmpeg 编码 → 清�
 ## 六、怎么验收
 
 ```
-python app/tools/merge_accept.py                 # 默认样片，跑到「导出启动 + 取消」为止，约 30 秒
-python app/tools/merge_accept.py 视频.mp4 --keep  # 连导出一起跑完（千帧约 2 分钟）
+python app/tools/accept/merge_accept.py                 # 默认样片，跑到「导出启动 + 取消」为止，约 30 秒
+python app/tools/accept/merge_accept.py 视频.mp4 --keep  # 连导出一起跑完（千帧约 2 分钟）
 ```
 
 它起后端、用 CDP 驱动无头 Edge **真实点击**，逐项断言：导入素材 / 选模型 / 检测出框 /
@@ -215,7 +215,7 @@ python app/tools/merge_accept.py 视频.mp4 --keep  # 连导出一起跑完（�
 
 
 ```
-python app/tools/test_merge_api.py        # 接口层
+python app/tools/accept/test_merge_api.py        # 接口层
 # 端到端：prepare 一个 3 秒 90 帧的项目 → POST /api/merge/export-project
 #        → merged/ 90 张、尺寸与源帧一致、ffmpeg 报 90/30=3.0s + aac 音轨
 #        → 删一半 merged 再跑（只补缺的）、删源帧再跑（点名缺哪几张）

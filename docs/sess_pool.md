@@ -6,7 +6,7 @@
 > 剩下 40 ms 是 CPU 侧的 letterbox resize + 争用，多开 session 只是把同一份 CPU 活
 > 做两遍。数据在下面。
 
-## 1. 按模型：GPU EP vs CPU EP（`app/tools/sess_bench.py`）
+## 1. 按模型：GPU EP vs CPU EP（`app/tools/bench/sess_bench.py`）
 
 单张中位 ms（同一份 onnx，只换 EP；本机 16 物理核 / 32 逻辑核，RTX 5070 Laptop）：
 
@@ -49,7 +49,7 @@ python 开销，以及被别段抢 CPU 之后的额外等待。** 这一段是�
 「GPU 算力」瓶颈。多开一路 CPU detect session 等于把同一份 resize 再做一遍 ——
 这正是实测看到的：detect 段占用从 95% 涨到 178% / 238%，帧率却纹丝不动。
 
-## 3. 扫描台：真流水线、逐格跑（`app/tools/sess_sweep.py`）
+## 3. 扫描台：真流水线、逐格跑（`app/tools/bench/sess_sweep.py`）
 
 每一格都是**一次真的 /api/merge/export**（同一条片子、同一份 dfm、同一套参数），
 6 秒样片、每格 3 次取中位。命令：

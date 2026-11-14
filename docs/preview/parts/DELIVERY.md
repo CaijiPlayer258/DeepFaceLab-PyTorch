@@ -207,12 +207,12 @@ POST /api/mask/predict|text|bisenet   需要 AI 模型，返回 501
 ### 9.2 后端
 
 ```
-POST /api/models/{name}/export        起后台线程跑 4.0 的 tools/export_dfm.py
+POST /api/models/{name}/export        起后台线程跑 4.0 的 tools/migrate/export_dfm.py
 GET  /api/models/export/status        轮询：running / ok / error / log[-40:]
 ```
 
 用 **4.0 的 python**（torch 2.7.0+cu128 + onnx 1.22）跑，命令：
-`python tools/export_dfm.py --model SAEHD --model-dir <ws>/model --force-name <name>`
+`python tools/migrate/export_dfm.py --model SAEHD --model-dir <ws>/model --force-name <name>`
 cwd 设在 4.0 根目录（脚本要 `sys.path` 找 core/models）。
 
 ### 9.3 发现并修掉一个会毁数据的坑

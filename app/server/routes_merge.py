@@ -5065,7 +5065,7 @@ def _preview_job(job: dict) -> dict:
 # 但代价是：① 预览开始依赖 cache 存在与否（有 cache 和没 cache 出图不一样，还会读到
 # 别人留下的半成品）；② 整帧 float32 的色彩迁移 + compose 比一步式慢一倍
 # （1080×1920 实测 10 帧端到端：改前 497ms/帧 → 改后 230ms/帧，见
-# app/tools/preview_fast_accept.py）；③ 一次 UI 预览把六阶段的代码路径也拉进了请求
+# app/tools/accept/preview_fast_accept.py）；③ 一次 UI 预览把六阶段的代码路径也拉进了请求
 # 线程。整条已删掉，连同「从 <视频>_cache/frames 读帧」那一小段。
 #
 # 现在只有一条路：取帧 → worker → MergeMaskedFace（dfm 推理 + 遮罩 + 融合一次做完）
@@ -10375,7 +10375,7 @@ def _vram_reserve_mb(free_mb) -> float:
         上限 768MB 防止 24GB 卡上又长出一个 1.2GB 的死重。
 
     实测佐证（本机 RTX 5070 Laptop 8GB）：按新口径算，「空闲 3.17GB / 需要 2.46GB」
-    的单子直接放行，真跑 12 帧 0 OOM（app/tools/vram_force_accept.py 的 A 段）；
+    的单子直接放行，真跑 12 帧 0 OOM（app/tools/accept/vram_force_accept.py 的 A 段）；
     而按老口径它必被拒 —— 那 1.37GB 里没有一个字节是实测需要的。
     """
     free = max(0.0, float(free_mb or 0.0))
@@ -11337,7 +11337,7 @@ def _stage_do_pred(cfg: dict) -> dict:
     语义照 4.0 export_pipeline.py:769（fo = warpAffine(frame, get_transform_mat(lm,
     swap_sz, WHOLE_FACE)) → dfm 前向）。
 
-    **吞吐**（本机实测，1080×1920、每帧 1 张脸、app/tools/stage_perf_profile.py）：
+    **吞吐**（本机实测，1080×1920、每帧 1 张脸、app/tools/bench/stage_perf_profile.py）：
         read 28.5ms/张（4 线程摊薄后，整帧 PNG 解码 17.7ms 是底）· prep 9ms/张 ·
         infer 37.6ms(ort-CUDA) / 30.4ms(原生 TRT bf16) ← 硬底 · write 26ms/张（2 线程）
     墙钟 ≈ max(三段)：25.6 张/秒(ort-CUDA) / 31.8 张/秒(原生 TRT)。
@@ -11952,7 +11952,7 @@ def _stage_do_mask(cfg: dict) -> dict:
     的 XSegLite 纯推理只要 1.44 ms/图（实测），也就是 92% 的时间不在推理上。现在拆成
     读 N 线程 / 推理 1 线程 / 写 M 线程三段（和 ③ 换脸同一套结构），墙钟从「各段相加」
     变成「取最长的那段」；dst 输入换成 aligned 之后读线程不再是瓶颈（口径见
-    app/tools/stage_perf_profile.py 与 %TEMP% 里的 before/after 基准）。
+    app/tools/bench/stage_perf_profile.py 与 %TEMP% 里的 before/after 基准）。
     """
     import sys as _sys
     import numpy as np
@@ -14042,9 +14042,9 @@ def merge_stage(name: str, body: dict = None):
 # ============================================================
 # 视频模式 · 快速导出（融合流水线 fused）
 # ------------------------------------------------------------
-# 口径（用户定的，实测见 app/tools/fused_pipeline_bench.py，同段 1080p 120 帧）：
+# 口径（用户定的，实测见 app/tools/bench/fused_pipeline_bench.py，同段 1080p 120 帧）：
 #   分段六阶段 7.20 帧/秒 · 六阶段合一**串行** 6.10（0.85x）· 合一**流水线** 20.55（2.85x）。
-# 这份生产实现的实测（app/tools/fused_export_accept.py，同一个样片 1080x1920 120 帧）：
+# 这份生产实现的实测（app/tools/accept/fused_export_accept.py，同一个样片 1080x1920 120 帧）：
 #   17.4~18.2 帧/秒（分段 7.20 → ≈2.5x）· quality=fast 20.9 帧/秒。
 #   差的那一点全在检测器：retinaface_10g 单帧 47~50ms = 约 20 帧/秒的硬底（它跑在
 #   onnxruntime 上，workspace/_engines 里的 retinaface TRT 引擎 app 层没接上）。
@@ -14603,7 +14603,7 @@ def _fused_open_frames(video: Path, start_i: int, size=None, mode="raw", bits=No
 
     默认 raw：`-f rawvideo -pix_fmt bgr24`（8bit 源）/`bgr48le -> >>8`（>8bit 源），
     软解。产物和切帧阶段落盘的 frames/%06d.png **逐位相同**（30 帧 mean 0.0000 / max 0 /
-    100% 像素相同），每帧 25.2 → 8.9 ms。回归见 app/tools/fused_decode_parity.py。
+    100% 像素相同），每帧 25.2 → 8.9 ms。回归见 app/tools/accept/fused_decode_parity.py。
 
     DFL_FUSED_DECODE=png 保留 PNG 管道（ffmpeg 解 → 无损 PNG → 管道 → cv2.imdecode）：
     排障时用它，或者要「同一条 PNG 编解码路径」做对照时用它（约 25ms/帧）。
@@ -14630,7 +14630,7 @@ def _fused_open_frames(video: Path, start_i: int, size=None, mode="raw", bits=No
     #   png  · 任意 ：ffmpeg 解 → PNG(无损) → 管道 → cv2.imdecode。25 ms/帧（可选）。
     # 为什么 raw 不改像素：两条路都是「同一个软解 → 同一个 swscale → BGR」，PNG 只是无损
     # 容器（8bit 源 rgb24 / >8bit 源 rgb48be，后者 cv2 取高字节 = 这里的 >>8）。
-    # 这条口径由 app/tools/fused_decode_parity.py 对着 frames/%06d.png 逐帧逐像素盯着。
+    # 这条口径由 app/tools/accept/fused_decode_parity.py 对着 frames/%06d.png 逐帧逐像素盯着。
     raw = str(mode or "raw").strip().lower() in _FUSED_RAW_MODES
     rf = (0, 0)
     deep = False
@@ -14849,7 +14849,7 @@ def _fused_run(cfg: dict) -> dict:
     det_src = str(cfg.get("det_align_src") or "cfg.det_align")
     det_thresh = float(cfg.get("align_thresh") or 0.5)
     # 检测的 letterbox 在 decode 线程先做（检测线程只留前向 + NMS）。关掉 = 回到老口径，
-    # 两条路逐位一致（同一个 prep()，见 app/tools/det_prep_parity.py），留这个开关
+    # 两条路逐位一致（同一个 prep()，见 app/tools/accept/det_prep_parity.py），留这个开关
     # 只是为了 A/B 与排障时能量到两边的账。
     det_prep_on = str(os.environ.get(_FUSED_ENV_DET_PREP) or "1").strip().lower() \
         not in ("0", "off", "false", "no")
@@ -15083,7 +15083,7 @@ def _fused_run(cfg: dict) -> dict:
 
     # ---- ① 解码：ffmpeg 的 rawvideo 帧流 → 帧缓冲（信号量卡死上限，满了解码就停，天然背压）----
     # 默认 rawvideo（软解）：和切帧产物 frames/%06d.png 逐位相同，25.2→8.9 ms/帧
-    # （见 _fused_open_frames 的注释 + app/tools/fused_decode_parity.py 的对拍回归）。
+    # （见 _fused_open_frames 的注释 + app/tools/accept/fused_decode_parity.py 的对拍回归）。
     # DFL_FUSED_DECODE=png 可退回 PNG 管道（排障 / 想走「同一条 PNG 编解码路径」时用）。
     gen = {}
     dec_mode = str(os.environ.get(_FUSED_ENV_DECODE) or "raw").strip().lower()
@@ -16024,9 +16024,9 @@ def _start_video_export(body: dict):
 
       · fused=1（默认，快速导出）：_fused_run 的全内存流水线 —— 解码 → 检测 → 对齐/归组
         → dfm → XSeg → 合成 → 编码 同时跑，段间只有有界队列，**不落中间产物**
-        （<视频名>_cache/ 一个都不建）。原型（app/tools/fused_pipeline_bench.py）同段
+        （<视频名>_cache/ 一个都不建）。原型（app/tools/bench/fused_pipeline_bench.py）同段
         1080p 120 帧量到 20.55 帧/秒（分段 7.20）；这份生产实现的验收见
-        app/tools/fused_export_accept.py：同一段片 18.21 帧/秒（分段 7.20 → 2.5x），
+        app/tools/accept/fused_export_accept.py：同一段片 18.21 帧/秒（分段 7.20 → 2.5x），
         换 fast 档检测器 20.87 —— 硬底是 retinaface_10g 单帧 47~50ms（它跑在
         onnxruntime 上，workspace/_engines 里那个 retinaface TRT 引擎 app 层没接）。
         代价：不支持续跑（取消就整段重跑）。

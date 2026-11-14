@@ -2,7 +2,7 @@
 
 > 「三条路」（融合视频导出 / 项目导出 / 预览）共用一份预算：**按预算跑，跑不了就明说**。
 > 代码：`app/server/routes_merge.py` 的 `_vram_plan` 一段（搜 `显存预算（三条路共用）`）。
-> 验收：`app/tools/vram_plan_accept.py`（三档伪造显存）、`app/tools/vram_reclaim_accept.py`
+> 验收：`app/tools/accept/vram_plan_accept.py`（三档伪造显存）、`app/tools/accept/vram_reclaim_accept.py`
 > （**预览常驻 → 导出**这条真实路径 + 「谁占的显存」）。
 
 ## 1. 为什么要有这一层
@@ -62,7 +62,7 @@ Windows/WDDM 上 `torch.cuda.mem_get_info` 报的空闲**比 nvidia-smi 高**：
 新口径只覆盖表里最后两行：底线 256MB ≈ P0 校准出来的探测误差（我们 vs nvidia-smi
 差 ≤256MB），5% 让大空闲时自动放宽，768MB 封顶（24GB 卡上别再长出 1.2GB 死重）。
 
-实测（`app/tools/vram_force_accept.py`，本机 RTX 5070 Laptop 8GB / 384 dfm）：
+实测（`app/tools/accept/vram_force_accept.py`，本机 RTX 5070 Laptop 8GB / 384 dfm）：
 
 | 场景 | 预留 | 可用 | 结果 |
 |---|---|---|---|

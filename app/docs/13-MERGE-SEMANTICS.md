@@ -60,7 +60,7 @@ iperov 当年的设计背景：
   mean 0.02~0.03 / max 20~33；成片 vs 预览 mean ≈ 3.6~4（编码往返），容差 8。
 - **预览永远不许读/写 cache**：不许"发现有 cache 就复用"，也不许为「和成片逐像素一致」
   把预览接回 compose —— 那样预览会慢一倍，还会因为 cache 在不在出两张不同的图。
-- 细节与验收见 `15-SIX-STAGES.md` 与 `app/tools/preview_fast_accept.py`。
+- 细节与验收见 `15-SIX-STAGES.md` 与 `app/tools/accept/preview_fast_accept.py`。
 
 ## 落地时的检查清单
 

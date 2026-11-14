@@ -109,7 +109,7 @@ tinymog 走，属于两套口径。
 - 为什么拆：解码线程只忙 ~15ms/帧（30~40%），检测线程是硬底（retinaface 89% 占用）。
 - 为什么是“搬家”不是“省掉”：那 0.7~0.9ms 的 resize 必须有人做；搬到有富余的线程才是净赚。
 - **逐位一致**：同一个 `_prep_ctx()`、同一个插值、同一张 canvas，`detect()` 与
-  `prep()+detect_ctx()` 的框/关键点/分数误差 **0.000**（`app/tools/det_prep_parity.py`，退出码 2 = 有误差）。
+  `prep()+detect_ctx()` 的框/关键点/分数误差 **0.000**（`app/tools/accept/det_prep_parity.py`，退出码 2 = 有误差）。
 - `DFL_FUSED_DET_PREP=0` 关掉（回老口径），A/B 用。
 
 **为什么不做「ffmpeg 直接解 640」**（`-vf scale=640:-2`）：swscale 的 bilinear 和 cv2 的

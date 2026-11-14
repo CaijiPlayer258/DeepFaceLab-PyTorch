@@ -112,7 +112,7 @@ It is fallbacked to IMWRITE_JPEG_SAMPLING_FACTOR_420.
 - GUI 提取：`app.py` `_align_stream` → `write_dfljpg`（默认 4:4:4）；
 - 分段导出切脸：`routes_merge.py` `write_dfljpg(..., quality=100, subsampling=0)`；
 - 帧图 jpg 分支：`routes_merge._stage_imencode`（默认还是 png，jpg 只在 `image_format=jpg` 时）；
-- `app/tools/faces_profile.py` 统计的就是同一个函数。
+- `app/tools/bench/faces_profile.py` 统计的就是同一个函数。
 
 仍然按库默认写 4:2:0 的（本仓库 GUI 不走，列出来免得误会）：
 

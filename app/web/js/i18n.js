@@ -1599,10 +1599,10 @@
   /* 参数页顶部的 TF 时代 dat 迁移提示（js/legacy_notice.js）。
      带数字的副行不在这里 —— 那种整句对不上字典，留给中文原文。 */
   Object.assign(DICT, {
-  "该 dat 来自 TF 版本，需用 app/tools/import_legacy_dat.py --convert 转换权重":
-    "This dat is from the TF build — convert the weights with app/tools/import_legacy_dat.py --convert",
-  "这份 dat 是 4.1 格式，但目录里的权重还是 TF 的 *.npy，需用 app/tools/import_legacy_dat.py --convert 转换权重":
-    "The dat is 4.1 format, but the weights are still TF *.npy — convert them with app/tools/import_legacy_dat.py --convert",
+  "该 dat 来自 TF 版本，需用 app/tools/migrate/import_legacy_dat.py --convert 转换权重":
+    "This dat is from the TF build — convert the weights with app/tools/migrate/import_legacy_dat.py --convert",
+  "这份 dat 是 4.1 格式，但目录里的权重还是 TF 的 *.npy，需用 app/tools/migrate/import_legacy_dat.py --convert 转换权重":
+    "The dat is 4.1 format, but the weights are still TF *.npy — convert them with app/tools/migrate/import_legacy_dat.py --convert",
   "这份 dat 来自 TF 版本，参数已自动迁移": "This dat is from the TF build — parameters were migrated automatically",
   "判定依据": "Why it counts as legacy",
   "明细": "Details",

@@ -274,11 +274,11 @@ def notice(dat_path):
     hint, note = "", ""
     if needs:
         if info["detected"]:
-            hint = ("该 dat 来自 TF 版本，需用 app/tools/import_legacy_dat.py --convert "
+            hint = ("该 dat 来自 TF 版本，需用 app/tools/migrate/import_legacy_dat.py --convert "
                     "转换权重")
         else:
             hint = ("这份 dat 是 4.1 格式，但目录里的权重还是 TF 的 *.npy，"
-                    "需用 app/tools/import_legacy_dat.py --convert 转换权重")
+                    "需用 app/tools/migrate/import_legacy_dat.py --convert 转换权重")
         if w["tf"] == 0:
             note = "目录里连 TF 权重（*.npy）都没有：这份 dat 只有参数，训练会从零开始。"
 

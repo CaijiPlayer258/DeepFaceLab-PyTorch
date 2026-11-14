@@ -177,7 +177,7 @@ class XSegMasker:
 
         能批量就一次前向（本机 256² 实测：ort-CUDA 逐张 4.02 ms/张 → batch2 2.68 ms/张），
         引擎只吃 batch 1（TRT 的 xseglite 档位是单档）就老实逐张 —— 逐张也不慢，
-        1.44 ms/张，瓶颈根本不在推理（见 app/tools/stage_perf_profile.py 的实测表）。
+        1.44 ms/张，瓶颈根本不在推理（见 app/tools/bench/stage_perf_profile.py 的实测表）。
         批量失败时把上限降回 1 并逐张重跑，行为静默但对调用方仍然正确。
         """
         import cv2

@@ -416,10 +416,10 @@ class Saveable():
         """Load original DeepFaceLab (TensorFlow) .npy weights.
 
         NOTE: this is an independent COPY of the matching logic in
-        tools/convert_dfl_tf_to_torch.py (that CLI is not imported here, so the
+        tools/migrate/convert_dfl_tf_to_torch.py (that CLI is not imported here, so the
         two must be kept in sync by hand). It is the code path actually used by
         training auto-convert (load_weights -> ':0' in key) and by the merger
-        page (.npy -> DFM via tools/export_dfm.py convert_npy_to_pth).
+        page (.npy -> DFM via tools/migrate/export_dfm.py convert_npy_to_pth).
 
           1. Build TF name -> param mapping from layer hierarchy
           2. Try exact name match first, then with/without the ':0' suffix

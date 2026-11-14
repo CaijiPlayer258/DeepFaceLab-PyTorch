@@ -104,7 +104,7 @@
 传帧改用裸 BGR 是**过了像素门**才切的：同一帧、同参数对拍（1080x1920 真项目帧）
 q95 JPEG 往返 vs 裸字节 = mean 0.1506 LSB / 差异像素 12.60% / max 5 LSB，在 0.5 LSB 门内。
 
-## 五、实测（1080x1920，416 的 dfm，90~120 帧真项目，app/tools/proj_pool_accept.py）
+## 五、实测（1080x1920，416 的 dfm，90~120 帧真项目，app/tools/accept/proj_pool_accept.py）
 
 | workers×batch | 帧/秒 | 显存峰值 | worker 单帧 p50 | 落盘/失败 |
 |---|---|---|---|---|

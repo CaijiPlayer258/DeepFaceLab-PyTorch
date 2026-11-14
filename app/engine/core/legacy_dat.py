@@ -10,7 +10,7 @@ iperov 的 TF 版把 iter / options / loss_history / sample_for_preview 一起 p
 一个分辨率对、架构却悄悄变成 liae-ud 的模型。
 
 本模块只做「参数翻译」。TF 的权重（``*_encoder.npy`` / ``.ckpt``）与 Torch 的张量布局
-不同，只能走 ``tools/convert_dfl_tf_to_torch.py``；``.dfm`` 不在讨论范围。
+不同，只能走 ``tools/migrate/convert_dfl_tf_to_torch.py``；``.dfm`` 不在讨论范围。
 
 键差异从哪来（不是猜的）
 ------------------------

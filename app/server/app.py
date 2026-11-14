@@ -637,7 +637,7 @@ def _get_detector(name=None):
 
 # ============================================================
 # DFM 导出（内置在合成器里）
-# 用 4.0 的 python（有 torch 2.7 + onnx）跑 tools/export_dfm.py
+# 用 4.0 的 python（有 torch 2.7 + onnx）跑 tools/migrate/export_dfm.py
 # ============================================================
 _export_job = {"running": False, "name": "", "log": [], "ok": None, "error": None}
 from ._paths import engine_python as _engine_python, engine_root as _engine_root

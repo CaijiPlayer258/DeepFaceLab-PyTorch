@@ -225,7 +225,7 @@ runtime\server\Scripts\python.exe app\tools\speed_bench.py --json D:\MyProject\_
 
 | 套件 | 结果 |
 |---|---|
-| `app/tools/merge_accept.py` | **PASS 10 · FAIL 0 · SKIP 0**（修完 3 条 FAIL 后） |
+| `app/tools/accept/merge_accept.py` | **PASS 10 · FAIL 0 · SKIP 0**（修完 3 条 FAIL 后） |
 | `fused_export_accept` | 64 PASS / 0 FAIL |
 | `stage6_accept` | 64 PASS / 0 FAIL |
 | `vram_plan_accept` / `vram_force_accept` / `vram_reclaim_accept` | 51 / 45 / 26 PASS · 0 FAIL |

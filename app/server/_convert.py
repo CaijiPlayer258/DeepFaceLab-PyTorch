@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """TF/Legacy .npy 模型 -> torch .pth 的转换任务（跑在 4.1 WebGUI 里）。
 
-真正的转换由 4.0 的 tools/convert_dfl_tf_to_torch.py 完成——它已经把
+真正的转换由 4.0 的 tools/migrate/convert_dfl_tf_to_torch.py 完成——它已经把
 权重名映射、卷积核 perm(3,2,0,1) 重排这些事做对了，这里只负责：
   1) 找到 workspace/model 里带 *_weights.npy 的模型
   2) 拉起那个脚本（用引擎 python，有 torch）
