@@ -6563,10 +6563,17 @@ function mgStageEmpty(on) {
          所以 1200×340 渲染出来接近 1:1～1.15:1，9.5px 的 lane 名字不会缩成 6px。
          高度不变 → 换 lane 数也不会让页面跳动。 */
       var W = 1200, H = 340, PADL = 56, TOPY = 58, BOXW = 74, GAP = 7;
-      var MAX_PULSE = 60;      /* 同屏最多 60 个光点，超了丢最旧的（别把 rAF 拖死） */
+      /* 光点密度由**两个物理上限**决定，不再按「每次轮询硬切 10 个」：
+           · PULSE_PER_S：每秒最多放多少个（按 POLL_MS 折算成每次轮询的预算）；
+           · MAX_PULSE  ：同屏最多几个在飞（≈ 40 帧/秒 × 8 张脸 × 0.6s 飞行时间的极端值）。
+         常见档（20~30 帧/秒、每帧 1~4 张脸）一条都不丢；只有极端帧率/人脸数才按比例稀释。
+         以前 TICK_MAX=10 把「20 帧/秒」也一起砍了（500ms × 20fps = 每段正好 10 个），
+         而且 10 个还在同一瞬间一次性放出来 —— 肉眼就是「每半秒跳一波」。 */
+      var MAX_PULSE = 200;     /* 同屏在飞上限（丢最旧的） */
+      var PULSE_PER_S = 240;   /* 每秒最多放几个光点 */
+      var POLL_MS = 250;       /* 和轮询同一个窗口：一拍的光点铺在这 250ms 里 */
       var LIT_MS = 1250;       /* 1.15s 动画 + 余量，之后摘 .lit 回稳态 */
       var STALL_MS = 600;      /* 某列多久没 tick 算卡住 */
-      var TICK_MAX = 10;       /* 一次轮询最多补几个光点（20 帧/秒 × 0.5s ≈ 10） */
 
       var geo = {};            /* key -> {cx, off, lanes:[{y,rect,txt}], count, queue, col} */
       var edgesIn = {};        /* "si:ai" -> {d, el}：源 lane → 腰点 */
@@ -6583,6 +6590,7 @@ function mgStageEmpty(on) {
       var state = {};          /* key -> "" / on / done / err（列标题颜色） */
       var seq = 0;             /* 光点序号：多 lane 时按它轮转 */
       var lastFlashed = [];    /* 最近一拍真正点亮过的 lane（验收拍照时按它重挂） */
+      var lastSpawn = 0;       /* 最近一拍实际放出去几个光点（验收要看「按预算稀释」有没有生效） */
       var layers = null;
       /* 截图专用：把光点的时钟按住（>0 = 定格在这个时刻），只给验收拍照用。
          光点只有 470–750ms 的命，一张 headless 截图往返就可能比它长 —— 拍照时
@@ -6750,11 +6758,16 @@ function mgStageEmpty(on) {
         }
         return changed;
       }
-      function flashOne(k, i) {
-        flashes.push({ k: k, i: i });
+      /* 点亮也铺在同一个窗口里：at = 这一次交接「应该」发生的时刻（不会早于现在）。
+         同一帧里同一条 lane 只闪一次（5 帧叠在 1/60 秒里看不出差别，但会白跑 4 次强制重排）。 */
+      function flashOne(k, i, at) {
+        flashes.push({ k: k, i: i, at: at || 0 });
       }
       function recycle(p) {
         p.c.setAttribute("opacity", "0");
+        /* 坐标也清掉：池里的圆点不该带着上一次飞行的残坐标（探针/截图都可能看见它） */
+        p.c.removeAttribute("cx");
+        p.c.removeAttribute("cy");
         pool.push(p.c);
         /* 光点的临时 path 用完就删（它只是给 getPointAtLength 当尺子，
            不进 DOM 的可见层，也不留垃圾） */
@@ -6763,26 +6776,46 @@ function mgStageEmpty(on) {
       }
       /* d = 源 lane→腰点 那段 + 腰点→目标 lane 那段（第二段以 "M 腰点" 开头，
          位置正好落在腰点上，所以拼起来的路径是**连续**的，光点从源 lane 一路走到目标 lane）。 */
-      function addPulse(d) {
+      var lastSeen = {};      /* 这一拍要亮哪几条 lane（去重，给拍照用） */
+      function rememberFlash(k, i) {
+        var id = k + "#" + i;
+        if (lastSeen[id]) return;
+        lastSeen[id] = 1;
+        lastFlashed.push({ k: k, i: i });
+        if (lastFlashed.length > 64) lastFlashed.shift();
+      }
+      var lenCache = {};      /* 同一条「源→腰→目标」路径的长度只量一次 */
+      function addPulse(key, d, startAt) {
         if (!layers) return;
         if (pulses.length >= MAX_PULSE) recycle(pulses.shift());   /* 超上限丢最旧的 */
         var path = mk("path", { d: d, fill: "none", stroke: "none" });
         layers.pulse.appendChild(path);
+        var L = lenCache[key];
+        if (L === undefined) {
+          /* getTotalLength() 会逼一次 SVG 布局；同一条路径反复量就是纯浪费（240 个/秒时很致命） */
+          L = path.getTotalLength();
+          lenCache[key] = L;
+        }
         var c = pool.pop() || mk("circle", { r: 2.4, fill: "var(--ok)" });
         if (!c.parentNode) layers.pulse.appendChild(c);
-        c.setAttribute("opacity", ".9");
-        pulses.push({ c: c, path: path, L: path.getTotalLength(),
-                      t0: nowMs(), dur: 470 + Math.random() * 280 });
+        c.setAttribute("opacity", "0");          /* 还没到起飞时刻：先藏着 */
+        pulses.push({ c: c, path: path, L: L, t0: startAt,
+                      dur: 470 + Math.random() * 280 });
       }
       /* 一次 tick：点亮发起的那条 lane，再沿曲线放一个光点过去。
          多 lane 的阶段（合成/编码）拿不到「是哪一条 lane 干的」—— status 里不带这个，
          每帧都带一份会让 500ms 的那次轮询白白变大。所以按 tick 序号**轮转**，
          保证光点始终落在**真实存在的 lane** 上（不是编出来的位置）。 */
-      function spawn(k, n) {
+      function spawn(k, n, sched) {
         var si = KEYS.indexOf(k);
         if (si < 0) return;
         if (si === KEYS.length - 1) {
-          for (var z = 0; z < n; z++) { seq += 1; flashOne(k, seq % Math.max(1, geo[k].lanes.length)); }
+          for (var z = 0; z < n; z++) {
+            seq += 1;
+            var li = seq % Math.max(1, geo[k].lanes.length);
+            flashOne(k, li, sched());
+            rememberFlash(k, li);
+          }
           return;
         }
         var to = si + 1;
@@ -6792,11 +6825,13 @@ function mgStageEmpty(on) {
         for (var j = 0; j < n; j++) {
           seq += 1;
           var ai = A.lanes.length ? (seq % A.lanes.length) : 0;
-          flashOne(k, ai);
+          var at = sched();          /* 这一发「应该」发生的时刻（铺在轮询窗口里） */
+          flashOne(k, ai, at);
+          rememberFlash(k, ai);
           if (!B || reduceMotion()) continue;
           var bi = B.lanes.length ? ((seq * 7 + 3) % B.lanes.length) : 0;
           var ein = edgesIn[si + ":" + ai], eout = edgesOut[si + ":" + bi];
-          if (ein && eout) addPulse(ein.d + " " + eout.d);
+          if (ein && eout) addPulse(si + ":" + ai + ":" + bi, ein.d + " " + eout.d, at);
         }
       }
       function kick() {
@@ -6808,12 +6843,16 @@ function mgStageEmpty(on) {
         if (freezeAt > 0) t = freezeAt;      /* 截图定格（见 freezeAt 的说明） */
         /* ① 点亮：摘类 → 强制重排 → 挂类（动画才会重放；衰减途中再来一次会重新点亮，
               不同 lane 各挂各的，互不打断）。合到一帧里做，减少强制重排次数。 */
-        lastFlashed = flashes.slice(0);        /* 拍照时要知道「刚才亮过哪几条」 */
+        /* 点亮是铺在窗口里的：只处理 at <= t 的那些，没到点的留到下一帧（不丢） */
+        var keep = [];
         while (flashes.length) {
           var f = flashes.shift();
+          if (f.at && f.at > t) { keep.push(f); continue; }
           var g = geo[f.k];
           var lane = g && g.lanes[f.i];
           if (!lane) continue;
+          if (t - (lane.lastLit || -1e9) < 16) continue;   /* 同一帧里同一条 lane 只闪一次 */
+          lane.lastLit = t;
           lane.rect.classList.remove("lit");
           void lane.rect.getBoundingClientRect();
           lane.rect.classList.add("lit");
@@ -6831,10 +6870,16 @@ function mgStageEmpty(on) {
             }, LIT_MS);
           })(lane, lane.rect, lane.gen);
         }
+        if (keep.length) flashes = keep.concat(flashes);
         /* ② 光点：沿曲线 getPointAtLength 走；只写 cx/cy/opacity，不读布局。 */
         for (var i = pulses.length - 1; i >= 0; i--) {
           var p = pulses[i];
-          var kk = Math.min(1, (t - p.t0) / p.dur);
+          var kk = (t - p.t0) / p.dur;
+          if (kk < 0) {                     /* 还没到起飞时刻：藏在源 lane 边上 */
+            if (p.c.getAttribute("opacity") !== "0") p.c.setAttribute("opacity", "0");
+            continue;
+          }
+          kk = Math.min(1, kk);
           var pt = p.path.getPointAtLength(p.L * kk);
           p.c.setAttribute("cx", pt.x.toFixed(1));
           p.c.setAttribute("cy", pt.y.toFixed(1));
@@ -6865,21 +6910,41 @@ function mgStageEmpty(on) {
         if (signature(lanes) !== sig) build(lanes);
         var t = nowMs();
         var running = !!d.running;
-        for (var i = 0; i < KEYS.length; i++) {
-          var k = KEYS[i], row = live[k] || {};
-          var ticks = Math.max(0, Number(row.ticks) || 0);
+        var wants = [], total = 0, i, k, row, ticks, delta, n;
+        for (i = 0; i < KEYS.length; i++) {
+          k = KEYS[i]; row = live[k] || {};
+          ticks = Math.max(0, Number(row.ticks) || 0);
           setCount(k, ticks);
-          var delta = (prev[k] === undefined) ? 0 : (ticks - prev[k]);
-          if (delta > 0) {
-            lastAt[k] = t;
-            spawn(k, Math.min(delta, TICK_MAX));
-          } else if (lastAt[k] === undefined) {
-            lastAt[k] = t;                 /* 第一次看到它：从这里开始算「多久没动」 */
-          }
+          delta = (prev[k] === undefined) ? 0 : (ticks - prev[k]);
+          if (delta > 0) lastAt[k] = t;
+          else if (lastAt[k] === undefined) lastAt[k] = t;  /* 第一次看到：从这儿算「多久没动」 */
           prev[k] = ticks;
+          wants.push(delta > 0 ? delta : 0);
+          if (delta > 0) total += delta;
           /* 卡住 = 还在跑 + 这一段没完成 + 已经 >600ms 没 tick（tick 一恢复就自动复原） */
           markStall(k, running && state[k] !== "done" &&
                        (t - (lastAt[k] || t)) > STALL_MS);
+        }
+        /* 这一拍放多少个光点：按 PULSE_PER_S 折算的预算**按比例**稀释（各段比例不变），
+           再把这个总数的每一发均匀铺在 POLL_MS 窗口里 —— 20 帧/秒时就是每 250/5 = 50ms
+           一发，肉眼是连续流，而不是「每半秒跳一波」。 */
+        var budget = Math.max(4, Math.round(PULSE_PER_S * POLL_MS / 1000));
+        var scale = total > budget ? (budget / total) : 1;
+        var plan = [], wantSpawn = 0;
+        for (i = 0; i < KEYS.length; i++) {
+          n = Math.max(0, Math.round(wants[i] * scale));
+          plan.push(n);
+          wantSpawn += n;
+        }
+        lastSpawn = wantSpawn;
+        if (wantSpawn > 0) {
+          var slotMs = POLL_MS / wantSpawn;
+          var slot = 0;
+          var sched = function () { slot += 1; return t + slot * slotMs; };
+          lastSeen = {};
+          for (i = 0; i < KEYS.length; i++) {
+            if (plan[i] > 0) spawn(KEYS[i], plan[i], sched);
+          }
         }
         kick();
       }
@@ -6888,6 +6953,8 @@ function mgStageEmpty(on) {
         var i;
         freezeAt = 0;
         lastFlashed = [];
+        lastSeen = {};
+        lastSpawn = 0;
         kick();                       /* 上一张照片可能把时钟按住了：重开后要重新起 ticker */
         for (i = 0; i < pulses.length; i++) recycle(pulses[i]);
         pulses = [];
@@ -6915,7 +6982,9 @@ function mgStageEmpty(on) {
         var out = { keys: KEYS, sig: sig, pulses: pulses.length, pool: pool.length,
                     stalled: {}, ticks: {}, state: {}, lanes: {},
                     edges: 0, edges_in: 0, edges_out: 0, waists: {},
-                    last_flashed: lastFlashed, built: !!layers };
+                    last_flashed: lastFlashed, last_spawn: lastSpawn,
+                    max_pulse: MAX_PULSE, pulse_per_s: PULSE_PER_S, poll_ms: POLL_MS,
+                    built: !!layers };
         var i, k;
         for (i = 0; i < KEYS.length; i++) {
           k = KEYS[i];
@@ -7002,6 +7071,11 @@ function mgStageEmpty(on) {
       if (fb) {
         var can = (typeof onForce === "function") && d.can_force !== false;
         fb.hidden = !can;
+        /* mgpRejectHide / mgpResultShow 会把 display:none 写成**内联**样式；这里必须清掉，
+           否则「被拒 → 离开 → 再被拒」之后那颗按钮再也回不来（内联样式压过类规则）。
+           以前它能一直挂着，靠的正是「.btn 的 display 压过了 [hidden]」这个 bug —— 修好
+           [hidden] 之后，这条显式的清场就成了必须的。 */
+        fb.style.display = can ? "" : "none";
         fb.disabled = false;
         fb.title = "按最小档真跑一次；真 OOM 会自动回滚到这一页，不会把后端搞坏";
       }
@@ -7523,6 +7597,9 @@ function mgStageEmpty(on) {
           }
           mgpTerminal(false, d, idx);
         }).catch(function () { mgpPollStage(idx, body, next); });
+      /* 分段链保持 600ms：/stage/status 每次要 listdir 四个产物目录（frames/aligned/
+         pred/mask），帧数上千时加频率不划算；而且分段链是**串行**的，图上不会出现
+         「同一时刻一大堆交接」那种密度问题。 */
       }, 600);
     }
 
@@ -7779,7 +7856,10 @@ function mgStageEmpty(on) {
               });
             }
           }).catch(function () { /* 网络抖一下就等下一拍 */ });
-      }, 500);
+      /* 250ms：和 MG_PIPE 的 POLL_MS 同一个窗口（一拍的光点就铺在这 250ms 里）。
+         以前 500ms 时，20 帧/秒的一段一次要补 10 个 tick，全在同一瞬间放出来，
+         肉眼就是「每半秒跳一波」；4 次/秒的 status 请求在后端只是读一次 qsize，不贵。 */
+      }, 250);
     }
 
     function mgFusedExport(payload) {

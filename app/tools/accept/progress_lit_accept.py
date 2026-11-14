@@ -10,8 +10,9 @@ r"""导出进度页「流水线实况」验收：6 列 lane + 贝塞尔曲线 + 
      右下角「查看生效配置」→ 抽屉里 14 个字段 + 来源标签。
   C  图：六列标题、lane 方块数 == 所有 lanes 之和；相邻两列**共用一个腰点**
      （源 lane → 腰点 → 目标 lane，条数 = 源+目标，不再是交叉的 N×M），每条只是一段
-     贝塞尔（d 里一个 C）、进出腰点坐标集合完全相同；光点从源 lane 经腰点走到目标 lane
-     且上限 60；lane 点亮 → 1.15s 暗回；>600ms 没 tick 的列整列琥珀、恢复后复原；
+     贝塞尔（d 里一个 C）、进出腰点坐标集合完全相同；光点从源 lane 经腰点走到目标 lane，
+     密度按「速率 240 个/秒 + 同屏 200」两个物理上限（不再按每次轮询硬切 10 个），
+     轮询窗口 250ms 且光点铺在窗口里；lane 点亮 → 1.15s 暗回；>600ms 没 tick 的列整列琥珀、恢复后复原；
      **图上没有「在飞 N」那行字**（用户要求删掉，inflight 仍在 status 里）。
   D  减动效：prefers-reduced-motion:reduce 时点亮动画是 none。
   E  复用：同一份 lanes 连喂两拍，SVG 节点身份不变（不重建 DOM）。
@@ -828,8 +829,24 @@ def main(argv=None):
                                            want_lit=False, want_pulse=True)
         pipe = json.loads(ev_json(call, "JSON.stringify(window.__mgpPipe())"))
         check(int(p_n) > 0, "C6 有 tick 增量就真的有光点在跑", "pulses=%s" % p_n)
-        check(int(pipe.get("pulses") or 0) <= 60, "C7 光点上限 60",
-              "pulses=%s" % pipe.get("pulses"))
+        # C7 的口径（用户要求「把上限去掉、闪烁要跟真实交接一样密」）：
+        #   旧：同屏 60 个、每次轮询最多 10 个（TICK_MAX）—— 那条上限把「20 帧/秒」也一起
+        #       砍了（500ms × 20fps = 每段正好 10 个），而且 10 个全在同一瞬间放出来，
+        #       肉眼就是「每半秒跳一波」。
+        #   新：两个**物理上限**，都不是为了让测试变绿：
+        #       · 同屏在飞 MAX_PULSE = 200（≈ 40 帧/秒 × 8 张脸 × 0.6s 飞行时间的极端值；
+        #         常见档 20~30 帧/秒、每帧 1~4 张脸，在飞只有几十个，根本碰不到）；
+        #       · 速率 PULSE_PER_S = 240 个/秒（按 250ms 窗口折算 = 每次轮询最多 60 个）。
+        #   这一条同时锁住「上限值」和「轮询窗口已经降到 250ms」两个设计决定。
+        check(int(pipe.get("pulses") or 0) <= int(pipe.get("max_pulse") or 200)
+              and int(pipe.get("max_pulse") or 0) == 200,
+              "C7 同屏在飞 ≤ MAX_PULSE=200（不再是 60）",
+              "pulses=%s max_pulse=%s" % (pipe.get("pulses"), pipe.get("max_pulse")))
+        check(int(pipe.get("poll_ms") or 0) == 250
+              and int(pipe.get("pulse_per_s") or 0) == 240,
+              "C7b 轮询窗口 250ms、速率上限 240 个/秒（光点铺在窗口里，不再一拍一堆）",
+              "poll_ms=%s pulse_per_s=%s"
+              % (pipe.get("poll_ms"), pipe.get("pulse_per_s")))
         on_curve = ev_json(call, r"""(function(){
           var svg = document.getElementById('mgPipeSvg');
           var paths = svg.querySelectorAll('path');
@@ -854,14 +871,27 @@ def main(argv=None):
         check(isinstance(on_curve, (int, float)) and float(on_curve) <= 30.0,
               "C8 光点落在那条贝塞尔曲线上（离最近采样点 <=30）", str(on_curve))
 
+        # C9 的口径也变了，改的理由写在下面（不是「为了变绿把 60 改成 200」）：
+        #   旧断言是「一次 delta 也只放 60 个」—— 那其实是 TICK_MAX=10 × 6 段的上限，
+        #   它同时也是「20 帧/秒也只能 10 个/段」的罪魁祸首，跟用户这次的诉求直接冲突。
+        #   新策略：**按速率预算**放（240 个/秒 × 250ms 窗口 = 每拍最多 60 个），超出就按
+        #   比例稀释（各段的光点比例不变，不是一刀切成一样多），并发另有 200 的上限兜底。
+        #   所以这条断言验的是两件事：
+        #     ① 巨大 delta（每段 +2000 = 12000 次交接）也只放出预算内那么多（≤60）；
+        #     ② 同时那些光点没有超过并发上限（≤200）。
         big2 = json.loads(json.dumps(live_status))
         for k in STAGES:
-            big2["stages"][k]["ticks"] = int((live["stages"].get(k) or {}).get("ticks") or 0) + 200
+            big2["stages"][k]["ticks"] = int((live["stages"].get(k) or {}).get("ticks") or 0) + 2000
         ev("window.mgpPipe(%s); true" % json.dumps(big2, ensure_ascii=False))
-        time.sleep(0.2)
-        cap = json.loads(ev_json(call, "JSON.stringify(window.__mgpPipe())"))
-        check(int(cap.get("pulses") or 0) <= 60,
-              "C9 一次大 delta 也只放 60 个（丢最旧的）", "pulses=%s" % cap.get("pulses"))
+        dump = json.loads(ev_json(call, "JSON.stringify(window.__mgpPipe())"))
+        budget = int(round(240 * 250 / 1000.0))
+        check(0 < int(dump.get("last_spawn") or 0) <= budget,
+              "C9 巨大 delta（每段 +2000）也只放「速率预算」内那么多",
+              "last_spawn=%s（预算 %d）· 交接总数 %d"
+              % (dump.get("last_spawn"), budget, 2000 * len(STAGES)))
+        check(int(dump.get("pulses") or 0) <= 200,
+              "C9b 同时光点总数 ≤ 并发上限 200",
+              "pulses=%s" % dump.get("pulses"))
 
         ev("window.__litProbe.starts = 0; true")
         base_starts = probe(ev)
@@ -903,7 +933,10 @@ def main(argv=None):
         #   · 光点用 mgpPipeFreeze 钉在出生后约 45%（默认 0 = 正常跑，运行时路径不看它）。
         # 动画/光点本身是真的，被按住的只是这张照片的时钟 —— C10~C14、C6/C8 验的是真跑。
         clip_rect = rect_of(call, "#p-merge .mgview[data-view='progress'] .mgprog")
-        ev("window.mgpPipeFreeze(performance.now() + 260); true")
+        # 定格在「起飞后 150~400ms」这个区间：光点铺在 250ms 的窗口里（最晚的 t0 = now+250），
+        # 所以把假时钟推到 now+400，飞得最早的那个走到 ~85%、最晚的 ~27% —— 都还在空中，
+        # 照片里是一串连续的点，而不是挤在 lane 出口。
+        ev("window.mgpPipeFreeze(performance.now() + 400); true")
         frozen = 0
         # 点亮是在 rAF 里挂类的：喂完必须真的走几帧才有动画对象可暂停。偶尔那一帧
         # 还没跑到（实测约三成概率），所以最多试 3 次，每次多喂一拍 ticks。

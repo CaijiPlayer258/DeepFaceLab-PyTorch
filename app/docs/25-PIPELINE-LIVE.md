@@ -56,9 +56,22 @@
   `stroke:var(--line-strong)` 1px、opacity .75；空列跳过。
 - 光点：每次 tick 的**增量**放一个 2.4px `var(--ok)` 圆点；路径是「源 lane→腰点 +
   腰点→目标 lane」两段 `d` 拼接的**临时 path**（第二段以 `M 腰点` 开头，位置正好接上），
-  `getPointAtLength` 走 470–750ms，走完连 path 一起删。同屏上限 60，超了丢最旧的；
-  圆点走 circle 池复用。多 lane 阶段拿不到「是哪一条 lane 干的」（status 不按帧带这个），
-  按 tick 序号**轮转**，保证光点始终落在真实存在的 lane 上。
+  `getPointAtLength` 走 470–750ms，走完连 path 一起删（路径长度按「源#腰#目标」缓存，
+  不重复 `getTotalLength()` —— 它每次都逼一次 SVG 布局）。圆点走 circle 池复用，
+  回收时连 `cx/cy` 一起清掉（池里不留上一次飞行的残坐标）。
+  多 lane 阶段拿不到「是哪一条 lane 干的」（status 不按帧带这个），按 tick 序号**轮转**，
+  保证光点始终落在真实存在的 lane 上。
+
+  **密度口径**（用户反馈「闪烁频率不够、把上限去掉」之后定的）：
+  - 轮询 `500ms → 250ms`（`POLL_MS`，`mgFusedPoll` 同值）；一拍的光点**均匀铺在这
+    250ms 窗口里**（`sched()` 给每一发算一个「应该发生」的时刻；`t0` 在未来的先藏着，
+    `kk<0` 时既不画也不调 `getPointAtLength` —— 负长度会抛错、把整帧 rAF 打死）；
+  - 点亮同样铺在窗口里（`flashes[].at`），同一帧里同一条 lane 只闪一次（16ms 去抖，
+    5 帧叠在 1/60 秒看不出差别，但会白跑 4 次强制重排）；
+  - 两个**物理上限**取代原来的 `TICK_MAX=10`：`PULSE_PER_S=240`（按窗口折算 = 每拍最多
+    60 个，超了按比例稀释，各段比例不变）+ `MAX_PULSE=200`（同屏在飞）。
+    常见档（20~30 帧/秒、每帧 1~4 张脸）**一条都不丢**：20 帧/秒时每段 5 发/拍 ÷ 250ms
+    = 50ms 一发，肉眼是连续流，而不是「每半秒跳一波」。
 - 点亮：`classList.remove('lit') + 强制重排 + add('lit')`重启，关键帧
   `0% panel-2 → 6% rgba(61,220,132,.16)+var(--ok) → 40% 半衰 → 100% 回常态`，
   1.15s（`forwards`），1.25s 后摘类；叠加天然成立（衰减中再来一次会重新点亮）。
@@ -67,8 +80,9 @@
   （`stroke:var(--warn)`、`fill: rgba(240,180,41,.10)`，浅色主题另有低透明取值）。
 - 列间**没有**「在飞 N」那行字（用户要求去掉：腰点本身就是「这一列有多少在途」的
   视觉表达）。`status.stages[*].inflight` 后端照给，界面不再显示。
-- 性能：轮询 500ms（一单一次请求，不按帧发）；`requestAnimationFrame` 里只写
-  `cx/cy/opacity`（不读布局）；点亮合到一帧里做，强制重排只在真点亮的那几条 lane 上发生。
+- 性能：轮询 250ms（一单一次请求，不按帧发；分段链那条仍是 600ms —— 它每次要 listdir
+  四个产物目录）；`requestAnimationFrame` 里只写 `cx/cy/opacity`（不读布局）；
+  点亮合到一帧里做，强制重排只在真点亮的那几条 lane 上发生，同一帧同一条 lane 最多一次。
 - 视觉 token：只读 `app.css` 现成变量（panel / panel-2 / line / line-strong / ok / warn /
   shadow），层级靠「面 + 1px 描边」，不发光、不缩放、不描彩色边。
 
