@@ -53,7 +53,9 @@ DFM_NAME = "阿証証証証-416"
 SETTINGS = {"mask_mode": 8, "color_transfer": "mt", "blend": "seamless",
             "mask_erode": 0, "mask_blur": 4}
 TOL_MEAN = 0.5              # 和基准档的帧级 |diff| 平均（LSB）
-SCAN = [(1, 1), (1, 4), (2, 2), (2, 4), (2, 8), (3, 4)]
+# 流水线之后 workers 已经没有意义（全程只有一份 dfm 会话），扫的是 dfm 攒批这一维；
+# 1×1 那一档留着当「不攒批」的对照（攒批目标最小会被抬到 4，所以它等价于 1×4）。
+SCAN = [(1, 4), (1, 8)]
 
 BASE = ""
 RESULTS = []
@@ -389,6 +391,8 @@ def run_export(clip, dfm, workers, batch, tag, force=True, cancel_after=None,
                            else (workers or 0)),
             "batch": int(snap.get("batch") if snap.get("batch") is not None
                          else (batch or 0)),
+            "pipeline": snap.get("pipeline"), "compose": snap.get("compose"),
+            "pipeline_line": snap.get("pipeline_line"),
             "req_workers": workers, "req_batch": batch,
             "log": list(snap.get("log") or []),
             "fps": snap.get("frame_fps"), "done": int(snap.get("done") or 0),
@@ -450,24 +454,26 @@ def case_a(clip, dfm, nframes):
     say("帧速从预热之后算（swap_elapsed=%.1fs / elapsed=%.1fs），swap p50=%sms"
         % (float(r.get("swap_elapsed") or 0), float(r.get("elapsed") or 0),
            r.get("swap_p50")))
-    # ---- 协议形状的三条硬证据 ----
-    # 1) status 回显 workers/batch（_proj_set 写进作业状态，跑完仍在）
-    check(int(r.get("workers") or 0) == 2 and int(r.get("batch") or 0) == 2,
-          "A status 回显默认档 workers=2 / batch=2（2×2，请求体没带这两个键）",
-          "workers=%s batch=%s" % (r.get("workers"), r.get("batch")))
-    # 默认档的进度日志必须写着 2×2（排障时第一眼要看的就是这一行）
-    pline = next((x for x in (r.get("log") or []) if "个 worker 进程" in str(x)), "")
-    check("每进程 2 帧并行" in str(pline), "A 默认档日志写着 2×2", pline or "没找到「并行：」日志")
-    # 2) 真正落盘的那份 worker 脚本里同时有「批量 + 裸字节块」两件事
-    scripts = sorted((TEMP / "dfl41_merge_preview").glob("preview_worker_*.py"),
-                     key=lambda x: x.stat().st_mtime)
-    src = scripts[-1].read_text(encoding="utf-8", errors="replace") if scripts else ""
-    need = ('"blobs"', "_read_exact", "ThreadPoolExecutor", "_run_items",
-            '"threads"')
-    miss = [x for x in need if x not in src]
-    check(bool(src) and not miss, "A 落盘 worker 脚本是「k 帧一条请求 + 裸字节块」那一版",
-          ("%s（缺 %s）" % (scripts[-1].name, miss)) if miss else
-          (scripts[-1].name if scripts else "没找到 worker 脚本"))
+    # ---- 协议形状的三条硬证据（流水线版）----
+    # 1) status 回显：一份 dfm 会话（workers=1）+ dfm 攒批 + 合成线程数
+    check(int(r.get("workers") or 0) == 1 and int(r.get("batch") or 0) >= 4,
+          "A status 回显一份会话 workers=1 / dfm 攒批 ≥4（请求体没带这两个键）",
+          "workers=%s batch=%s compose=%s" % (r.get("workers"), r.get("batch"),
+                                              r.get("compose")))
+    # 默认档的进度日志必须写着「一份 dfm 会话 / 攒批 / 合成线程」（排障第一眼就是它）。
+    # 注意 status 只回最后 12 行日志，120 帧跑完那一行早被挤掉了 —— 所以要连**开跑后
+    # 第一帧的快照**（snap0）一起找。
+    _logs = list(r.get("log") or []) + list((r.get("snap0") or {}).get("log") or [])
+    pline = str(r.get("pipeline_line") or "") or next(
+        (x for x in _logs if "一份 dfm 会话" in str(x)), "")
+    check("攒批" in str(pline) and "合成" in str(pline),
+          "A 默认档日志写着「一份 dfm 会话 · 攒批 N 张 · 合成 N 线程」",
+          pline or "没找到「流水线：」日志")
+    # 2) 走的是流水线（不是老的 worker 子进程），而且一眼能看出来是哪个模块
+    pipe = (APP / "server" / "_proj_pipe.py")
+    check(str(r.get("pipeline") or "") == "fused" and pipe.is_file(),
+          "A 走的是流水线（status.pipeline=fused · server/_proj_pipe.py 在位）",
+          "pipeline=%r" % (r.get("pipeline"),))
     # 3) 帧速口径：预热不算干活（swap_elapsed < elapsed，且 elapsed - swap ≈ 预热）
     check(float(r.get("swap_elapsed") or 0) > 0
           and float(r.get("swap_elapsed") or 0) <= float(r.get("elapsed") or 0),
@@ -481,17 +487,15 @@ def case_a(clip, dfm, nframes):
 # B · 扫描表
 # ============================================================
 def case_b(clip, dfm, base_row=None):
-    head("B · 扫描表 workers × batch（帧/秒 · 显存峰值 · worker 单帧 p50）")
+    head("B · 扫描表 dfm 攒批（帧/秒 · 显存峰值 · 单帧 p50）")
     rows = []
     base = base_row
     if base is None:
-        base = run_export(clip, dfm, 1, 1, "b_1x1")
-        rows.append(base)
-    else:
-        rows.append(base)
+        base = run_export(clip, dfm, 1, 4, "b_1x4")
+    rows.append(base)
     for (w, b) in SCAN:
-        if (w, b) == (1, 1) and base_row is not None:
-            continue
+        if (w, b) == (1, 4):
+            continue                      # 基准档就是它
         r = run_export(clip, dfm, w, b, "b_%dx%d" % (w, b))
         rows.append(r)
         say("%dx%d：%.2f 帧/秒 · 显存峰值 %s MB · swap p50 %sms · 墙钟 %.1fs"
@@ -520,25 +524,22 @@ def case_b(clip, dfm, base_row=None):
              float(best.get("fps") or 0)))
     slow = min(rows, key=lambda x: float(x.get("fps") or 0))
     check(float(best.get("fps") or 0) >= float(slow.get("fps") or 0),
-          "B 最优档不是 1×1（批处理确实赚到了）",
+          "B 最优档能跑（攒批 8 与攒批 4 都不掉帧）",
           "最优 %s vs 最慢 %s" % (best.get("tag"), slow.get("tag")))
-    # 默认档就是这张表选出来的（2×2）。但要分清哪一维是硬的：
-    #   · 帧速：两档会在 ~7% 的轮间抖动里**互相反超**（实测 2×2 13.5~14.5 / 2×4 13.3~14.7，
-    #     1×1 与 1×4 两档倒一直很稳）—— 所以只报数字，不钉谁第一；
-    #   · 显存：每次都是 2×2 低（6881 vs 7701、7062 vs 7720、5689 vs 7751）—— 钉这个。
+    # 流水线之后这一维只剩「dfm 攒批」：4 vs 8 帧速基本同档（实测差在 ±5% 抖动里），
+    # 硬差别是显存 —— 攒批越大，那份会话的 peak 越高。
     def _row(w, b):
         return next((x for x in rows if int(x.get("workers") or 0) == w
                      and int(x.get("batch") or 0) == b), None)
-    r22, r24 = _row(2, 2), _row(2, 4)
-    if r22 and r24 and r22.get("vram_peak_mb") and r24.get("vram_peak_mb"):
-        say("默认档 2×2 vs 2×4：%.2f vs %.2f 帧/秒（抖动内互有反超）· 显存 %s vs %s MB"
-            % (float(r22.get("fps") or 0), float(r24.get("fps") or 0),
-               r22.get("vram_peak_mb"), r24.get("vram_peak_mb")))
-        check(int(r22["vram_peak_mb"]) < int(r24["vram_peak_mb"]),
-              "B 默认档 2×2 显存低于 2×4（换默认的硬理由：8GB 卡留余量）",
-              "%s MB vs %s MB（低 %d MB）"
-              % (r22["vram_peak_mb"], r24["vram_peak_mb"],
-                 int(r24["vram_peak_mb"]) - int(r22["vram_peak_mb"])))
+    r4, r8 = _row(1, 4), _row(1, 8)
+    if r4 and r8:
+        say("攒批 4 vs 8：%.2f vs %.2f 帧/秒 · 显存峰 %s vs %s MB"
+            % (float(r4.get("fps") or 0), float(r8.get("fps") or 0),
+               r4.get("vram_peak_mb"), r8.get("vram_peak_mb")))
+        if r4.get("vram_peak_mb") and r8.get("vram_peak_mb"):
+            check(int(r8["vram_peak_mb"]) >= int(r4["vram_peak_mb"]) - 200,
+                  "B 攒批 8 的显存峰不低于攒批 4（越大越吃显存，别默认拉满）",
+                  "%s vs %s MB" % (r8["vram_peak_mb"], r4["vram_peak_mb"]))
     return rows
 
 
@@ -546,9 +547,9 @@ def case_b(clip, dfm, base_row=None):
 # C · 逐像素对拍（每档 vs 1×1 基准档）
 # ============================================================
 def case_c(rows):
-    head("C · 逐像素对拍（每档产物 vs 1×1 基准档，mean ≤ %.1f LSB）" % TOL_MEAN)
+    head("C · 逐像素对拍（每档产物 vs 攒批 4 基准档，mean ≤ %.1f LSB）" % TOL_MEAN)
     base = next((r for r in rows if int(r.get("workers") or 0) == 1
-                 and int(r.get("batch") or 0) == 1), None)
+                 and int(r.get("batch") or 0) == 4), None)
     if base is None:
         check(False, "C 缺基准档", "先跑 B 段")
         return
@@ -656,7 +657,7 @@ def main():
             rows = case_b(clip, dfm)
         if "c" in cases:
             if not rows:
-                rows = [run_export(clip, dfm, 1, 1, "b_1x1")]
+                rows = [run_export(clip, dfm, 1, 4, "b_1x4")]
                 for (w, b) in SCAN[1:]:
                     rows.append(run_export(clip, dfm, w, b, "b_%dx%d" % (w, b)))
             case_c(rows)

@@ -409,6 +409,7 @@ def run_export(tag, clip, dfm_stem, workers=None, batch=None, force=True):
             "ms_face": ms_face, "fps85": fps85,
             "fps": snap.get("frame_fps"), "workers": snap.get("workers"),
             "batch": snap.get("batch"), "swap_p50": snap.get("swap_p50"),
+            "pipeline": snap.get("pipeline"), "compose": snap.get("compose"),
             "done": snap.get("done"), "files": len(files),
             "swap_elapsed": snap.get("swap_elapsed"), "swap_frames": snap.get("swap_frames"),
             "failed": snap.get("failed"), "elapsed": snap.get("elapsed"),
@@ -460,7 +461,7 @@ def sess_peak_file():
 # ============================================================
 def case_big(clip, big, nframes):
     stem, mb = big[0].stem, big[1]
-    head("A · 大模型默认档（%.2fGB 权重）→ 1 worker × 4 线程" % (mb / 1024.0))
+    head("A · 大模型默认档（%.2fGB 权重）→ 一份会话 × dfm 攒批 4" % (mb / 1024.0))
     r = run_export("a_big_default", clip, stem, None, None)
     say("HTTP %s · phase=%s · workers=%r batch=%r · %.2f 帧/秒 · 峰值 %s/%s MB（%.1f%%）· swap p50 %sms"
         % (r.get("http"), r.get("phase"), r.get("workers"), r.get("batch"),
@@ -471,9 +472,12 @@ def case_big(clip, big, nframes):
         return r
     check(r.get("phase") == "done" and int(r.get("files") or 0) == nframes,
           "a 大模型默认档跑完且帧数对", "%s 帧（源 %d）" % (r.get("files"), nframes))
-    check(int(r.get("workers") or 0) == 1 and int(r.get("batch") or 0) == 4,
-          "a 默认档 = 1 worker × 4 线程（按模型体量收缩）",
-          "workers=%r batch=%r" % (r.get("workers"), r.get("batch")))
+    # 流水线之后 workers 恒为 1（一份 dfm 会话），batch = dfm 攒批目标（大模型按计划 4）
+    check(int(r.get("workers") or 0) == 1 and int(r.get("batch") or 0) >= 4
+          and str(r.get("pipeline") or "") == "fused",
+          "a 默认档 = 一份会话（workers=1）× dfm 攒批 ≥4，走流水线",
+          "workers=%r batch=%r pipeline=%r" % (r.get("workers"), r.get("batch"),
+                                               r.get("pipeline")))
     say("整卡 %s/%s MB = %.1f%%（含桌面/etc %s MB）· 本程序 %s MB = %.1f%%"
         % (r.get("peak"), r.get("total"), r.get("pct") or 0, r.get("base"),
            r.get("ours"), r.get("ours_pct") or 0))
@@ -531,7 +535,7 @@ def case_big(clip, big, nframes):
 # ============================================================
 def case_small(clip, small, nframes):
     stem, mb = small[0].stem, small[1]
-    head("B · 小模型默认档（%.2fGB 权重）→ 2 worker × 2 线程" % (mb / 1024.0))
+    head("B · 小模型默认档（%.2fGB 权重）→ 一份会话（不再 2 进程）" % (mb / 1024.0))
     r = run_export("b_small_default", clip, stem, None, None)
     say("HTTP %s · phase=%s · workers=%r batch=%r · %.2f 帧/秒 · 峰值 %s/%s MB（%.1f%%）"
         % (r.get("http"), r.get("phase"), r.get("workers"), r.get("batch"),
@@ -541,8 +545,9 @@ def case_small(clip, small, nframes):
         return r
     check(r.get("phase") == "done" and int(r.get("files") or 0) == nframes,
           "b 小模型默认档跑完且帧数对", "%s 帧（源 %d）" % (r.get("files"), nframes))
-    check(int(r.get("workers") or 0) == 2 and int(r.get("batch") or 0) == 2,
-          "b 默认档 = 2 worker × 2 线程（小模型不收缩）",
+    # 流水线之后小模型也不再开 2 个进程：一份会话 + 攒批（计划里的 2×2 只影响预算）
+    check(int(r.get("workers") or 0) == 1 and int(r.get("batch") or 0) >= 4,
+          "b 默认档 = 一份会话 × dfm 攒批 ≥4（不再 2 进程 × 2 线程）",
           "workers=%r batch=%r" % (r.get("workers"), r.get("batch")))
     say("整卡 %s/%s MB = %.1f%%（含桌面/etc %s MB）· 本程序 %s MB = %.1f%%"
         % (r.get("peak"), r.get("total"), r.get("pct") or 0, r.get("base"),
@@ -557,8 +562,10 @@ def case_small(clip, small, nframes):
           "b 每张有脸帧 ≤ %d ms（= 折算到 85%% 有脸 ≥ 12 帧/秒）" % FACE_MS_SMALL,
           "%.1f ms/帧 · 折算 %.2f 帧/秒 · 夹具实测 %.2f 帧/秒" % (msf, f85, fps))
     note = r.get("note") or ""
-    check("计划 2 worker(s) × 2 线程" in note, "b 决定说明写着 2 worker(s) × 2 线程",
-          note or "没有这一行")
+    # 计划那一行是**预算**的口径（沙箱里桌面占得多时它会自己减档），所以只验「有这行
+    # 且写了 worker(s) × 线程」；实际生效的并行度看上面 workers/batch 那两条。
+    check("计划" in note and "worker(s)" in note and "线程" in note,
+          "b 决定说明里有「计划 N worker(s) × M 线程」", note or "没有这一行")
     return r
 
 
@@ -577,10 +584,11 @@ def case_manual(clip, big, nframes):
           "c 手动 2 个 worker 被受理并跑完", "HTTP %s phase=%s %s"
           % (r.get("http"), r.get("phase"), (r.get("err") or "")[:120]))
     check(int(r.get("workers") or 0) == 1,
-          "c 显存不够 → 实际只开了 1 个 worker（降级）",
+          "c 显存不够 → 实际只开了一份会话（降级 / 流水线本来就只有一份）",
           "workers=%r（请求 2）" % r.get("workers"))
-    warns = [x for x in (r.get("log") or []) if "[warn]" in str(x) and "worker" in str(x)]
-    check(bool(warns), "c 日志里有「只装得下 N 个 worker（请求 2）」提示",
+    warns = [x for x in (r.get("log") or []) if "[warn]" in str(x) and "worker" in str(x)
+             and ("只装得下" in str(x) or "只有一份 dfm 会话" in str(x))]
+    check(bool(warns), "c 日志里有「只装得下 N 个 worker（请求 2）」/「只有一份 dfm 会话」提示",
           (warns[-1] if warns else "没找到")[:200])
     note = r.get("note") or ""
     check("已减" in note, "c 决定说明里写明「已减」", note or "没有这一行")

@@ -86,6 +86,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from . import _eff as _eff
 from . import _projplan as _projplan
 from . import app as _app_mod
 from ._face_group import clear_face_group_cache, register_cache_clearer
@@ -2012,6 +2013,8 @@ def merge_export(body: dict):
       · 给了帧目录 -> 老路：4.0 MergeStudio 子进程一口气出 mp4（下面的代码）。
     """
     body = _as_dict(body)
+    # ---- 收到请求先回显一份（脱敏）：路径只留文件名、base64 换成长度 ----
+    _eff.log_request("/api/merge/export", body)
 
     # ---- 0) 视频模式：video 有值 + 没有帧目录 -> 不需要项目 ----
     if (str(body.get("video") or body.get("source_video") or "").strip()
@@ -2143,7 +2146,24 @@ def merge_export(body: dict):
                            # 否则 /export/status 会把上一轮的逐帧记录当成这一轮的
                            "mode": "project", "video": "", "total": 0,
                            "frames_done": 0, "frames": [], "stats": {},
-                           "cache": {}, "encode": {}})
+                           "cache": {}, "encode": {},
+                           "eff": None, "eff_warnings": [], "warnings": []})
+    # ---- 生效配置（老项目模式：4.0 MergeStudio 子进程一口气出 mp4）----
+    # 这条路的检测器由子进程选，但合成参数/模型/并发照样要对得上账。
+    try:
+        _pcfg = {"settings": settings, "config": _merge_settings_to_config(settings),
+                 "detector": _DEFAULT_DETECTOR, "det_align": _DEFAULT_DETECTOR,
+                 "mask_src": _mask_src(settings, settings.get("mask_mode")),
+                 "dfm": str(dfm), "model": model_name, "single_models": [],
+                 "library": "", "use_library": False, "chain": False, "fused": False,
+                 "range": {}, "workers": workers, "batch": 0,
+                 "jpeg_quality": _STAGE_JPEG_QUALITY}
+        eff = _eff_publish("/api/merge/export", "project-modes", body, _pcfg)
+        with _merge_job_lock:
+            _merge_job.update(_eff_status_patch(eff))
+    except Exception as e:                                  # noqa: BLE001
+        print("[eff] 生成失败（不影响这一单）：%s: %s"
+              % (e.__class__.__name__, str(e)[:200]), flush=True)
     threading.Thread(target=_run_export,
                      args=(str(ip), str(out_mp4), str(aligned), str(dfm), settings,
                            mask_onnx, fps, workers, encoder, hwaccel),
@@ -2214,7 +2234,10 @@ def merge_export_status():
             "fps": snap.get("fps"), "workers": snap.get("workers"),
             "encoder": snap.get("encoder"), "hwaccel": snap.get("hwaccel"),
             "dfm": snap.get("dfm"),
-            "mode": mode or "project"}
+            "mode": mode or "project",
+            # 生效配置 + 一致性警告（进度页「当前生效」面板 / 顶部横幅读这两个键）
+            "eff": snap.get("eff"), "eff_warnings": list(snap.get("eff_warnings") or []),
+            "warnings": list(snap.get("warnings") or [])}
     if mode == "video":
         # 视频模式多给一段明细：逐帧记录（每张脸用了谁）+ 计数 + 结束时的缓存状态。
         # 老前端不认识这些字段，多给不会影响它（缺字段才是坑）。
@@ -2795,6 +2818,10 @@ _PREVIEW_SEND_QUALITY = 95         # 送给 worker 的帧 JPEG 质量
 _PREVIEW_QUALITY = 92              # 回给界面的 JPEG 质量
 _PREVIEW_HIT = {}                 # 上一帧的整份响应（只留 1 条：同一 t 连点两下时整份复用）
 _PREVIEW_HIT_LOCK = threading.Lock()
+# 上一次预览真正生效的配置：预览是高频入口（播放/拖动时每帧一次），[eff] 只在配置
+# 变化时打一行；/api/merge/preview/status 读这里，界面也能对照。
+_PREVIEW_EFF = {}
+_PREVIEW_EFF_LOCK = threading.Lock()
 _WORKER_MAX_MODELS = 3            # worker 里 DFM 的常驻上限（它自己报 max_models，这里是兜底）
 _PREVIEW_MAX_MODELS = 8           # 一次请求最多声明几个模型（真正常驻的仍只有 3 个）
 _PREVIEW_MAX_SWAPS = 8            # 单帧最多换几张脸（多模型模式下检测到的脸全换）
@@ -5078,6 +5105,8 @@ def merge_preview(body: dict):
     """
     t_start = time.time()
     body = _as_dict(body)
+    # 预览是高频入口（播放/拖动时每帧一次）：内容没变就不重复打，免得淹掉别的日志
+    _eff.log_request("/api/merge/preview", body, dedupe=True)
 
     video = _norm_path(body.get("video") or body.get("path"))
     if video is None:
@@ -5105,6 +5134,20 @@ def merge_preview(body: dict):
     detector = _detector_val(body.get("detector"))
     thresh = _float_val("thresh", body.get("thresh"), 0.0, 1.0, 0.5)
     xseg = _xseg_of(body)
+
+    # ---- 生效配置（预览：配置没变就不重复打，否则播放时每帧一行会淹掉日志）----
+    _pcfg = {"settings": settings, "config": cfg,
+             "detector": detector, "det_align": detector,
+             "mask_src": _mask_src(settings, settings.get("mask_mode")),
+             "dfm": str(dfm), "model": model_name, "single_models": models or [],
+             "library": str(body.get("faces_project") or ""),
+             "use_library": True, "chain": False, "fused": False,
+             "range": {}, "workers": 0, "batch": 0,
+             "jpeg_quality": _PREVIEW_QUALITY}
+    eff = _eff_publish("/api/merge/preview", "preview", body, _pcfg, dedupe=True)
+    with _PREVIEW_EFF_LOCK:
+        _PREVIEW_EFF.clear()
+        _PREVIEW_EFF.update(eff)
 
     # ---- 显存闸门：模型装不下就**明确拒绝**，别让 worker 半死不活 ----
     # 以前这里是「起 worker → 加载失败 → 报一句 worker 的 stderr 尾巴」，用户看到的
@@ -5224,7 +5267,8 @@ def merge_preview(body: dict):
                 xseg=xseg, detector=detector,
                 settings=settings, timings=res.get("timings") or {},
                 worker=_WORKER.status(), note=res.get("note") or note,
-                vram_plan=dict(plan), on_cpu=bool(plan.get("cpu")))
+                vram_plan=dict(plan), on_cpu=bool(plan.get("cpu")),
+                eff=eff, eff_warnings=list((eff or {}).get("warnings") or []))
     if models:                          # 多模型：只增不改，把「谁被用了」摊开给前端核对
         resp["models"] = [{"name": m["name"], "dfm": m["dfm"],
                            "faces": list(m["faces"])} for m in models]
@@ -5249,8 +5293,14 @@ def merge_preview_status():
     """
     st = _WORKER.status()
     plan = dict(st.get("vram_plan") or _vram_last("预览") or {})
+    with _PREVIEW_EFF_LOCK:
+        eff = dict(_PREVIEW_EFF) if _PREVIEW_EFF else None
     return _ok(**dict(st, vram_plan=plan,
-                      on_cpu=bool(st.get("on_cpu") or plan.get("cpu"))))
+                      on_cpu=bool(st.get("on_cpu") or plan.get("cpu")),
+                      eff=eff,
+                      eff_warnings=list((eff or {}).get("warnings") or []),
+                      warnings=[str(w.get("text") or w)
+                                for w in ((eff or {}).get("warnings") or [])]))
 
 @router.post("/api/merge/preview-frame")
 @_api
@@ -5701,8 +5751,8 @@ class _ProjCancel(Exception):
 def _proj_snap() -> dict:
     with _PROJ_LOCK:
         snap = dict(_PROJ_JOB)
-        for k in ("warnings", "failed_frames", "missing", "missing_source",
-                  "models", "log"):
+        for k in ("warnings", "eff_warnings", "failed_frames", "missing",
+                  "missing_source", "models", "log"):
             snap[k] = list(snap.get(k) or [])
         snap["settings"] = dict(snap.get("settings") or {})
         snap["encode"] = dict(snap.get("encode") or {})
@@ -6040,7 +6090,96 @@ def _proj_source_video(raw, project: Path, frames_dir: Path):
     return None, "项目目录里找不到原视频（.mp4）—— 用 video 参数指定一个"
 
 
+def _proj_finish(cfg: dict, project, frames, frame_ext, merged_dir, t0, total):
+    """项目导出的收尾：对账（缺帧要说清楚）+ ffmpeg 编码成片。
+
+    老路（_proj_run）和流水线（_proj_pipe.run）共用这一段 —— 成片的 ffmpeg
+    命令、缺帧清单、进度口径只有一个实现，不会两条路各写一套再慢慢漂。
+    """
+    # ---- 编码前对账：缺帧必须说清楚缺哪几张，别让成片悄悄变短 ----
+    merged_names = [n for n in _proj_frame_files(merged_dir)
+                    if Path(n).suffix.lower() == frame_ext]
+    merged_set = set(merged_names)
+    frames_set = set(frames)
+    missing = [n for n in frames if n not in merged_set]       # 有源帧、没产物
+    v_frames = int(cfg.get("video_frames") or 0)
+    fps = max(0.001, float(cfg["fps"]))
+    # 项目和视频本该一一对应才比较帧数（抽帧按 2fps 之类的本来就对不上）
+    near_full = bool(v_frames) and (len(frames) + 10 >= v_frames)
+    if v_frames and near_full and len(frames) < v_frames:
+        # 按命名规律点名缺了哪几张（编号本来就有洞，contiguous=False）
+        info_seq = _proj_seq_info(frames, contiguous=False)
+        if info_seq is not None:
+            prefix, width, suffix, start, _nums = info_seq
+            want = [prefix + str(i).zfill(width) + suffix
+                    for i in range(int(start), int(start) + v_frames)]
+            gone = [n for n in want if n not in frames_set]
+            if gone:
+                _proj_warn("源视频 %d 帧，项目里缺 %d 帧：%s（这些帧不会出现在成片里）"
+                           % (v_frames, len(gone), "、".join(gone[:12])))
+                missing = gone + missing
+    _proj_set(missing=missing[: _PROJ_MAX_LIST], merged_frames=len(merged_names))
+    if len(merged_names) < len(frames):
+        lack = [n for n in missing if n in frames_set]
+        _proj_warn("merged 只有 %d 帧 < 源帧 %d 帧 —— 缺 %d 帧%s"
+                   % (len(merged_names), len(frames), len(frames) - len(merged_names),
+                      ("：" + "、".join(lack[:12])) if lack else ""))
+    if v_frames and near_full and len(merged_names) < v_frames:
+        _proj_warn("成片只会有 %d 帧（源视频 %d 帧），比原片短 %.2f 秒"
+                   % (len(merged_names), v_frames,
+                      (v_frames - len(merged_names)) / fps))
+    if not merged_names:
+        raise _BadInput("merged/ 里一帧都没有，没法编码：%s" % merged_dir, 422)
+
+    # ---- 编码 ----
+    _proj_set(stage="编码", pct=_PROJ_PCT_SWAP,
+              msg="编码 %d 帧 → %s" % (len(merged_names),
+                                       Path(str(cfg["out_video"])).name))
+    pat = _proj_pattern(merged_names)
+    seq_dir = None
+    try:
+        if pat is None:
+            # 编号有洞（缺帧 / 名字不规则）：按顺序硬链接成 %06d 再编码。
+            # 不这么做的话 image2 会在第一个洞停住，成片被截短，而界面上写着「成功」。
+            seq_dir = project / "_encode_seq"
+            shutil.rmtree(str(seq_dir), ignore_errors=True)
+            seq_dir.mkdir(parents=True, exist_ok=True)
+            for i, n in enumerate(merged_names):
+                d = seq_dir / ("%06d%s" % (i, frame_ext))
+                try:
+                    os.link(str(merged_dir / n), str(d))
+                except OSError:
+                    shutil.copyfile(str(merged_dir / n), str(d))
+            # 注意别写成 "%06d%s" % (...)：那样 %06d 会被当场格式化掉，
+            # image2 拿到的是一个具体文件名 → 只编出 1 帧
+            pat = ("%06d" + frame_ext, 0)
+            _proj_log("帧编号不连续，已按顺序重排 %d 帧到 %s" % (len(merged_names), seq_dir))
+        pattern = str(Path(str(merged_dir if seq_dir is None else seq_dir)) / pat[0])
+        t_enc = time.time()
+        enc = _proj_encode(pattern, pat[1], float(cfg["fps"]), cfg["video"],
+                           cfg["out_video"], len(merged_names))
+        enc["seconds"] = round(time.time() - t_enc, 2)
+        _proj_set(encode=enc)
+        _proj_log("编码：%s" % enc.get("cmd"))
+        if enc.get("code") != 0:
+            raise _BadInput("编码失败（ffmpeg 退出码 %s）：%s"
+                            % (enc.get("code"), (enc.get("tail") or "")[-500:]), 500)
+    finally:
+        if seq_dir is not None:
+            shutil.rmtree(str(seq_dir), ignore_errors=True)
+
+    el = time.time() - t0
+    _proj_set(done=total, pct=100, stage="完成", msg="完成：%d 帧 → %s"
+              % (len(merged_names), Path(str(cfg["out_video"])).name),
+              elapsed=round(el, 1), eta_s=0)
+
 def _proj_run(cfg: dict):
+    # 默认走流水线（app/server/_proj_pipe.py · docs/21-PROJ-PIPELINE.md）：
+    # 读 DFLJPG 的 68 点不检测 + dfm 攒批 + compose_frame（ROI/多线程）。
+    # DFL_PROJ_PIPELINE=legacy 回到下面这条老路（worker 子进程 + MergeMaskedFace）。
+    from . import _proj_pipe
+    if _proj_pipe.enabled():
+        return _proj_pipe.run(cfg)
     project = Path(cfg["project"])
     frames_dir = Path(cfg["frames_dir"])
     aligned_dir = Path(cfg["aligned"])
@@ -6758,82 +6897,7 @@ def _proj_run(cfg: dict):
     # frame_fps 保留循环里最后一次的值（按真正处理过的帧算，跳过的不算）
     _proj_set(failed_frames=failed_frames)
 
-    # ---- 编码前对账：缺帧必须说清楚缺哪几张，别让成片悄悄变短 ----
-    merged_names = [n for n in _proj_frame_files(merged_dir)
-                    if Path(n).suffix.lower() == frame_ext]
-    merged_set = set(merged_names)
-    frames_set = set(frames)
-    missing = [n for n in frames if n not in merged_set]       # 有源帧、没产物
-    v_frames = int(cfg.get("video_frames") or 0)
-    fps = max(0.001, float(cfg["fps"]))
-    # 项目和视频本该一一对应才比较帧数（抽帧按 2fps 之类的本来就对不上）
-    near_full = bool(v_frames) and (len(frames) + 10 >= v_frames)
-    if v_frames and near_full and len(frames) < v_frames:
-        # 按命名规律点名缺了哪几张（编号本来就有洞，contiguous=False）
-        info_seq = _proj_seq_info(frames, contiguous=False)
-        if info_seq is not None:
-            prefix, width, suffix, start, _nums = info_seq
-            want = [prefix + str(i).zfill(width) + suffix
-                    for i in range(int(start), int(start) + v_frames)]
-            gone = [n for n in want if n not in frames_set]
-            if gone:
-                _proj_warn("源视频 %d 帧，项目里缺 %d 帧：%s（这些帧不会出现在成片里）"
-                           % (v_frames, len(gone), "、".join(gone[:12])))
-                missing = gone + missing
-    _proj_set(missing=missing[: _PROJ_MAX_LIST], merged_frames=len(merged_names))
-    if len(merged_names) < len(frames):
-        lack = [n for n in missing if n in frames_set]
-        _proj_warn("merged 只有 %d 帧 < 源帧 %d 帧 —— 缺 %d 帧%s"
-                   % (len(merged_names), len(frames), len(frames) - len(merged_names),
-                      ("：" + "、".join(lack[:12])) if lack else ""))
-    if v_frames and near_full and len(merged_names) < v_frames:
-        _proj_warn("成片只会有 %d 帧（源视频 %d 帧），比原片短 %.2f 秒"
-                   % (len(merged_names), v_frames,
-                      (v_frames - len(merged_names)) / fps))
-    if not merged_names:
-        raise _BadInput("merged/ 里一帧都没有，没法编码：%s" % merged_dir, 422)
-
-    # ---- 编码 ----
-    _proj_set(stage="编码", pct=_PROJ_PCT_SWAP,
-              msg="编码 %d 帧 → %s" % (len(merged_names),
-                                       Path(str(cfg["out_video"])).name))
-    pat = _proj_pattern(merged_names)
-    seq_dir = None
-    try:
-        if pat is None:
-            # 编号有洞（缺帧 / 名字不规则）：按顺序硬链接成 %06d 再编码。
-            # 不这么做的话 image2 会在第一个洞停住，成片被截短，而界面上写着「成功」。
-            seq_dir = project / "_encode_seq"
-            shutil.rmtree(str(seq_dir), ignore_errors=True)
-            seq_dir.mkdir(parents=True, exist_ok=True)
-            for i, n in enumerate(merged_names):
-                d = seq_dir / ("%06d%s" % (i, frame_ext))
-                try:
-                    os.link(str(merged_dir / n), str(d))
-                except OSError:
-                    shutil.copyfile(str(merged_dir / n), str(d))
-            # 注意别写成 "%06d%s" % (...)：那样 %06d 会被当场格式化掉，
-            # image2 拿到的是一个具体文件名 → 只编出 1 帧
-            pat = ("%06d" + frame_ext, 0)
-            _proj_log("帧编号不连续，已按顺序重排 %d 帧到 %s" % (len(merged_names), seq_dir))
-        pattern = str(Path(str(merged_dir if seq_dir is None else seq_dir)) / pat[0])
-        t_enc = time.time()
-        enc = _proj_encode(pattern, pat[1], float(cfg["fps"]), cfg["video"],
-                           cfg["out_video"], len(merged_names))
-        enc["seconds"] = round(time.time() - t_enc, 2)
-        _proj_set(encode=enc)
-        _proj_log("编码：%s" % enc.get("cmd"))
-        if enc.get("code") != 0:
-            raise _BadInput("编码失败（ffmpeg 退出码 %s）：%s"
-                            % (enc.get("code"), (enc.get("tail") or "")[-500:]), 500)
-    finally:
-        if seq_dir is not None:
-            shutil.rmtree(str(seq_dir), ignore_errors=True)
-
-    el = time.time() - t0
-    _proj_set(done=total, pct=100, stage="完成", msg="完成：%d 帧 → %s"
-              % (len(merged_names), Path(str(cfg["out_video"])).name),
-              elapsed=round(el, 1), eta_s=0)
+    return _proj_finish(cfg, project, frames, frame_ext, merged_dir, t0, total)
 
 
 def _proj_worker(cfg: dict):
@@ -6903,6 +6967,7 @@ def merge_export_project(body: dict):
       （拒绝是 HTTP 400 + need_mb/avail_mb/suggest 等结构化字段）。
     """
     body = _as_dict(body)
+    _eff.log_request("/api/merge/export-project", body)
     project = _norm_path(body.get("project_dir") or body.get("project"))
     if project is None:
         raise _BadInput("缺少 project_dir：要一个 DFL 项目目录（<视频名>/）")
@@ -7123,7 +7188,15 @@ def merge_export_project(body: dict):
             "settings": settings, "detector": detector, "aligned_faces": 0,
             "merged_frames": 0, "warnings": [], "failed_frames": [], "missing": [],
             "missing_source": [], "encode": {},
+            "eff": None, "eff_warnings": [],
         })
+    # ---- 生效配置：一行 [eff] + 一致性自检（warnings[] 里同时放纯文本）----
+    try:
+        eff = _eff_publish("/api/merge/export-project", "project", body, cfg)
+        _proj_set(**_eff_status_patch(eff))
+    except Exception as e:                                  # noqa: BLE001
+        print("[eff] 生成失败（不影响这一单）：%s: %s"
+              % (e.__class__.__name__, str(e)[:200]), flush=True)
     threading.Thread(target=_proj_worker, args=(cfg,), daemon=True,
                      name="merge-export-project").start()
 
@@ -7492,6 +7565,8 @@ _STAGE_JOB = {
     "log": [], "meta": {}, "seconds": {}, "resumed": {}, "swapped": 0, "copied": 0,
     "no_face": 0, "cache_removed": False, "started_at": None, "finished_at": None,
     "chain": False, "keep_cache": False, "force": False,
+    # 生效配置 + 一致性警告（[eff] 行同款；进度页顶部横幅读它）
+    "eff": None, "eff_warnings": [], "warnings": [],
 }
 
 
@@ -7561,6 +7636,155 @@ def _mask_src(settings, mask_mode=None) -> dict:
     # ③ settings 里什么都没有：和界面默认一致（遮罩来源默认 XSegLite）
     return {"source": "xseg", "model": "lite", "label": "XSegLite", "raw": raw,
             "model_from": "default", "model_note": _note}
+
+
+# ============================================================
+# 生效配置（[eff] / [req] / 一致性自检）
+# ------------------------------------------------------------
+# 用户的原话：「我们的控制台、日志显示，做得是不是和没有一样」。事实是检测器那个
+# bug 里日志一直写着 retinaface_10g，可没人能从流水账里看出「这跟我设的不一样」。
+# 这里把真正生效的配置摊成一行 JSON（每个字段带来源 ui/default/inferred），把
+# 「请求体 vs 界面默认」对不上账的地方打成 [eff-warn] 并塞进 status.warnings[]。
+# ============================================================
+def _eff_model_names(cfg) -> list:
+    names = []
+    for m in (cfg.get("single_models") or cfg.get("models") or []):
+        try:
+            n = str(m.get("name") or "")
+        except Exception:                                   # noqa: BLE001
+            n = str(m or "")
+        if n and n not in names:
+            names.append(n)
+    if not names and cfg.get("model"):
+        names = [str(cfg.get("model"))]
+    return names
+
+
+def _eff_basename(value) -> str:
+    """只留名字：日志和界面都不需要整条用户路径。"""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return os.path.basename(text.rstrip("\\/")) or text
+
+
+def _eff_values_of(cfg: dict, kind: str) -> dict:
+    """cfg -> [eff] 的字段值。**只从 cfg 取**，不重新算一遍（否则就不是「生效」了）。"""
+    cfg = cfg or {}
+    conf = cfg.get("config") or {}
+    settings = cfg.get("settings") or {}
+    mask = cfg.get("mask_src")
+    if not isinstance(mask, dict):
+        mask = _mask_src(settings, settings.get("mask_mode"))
+    if kind == "project":
+        workers, batch, fast = cfg.get("workers"), cfg.get("batch"), False
+    elif kind == "fused":
+        workers = cfg.get("merge_workers")
+        batch = cfg.get("fused_batch") or cfg.get("pred_batch")
+        fast = True
+    else:
+        workers = cfg.get("merge_workers")
+        batch = cfg.get("pred_batch")
+        fast = bool(cfg.get("chain"))
+    q = cfg.get("jpeg_quality")
+    if q is None:
+        try:
+            q = int(cfg.get("quality"))
+        except (TypeError, ValueError):
+            q = _STAGE_JPEG_QUALITY
+    return {
+        "detector": str(cfg.get("det_align") or cfg.get("detector") or _DEFAULT_DETECTOR),
+        "mask_source": str(mask.get("label") or ""),
+        "ct_mode": str(conf.get("color_transfer_mode") or settings.get("ct_mode") or DEFAULT_CT_MODE),
+        "blend": str(conf.get("mode") or settings.get("blend") or DEFAULT_BLEND),
+        "erode": int(conf.get("erode_mask_modifier") or 0),
+        "blur": int(conf.get("blur_mask_modifier") or 0),
+        "models": _eff_model_names(cfg),
+        # 人脸库只留名字：日志/界面都不需要整条用户路径
+        "faces_project": _eff_basename(cfg.get("library") or ""),
+        "library_enabled": bool(cfg.get("use_library", True)),
+        "fast_export": bool(fast),
+        "frame_range": dict(cfg.get("range") or {}),
+        "workers": int(workers or 0),
+        "batch": int(batch or 0),
+        "jpeg_quality": int(q or 0),
+    }
+
+
+def _eff_inferred_of(cfg: dict, body: dict) -> dict:
+    """哪些字段是后端从别的字段推出来的（写进 src_note，必要时打 [eff-warn]）。"""
+    inf = {}
+    body = body if isinstance(body, dict) else {}
+    if not str(body.get("detector") or "").strip():
+        q = str(body.get("quality") or body.get("align_quality") or "").strip().lower()
+        if q:
+            inf["detector"] = "quality=%s" % q
+    mask = cfg.get("mask_src") if isinstance(cfg.get("mask_src"), dict) else {}
+    if str(mask.get("model_from") or "") == "mask_mode":
+        inf["mask_source"] = "mask_mode=%s" % (cfg.get("mask_mode"),)
+    return inf
+
+
+def _eff_requested_of(body: dict, kind: str) -> dict:
+    """请求体里写的原值（只取和 [eff] 同一个旋钮的那几个键，用来发现「被后端改写」）。"""
+    body = body if isinstance(body, dict) else {}
+    out = {}
+
+    def _num(*keys):
+        for k in keys:
+            v = body.get(k)
+            if v is None or (isinstance(v, str) and not v.strip()):
+                continue
+            try:
+                return int(float(v))
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    w = _num("workers") if kind == "project" else _num("merge_workers", "threads", "merge_threads")
+    if w is not None:
+        out["workers"] = w
+    if kind == "fused":
+        # eff 的 batch 就是 fused_batch；body 的 pred_batch/batch 是另一个旋钮，别拿来对账
+        b = _num("fused_batch")
+    elif kind == "project":
+        b = _num("batch")
+    else:
+        b = _num("batch", "pred_batch")
+    if b is not None:
+        out["batch"] = b
+    q = _num("jpeg_quality")
+    if q is not None:
+        out["jpeg_quality"] = q
+    return out
+
+
+def _eff_publish(route: str, kind: str, body: dict, cfg: dict,
+                 dedupe: bool = False) -> dict:
+    """打 [eff] + [eff-warn]，返回生效配置（调用方把它塞进 status）。
+
+    请求体那一行 [req] 在路由入口打（每次 HTTP 请求一行，dry_run 预检也算），
+    这里只负责「真正生效的那份配置」。
+    """
+    body = body if isinstance(body, dict) else {}
+    quiet = {"mask_source"}          # mask_source ← mask_mode 是契约，不算对不上
+    if str(kind).startswith("stage:"):
+        # 单个阶段不做「快速导出」这个选择（fused 是 /api/merge/export 的旋钮）
+        quiet.add("fast_export")
+    eff = _eff.build(route, kind, body, _eff_values_of(cfg, kind),
+                     inferred=_eff_inferred_of(cfg, body),
+                     quiet=quiet,
+                     requested=_eff_requested_of(body, kind))
+    eff["req_unused"] = _eff.unused_keys(body)
+    _eff.log_eff(eff, dedupe=dedupe)
+    return eff
+
+
+def _eff_status_patch(eff: dict) -> dict:
+    """生效配置 -> 塞进 status 的几个键（warnings[] 里也放一份纯文本）。"""
+    warns = list((eff or {}).get("warnings") or [])
+    return {"eff": eff, "eff_warnings": warns,
+            "warnings": [str(w.get("text") or w) for w in warns]}
 
 
 def _stage_files(dirp, exts=_STAGE_IMG_EXTS) -> list:
@@ -13474,6 +13698,9 @@ def merge_stage_status(cache_dir: str = "", video: str = ""):
         "resumable": (not bool(snap.get("fused"))),
         "frame_budget": snap.get("frame_budget"),
         "resumed": bool(snap.get("resumed")),
+        # 生效配置 + 一致性警告（[eff] 行同款；进度页「当前生效」面板与顶部横幅）
+        "eff": snap.get("eff"), "eff_warnings": list(snap.get("eff_warnings") or []),
+        "warnings": list(snap.get("warnings") or []),
     }
     if running and out["frames_total"] and out["frames_done"]:
         rate = float(out["frame_fps"] or 0.0)
@@ -13595,6 +13822,7 @@ def merge_stage(name: str, body: dict = None):
         raise _BadInput("未知阶段 %r（只认 %s）"
                         % (name, " / ".join(_STAGE_ORDER)), 404)
     body = _as_dict(body)
+    _eff.log_request("/api/merge/stage/%s" % stage, body)
     cfg = _stage_cfg(body, stage)
     with _STAGE_LOCK:
         if _STAGE_JOB.get("running"):
@@ -13654,6 +13882,14 @@ def merge_stage(name: str, body: dict = None):
             "keep_cache": bool(cfg.get("keep_cache")), "force": bool(cfg.get("force")),
             "frames": [], "vram_plan": dict(cfg.get("vram_plan") or {}),
         })
+    # ---- 生效配置：一行 [eff] + 一致性自检（进 status.warnings[] / 进度页横幅）----
+    try:
+        eff = _eff_publish("/api/merge/stage/%s" % stage, "stage:%s" % stage, body, cfg)
+        with _STAGE_LOCK:
+            _STAGE_JOB.update(_eff_status_patch(eff))
+    except Exception as e:                                  # noqa: BLE001
+        print("[eff] 生成失败（不影响这一单）：%s: %s"
+              % (e.__class__.__name__, str(e)[:200]), flush=True)
     threading.Thread(target=_stage_worker, args=(cfg,), daemon=True,
                      name="merge-stage-%s" % stage).start()
     rng = cfg.get("range") or {}
@@ -15749,7 +15985,20 @@ def _start_video_export(body: dict):
             "keep_cache": bool(cfg.get("keep_cache")), "force": bool(cfg.get("force")),
             "frames": [], "fused": bool(fused), "frame_budget": None, "resumed": False,
             "vram_plan": dict(cfg.get("vram_plan") or {}),
+            "eff": None, "eff_warnings": [], "warnings": [],
         })
+    # ---- 生效配置：一行 [eff] + 一致性自检 ----
+    # 用户要的就是这一行：把「我设的」和「它在跑的」摆在一起，对不上就 [eff-warn]。
+    try:
+        eff = _eff_publish("/api/merge/export", ("fused" if fused else "staged"), body, cfg)
+        patch = _eff_status_patch(eff)
+        with _merge_job_lock:
+            _merge_job.update(patch)
+        with _STAGE_LOCK:
+            _STAGE_JOB.update(patch)
+    except Exception as e:                                  # noqa: BLE001
+        print("[eff] 生成失败（不影响这一单）：%s: %s"
+              % (e.__class__.__name__, str(e)[:200]), flush=True)
     cfg["log_file"] = _vid_open_log(Path(cfg["out"]).with_suffix(".log"))
     # 帧图编码口径（两条路同一句）：PNG 无损 / JPEG 固定 quality=100 + 4:4:4。
     # 设置页那颗「质量」旋钮已经删掉 —— 后端不再从界面读它，日志里照旧回显真实值。
