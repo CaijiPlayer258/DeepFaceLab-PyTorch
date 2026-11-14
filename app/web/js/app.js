@@ -7258,6 +7258,7 @@ function mgStageEmpty(on) {
       var box = $("mgpEffDrawer"), btn = $("mgpEffOpen");
       if (!box || !MGP_EFF.eff) return;
       MGP_EFF.open = true;
+        if (btn) { btn.hidden = true; btn.style.display = "none"; }   /* 抽屉开了就收起右下角入口 */
       mgpEffPaint(true);
       box.hidden = false;
       if (btn) btn.setAttribute("aria-expanded", "true");
@@ -7268,6 +7269,7 @@ function mgStageEmpty(on) {
       var box = $("mgpEffDrawer"), btn = $("mgpEffOpen");
       MGP_EFF.open = false;
       if (box) box.hidden = true;
+          btn.hidden = false; btn.style.display = "";
       if (btn) {
         btn.setAttribute("aria-expanded", "false");
         if (giveFocus && btn.focus) {

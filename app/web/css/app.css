@@ -6049,3 +6049,9 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 }
 
 
+
+/* [hidden] 属性要真的隐藏：.btn 自带 display，UA 的 [hidden]{display:none} 打不过它。
+   之前「仍然尝试（可能 OOM）」在导出成功后还挂着，就是这条。 */
+#p-merge .mgprog-res-acts #mgpForceTry[hidden],
+#p-merge .mgprog-res-acts #mgpForceTry[style*="display: none"] { display: none !important; }
+#p-merge .mgprog-lnk[hidden] { display: none !important; }
