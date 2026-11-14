@@ -5106,7 +5106,8 @@ def merge_preview(body: dict):
     t_start = time.time()
     body = _as_dict(body)
     # 预览是高频入口（播放/拖动时每帧一次）：内容没变就不重复打，免得淹掉别的日志
-    _eff.log_request("/api/merge/preview", body, dedupe=True)
+    _eff.log_request("/api/merge/preview", body, dedupe=True,
+                     ignore=("t", "frame", "face", "idx", "n", "step"))
 
     video = _norm_path(body.get("video") or body.get("path"))
     if video is None:
@@ -6904,6 +6905,8 @@ def _proj_worker(cfg: dict):
     """线程入口：所有异常在这里落成终态，绝不让状态永远停在 running。"""
     try:
         _proj_run(cfg)
+        if cfg.get("downgrade_warn"):
+            _proj_warn(str(cfg["downgrade_warn"]))     # 收尾再提一次：status.log 只看最后 12 行
         with _PROJ_LOCK:
             _PROJ_JOB.update({"running": False, "ok": True, "phase": "done",
                               "cancelled": False, "finished_at": time.time(),
@@ -7062,6 +7065,9 @@ def merge_export_project(body: dict):
     # 以前是「先起 4 个进程、看谁崩」，崩了再退 —— 那一步本身就会把卡顶到 OOM。
     ses = _vram_sess_peak_mb(plan_paths)
     minfo = _dfm_info(plan_paths[0]) if plan_paths else {}
+    # 预算削减前用户/自适应想要的 worker 数：砍了就一定要在 job.log 里说一句
+    # （「降级并提示」是这条链的契约；只降不提示 = 用户以为自己在跑 2 份会话）
+    workers_req = int(workers)
     plan = _vram_guard(plan_paths, {"mode": "procs", "max_procs": int(workers),
                                     "batch": int(batch), "aux": True,
                                     "sess_mb": float(ses["sess_mb"]),
@@ -7197,6 +7203,29 @@ def merge_export_project(body: dict):
     except Exception as e:                                  # noqa: BLE001
         print("[eff] 生成失败（不影响这一单）：%s: %s"
               % (e.__class__.__name__, str(e)[:200]), flush=True)
+    # ---- 降级要留痕：预算把 worker 数砍下来时，job.log 里必须有一句 [warn] ----
+    # 顺序：先 eff（它会把 warnings 置成生效配置的那几条），再追加降级提示。
+    if int(workers) < int(workers_req):
+        try:
+            from . import _proj_pipe as _pp
+            _pipeline = bool(_pp.enabled())
+        except Exception:                                   # noqa: BLE001
+            _pipeline = False
+        _budget = ""
+        if plan.get("avail_mb"):
+            _budget = ("（可用 %.2fGB / 需要 %.2fGB）"
+                       % (float(plan.get("avail_mb") or 0.0) / 1024.0,
+                          float(plan.get("need_mb") or 0.0) / 1024.0))
+        if _pipeline:
+            _downgrade_msg = ("只有一份 dfm 会话（融合流水线）：请求 %d 个 worker，实际 1 份；"
+                              "worker 数只用于预算档位%s" % (int(workers_req), _budget))
+        else:
+            _downgrade_msg = ("只装得下 %d 个 worker（请求 %d）：显存预算不够，已减到 %d 份会话%s"
+                              % (int(workers), int(workers_req), int(workers), _budget))
+        _proj_warn(_downgrade_msg)
+        # /status 的 log 只回最后 12 行：开头这一句会被几十帧的进度冲掉。收尾再提一次，
+        # 因为「用户会看的那一屏」就是最后 12 行（这也是这个任务要治的病：写了但看不见）。
+        cfg["downgrade_warn"] = _downgrade_msg
     threading.Thread(target=_proj_worker, args=(cfg,), daemon=True,
                      name="merge-export-project").start()
 
@@ -7770,6 +7799,18 @@ def _eff_publish(route: str, kind: str, body: dict, cfg: dict,
     quiet = {"mask_source"}          # mask_source ← mask_mode 是契约，不算对不上
     if str(kind).startswith("stage:"):
         # 单个阶段不做「快速导出」这个选择（fused 是 /api/merge/export 的旋钮）
+        quiet.add("fast_export")
+        # 六阶段里只有 faces 真正用检测器（其余阶段拿的是上游产物）
+        if kind != "stage:faces":
+            quiet.add("detector")
+    if kind == "project":
+        # DFL 项目导出：没有「快速导出」开关；jpeg 质量是它自己的帧编码旋钮（界面没这控件）
+        quiet.update({"fast_export", "jpeg_quality"})
+    if kind == "project-modes":
+        # 4.0 MergeStudio 老项目模式：不选快速导出、不读人脸库、帧图质量是子进程的事
+        quiet.update({"fast_export", "jpeg_quality", "library_enabled"})
+    if kind == "preview":
+        # 预览不是导出：没有「快速导出」这个选择
         quiet.add("fast_export")
     eff = _eff.build(route, kind, body, _eff_values_of(cfg, kind),
                      inferred=_eff_inferred_of(cfg, body),
@@ -15989,6 +16030,7 @@ def _start_video_export(body: dict):
         })
     # ---- 生效配置：一行 [eff] + 一致性自检 ----
     # 用户要的就是这一行：把「我设的」和「它在跑的」摆在一起，对不上就 [eff-warn]。
+    eff = None
     try:
         eff = _eff_publish("/api/merge/export", ("fused" if fused else "staged"), body, cfg)
         patch = _eff_status_patch(eff)
@@ -16000,6 +16042,14 @@ def _start_video_export(body: dict):
         print("[eff] 生成失败（不影响这一单）：%s: %s"
               % (e.__class__.__name__, str(e)[:200]), flush=True)
     cfg["log_file"] = _vid_open_log(Path(cfg["out"]).with_suffix(".log"))
+    # 生效配置也贴进产物日志（<out>.log）：这是用户报 bug 时最常附的那份文件
+    if eff:
+        try:
+            _vid_log("[eff] " + _eff.line_of(eff))
+            for _w in (eff.get("warnings") or []):
+                _vid_log("[eff-warn] " + str(_w.get("text") or _w))
+        except Exception:                                   # noqa: BLE001
+            pass
     # 帧图编码口径（两条路同一句）：PNG 无损 / JPEG 固定 quality=100 + 4:4:4。
     # 设置页那颗「质量」旋钮已经删掉 —— 后端不再从界面读它，日志里照旧回显真实值。
     _vid_log("帧图编码：PNG 无损（compression level %s）/ JPEG quality=%d + 4:4:4"
