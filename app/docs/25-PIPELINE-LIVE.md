@@ -1,6 +1,6 @@
 # 25 · 流水线实况（导出进度页的 SVG 图）
 
-> 一句话：进度页原来那排「六个圆点」换成 **6 列 lane + 三次贝塞尔曲线 + 光点**，
+> 一句话：进度页原来那排「六个圆点」换成 **6 列 lane + 腰点收束的贝塞尔连线 + 光点**，
 > 数据只有一处来源 —— `GET /api/merge/export/status` 的 `stages`。
 > 验收：`app/tools/accept/progress_lit_accept.py`（47 条断言 + 3 张截图）。
 
@@ -48,19 +48,25 @@
 - 结构：6 列 × N 条 lane（`rect.lane`，74×≤24、rx 7、`fill:var(--panel-2)`、
   `stroke:var(--line-strong)` 1px、文字 9.5px 等宽）；一次建好后**只改文字/坐标**，
   同一份 lanes 不重建节点（验收 C20 盯着元素身份）。
-- 曲线：两段三次贝塞尔，列间中线 C 连续（`curve()`），`stroke:var(--line-strong)`
-  1px、opacity .75；每源 lane × 每目标 lane 一条（空列跳过）。
-- 光点：每次 tick 的**增量**放一个 2.4px `var(--ok)` 圆点，沿同一条曲线
-  `getPointAtLength` 走 470–750ms；同屏上限 60，超了丢最旧的；节点复用（circle 池）。
-  多 lane 阶段拿不到「是哪一条 lane 干的」（status 不按帧带这个），按 tick 序号**轮转**，
-  保证光点始终落在真实存在的 lane 上。
+- 连线：相邻两列**共用一个腰点**（`x` = 两列中线，`y` = 两列所有 lane 的 y 的中点）。
+  源侧每条 lane → 腰点一条（`edgesIn`），腰点 → 目标侧每条 lane 一条（`edgesOut`）：
+  合成 8 × 导出 6 原来是 48 条交叉，现在是 8 + 6 = 14 条，进出共用同一个点 ——
+  视觉上是「先收束到一点、再散开」。单段是三次贝塞尔（`arc()`），两个控制点分别与
+  两端同 y，所以**两端切线都水平**，两段在腰点处方向连续，拼起来是一整条平滑的流。
+  `stroke:var(--line-strong)` 1px、opacity .75；空列跳过。
+- 光点：每次 tick 的**增量**放一个 2.4px `var(--ok)` 圆点；路径是「源 lane→腰点 +
+  腰点→目标 lane」两段 `d` 拼接的**临时 path**（第二段以 `M 腰点` 开头，位置正好接上），
+  `getPointAtLength` 走 470–750ms，走完连 path 一起删。同屏上限 60，超了丢最旧的；
+  圆点走 circle 池复用。多 lane 阶段拿不到「是哪一条 lane 干的」（status 不按帧带这个），
+  按 tick 序号**轮转**，保证光点始终落在真实存在的 lane 上。
 - 点亮：`classList.remove('lit') + 强制重排 + add('lit')`重启，关键帧
   `0% panel-2 → 6% rgba(61,220,132,.16)+var(--ok) → 40% 半衰 → 100% 回常态`，
   1.15s（`forwards`），1.25s 后摘类；叠加天然成立（衰减中再来一次会重新点亮）。
   `prefers-reduced-motion:reduce` → `animation:none`。
 - 卡住：某 key >600ms 没 tick 且这一单还在跑、这段还没完成 → 该列所有 lane 加 `.stall`
   （`stroke:var(--warn)`、`fill: rgba(240,180,41,.10)`，浅色主题另有低透明取值）。
-- 在飞：列间中线 `在飞 N`（`inflight`，0 时不显示）。
+- 列间**没有**「在飞 N」那行字（用户要求去掉：腰点本身就是「这一列有多少在途」的
+  视觉表达）。`status.stages[*].inflight` 后端照给，界面不再显示。
 - 性能：轮询 500ms（一单一次请求，不按帧发）；`requestAnimationFrame` 里只写
   `cx/cy/opacity`（不读布局）；点亮合到一帧里做，强制重排只在真点亮的那几条 lane 上发生。
 - 视觉 token：只读 `app.css` 现成变量（panel / panel-2 / line / line-strong / ok / warn /
@@ -81,8 +87,8 @@ runtime\server\Scripts\python.exe app\tools\accept\progress_lit_accept.py
 - 真跑一单 72 帧快速导出（素材 = 训练预览图裁块，有脸 → 六段都动），采 90+ 拍 status；
 - 断言：六键齐全 / lanes == 实际线程数（并和后端日志「线程 …合成8/编码6」对账）/
   ticks 单调不减 / inflight 整数 / DOM 没有 #mgpEff 有 #mgpEffWarn / 抽屉 14 字段 /
-  六列 / 两段贝塞尔 / 光点在曲线上 / 上限 60 / 点亮 1.15s 且 1.25s 后摘 / 卡住变琥珀再复原 /
-  在飞 N / 节点复用 / 减动效；
+  六列 / 腰点收束（条数 = 源+目标、进出同一坐标集合、单段一个 C）/ 光点在曲线上 /
+  上限 60 / 点亮 1.15s 且 1.25s 后摘 / 卡住变琥珀再复原 / 图上没有「在飞」/ 节点复用 / 减动效；
 - 截图 3 张进 `%TEMP%\dfl_progress_lit_accept\`：`prog-live.png` / `prog-stall.png` /
   `prog-done.png`；
 - `--shots-only`：复用上次的 status/eff（不跑导出）只重拍截图，改样式时用这个；

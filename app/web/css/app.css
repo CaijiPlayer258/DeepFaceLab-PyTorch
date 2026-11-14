@@ -6007,12 +6007,8 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   fill: var(--ink-3);
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
 }
-#p-merge .mgpipe .t-queue {
-  font-size: 9.5px;
-  fill: var(--ink-3);
-  font-variant-numeric: tabular-nums;
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
-}
+/* （列间原来那句「在飞 N」已按用户要求去掉：连线改成「收束到腰点再散开」之后，
+   腰点本身就是「这一列有多少在途」的视觉表达，再压一行字反而挤。） */
 
 /* ---------- lane 方块：次级面 + 1px 描边（和面板内部其它次级块同一档） ---------- */
 #p-merge .mgpipe .lane {

@@ -6545,7 +6545,7 @@ function mgStageEmpty(on) {
          status.stages[key] = {ticks, inflight, lanes[], ms?, batch?}
        前端一条都不写死 —— lane 有几条就是图上几个方块（合成池 8 线程 = t0..t7，
        编码 6 线程 = e0..e5），ticks 只增、光点按**增量**放，inflight 就是列间那句
-       「在飞 N」。没有这份数据时（老后端 / 还没开单）列是占位的「—」，不瞎猜。
+       列标题的「N 帧」。没有这份数据时（老后端 / 还没开单）列是占位的「—」，不瞎猜。
        点亮：某条 lane 的列 tick 了 → 那条 lane 瞬间到峰值、1.15s 暗回常态。
        卡住：某列 >600ms 没 tick 且还没完成 → 整列琥珀；恢复自动复原。
        ============================================================ */
@@ -6569,7 +6569,9 @@ function mgStageEmpty(on) {
       var TICK_MAX = 10;       /* 一次轮询最多补几个光点（20 帧/秒 × 0.5s ≈ 10） */
 
       var geo = {};            /* key -> {cx, off, lanes:[{y,rect,txt}], count, queue, col} */
-      var edges = {};          /* "si:ai:bi" -> <path>（曲线本体，光点直接在它身上走） */
+      var edgesIn = {};        /* "si:ai" -> {d, el}：源 lane → 腰点 */
+      var edgesOut = {};       /* "si:bi" -> {d, el}：腰点 → 目标 lane（和 edgesIn 共用腰点） */
+      var waists = {};         /* si -> {x, y}：这一对相邻列的腰点（进出共用） */
       var pulses = [];         /* 活跃光点 {c, path, L, t0, dur} */
       var pool = [];           /* 复用起来的 <circle>：不每个 tick 重建 DOM */
       var flashes = [];        /* 待点亮 [{k, i}]（合到下一帧一起做，减少强制重排） */
@@ -6580,6 +6582,7 @@ function mgStageEmpty(on) {
       var stallNow = {};       /* key -> 现在卡没卡 */
       var state = {};          /* key -> "" / on / done / err（列标题颜色） */
       var seq = 0;             /* 光点序号：多 lane 时按它轮转 */
+      var lastFlashed = [];    /* 最近一拍真正点亮过的 lane（验收拍照时按它重挂） */
       var layers = null;
       /* 截图专用：把光点的时钟按住（>0 = 定格在这个时刻），只给验收拍照用。
          光点只有 470–750ms 的命，一张 headless 截图往返就可能比它长 —— 拍照时
@@ -6603,15 +6606,18 @@ function mgStageEmpty(on) {
         }
         return e;
       }
-      /* 三次贝塞尔：源 lane → 列间中线 → 目标 lane（照 pipeline4 的 curve()，
-         两段在中线处 C 连续，所以看起来是**一条平滑的 S**，不是直角折线）。 */
-      function curve(a, b, jx) {
-        var my = (a.y + b.y) / 2;
+      /* 相邻两列之间只有一个**腰点**：x = 两列中线，y = 两列所有 lane 的 y 的中点。
+         源侧：每条源 lane → 腰点（一条曲线）；目标侧：腰点 → 每条目标 lane（一条曲线）。
+         于是「每个源 lane × 每个目标 lane」的交叉（合成 8 × 导出 6 = 48 条）变成
+         8 + 6 = 14 条，进出共用同一个点 —— 视觉上是「先收束到一点、再散开」。
+         单段仍是三次贝塞尔；两个控制点分别与两端同 y，所以**两端切线都水平**，
+         两段在腰点处方向也连续，拼起来是一整条平滑的流（不是折线、也不打结）。 */
+      function arc(a, b) {
+        var dx = b.x - a.x;
         return "M" + a.x + "," + a.y +
-          " C" + (a.x + (jx - a.x) * 0.55) + "," + a.y +
-          " " + (jx - (jx - a.x) * 0.12) + "," + my + " " + jx + "," + my +
-          " C" + (jx + (b.x - jx) * 0.12) + "," + my +
-          " " + (b.x - (b.x - jx) * 0.55) + "," + b.y + " " + b.x + "," + b.y;
+          " C" + (a.x + dx * 0.55) + "," + a.y +
+          " " + (b.x - dx * 0.55) + "," + b.y +
+          " " + b.x + "," + b.y;
       }
       function lanesOf(st) {
         var out = {}, i, k, row;
@@ -6638,9 +6644,9 @@ function mgStageEmpty(on) {
         var svg = $("mgPipeSvg");
         if (!svg) return false;
         while (svg.firstChild) svg.removeChild(svg.firstChild);
-        layers = { edge: mk("g", {}), box: mk("g", {}),
-                   lbl: mk("g", {}), pulse: mk("g", {}) };
-        geo = {}; edges = {}; pulses = []; pool = [];
+        layers = { edge: mk("g", { "class": "edges" }), box: mk("g", {}),
+                   lbl: mk("g", {}), pulse: mk("g", { "class": "pulses" }) };
+        geo = {}; edgesIn = {}; edgesOut = {}; waists = {}; pulses = []; pool = [];
         var colW = (W - PADL * 2) / (KEYS.length - 1);
         var space = H - TOPY - 46;
         var i, j, k;
@@ -6662,11 +6668,12 @@ function mgStageEmpty(on) {
           t2.textContent = "— 帧";
           col.appendChild(t2);
           layers.lbl.appendChild(col);
-          geo[k] = { cx: cx, off: off, lanes: [], count: t2, queue: null, col: col };
+          geo[k] = { cx: cx, off: off, lanes: [], count: t2, col: col };
           for (j = 0; j < n; j++) {
             var y = y0 + j * (laneH + GAP);
             var rect = mk("rect", { x: cx - BOXW / 2, y: y, width: BOXW, height: laneH,
                                     rx: 7, "class": off ? "lane off" : "lane" });
+            rect.setAttribute("data-lane", k + "#" + j);   /* key#序号：排障/拍照直接定位 */
             layers.box.appendChild(rect);
             var tx = mk("text", { x: cx, y: y + laneH / 2 + 3.2, "text-anchor": "middle",
                                   "class": "t-lane" });
@@ -6675,30 +6682,32 @@ function mgStageEmpty(on) {
             geo[k].lanes.push({ y: y + laneH / 2, rect: rect, txt: tx });
           }
         }
-        /* 连线：每个源 lane × 每个目标 lane 一条；空列（off）不连线，光点会跳过它 */
+        /* 连线：源侧 lane → 腰点、腰点 → 目标侧 lane（相邻两列共用同一个腰点）。
+           空列（off）不连线，光点会跳过它。 */
         for (i = 0; i < KEYS.length - 1; i++) {
           var A = geo[KEYS[i]], B = geo[KEYS[i + 1]];
           if (A.off || B.off) continue;
-          for (var ai = 0; ai < A.lanes.length; ai++) {
-            for (var bi = 0; bi < B.lanes.length; bi++) {
-              var d = curve({ x: A.cx + BOXW / 2, y: A.lanes[ai].y },
-                            { x: B.cx - BOXW / 2, y: B.lanes[bi].y },
-                            (A.cx + B.cx) / 2);
-              var p = mk("path", { d: d, fill: "none", stroke: "var(--line-strong)",
-                                   "stroke-width": 1, opacity: ".75" });
-              layers.edge.appendChild(p);
-              edges[i + ":" + ai + ":" + bi] = p;
-            }
-          }
-          /* 列间那句「在飞 N」：挂在两列 lane 区间的中线上（mock 同位置） */
           var ys = [];
           for (j = 0; j < A.lanes.length; j++) ys.push(A.lanes[j].y);
           for (j = 0; j < B.lanes.length; j++) ys.push(B.lanes[j].y);
-          var qy = (Math.min.apply(null, ys) + Math.max.apply(null, ys)) / 2;
-          var qt = mk("text", { x: (A.cx + B.cx) / 2, y: qy - 10,
-                                "text-anchor": "middle", "class": "t-queue" });
-          layers.edge.appendChild(qt);
-          geo[KEYS[i]].queue = qt;
+          var waist = { x: (A.cx + B.cx) / 2,
+                        y: (Math.min.apply(null, ys) + Math.max.apply(null, ys)) / 2 };
+          waists[i] = waist;
+          var sx = A.cx + BOXW / 2, tx = B.cx - BOXW / 2;
+          for (var ai = 0; ai < A.lanes.length; ai++) {
+            var din = arc({ x: sx, y: A.lanes[ai].y }, waist);
+            var pin = mk("path", { d: din, fill: "none", stroke: "var(--line-strong)",
+                                   "stroke-width": 1, opacity: ".75" });
+            layers.edge.appendChild(pin);
+            edgesIn[i + ":" + ai] = { d: din, el: pin };
+          }
+          for (var bi = 0; bi < B.lanes.length; bi++) {
+            var dout = arc(waist, { x: tx, y: B.lanes[bi].y });
+            var pout = mk("path", { d: dout, fill: "none", stroke: "var(--line-strong)",
+                                    "stroke-width": 1, opacity: ".75" });
+            layers.edge.appendChild(pout);
+            edgesOut[i + ":" + bi] = { d: dout, el: pout };
+          }
         }
         svg.appendChild(layers.edge);
         svg.appendChild(layers.box);
@@ -6713,12 +6722,6 @@ function mgStageEmpty(on) {
         if (!g || !g.count) return;
         var txt = (ticks === null || ticks === undefined) ? "— 帧" : (ticks + " 帧");
         if (g.count.textContent !== txt) g.count.textContent = txt;
-      }
-      function setQueue(k, n) {
-        var g = geo[k];
-        if (!g || !g.queue) return;
-        var txt = (n > 0) ? ("在飞 " + n) : "";
-        if (g.queue.textContent !== txt) g.queue.textContent = txt;
       }
       function markStall(k, on) {
         on = !!on;
@@ -6753,10 +6756,18 @@ function mgStageEmpty(on) {
       function recycle(p) {
         p.c.setAttribute("opacity", "0");
         pool.push(p.c);
+        /* 光点的临时 path 用完就删（它只是给 getPointAtLength 当尺子，
+           不进 DOM 的可见层，也不留垃圾） */
+        if (p.path && p.path.parentNode) p.path.parentNode.removeChild(p.path);
+        p.path = null;
       }
-      function addPulse(path) {
+      /* d = 源 lane→腰点 那段 + 腰点→目标 lane 那段（第二段以 "M 腰点" 开头，
+         位置正好落在腰点上，所以拼起来的路径是**连续**的，光点从源 lane 一路走到目标 lane）。 */
+      function addPulse(d) {
         if (!layers) return;
         if (pulses.length >= MAX_PULSE) recycle(pulses.shift());   /* 超上限丢最旧的 */
+        var path = mk("path", { d: d, fill: "none", stroke: "none" });
+        layers.pulse.appendChild(path);
         var c = pool.pop() || mk("circle", { r: 2.4, fill: "var(--ok)" });
         if (!c.parentNode) layers.pulse.appendChild(c);
         c.setAttribute("opacity", ".9");
@@ -6784,8 +6795,8 @@ function mgStageEmpty(on) {
           flashOne(k, ai);
           if (!B || reduceMotion()) continue;
           var bi = B.lanes.length ? ((seq * 7 + 3) % B.lanes.length) : 0;
-          var path = edges[si + ":" + ai + ":" + bi];
-          if (path) addPulse(path);
+          var ein = edgesIn[si + ":" + ai], eout = edgesOut[si + ":" + bi];
+          if (ein && eout) addPulse(ein.d + " " + eout.d);
         }
       }
       function kick() {
@@ -6797,6 +6808,7 @@ function mgStageEmpty(on) {
         if (freezeAt > 0) t = freezeAt;      /* 截图定格（见 freezeAt 的说明） */
         /* ① 点亮：摘类 → 强制重排 → 挂类（动画才会重放；衰减途中再来一次会重新点亮，
               不同 lane 各挂各的，互不打断）。合到一帧里做，减少强制重排次数。 */
+        lastFlashed = flashes.slice(0);        /* 拍照时要知道「刚才亮过哪几条」 */
         while (flashes.length) {
           var f = flashes.shift();
           var g = geo[f.k];
@@ -6833,7 +6845,8 @@ function mgStageEmpty(on) {
         if (!freezeAt && (pulses.length || flashes.length)) kick();
       }
 
-      /* 喂一拍 status：列标题计数、在飞数、点亮、光点、卡住，全在这里 */
+      /* 喂一拍 status：列标题计数、点亮、光点、卡住，全在这里
+         （inflight 后端照给，只是界面不再显示「在飞 N」） */
       function paint(d) {
         d = d || {};
         var right = $("mgPipeRight");
@@ -6845,7 +6858,7 @@ function mgStageEmpty(on) {
           /* 还没开单 / 后端还没起流水线（模型加载那几秒）：先把六列摆出来当占位，
              别让这块是个空白框；真 lanes 一到，签名变了会自动重建。 */
           if (!layers) build(lanesOf(null));
-          for (var z = 0; z < KEYS.length; z++) { setCount(KEYS[z], null); setQueue(KEYS[z], 0); }
+          for (var z = 0; z < KEYS.length; z++) setCount(KEYS[z], null);
           return;
         }
         var lanes = lanesOf(live);
@@ -6855,9 +6868,7 @@ function mgStageEmpty(on) {
         for (var i = 0; i < KEYS.length; i++) {
           var k = KEYS[i], row = live[k] || {};
           var ticks = Math.max(0, Number(row.ticks) || 0);
-          var inflight = Math.max(0, Number(row.inflight) || 0);
           setCount(k, ticks);
-          setQueue(k, inflight);
           var delta = (prev[k] === undefined) ? 0 : (ticks - prev[k]);
           if (delta > 0) {
             lastAt[k] = t;
@@ -6876,6 +6887,7 @@ function mgStageEmpty(on) {
       function reset() {
         var i;
         freezeAt = 0;
+        lastFlashed = [];
         kick();                       /* 上一张照片可能把时钟按住了：重开后要重新起 ticker */
         for (i = 0; i < pulses.length; i++) recycle(pulses[i]);
         pulses = [];
@@ -6887,7 +6899,6 @@ function mgStageEmpty(on) {
           stallNow[KEYS[i]] = false;
           markStall(KEYS[i], false);
           setCount(KEYS[i], null);
-          setQueue(KEYS[i], 0);
           /* 换一单 / 重连：把上一单残留的 .lit 也摘掉（否则它要等各自的 1.25s
              定时器才消失，图上会有一片「没人点也亮着」的方块） */
           var g = geo[KEYS[i]];
@@ -6902,7 +6913,9 @@ function mgStageEmpty(on) {
 
       function debug() {
         var out = { keys: KEYS, sig: sig, pulses: pulses.length, pool: pool.length,
-                    stalled: {}, ticks: {}, state: {}, lanes: {}, edges: 0, built: !!layers };
+                    stalled: {}, ticks: {}, state: {}, lanes: {},
+                    edges: 0, edges_in: 0, edges_out: 0, waists: {},
+                    last_flashed: lastFlashed, built: !!layers };
         var i, k;
         for (i = 0; i < KEYS.length; i++) {
           k = KEYS[i];
@@ -6911,7 +6924,15 @@ function mgStageEmpty(on) {
           out.state[k] = state[k] || "";
           out.lanes[k] = geo[k] ? geo[k].lanes.length : 0;
         }
-        for (i in edges) { if (Object.prototype.hasOwnProperty.call(edges, i)) out.edges += 1; }
+        for (i in edgesIn) { if (Object.prototype.hasOwnProperty.call(edgesIn, i)) out.edges_in += 1; }
+        for (i in edgesOut) { if (Object.prototype.hasOwnProperty.call(edgesOut, i)) out.edges_out += 1; }
+        out.edges = out.edges_in + out.edges_out;      /* 画出来的连线总条数 */
+        for (i in waists) {
+          if (Object.prototype.hasOwnProperty.call(waists, i)) {
+            out.waists[i] = { x: Math.round(waists[i].x * 100) / 100,
+                              y: Math.round(waists[i].y * 100) / 100 };
+          }
+        }
         return out;
       }
 

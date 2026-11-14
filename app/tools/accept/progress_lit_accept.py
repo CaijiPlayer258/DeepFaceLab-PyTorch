@@ -8,9 +8,11 @@ r"""导出进度页「流水线实况」验收：6 列 lane + 贝塞尔曲线 + 
      并且拿后端日志里那行「线程 检测…/合成N/编码M」当第二把尺子对一遍。
   B  DOM：没有 #mgpEff（常驻面板已拆），有 #mgpEffWarn（告警横幅）；
      右下角「查看生效配置」→ 抽屉里 14 个字段 + 来源标签。
-  C  图：六列标题、lane 方块数 == 所有 lanes 之和、每条连线都是两段三次贝塞尔
-     （d 里两个 C）、光点落在真实曲线上且上限 60、lane 点亮 → 1.15s 暗回、
-     >600ms 没 tick 的列整列琥珀、恢复后复原、列间「在飞 N」跟着 inflight 走。
+  C  图：六列标题、lane 方块数 == 所有 lanes 之和；相邻两列**共用一个腰点**
+     （源 lane → 腰点 → 目标 lane，条数 = 源+目标，不再是交叉的 N×M），每条只是一段
+     贝塞尔（d 里一个 C）、进出腰点坐标集合完全相同；光点从源 lane 经腰点走到目标 lane
+     且上限 60；lane 点亮 → 1.15s 暗回；>600ms 没 tick 的列整列琥珀、恢复后复原；
+     **图上没有「在飞 N」那行字**（用户要求删掉，inflight 仍在 status 里）。
   D  减动效：prefers-reduced-motion:reduce 时点亮动画是 none。
   E  复用：同一份 lanes 连喂两拍，SVG 节点身份不变（不重建 DOM）。
 
@@ -376,15 +378,19 @@ def shot(call, name, selector="", clip=None):
         plans.append({"format": "png", "clip": c})
     plans.append({"format": "png"})
     err = None
-    for params in plans:
-        try:
-            res = call("Page.captureScreenshot", params, recv_timeout=45)
-            data = b64.b64decode(res.get("data") or "")
-            if data:
-                out.write_bytes(data)
-                return out
-        except Exception as e:                               # noqa: BLE001
-            err = e
+    for _try in range(2):                       # headless 偶发 capture 卡住：再试一次
+        for params in plans:
+            try:
+                res = call("Page.captureScreenshot", params, recv_timeout=60)
+                data = b64.b64decode(res.get("data") or "")
+                if data:
+                    out.write_bytes(data)
+                    return out
+            except Exception as e:                           # noqa: BLE001
+                err = e
+        if _try == 0:
+            say("截图 %s 第一次没拿到（%s），重试" % (name, err))
+            time.sleep(0.4)
     say("截图失败（%s）：%s" % (name, err))
     return None
 
@@ -423,6 +429,37 @@ def wait_lit(ev, call, want, tries=8):
             return n
         time.sleep(0.08)
     return n
+
+
+def feed_and_probe(ev, call, live_status, live, want_lit=True, want_pulse=True,
+                   tries=4):
+    """喂一拍带增量的 status，走一帧，再在**同一批**里读「亮了几条 / 几个光点」。
+
+    为什么不在两步之间 sleep：点亮挂类和光点推进都在 rAF 里，而 headless 的 CDP
+    往返随便就几百毫秒 —— 固定 sleep 会让「点亮」衰减完、「光点」也跑完，读出来是 0
+    （偶发就是这么来的）。这里喂完立刻走一帧、立刻读，读不到就多一点增量再来。
+    返回 (lit_n, pulses_n, fed_status)。
+    """
+    lit_n, p_n, b = 0, 0, live_status
+    for i in range(tries):
+        b = json.loads(json.dumps(live_status))
+        for k in STAGES:
+            b["stages"][k]["ticks"] = int((live["stages"].get(k) or {}).get("ticks")
+                                          or 0) + 1 + i
+        ev("window.mgpPipe(%s); true" % json.dumps(b, ensure_ascii=False))
+        flush_frames(ev, 1)
+        out = json.loads(ev_json(call, r"""(function(){
+          var svg = document.getElementById('mgPipeSvg');
+          var dbg = window.__mgpPipe ? window.__mgpPipe() : {};
+          return JSON.stringify({lit: svg.querySelectorAll('rect.lane.lit').length,
+                                 pulses: (dbg && dbg.pulses) || 0});
+        })()"""))
+        lit_n = int(out.get("lit") or 0)
+        p_n = int(out.get("pulses") or 0)
+        if (not want_lit or lit_n > 0) and (not want_pulse or p_n > 0):
+            return lit_n, p_n, b
+        time.sleep(0.05)
+    return lit_n, p_n, b
 
 
 def wait_pulses(ev, call, want=1, tries=8):
@@ -686,7 +723,7 @@ def main(argv=None):
         time.sleep(0.2)
 
         # ---------------------------------------------------------------
-        head("C  图：六列 / lane 数 / 两段贝塞尔 / 光点 / 点亮 / 卡住 / 在飞")
+        head("C  图：六列 / lane 数 / 腰点收束的连线 / 光点 / 点亮 / 卡住")
         ev("window.mgpReset(); true")
         ev("window.mgpPipe(%s); true" % json.dumps(live_status, ensure_ascii=False))
         time.sleep(0.5)
@@ -695,17 +732,37 @@ def main(argv=None):
           var st = svg.querySelectorAll('text.t-stage');
           var lanes = svg.querySelectorAll('rect.lane');
           var off = svg.querySelectorAll('rect.lane.off');
-          var paths = svg.querySelectorAll('path');
-          var two = 0, bad = 0, ds = [];
+          var paths = svg.querySelectorAll('g.edges path');
+          var one = 0, bad = 0, ds = [], starts = [], ends = [];
+          function nums(s){                     /* 抽出一段 d 里的所有数字（字母/逗号都当分隔） */
+            var out = [], parts = String(s).split(/[^0-9.\-]+/);
+            for (var q=0;q<parts.length;q++){
+              if (!parts[q]) continue;
+              var v = parseFloat(parts[q]);
+              if (isFinite(v)) out.push(v);
+            }
+            return out;
+          }
+          function pt(s){                       /* 最后两个数 = 这条路径的终点 */
+            var n = nums(s);
+            return { x: n[n.length-2], y: n[n.length-1] };
+          }
+          function head(s){                     /* "M x,y" 那一段的坐标（起点） */
+            return pt(String(s).slice(0, String(s).indexOf('C') + 1));
+          }
           for (var i=0;i<paths.length;i++){
             var d = paths[i].getAttribute('d') || '';
             ds.push(d);
-            if (d.indexOf('C') >= 0 && d.lastIndexOf('C') > d.indexOf('C')) two += 1;
+            if (d.indexOf('C') >= 0 && d.lastIndexOf('C') === d.indexOf('C')) one += 1;
             else bad += 1;
+            starts.push(head(d));
+            ends.push(pt(d));
           }
-          var q = [];
-          var qs = svg.querySelectorAll('text.t-queue');
-          for (var j=0;j<qs.length;j++) q.push(String(qs[j].textContent));
+          function key(p){ return Math.round(p.x*10)/10 + ',' + Math.round(p.y*10)/10; }
+          var uk = {};
+          for (var s=0;s<starts.length;s++) uk[key(starts[s])] = 1;
+          var ek = {};
+          for (var e=0;e<ends.length;e++) ek[key(ends[e])] = 1;
           var cnt = [];
           var cs = svg.querySelectorAll('text.t-count');
           for (var k=0;k<cs.length;k++) cnt.push(String(cs[k].textContent));
@@ -713,8 +770,11 @@ def main(argv=None):
             cols: st.length, colTxt: Array.prototype.map.call(st,
                     function(n){ return String(n.textContent); }),
             lanes: lanes.length, off: off.length,
-            paths: paths.length, two: two, bad: bad,
-            queues: q, counts: cnt, firstD: ds[0] || ''
+            paths: paths.length, one: one, bad: bad,
+            starts: uk, ends: ek,
+            queueNodes: svg.querySelectorAll('text.t-queue').length,
+            queueTxt: String(svg.textContent).indexOf('在飞') >= 0,
+            counts: cnt, firstD: ds[0] || ''
           });
         })()"""))
         want_lanes = sum(len(lanes[k]) for k in STAGES)
@@ -724,18 +784,48 @@ def main(argv=None):
               "DOM %s / status %d" % (dom.get("lanes"), want_lanes))
         check(int(dom.get("off")) == 0, "C3 这一单六列都有真 lane（没有占位格）",
               "off=%s" % dom.get("off"))
-        check(int(dom.get("paths")) > 0 and int(dom.get("two")) == int(dom.get("paths")),
-              "C4 每条连线都是两段三次贝塞尔（d 里两个 C）",
-              "paths=%s two=%s bad=%s" % (dom.get("paths"), dom.get("two"), dom.get("bad")))
-        check(str(dom.get("firstD") or "").count("C") == 2,
-              "C5 曲线 d 的形状 = M…C…C…（中缝衔接）", str(dom.get("firstD"))[:70])
+        # 腰点几何：相邻两列共用 1 个腰点 → 条数 = 源 lane 数 + 目标 lane 数
+        want_paths = 0
+        for i in range(len(STAGES) - 1):
+            want_paths += len(lanes[STAGES[i]]) + len(lanes[STAGES[i + 1]])
+        want_waists = len(STAGES) - 1
+        check(int(dom.get("paths")) == want_paths,
+              "C4 连线条数 = Σ(源 lane + 目标 lane)（合成8×导出6 的 48 条交叉没了）",
+              "DOM %s / 期望 %d（旧写法会是 %d）"
+              % (dom.get("paths"), want_paths,
+                 sum(len(lanes[STAGES[i]]) * len(lanes[STAGES[i + 1]])
+                     for i in range(len(STAGES) - 1))))
+        check(int(dom.get("one")) == int(dom.get("paths")) and int(dom.get("bad")) == 0,
+              "C5 每条连线都是单段三次贝塞尔（d 里一个 C）",
+              "paths=%s one=%s bad=%s" % (dom.get("paths"), dom.get("one"), dom.get("bad")))
+        # 腰点 = 既出现在「起点集合」又出现在「终点集合」里的那些坐标：
+        #   源侧：起点 = lane 边、终点 = 腰点；目标侧：起点 = 腰点、终点 = lane 边。
+        #   所以 lane 边只会在其中一侧出现，而腰点两侧都有 —— 交集恰好就是腰点。
+        starts_k = set((dom.get("starts") or {}).keys())
+        ends_k = set((dom.get("ends") or {}).keys())
+        shared = sorted(starts_k & ends_k)
+        n_src = sum(len(lanes[STAGES[i]]) for i in range(len(STAGES) - 1))
+        n_tgt = sum(len(lanes[STAGES[i + 1]]) for i in range(len(STAGES) - 1))
+        check(len(starts_k) == n_src + want_waists
+              and len(ends_k) == n_tgt + want_waists,
+              "C5b 起点/终点个数 = (源 lane 数 + 腰点数) / (目标 lane 数 + 腰点数)",
+              "starts=%d(期望 %d) ends=%d(期望 %d)"
+              % (len(starts_k), n_src + want_waists,
+                 len(ends_k), n_tgt + want_waists))
+        check(len(shared) == want_waists,
+              "C5c 收束到 %d 个腰点，且进出**共用同一个**点（起点∩终点 = 腰点）"
+              % want_waists,
+              "交集 %d 个：%s" % (len(shared), shared[:3]))
+        check(int(dom.get("queueNodes") or 0) == 0 and dom.get("queueTxt") is False,
+              "C5d 没有「在飞 N」那行字（.t-queue 节点 0 个、SVG 里没有「在飞」）",
+              "nodes=%s txt=%s" % (dom.get("queueNodes"), dom.get("queueTxt")))
 
         # 第一拍 prev 是空的（= 重连语义：不补放历史光点），所以先喂一拍**增量**再断光点
         big = json.loads(json.dumps(live_status))
         for k in STAGES:
             big["stages"][k]["ticks"] = int((live["stages"].get(k) or {}).get("ticks") or 0) + 2
-        ev("window.mgpPipe(%s); true" % json.dumps(big, ensure_ascii=False))
-        p_n = wait_pulses(ev, call, 1)
+        _lit_n, p_n, _fed = feed_and_probe(ev, call, live_status, live,
+                                           want_lit=False, want_pulse=True)
         pipe = json.loads(ev_json(call, "JSON.stringify(window.__mgpPipe())"))
         check(int(p_n) > 0, "C6 有 tick 增量就真的有光点在跑", "pulses=%s" % p_n)
         check(int(pipe.get("pulses") or 0) <= 60, "C7 光点上限 60",
@@ -824,14 +914,24 @@ def main(argv=None):
                                                   .get("ticks") or 0) + 2 * (_try + 1)
             ev("window.mgpFusedPaint(%s); true" % json.dumps(_big, ensure_ascii=False))
             flush_frames(ev, 3)             # 这一帧：挂 .lit + 光点落到曲线上 45% 处
-            # 定格手法：给正在亮的 lane 挂内联 animation-play-state:paused + delay:-70ms
-            # （= 动画第 6% 的峰值，立刻可见且不会自己衰减）。Web Animations 的
-            # pause()+currentTime 在 headless 里是「pending pause」，时灵时不灵 —— 实测
-            # 同一份代码有时拍到峰值、有时拍到稳态。内联 style 是同步生效的，稳。
+            # 定格手法：按「刚才真正亮过的那几条 lane」重新挂 .lit（时钟从 0 重启，
+            # 应用自己的 1.25s 摘类定时器已经全部跑过了，不会再来抢），再用内联
+            # animation-play-state:paused + delay:-70ms 摆在动画第 6% 的峰值。
+            # 为什么不用 Web Animations 的 pause()+currentTime：headless 里那是
+            # 「pending pause」，同一份代码有时拍到峰值、有时拍到稳态。内联 style 同步生效。
+            last_fl = json.loads(ev_json(call, "JSON.stringify(window.__mgpPipe())")
+                                 ).get("last_flashed") or []
             frozen = ev("(function(){var svg=document.getElementById('mgPipeSvg');"
-                        "var rs=svg.querySelectorAll('rect.lane.lit');"
-                        "for(var i=0;i<rs.length;i++){rs[i].style.animationPlayState='paused';"
-                        "rs[i].style.animationDelay='-70ms';}return rs.length;})()") or 0
+                        "var all=svg.querySelectorAll('rect.lane');var list=%s;var n=0;"
+                        "for(var i=0;i<list.length;i++){"
+                        "var want=list[i].k+'#'+list[i].i,hit=null;"
+                        "for(var r=0;r<all.length;r++){"
+                        "if(all[r].getAttribute('data-lane')===want){hit=all[r];break;}}"
+                        "if(!hit)continue;"
+                        "hit.classList.remove('lit');void hit.getBoundingClientRect();"
+                        "hit.classList.add('lit');"
+                        "hit.style.animationPlayState='paused';hit.style.animationDelay='-70ms';n++;}"
+                        "return n;})()" % json.dumps(last_fl, ensure_ascii=False)) or 0
             if frozen:
                 break
         say("定格：点亮 %s 条（截完就恢复）" % frozen)
@@ -879,23 +979,24 @@ def main(argv=None):
         check(not any(bool(v) for v in (back.get("stalled") or {}).values()),
               "C17 tick 一恢复，琥珀色就撤掉", str(back.get("stalled")))
 
-        # 在飞 N：inflight>0 的列间必须出现；0 的列必须空
+        # 「在飞 N」已按用户要求删掉：把 inflight 喂成 5 也不许长出任何文字节点
         q_live = json.loads(json.dumps(live_status))
         q_live["stages"]["dfm"]["inflight"] = 5
         q_live["stages"]["det"]["inflight"] = 0
+        before_txt = int(ev_json(call, "(function(){return document.querySelectorAll("
+                                       "'#mgPipeSvg text').length;})()") or 0)
         ev("window.mgpPipe(%s); true" % json.dumps(q_live, ensure_ascii=False))
         time.sleep(0.15)
-        qtxt = json.loads(ev_json(call, r"""(function(){
+        now = json.loads(ev_json(call, r"""(function(){
           var svg = document.getElementById('mgPipeSvg');
-          var out = [];
-          var qs = svg.querySelectorAll('text.t-queue');
-          for (var i=0;i<qs.length;i++) out.push(String(qs[i].textContent));
-          return JSON.stringify(out);
+          return JSON.stringify({n: svg.querySelectorAll('text').length,
+                                 inair: String(svg.textContent).indexOf('在飞') >= 0,
+                                 q: svg.querySelectorAll('.t-queue').length});
         })()"""))
-        joined = "|".join([str(x) for x in (qtxt or [])])
-        check("在飞 5" in joined, "C18 inflight>0 的列间显示「在飞 N」", joined[:120])
-        check("在飞 0" not in joined, "C19 inflight=0 不显示（也不会显示「在飞 0」）",
-              joined[:120])
+        check(int(now.get("n") or 0) == before_txt, "C18 inflight 变了也不多长文字节点",
+              "text %s -> %s" % (before_txt, now.get("n")))
+        check(now.get("inair") is False and int(now.get("q") or 0) == 0,
+              "C19 整张图里没有「在飞」字样、没有 .t-queue 节点", str(now))
 
         # 节点复用：同一份 lanes 再喂一拍，lane 元素身份不变（没重建 DOM）
         ev_json(call, r"""(function(){
@@ -935,9 +1036,9 @@ def main(argv=None):
         ev("window.mgpPipeFreeze(0); true")
         ev("window.mgpReset(); true")
         ev("window.mgpPipe(%s); true" % json.dumps(live_status, ensure_ascii=False))
-        flush_frames(ev, 2)
-        ev("window.mgpPipe(%s); true" % json.dumps(big, ensure_ascii=False))
-        flush_frames(ev, 3)
+        flush_frames(ev, 1)
+        d1_lit, _d1_p, _d1_fed = feed_and_probe(ev, call, live_status, live,
+                                                want_lit=True, want_pulse=False)
         rm = json.loads(ev_json(call, r"""(function(){
           var svg = document.getElementById('mgPipeSvg');
           var r = svg.querySelector('rect.lane.lit');
@@ -945,7 +1046,8 @@ def main(argv=None):
           return JSON.stringify({lit: !!r, anim: cs ? cs.animationName : ''});
         })()"""))
         check(str(rm.get("anim") or "") == "none" and rm.get("lit") is True,
-              "D1 减动效时点亮照挂（.lit）但动画是 none", str(rm))
+              "D1 减动效时点亮照挂（.lit）但动画是 none",
+              "%s · 本轮亮过 %s 条" % (rm, d1_lit))
         call("Emulation.setEmulatedMedia", {"features": []})
 
     except SystemExit:
