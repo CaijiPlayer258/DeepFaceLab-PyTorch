@@ -44,6 +44,11 @@ lab/**/*.npy
 _electron_tmp*/
 _ref/
 _serve*.log
+*.tmp
+# 子任务/调试留下的临时产物（不命名为 _xxx.log 也要挡）
+_*.log
+_probe_*.py
+_splice.py
 bg_*.png
 f_*.png
 
@@ -77,6 +82,6 @@ app/engine/ui/user/
 /_*.txt
 /_*.json
 
-# B վ WBI ǩ������
+# B վ WBI ǩ������
 .wbi_cache.json
 **/.wbi_cache.json
