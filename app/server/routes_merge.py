@@ -86,6 +86,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from . import _projplan as _projplan
 from . import app as _app_mod
 from ._face_group import clear_face_group_cache, register_cache_clearer
 from ._paths import ROOT as _REPO_ROOT
@@ -4117,6 +4118,50 @@ class _PreviewWorkerPool:
             self._free.put(w)
         return len(ok)
 
+    def add_one(self, dfms, xseg) -> bool:
+        """再热一份会话（自适应标定要量 2 worker 那一档才加）。
+
+        返回是否成功：装不下 / 加载失败就当场关掉，池子里保持原样 —— 标定本身不能因为
+        「想量 2 worker」把这一单弄崩。
+        """
+        w = _PreviewWorker()
+        try:
+            r = w.call({"cmd": "warm",
+                        "dfms": [str(p) for p in (dfms or []) if str(p or "")],
+                        "xseg": str(xseg or "")})
+            if not r.get("ok"):
+                raise _BadInput(str(r.get("error") or "warm 失败"), 500)
+        except Exception as e:                          # noqa: BLE001
+            print("[merge-proj] 追加 worker 失败（%s）：%s"
+                  % (e.__class__.__name__, str(e)[:200]), flush=True)
+            try:
+                w.close("追加失败")
+            except Exception:                           # noqa: BLE001
+                pass
+            return False
+        self._all.append(w)
+        self._free.put(w)
+        return True
+
+    def retire(self, why="自适应降档") -> bool:
+        """**关掉一个空闲 worker**（自适应降档 / 标定完不需要 2 份时用）。
+
+        只在「手里没有它」的时候能调：从空闲队列 get_nowait 拿不到就返回 False（正忙），
+        绝不打断在飞的那一批 —— 降档慢一帧无所谓，丢帧/失败帧才是事故。
+        """
+        if len(self._all) <= 1:
+            return False
+        try:
+            w = self._free.get_nowait()
+        except queue.Empty:
+            return False
+        self._all = [x for x in self._all if x is not w]
+        try:
+            w.close(why)
+        except Exception:                               # noqa: BLE001
+            pass
+        return True
+
     def close(self, why="项目导出结束"):
         if self._closed:
             return
@@ -6071,6 +6116,9 @@ def _proj_run(cfg: dict):
     # （vplan.procs → vplan.batch，_vram_cands 的阶梯），两样都到最小才拒绝。
     batch = int(cfg.get("batch") or _proj_batch_default(want_workers))
     batch = max(1, min(int(batch), _PREVIEW_MAX_BATCH, int(total) or 1))
+    # 实际在跑的档位：自适应会在运行中改它（降线程不用重建 worker；降 worker 走
+    # pool.retire —— 只关空闲的那个，绝不打断在飞的批）
+    cur = {"workers": 0, "batch": int(batch)}
 
     # 一个 worker 也走池子：批量协议（一次请求 k 帧，worker 里 k 个线程）在 N=1 时
     # 照样有效；workers=1 + batch=1 就是"一帧一请求"的老语义（逐像素基准那一档）。
@@ -6099,10 +6147,11 @@ def _proj_run(cfg: dict):
         _proj_warn("%d 个 worker 没起来（显存不够 / 加载失败），实际并行 %d"
                    % (want_workers - n_ok, n_ok))
     n_workers = int(n_ok)
+    cur["workers"] = int(n_workers)
     _proj_set(workers=int(n_workers), batch=int(batch))
     # ---- 显存采样：这一单整卡峰到多少（喂 _proj_record_sess_peak）----
     # 每 2 秒一次 nvidia-smi（80ms，无窗口），开销可以忽略；峰值只在正常跑完时才采纳。
-    samp = {"peak": 0, "total": 0}
+    samp = {"peak": 0, "total": 0, "util": 0.0, "now": 0}
     samp_stop = threading.Event()
 
     def _vram_sampler():
@@ -6111,7 +6160,18 @@ def _proj_run(cfg: dict):
                 _f2, _t2, _u2 = _vram_free_smi(fresh=True)
                 if _u2 is not None:
                     samp["peak"] = max(int(samp["peak"]), int(_u2))
+                    samp["now"] = int(_u2)      # 降档判定看**当前**，不看历史最高
                     samp["total"] = int(_t2 or 0)
+            except Exception:                           # noqa: BLE001
+                pass
+            # GPU 利用率：自适应「升档」要看它（显存宽松 + GPU 吃不满 = 线程不够）
+            try:
+                _r = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu",
+                                     "--format=csv,noheader,nounits"],
+                                    capture_output=True, text=True, timeout=6,
+                                    creationflags=0x08000000)
+                _line = (_r.stdout or "").strip().splitlines()[0]
+                samp["util"] = float(_line)
             except Exception:                           # noqa: BLE001
                 pass
             samp_stop.wait(2.0)
@@ -6124,8 +6184,11 @@ def _proj_run(cfg: dict):
     send_raw = _proj_send_raw()
     out_raw = _proj_out_raw()
 
-    def _prep(name):
+    def _prep(name, bench=False):
         """一帧的「准备」：读帧 → 检测 → 68 点 → 拼好要发 worker 的那一份。
+
+        bench=True：标定用 —— **不认断点续跑**（merged 里已经有也要重算），否则续跑时
+        标定会量到一串 skip，帧速变成无穷大。
 
         返回 (kind, payload)：
           skip  续跑：merged 里已经有这一帧（payload=None）
@@ -6138,7 +6201,7 @@ def _proj_run(cfg: dict):
         dst_p = merged_dir / name
         src_p = frames_dir / name
         # ---- 断点续跑：merged 里已经有非空文件就跳过（--force 时才重做）----
-        if not force and dst_p.is_file() and dst_p.stat().st_size > 0:
+        if not bench and not force and dst_p.is_file() and dst_p.stat().st_size > 0:
             return "skip", None
         try:
             frame = _app_mod._imread_any(src_p)
@@ -6173,10 +6236,11 @@ def _proj_run(cfg: dict):
             return "res", prep["done"]
         return "item", prep
 
-    def _swap_batch(names_b, preps, worker):
+    def _swap_batch(names_b, preps, worker, k=None):
         """一个批：等这批的准备结果 → 换脸合成**一次**请求（k 帧并行）→ 摊平。
 
         返回 [(name, kind, payload)]，顺序和 names_b 一致。
+        k 不传就是当前档位的线程数（cur["batch"]）—— 标定要跑别的档位，所以它是参数。
         """
         prepared = []
         for i, fut in enumerate(preps):
@@ -6198,7 +6262,7 @@ def _proj_run(cfg: dict):
         if items:
             t_send = time.time()
             metas, imgs = _worker_swap(worker, [p["item"] for p in items],
-                                       threads=min(int(batch), len(items)),
+                                       threads=min(int(k or cur["batch"]), len(items)),
                                        state=state)
             for j, slot in enumerate(slots):
                 ctx = items[j]
@@ -6270,6 +6334,291 @@ def _proj_run(cfg: dict):
         else:
             swapped += 1
 
+    # ============================================================
+    # 自适应档位：标定 → 选档 → 运行中升降档（用户口径「项目模式要有智能调度」）
+    # ------------------------------------------------------------
+    # 静态规则（_proj_workers_default / _proj_batch_default）只是**没有实测时**的兜底：
+    # 同一张 8GB 卡，「4 帧摊在 1 份会话还是 2 份上」是 77% vs 95%（换页）—— 这件事跟
+    # 权重只是相关，不是因果（还看 arena 涨多少、帧多大、桌面占了几个 GB）。所以这里
+    # 现场用 SAMPLE_FRAMES 帧把候选 (workers × batch) 真跑一遍，量帧速 / 显存峰 /
+    # swap p50，再按 _projplan.choose 的三条规则选；跑起来之后每 ADAPT_EVERY 帧复查，
+    # 显存或 swap 恶化就降档（降线程 → 降 worker），长期空闲且显存宽松再升回来。
+    # ============================================================
+    adapt = dict(cfg.get("adaptive") or {})
+    ad_state = {"events": [], "base_p50": None, "at": 0, "downs": 0, "ups": 0}
+    adapt_every = max(20, int(os.environ.get("DFL_PROJ_ADAPT_EVERY") or 200))
+    # 降档的显存阈值（默认 88%）；验收/排障可以调低，让「运行中自适应」这条路径真被触发
+    adapt_pct = float(os.environ.get("DFL_PROJ_ADAPT_PCT") or 88.0)
+    best_batch = max(1, int(cur["batch"]))
+
+    def _adapt_snap() -> dict:
+        return {"src": str(adapt.get("src") or "off"), "pick": adapt.get("pick"),
+                "rows": adapt.get("rows"), "note": str(adapt.get("note") or ""),
+                "cap": adapt.get("cap"), "events": list(ad_state.get("events") or []),
+                "cur": {"workers": len(pool), "batch": int(cur["batch"])}}
+
+    def _measure(names, nw, nb):
+        """量一档（nw 个 worker、每批 nb 帧）→ {fps, swap_p50, peak_mb, ...}。"""
+        if not names or len(pool) < int(nw):
+            return None
+        stop_s = threading.Event()
+        peak = {"mb": 0, "total": 0}
+
+        def _samp():
+            while not stop_s.is_set():
+                try:
+                    _f, _t, _u = _vram_free_smi(fresh=True)
+                    if _u is not None:
+                        peak["mb"] = max(int(peak["mb"]), int(_u))
+                        peak["total"] = int(_t or peak["total"])
+                except Exception:                       # noqa: BLE001
+                    pass
+                stop_s.wait(0.15)
+
+        threading.Thread(target=_samp, daemon=True, name="proj-bench-vram").start()
+
+        rounds = []
+
+        def _slot(names_b, preps):
+            w = pool.acquire()
+            t_b = time.time()
+            try:
+                return _swap_batch(names_b, preps, w, k=int(nb))
+            finally:
+                rounds.append((t_b, time.time(), len(names_b)))
+                pool.release(w)
+
+        chunks = [list(names[i:i + int(nb)]) for i in range(0, len(names), int(nb))]
+        got_ms, bad = [], 0
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+        t0 = time.time()
+        with _TPE(max_workers=max(2, int(nb) * 2),
+                  thread_name_prefix="proj-bench-prep") as prep_ex, \
+                _TPE(max_workers=max(1, int(nw)), thread_name_prefix="proj-bench") as ex:
+            futs = []
+            for ch in chunks:
+                preps = [prep_ex.submit(_prep, nm, True) for nm in ch]
+                futs.append((ch, ex.submit(_slot, ch, preps)))
+            for ch, f in futs:
+                try:
+                    landed = f.result()
+                except Exception as e:                  # noqa: BLE001
+                    bad += len(ch)
+                    _proj_warn("标定 %d×%d 有一批失败：%s: %s"
+                               % (nw, nb, e.__class__.__name__, str(e)[:120]))
+                    continue
+                for (_nm, kind, payload) in landed:
+                    if kind == "err":
+                        bad += 1
+                    elif kind == "res" and payload:
+                        _ms = (payload.get("timings") or {}).get("swap_ms")
+                        if _ms:
+                            got_ms.append(float(_ms))
+        stop_s.set()
+        # 帧速按**稳态**算：头 nw 批还在热 arena / 填流水线（2 worker 那档尤其明显，
+        # 12 帧里它能把 13.4 量成 10.0），所以丢掉每路的第一批，只数后面的。
+        rounds.sort()
+        skip = int(nw) if len(rounds) > int(nw) + 1 else 0
+        used = rounds[skip:] or rounds
+        try:
+            span = max(0.001, max(r[1] for r in used) - min(r[0] for r in used))
+            cnt = sum(int(r[2]) for r in used)
+        except ValueError:                              # 一轮都没跑成（全失败）
+            span, cnt = max(0.001, time.time() - t0), 0
+        vals = sorted(got_ms)
+        return {"workers": int(nw), "batch": int(nb),
+                "fps": round(cnt / span, 2) if cnt else 0.0,
+                "swap_p50": (round(vals[len(vals) // 2], 1) if vals else None),
+                "peak_mb": int(peak["mb"] or 0), "total_mb": int(peak["total"] or 0),
+                "frames": int(cnt) or len(names), "bad": int(bad), "sec": round(span, 2)}
+
+    def _calibrate():
+        """没有实测时：8~12 帧 × 候选档位 → 选一档，并把结果写进 _proj_bench.json。"""
+        nonlocal batch, best_batch
+        # 取帧不能只看「aligned 里有脸」：本片就有 16 帧有对齐脸但检测器没检出（按原帧
+        # 落盘），拿它们标定会量到「原样搬运」的 110 帧/秒 —— 那不是换脸的帧速。所以先
+        # 用 _prep 探一遍，只收真能换脸（kind=item）的帧。
+        want = int(_projplan.SAMPLE_FRAMES)
+        names = []
+        for _nm in [n for n in frames if (face_map.get(n) or [])]:
+            if len(names) >= want:
+                break
+            try:
+                _kind, _pl = _prep(_nm, True)
+            except Exception:                       # noqa: BLE001
+                continue
+            if _kind == "item":
+                names.append(_nm)
+        if len(names) < 4:
+            _proj_log("标定：能换脸的帧只找到 %d 张（要 4 张以上）→ 不标定"
+                      % len(names))
+            return None
+        size_px = int(vplan.get("size_px") or _dfm_size_hint(_dfms[0]) or 0)
+        mmb = float(vplan.get("model_mb") or 0.0)
+        sess_mb = float(vplan.get("sess_mb") or 0.0)
+        cands = []
+        for (nw, nb) in _projplan.candidates(2, _PREVIEW_MAX_BATCH):
+            fit, est_mb = True, None
+            try:
+                cand = _vram_plan(mmb, {"mode": "procs", "max_procs": int(nw),
+                                        "batch": int(nb), "aux": True,
+                                        "sess_mb": sess_mb, "size_px": size_px,
+                                        "sess_src": "标定：用本单的会话峰值",
+                                        "label": "标定 %d×%d" % (nw, nb)})
+                for st in (cand.get("steps") or []):
+                    if int(st.get("procs") or 0) == int(nw) and int(st.get("batch") or 0) == int(nb):
+                        est_mb = float(st.get("need_mb") or 0.0)
+                        break
+                plan_ok = (bool(cand.get("ok"))
+                           and int(cand.get("procs") or 1) >= int(nw)
+                           and int(cand.get("batch") or 1) >= int(nb))
+                # 预算是**估算**（会话峰值 + 批台阶），实测常常比它低几百 MB ——
+                # 416 就是被估到 5781 而真跑只有 4906（6503 整卡）。所以这里不用
+                # 「预算说不行就不量」，而是「估算的整卡占用没超过换页线就量一量，
+                # 量完按**实测峰值**判」。真装不下由 add_one 失败兜住（当场 close）。
+                tot_mb = float(vplan.get("total_mb") or 0.0)
+                base_mb = float(base_used or 0.0)
+                fits_hard = (est_mb is not None and tot_mb > 0
+                             and (est_mb + base_mb) <= 100.0 * _projplan.HARD * tot_mb / 100.0)
+                fit = bool(plan_ok or fits_hard)
+                if not fit:
+                    _proj_log("标定跳过 %d×%d：估算整卡 %.0fMB > 换页线 %.0f%%（%s）"
+                              % (nw, nb, float(est_mb or 0) + base_mb,
+                                 100.0 * _projplan.HARD,
+                                 str(cand.get("reason") or "")[:80]))
+                elif not plan_ok:
+                    _proj_log("标定 %d×%d：预算说装不下，但估算整卡 %.0fMB 在换页线内 → "
+                              "按实测判（真起不来会当场关掉）"
+                              % (nw, nb, float(est_mb or 0) + base_mb))
+            except Exception:                           # noqa: BLE001
+                fit = True
+            if fit:
+                cands.append((nw, nb))
+        rows = {}
+        _proj_log("标定：用 %d 帧量 %s 档（每档跑完就记帧速 / 显存峰 / swap p50）"
+                  % (len(names), "、".join("%d×%d" % c for c in cands) or "无"))
+        for (nw, nb) in cands:
+            while len(pool) > int(nw):
+                if not pool.retire("标定：先量 worker 少的档"):
+                    break
+            while len(pool) < int(nw):
+                if not pool.add_one(_dfms, cfg.get("xseg")):
+                    break
+            cur["workers"] = len(pool)
+            if len(pool) < int(nw):
+                _proj_log("标定跳过 %d×%d：第 %d 个 worker 起不来（显存不够）"
+                          % (nw, nb, int(nw)))
+                continue
+            r = _measure(names, nw, nb)
+            if not r or r.get("bad") or float(r.get("fps") or 0) <= 0:
+                _proj_log("标定 %d×%d 没量成（失败 %s / %.2f 帧/秒）"
+                          % (nw, nb, (r or {}).get("bad"), float((r or {}).get("fps") or 0)))
+                continue
+            rows["%dx%d" % (nw, nb)] = r
+            _proj_log("标定 %d×%d：%.2f 帧/秒 · swap p50 %sms · 显存峰 %dMB"
+                      % (nw, nb, r["fps"], r["swap_p50"], r["peak_mb"]))
+        if not rows:
+            return None
+        tot = int(rows[sorted(rows)[0]].get("total_mb") or 0)
+        res = _projplan.choose(rows, tot, base_used)
+        line = _projplan.note(rows, res)
+        _proj_log(line)
+        pick = res.get("pick") or None
+        if pick:
+            cur["batch"] = int(pick["batch"])
+            batch = int(pick["batch"])
+            best_batch = max(1, int(cur["batch"]))
+            while len(pool) > int(pick["workers"]):
+                if not pool.retire("标定：选中的档位只要 %d 个 worker" % int(pick["workers"])):
+                    break
+            cur["workers"] = len(pool)
+            _proj_set(workers=int(cur["workers"]), batch=int(cur["batch"]))
+        adapt.update({"src": "bench", "rows": res.get("rows"), "pick": pick,
+                      "rejected": res.get("rejected"), "note": line,
+                      "cap": res.get("cap")})
+        cfg["adaptive"] = dict(adapt)
+        _proj_set(adaptive=_adapt_snap())
+        # 标定本身不干活：帧速和 swap p50 都要从**正式开跑**那一拍重新起算，
+        # 否则 8~12 帧的标定时间会被摊进这一单的帧速里（实测差 8.3 vs 10.1）。
+        nonlocal t_swap
+        t_swap = time.time()
+        del swap_ms[:]
+        ad_state["at"] = 0
+        ad_state["base_p50"] = None
+        if adapt.get("key"):
+            # 每一档同时记 delta（本程序那一块）：缓存命中时基线可能已经变了
+            # （用户多开了个浏览器就 +800MB），用 delta + 当时的基线才算得准。
+            rows_out = {}
+            for _k, _r in rows.items():
+                _rr = dict(_r)
+                if base_used:
+                    _rr["delta_mb"] = max(0, int(_rr.get("peak_mb") or 0) - int(base_used))
+                rows_out[_k] = _rr
+            _projplan.put_row(WORKSPACE, adapt["key"],
+                              {"v": _projplan.BENCH_VER, "ts": time.time(),
+                               "model": str(cfg.get("model") or ""),
+                               "size_px": size_px, "base_mb": base_used,
+                               "rows": rows_out, "sample_frames": len(names),
+                               "token": "bench"})
+            _proj_log("标定结果已存 %s（下次同一份模型直接用，不再花这 %d 帧）"
+                      % (_projplan.path_of(WORKSPACE).name, len(names)))
+        return pick
+
+    def _adapt_check():
+        """运行中复查（每 adapt_every 帧）：显存 >88% 或 swap p50 恶化 >50% → 降一档。"""
+        if done - int(ad_state.get("at") or 0) < adapt_every:
+            return
+        ad_state["at"] = done
+        tot = int(samp.get("total") or 0)
+        if not tot:
+            return
+        # 用「当前占用」判降档：peak 是单调的，一旦摸到过 89% 就永远 89% → 会一路
+        # 从 4 线程掉到 1（棘轮 bug）。peak 只用来记账和写报告。
+        pct = 100.0 * float(samp.get("now") or samp.get("peak") or 0) / tot
+        recent = sorted(x for x in swap_ms[-adapt_every:] if x)
+        p50 = recent[len(recent) // 2] if recent else None
+        if ad_state.get("base_p50") is None and p50:
+            ad_state["base_p50"] = p50
+        base = ad_state.get("base_p50") or p50
+        util = float(samp.get("util") or 0.0)
+        why = ""
+        if pct > adapt_pct:
+            why = "显存 %.0f%% > %.0f%%" % (pct, adapt_pct)
+        elif base and p50 and p50 > 1.5 * float(base):
+            why = ("swap p50 %.0fms 恶化到 %.1f×（基线 %.0fms）"
+                   % (p50, p50 / float(base), float(base)))
+        if why:
+            msg = ""
+            if int(cur["batch"]) > 1:
+                cur["batch"] = int(cur["batch"]) - 1
+                _proj_set(batch=int(cur["batch"]))
+                msg = "[project] 自适应降档：%s → 线程 %d" % (why, int(cur["batch"]))
+            elif len(pool) > 1 and pool.retire("自适应降档"):
+                cur["workers"] = len(pool)
+                _proj_set(workers=int(cur["workers"]))
+                msg = ("[project] 自适应降档：%s → worker %d（线程已经是 1）"
+                       % (why, int(cur["workers"])))
+            if msg:
+                ad_state["downs"] = int(ad_state.get("downs") or 0) + 1
+                ad_state["events"].append({"frame": int(done), "kind": "down", "why": why,
+                                           "workers": len(pool),
+                                           "batch": int(cur["batch"])})
+                ad_state["base_p50"] = p50 or base
+                _proj_log(msg)
+                _proj_set(adaptive=_adapt_snap())
+            return
+        # 升档：GPU 长期吃不满（<50%）且显存宽松（<70%）→ 线程 +1（最多回到实测最优）
+        if (pct < 70.0 and util and util < 50.0 and int(cur["batch"]) < int(best_batch)
+                and int(ad_state.get("ups") or 0) < 2):
+            cur["batch"] = int(cur["batch"]) + 1
+            ad_state["ups"] = int(ad_state.get("ups") or 0) + 1
+            ad_state["events"].append({"frame": int(done), "kind": "up",
+                                       "why": "GPU %.0f%% / 显存 %.0f%%" % (util, pct),
+                                       "workers": len(pool), "batch": int(cur["batch"])})
+            _proj_log("[project] 自适应升档：GPU %.0f%% 没吃饱 / 显存 %.0f%% → 线程 %d"
+                      % (util, pct, int(cur["batch"])))
+            _proj_set(batch=int(cur["batch"]), adaptive=_adapt_snap())
+
     def _tick():
         """进度（只在主线程跑，和以前串行时的口径一模一样）。
 
@@ -6295,6 +6644,7 @@ def _proj_run(cfg: dict):
                       % (done, total, rate, ("（跳过 %d）" % skipped) if skipped else ""))
         if len(failed_frames) > _PROJ_MAX_LIST:
             del failed_frames[_PROJ_MAX_LIST:]
+        _adapt_check()
         if done % 20 == 0 or done == total:
             _proj_log("合成 %d/%d 帧 · 换脸 %d · 原样 %d · 跳过 %d · 失败 %d · "
                       "worker 单帧 p50 %sms"
@@ -6303,6 +6653,16 @@ def _proj_run(cfg: dict):
 
     cancelled = False               # finally 里要读它（记账那一拍：取消的单不采纳峰值）
     try:
+        # ---- 自适应：没有实测就现场标定（有缓存的话 merge_export_project 已经选好了）----
+        if str(adapt.get("src") or "") == "bench" and _projplan.enabled():
+            try:
+                _calibrate()
+            except Exception as e:                      # noqa: BLE001
+                traceback.print_exc()
+                _proj_warn("标定失败（不影响这一单，按保守档 %d×%d 跑）：%s: %s"
+                           % (len(pool), int(cur["batch"]), e.__class__.__name__,
+                              str(e)[:160]))
+        _proj_set(adaptive=_adapt_snap())
         # ---- 三段流水：准备（读帧/检测/68 点）→ 换脸（worker 里 k 帧并行）→ 落盘 ----
         # 主线程只干三件事：切批、按**提交顺序**收结果、记账 —— 落盘顺序因此和串行时
         # 一样（断点续跑的游标不变），PNG 编码则挪到落盘线程里，不占换脸的时间。
@@ -6346,7 +6706,7 @@ def _proj_run(cfg: dict):
             while True:
                 while len(batch_q) < window_b:
                     names_b = []
-                    for _k in range(int(batch)):
+                    for _k in range(int(cur["batch"])):
                         try:
                             names_b.append(next(it))
                         except StopIteration:
@@ -6587,6 +6947,49 @@ def merge_export_project(body: dict):
                            _proj_workers_default(model_mb)))
     batch = int(_int_val("batch", body.get("batch"), 1, _PREVIEW_MAX_BATCH,
                          _proj_batch_default(workers)))
+    # ---- 自适应档位：**有实测就按实测选，没有就保守起、跑完把实测写回去** ----
+    # 静态规则（按权重 ≥1GB → 1 worker）只是「还没量过」时的兜底。同一张 8GB 卡，
+    # 「4 帧摊在 1 份会话还是 2 份上」实测是 77% vs 95%（换页）—— 这件事跟权重只是
+    # 相关、不是因果（还看 arena 怎么涨、帧尺寸、桌面/浏览器占了几个 GB）。所以：
+    #   · 本机量过这份模型 → 用 <workspace>/_proj_bench.json 里的实测挑（_projplan.choose）
+    #   · 没量过 → 按保守档起，_proj_run 开跑前用 8~12 帧现场标定，选完再正式跑
+    #   · 请求体 / 环境变量显式给了 workers/batch → 一句话都不改（尊重手动）
+    adapt = {"src": "off", "explicit": False, "note": ""}
+    explicit = bool(str(body.get("workers") or "").strip()
+                    or str(body.get("batch") or "").strip()
+                    or str(os.environ.get("DFL_PROJ_WORKERS") or "").strip()
+                    or str(os.environ.get("DFL_PROJ_BATCH") or "").strip())
+    adapt["explicit"] = bool(explicit)
+    adapt_key = ""
+    if not explicit and _projplan.enabled():
+        adapt_key = _projplan.model_key(plan_paths)
+        _row = _projplan.get_row(WORKSPACE, adapt_key)
+        if _row.get("rows"):
+            try:
+                _f0, _t0, _u0 = _vram_free_smi(fresh=True)
+            except Exception:                       # noqa: BLE001
+                _t0 = _u0 = None
+            _pick = _projplan.choose(_row["rows"], _t0, _u0)
+            if _pick.get("pick"):
+                workers = int(_pick["pick"]["workers"])
+                batch = int(_pick["pick"]["batch"])
+                adapt = {"src": "cache", "key": adapt_key, "rows": _pick["rows"],
+                         "pick": _pick["pick"], "rejected": _pick.get("rejected"),
+                         "cap": _pick.get("cap"),
+                         "note": _projplan.note(_row["rows"], _pick)}
+            else:
+                _cons = _projplan.conservative(model_mb)
+                workers, batch = int(_cons["workers"]), int(_cons["batch"])
+                adapt = {"src": "cache-none", "key": adapt_key, "rows": _pick.get("rows"),
+                         "pick": None,
+                         "note": _projplan.note(_row["rows"], _pick) + " → " + _cons["why"]}
+        else:
+            _cons = _projplan.conservative(model_mb)
+            workers, batch = int(_cons["workers"]), int(_cons["batch"])
+            adapt = {"src": "bench", "key": adapt_key, "rows": None, "pick": None,
+                     "note": "%s（本次导出前现场标定 8~12 帧）" % _cons["why"]}
+    elif explicit:
+        adapt["note"] = "手动指定 workers/batch → 不改（只按显存预算削减）"
     # ---- 显存预算：能开几个 worker 就开几个，装不下就按 worker → 线程 → 拒绝 的顺序退 ----
     # 每多一个 worker 就多一份「会话 + CUDA context」，而且那份会话**真跑起来还要再长一块**
     # （384 实测 ≈3.4GB/份，不是「权重 + context」那 2.08GB）—— 所以这里喂进去的是
@@ -6603,10 +7006,30 @@ def merge_export_project(body: dict):
         workers = max(1, int(plan.get("procs") or 1))
     if int(plan.get("batch") or 1) < int(batch):
         batch = max(1, int(plan.get("batch") or 1))
+    # ---- 实测优先：缓存的实测档被预算砍掉时，以**实测**为准（不写死、也不拿估算压实测）----
+    # 预算那套是「一份会话的峰值 + 批台阶」的估算，会高估：416 今天估 5781MB / 实测整卡
+    # 6503MB（程序 4906MB），于是 2×2 被砍成 1 个 worker —— 而同一台机器真的量到过
+    # 79.8% / 14.8 帧/秒。既然实测在换页线以内，就没理由为了估算退档。
+    _pick = adapt.get("pick") or None
+    if (_pick and str(adapt.get("src")) == "cache"
+            and int(_pick.get("workers") or 1) > int(plan.get("procs") or 1)
+            and float(_pick.get("pct") or 0.0) <= 100.0 * _projplan.HARD):
+        print("[project] 实测档 %s 整卡 %.0f%% ≤ 换页线 %.0f%% → 覆盖预算削减（%d → %d worker）"
+              % (_pick["label"], float(_pick["pct"]), 100.0 * _projplan.HARD,
+                 int(plan.get("procs") or 1), int(_pick["workers"])), flush=True)
+        workers, batch = int(_pick["workers"]), int(_pick["batch"])
+        plan.update({"procs": int(workers), "batch": int(batch),
+                     "requested_procs": int(workers), "requested_batch": int(batch),
+                     "adaptive_override": True, "downgraded": False})
     # 这一行是排障第一现场（server.log + job.log 各一份）：模型多大 / 可用多少 /
     # 计划几个 worker × 几线程 / 减了没有、为什么减。
     plan["worker_note"] = _proj_plan_note(model_mb, plan)
     print(plan["worker_note"], flush=True)
+    # 档位是**怎么来的**：缓存的实测 / 现场标定 / 保守默认 / 手动指定 —— 和上面那行
+    # 预算说明并列写进日志与 status（"为什么不是另一个档"要能当场回答）。
+    plan["adaptive"] = dict(adapt)
+    if adapt.get("note"):
+        print("[project] " + str(adapt["note"]), flush=True)
     # ---- 起 worker **之前**先把本进程的死重放掉 ----
     # 项目导出的 worker 是独立进程（各持自己的 dfm session），所以本进程里缓存的
     # dfm/XSeg 会话、以及常驻预览 worker 里那份模型，在这一单里都是**一点用没有**的
@@ -6674,7 +7097,7 @@ def merge_export_project(body: dict):
            "config": cfg_main, "settings": settings, "xseg": xseg,
            "detector": detector, "thresh": float(thresh), "quality": int(quality),
            "force": force, "workers": int(workers), "batch": int(batch),
-           "vram_plan": dict(plan)}
+           "adaptive": dict(adapt), "vram_plan": dict(plan)}
 
     with _PROJ_LOCK:
         if _PROJ_JOB.get("running"):

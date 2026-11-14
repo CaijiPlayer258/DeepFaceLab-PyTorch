@@ -230,6 +230,10 @@ def start_server(extra_env=None):
               "DFL_PROJ_WORKERS", "DFL_PROJ_BATCH", "DFL_PROJ_SEND",
               "DFL_PROJ_OUT", "DFL_FUSED_BUDGET"):
         env.pop(k, None)
+    # 这一套验的是**保守默认档**（按权重 ≥1GB→1×4 / ≤600MB→2×2）：把自适应标定关掉，
+    # 否则它会按实测换档（那才是对的，但就不是本文件要验的那条规则了）。
+    # 自适应本身由 proj_adaptive_accept.py 验。
+    env.setdefault("DFL_PROJ_BENCH", "0")
     for k, v in (extra_env or {}).items():
         env[str(k)] = str(v)
     logf = open(str(SERVER_LOG), "ab")
