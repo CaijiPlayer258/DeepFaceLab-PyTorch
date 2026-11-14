@@ -242,3 +242,13 @@ aligned 画布与 facelib 画布不是同一个东西。
 
 产物：`%TEMP%\dfl_align_ab\result.json`（回归门）、
 `%TEMP%\dfl_align_ab\recut\report.json` + `plates_*.png`（重切）。
+
+## 已接受、不再处理的差异（用户决定，勿再当成欠账去修）
+
+以下两条是**有意保留**的：
+
+1. **关键点标注约定（2D106 vs DFL/FAN）**：拟合残差中位 0.10~0.12（单位空间），iperov 自己芯片 0.075。
+   要消除只能换关键点模型 —— **不做**。几何已在 1e-7 量级等价，残留只是标注风格差异。
+2. **插值核（CUBIC vs iperov 的 LANCZOS4）**：差 0.21 LSB。
+   **不做**：我们按原始分辨率切脸（缩放接近 1:1），插值核的差别在此量级下没有实际意义。
+   `align_recut.py --interp lanczos4` 保留作逐字节复刻的逃生门，默认不启用。
