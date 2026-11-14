@@ -445,6 +445,30 @@ def case_preview_then_export(clip):
         m = re.search(r"回收预览模型\s*([0-9.]+)\s*MB", hits[0] if hits else "")
         if m:
             say("a2 回收了 %.2f GB" % (float(m.group(1)) / 1024.0))
+        # ---- ★ 用户那一单的根：dry_run 不许「我们自己的预览 worker」把预算砍掉 ----
+        # 预算 = 空闲 − 预留 + 可回收，可回收必须**真的**出现在公式里。
+        # 以前 reclaim_left 初值写死 0（只有「装不下才回收」那个永远走不到的分支才会赋值）：
+        # 日志第二行打「可回收 2733 MB」、公式里加 0 → 帧预算 30→8、dfm 批 8→1。
+        _free2 = float(p1.get("free_mb") or 0.0)
+        _resv = float(p1.get("reserve_mb") or 0.0)
+        _left = float(p1.get("reclaim_left_mb") or 0.0)
+        _able = float(p1.get("reclaimable_mb") or 0.0)
+        check(_able >= 500.0 and _left >= 0.9 * _able,
+              "a2a 可回收真的进了预算公式（dry_run 不卸模型 → 那一栏 = 可回收）",
+              "reclaimable=%s reclaim_left_mb=%s（以前这里恒为 0）" % (_able, _left))
+        check(abs(_avail - max(0.0, _free2 - _resv + _left)) <= 2.0,
+              "a2b 预算 = 空闲 − 预留 + 可回收（三个数对得上）",
+              "%.0f = %.0f − %.0f + %.0f" % (_avail, _free2, _resv, _left))
+        _top = next((s for s in (p1.get("steps") or [])
+                     if int(s.get("frames") or 0) == 30 and int(s.get("batch") or 0) == 8), None)
+        if _top and _top.get("fit"):
+            check(int(p1.get("frames") or 0) == 30 and int(p1.get("batch") or 0) == 8,
+                  "a2c 帧预算 30 / dfm 批 8（不因为自己的预览 worker 降档）",
+                  "frames=%s batch=%s downgraded=%s"
+                  % (p1.get("frames"), p1.get("batch"), p1.get("downgraded")))
+        else:
+            say("a2c 30 帧/批 8 要 %.0f MB > 可用 %.0f MB —— 这一档本来就要降（跳过断言）"
+                % (float((_top or {}).get("need_mb") or 0.0), _avail))
         say("nvidia-smi（回收后）：%s" % smi())
 
         # ---- 真导出 ----
@@ -467,6 +491,21 @@ def case_preview_then_export(clip):
         blob2 = log_since(mark)
         check(not OOM_PAT.search(blob2), "a3 全程没有 CUDA OOM",
               (OOM_PAT.search(blob2).group(0) if OOM_PAT.search(blob2) else "clean"))
+        # ---- 真起手这一拍：成片日志里必须有「先回收 → 再算预算」，而且预算是 30/8 ----
+        _logp = out_p.with_suffix(".log")
+        _txt = _logp.read_text("utf-8", "ignore") if _logp.is_file() else ""
+        _mr = re.search(r"回收预览模型\s*([0-9.]+)\s*MB.*?空闲\s*(\d+)\s*→\s*(\d+)\s*MB",
+                        _txt)
+        check(bool(_mr), "a3 导出起手先回收了预览模型（成片日志里有「空闲 A → B」）",
+              (_mr.group(0)[:160] if _mr else "（日志 %s 里没有这一行）" % _logp.name))
+        _mb = re.search(r"显存预算\s*→\s*帧缓冲\s*(\d+)\s*/\s*dfm 批\s*(\d+)", _txt)
+        check(bool(_mb) and int(_mb.group(1)) == 30 and int(_mb.group(2)) == 8,
+              "a3 真跑的帧预算 30 / dfm 批 8", (_mb.group(0) if _mb else "（没有预算行）"))
+        if _mr and _mb:
+            check(_txt.find("回收预览模型") < _txt.find("显存预算 → 帧缓冲"),
+                  "a3 顺序：先回收 → 再算预算（反了就是这一次的 bug）",
+                  "回收@%d < 预算@%d" % (_txt.find("回收预览模型"),
+                                        _txt.find("显存预算 → 帧缓冲")))
         say("a3 导出之后 nvidia-smi：%s" % smi())
 
         # ---- 导出结束后预览仍能用（懒加载回来） ----
@@ -524,30 +563,95 @@ def case_foreign(clip):
             check(float(p.get("other_mb") or 0.0) >= 900.0,
                   "b1 计划里「其它程序」那一栏认得出那 1.2GB",
                   "other_mb=%s own_mb=%s" % (p.get("other_mb"), p.get("own_mb")))
-        # 占到真的放不下：4.5GB
+        # ---- 别的程序占 4.6GB（用户口径那个数）----
+        # 修复后这里只有两种**都正确**的结局：要么「真够」（我们自己那 2.5GB 收回来后
+        # 需要 ≤ 可用，数字全在计划里），要么「真不够」（400 + 数字）。错的只有一种：
+        # 既不回收、也不解释，把一个本来跑得动的活判死 —— 那正是这一次修的 bug。
         with Hog(4600):
-            say("b2 nvidia-smi（诱饵 4.5GB）：%s" % smi())
+            say("b2 nvidia-smi（诱饵 4.6GB）：%s" % smi())
             st2, d2 = post("/api/merge/export", export_body(clip, OUT / "b2.mp4"))
             err = str((d2 or {}).get("error") or "")
             ext = d2 or {}
-            p2 = ext.get("vram") or {}
+            p2 = ext.get("vram") or (ext.get("vram_plan") or {})
             say("b2 HTTP %s · %s" % (st2, json.dumps(plan_brief(p2), ensure_ascii=False)))
-            say("b2 消息：%s" % err[:400])
-            check(st2 == 400, "b2 真放不下 → 明确拒绝（HTTP 400）", "HTTP %s" % st2)
-            check(("本程序" in err) and ("其它程序" in err),
-                  "b2 拒绝消息区分「本程序占用 / 其它程序占用」",
-                  ("本程序" in err, "其它程序" in err))
-            check(re.search(r"需要\s*[0-9.]+\s*GB", err) is not None
-                  and re.search(r"可用\s*[0-9.]+\s*GB", err) is not None,
-                  "b2 消息里仍有「需要 X GB / 可用 Y GB」（老口径不回退）", err[:120])
-            check(ext.get("own_mb") is not None and ext.get("other_mb") is not None,
-                  "b2 结构化字段带 own_mb / other_mb（前端不用抠中文）",
-                  "own=%s other=%s" % (ext.get("own_mb"), ext.get("other_mb")))
-            check(not Path(str(OUT / "b2.mp4")).exists(), "b2 没有产生成片",
-                  "b2.mp4")
+            _need = float(p2.get("need_mb") or 0.0)
+            _av = float(p2.get("avail_mb") or 0.0)
+            if st2 == 400:
+                say("b2 结局：拒绝（收回来也不够：需要 %.0f ≤ 可用 %.0f 不成立）"
+                    % (_need, _av))
+                check(("本程序" in err) and ("其它程序" in err),
+                      "b2 拒绝消息区分「本程序占用 / 其它程序占用」",
+                      ("本程序" in err, "其它程序" in err))
+                check(re.search(r"需要\s*[0-9.]+\s*GB", err) is not None
+                      and re.search(r"可用\s*[0-9.]+\s*GB", err) is not None,
+                      "b2 消息里仍有「需要 X GB / 可用 Y GB」（老口径不回退）", err[:120])
+                check(ext.get("own_mb") is not None and ext.get("other_mb") is not None,
+                      "b2 结构化字段带 own_mb / other_mb（前端不用抠中文）",
+                      "own=%s other=%s" % (ext.get("own_mb"), ext.get("other_mb")))
+                check(not Path(str(OUT / "b2.mp4")).exists(), "b2 没有产生成片", "b2.mp4")
+            else:
+                say("b2 结局：放行（收回自己的 2.5GB 之后真够：需要 %.0f ≤ 可用 %.0f）"
+                    % (_need, _av))
+                check(st2 == 200 and _need > 0 and _need <= _av,
+                      "b2 放行时数字必须自洽（需要 ≤ 可用，没有拿假账骗人）",
+                      "need=%.0f avail=%.0f" % (_need, _av))
+                check(float(p2.get("reclaimed_mb") or 0.0) >= 1000.0,
+                      "b2 放行前确实把预览模型收回来了（≥1GB）",
+                      "reclaimed=%s models=%s" % (p2.get("reclaimed_mb"),
+                                                  p2.get("preview_models")))
         blob = log_since(mark)
         check(not OOM_PAT.search(blob), "b 全程没有 CUDA OOM",
               (OOM_PAT.search(blob).group(0) if OOM_PAT.search(blob) else "clean"))
+    finally:
+        stop_server(proc)
+
+
+# ============================================================
+# C · 真放不下：别的程序把卡占到「连最小档都塞不进」
+# ============================================================
+def case_too_big(clip):
+    """反例还得有效：真的不够时必须 400，而且消息里的数字要能复核。
+
+    这一段**不预览**（起一台干净后端）：我们自己的占用是 0，可回收也是 0，
+    于是「够 / 不够」只由那台诱饵进程决定 —— 与分支判断无关的确定性反例。
+    诱饵体量按计划算：total − need（最小档峰值）− 预留上限，正好卡在「塞不进」。
+    """
+    head("C · 别的程序把卡占满：连最小档都塞不进 → 拒绝且消息带数字")
+    proc = start_server("真放不下")
+    try:
+        _s, d0 = post("/api/merge/export", export_body(clip, OUT / "c0.mp4", dry=True))
+        p0 = plan_of(d0)
+        need = float(p0.get("need_mb") or 0.0)
+        total = float(p0.get("total_mb") or 0.0)
+        say("c0 干净后端：need(最小档)=%.0f MB · total=%.0f MB · free=%s · %s"
+            % (need, total, p0.get("free_mb"), json.dumps(plan_brief(p0), ensure_ascii=False)))
+        if need <= 0 or total <= 0:
+            check(False, "c0 拿得到 need / total（拿不到就没法构造反例）",
+                  "need=%s total=%s" % (need, total))
+            return
+        free_now = smi_free() or int(total)
+        hog_mb = int(max(1024.0, min(total - need - 400.0, float(free_now) - 250.0)))
+        say("c1 诱饵 %d MB（total − need − 400 = %.0f，free−250 = %d）"
+            % (hog_mb, total - need - 400.0, int(free_now) - 250))
+        with Hog(hog_mb):
+            say("c1 nvidia-smi（诱饵 %d MB）：%s" % (hog_mb, smi()))
+            st, d = post("/api/merge/export", export_body(clip, OUT / "c1.mp4"))
+            err = str((d or {}).get("error") or "")
+            ext = d or {}
+            p = ext.get("vram") or {}
+            say("c1 HTTP %s · %s" % (st, json.dumps(plan_brief(p), ensure_ascii=False)))
+            say("c1 消息：%s" % err[:400])
+            _need = float(p.get("need_mb") or 0.0)
+            _av = float(p.get("avail_mb") or 0.0)
+            check(st == 400, "c1 真放不下 → HTTP 400（不硬跑）", "HTTP %s" % st)
+            check(_need > _av > 0.0, "c1 数字自洽：需要 > 可用（拒绝有依据）",
+                  "need=%.0f avail=%.0f" % (_need, _av))
+            check(re.search(r"需要\s*[0-9.]+\s*GB", err) is not None
+                  and re.search(r"可用\s*[0-9.]+\s*GB", err) is not None
+                  and ("其它程序" in err),
+                  "c1 消息里有「需要 X GB / 可用 Y GB」+「其它程序」（知道是谁占的）",
+                  err[:160])
+            check(not Path(str(OUT / "c1.mp4")).exists(), "c1 没有产生成片", "c1.mp4")
     finally:
         stop_server(proc)
 
@@ -580,6 +684,7 @@ def main(argv=None):
         case_preview_then_export(clip)
     if "b" in want:
         case_foreign(clip)
+        case_too_big(clip)
 
     fails = [r for r in RESULTS if not r[0]]
     print("")

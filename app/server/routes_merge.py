@@ -7076,7 +7076,8 @@ def merge_export_project(body: dict):
                                     "batch": int(batch), "aux": True,
                                     "sess_mb": float(ses["sess_mb"]),
                                     "sess_src": str(ses["src"]),
-                                    "model_info": minfo}, label="项目导出")
+                                    "model_info": minfo,
+                                    "reclaim_first": True}, label="项目导出")
     if int(plan.get("procs") or 1) < int(workers):
         workers = max(1, int(plan.get("procs") or 1))
     if int(plan.get("batch") or 1) < int(batch):
@@ -9615,14 +9616,40 @@ def _vram_reclaim(why: str = "导出") -> dict:
                float(_vram_models_mb(models)) + float(_VRAM_CTX_MB)
                + float(_VRAM_ARENA_MB) * max(1, len(models)))
     names = [os.path.basename(str(p)) for p in models]
+    reply = {}
     try:
-        w.unload("")
+        reply = dict(w.unload("") or {})
     except Exception as e:                                  # noqa: BLE001
-        print("[vram] 回收预览模型失败（%s）：%s" % (why, str(e)[:200]), flush=True)
+        print("[vram] 回收预览模型失败（%s）：unload 抛异常：%s"
+              % (why, str(e)[:200]), flush=True)
         return {"ok": False, "did": False, "freed_mb": 0.0,
                 "ms": round((time.time() - t0) * 1000.0, 1), "models": names,
                 "before_mb": before, "after_mb": before,
-                "why": "回收失败：%s" % str(e)[:160]}
+                "why": "回收失败（unload 抛异常）：%s" % str(e)[:160]}
+    # ★ 「回应说没放掉」同样算失败。worker 的 unload 是在**子进程**里执行的，它自己
+    #   失败时（模型被那一帧占着 / _vram_flush 抛错 / 不认这个命令）不会抛异常，只回
+    #   ok=false 或**原样带着 models 清单**回来。以前这里只 catch 异常 —— 于是失败被
+    #   记成「成功、腾出 0MB」，日志上只剩一个 0，原因永远看不见（用户口径：失败要写
+    #   清原因，不能只打 0）。
+    try:
+        left = [str(p) for p in (w._models or {}).keys()]
+    except Exception:                                       # noqa: BLE001
+        left = []
+    if left or reply.get("ok") is False:
+        _r_why = str(reply.get("error") or reply.get("why") or reply.get("msg")
+                     or reply.get("stage") or "").strip()
+        if not _r_why:
+            _r_why = ("worker 回了 ok=false" if not left else
+                      "worker 说放掉了，但 %d 份模型还在：%s"
+                      % (len(left), "/".join(os.path.basename(p) for p in left[:3])))
+        print("[vram] 回收预览模型失败（%s）：%s（worker 里仍常驻 %d 份：%s）"
+              % (why, _r_why[:200], len(left),
+                 "/".join(os.path.basename(p) for p in left[:3]) or "-"), flush=True)
+        return {"ok": False, "did": False, "freed_mb": 0.0,
+                "ms": round((time.time() - t0) * 1000.0, 1), "models": names,
+                "left_models": [os.path.basename(p) for p in left],
+                "before_mb": before, "after_mb": before,
+                "why": "回收失败：%s" % _r_why[:160]}
     after = before
     deadline = time.time() + 4.0
     while time.time() < deadline:
@@ -9667,14 +9694,78 @@ def _vram_reclaim(why: str = "导出") -> dict:
     except Exception:                                       # noqa: BLE001
         pass
     ms = (time.time() - t0) * 1000.0
-    print("[vram] 回收预览模型 %.0f MB（%s · %s · %.0fms%s）：空闲 %s → %s MB"
+    # 卸掉了模型、空闲却没涨够（WDDM 上「释放」不等于还给驱动）：这同样是「回收没成」，
+    # 必须有个原因挂在 why 上 —— 否则预算里那一栏是 0，日志上也只有一个 0。
+    # 口径（按「腾出来多少」分两档，别把 84% 的火气也写成失败）：
+    #   < 50%  → 真失败（ok=False，why 进日志/summary/拒绝消息）
+    #   50~85% → 只是比「模型体量 + context」估的少（note，不判失败）
+    _short = ""
+    _note = ""
+    if before is None or after is None:
+        _short = "显存探不到（torch / nvidia-smi 都没答），只能按模型体量估 %.0f MB" % want
+    elif freed < 0.5 * max(1.0, want):
+        _short = ("卸了模型但空闲只涨了 %.0f MB（应约 %.0f MB）%s"
+                  % (freed, want,
+                     "；worker 进程已回收" if recycled else
+                     "；进程没回收（DFL_VRAM_RECYCLE_WORKER=0 或回收失败）"))
+    elif freed < 0.85 * max(1.0, want):
+        _note = ("比按模型体量估的 %.0f MB 少（进程%s）"
+                 % (want, "已回收" if recycled else "仍常驻，WDDM 上释放不全正常"))
+    print("[vram] 回收预览模型 %.0f MB（%s · %s · %.0fms%s）：空闲 %s → %s MB%s%s"
           % (freed, why, "/".join(names[:3]) or "-", ms,
              " · 进程已回收" if recycled else "",
              "?" if before is None else int(before),
-             "?" if after is None else int(after)), flush=True)
-    return {"ok": True, "did": True, "freed_mb": round(freed, 1), "ms": round(ms, 1),
+             "?" if after is None else int(after),
+             (" · " + _short) if _short else "",
+             (" · " + _note) if _note else ""), flush=True)
+    return {"ok": not bool(_short), "did": True, "freed_mb": round(freed, 1),
+            "ms": round(ms, 1),
             "models": names, "before_mb": before, "after_mb": after,
-            "want_mb": round(want, 1), "recycled": bool(recycled), "why": ""}
+            "want_mb": round(want, 1), "recycled": bool(recycled),
+            "why": _short, "note": _note}
+
+
+def _vram_src_real(src) -> bool:
+    """这个 free 是不是**真探到的**。env / file / override 都是伪造或单测注入的值，
+    拿它们再加「可回收」就是假账（一个文本文件就能把预算抬高 2.7GB）。"""
+    s = str(src or "")
+    return not (s.startswith("env:") or s.startswith("file:") or s in ("override", ""))
+
+
+_VRAM_RECLAIM_MARK = {"at": 0.0, "rec": {}}
+
+
+def _vram_reclaim_once(why: str = "导出", gap: float = 6.0) -> dict:
+    """回收预览 worker 的模型，但**同一单里只真收一次**。
+
+    为什么要节流：导出起手有两拍预算 —— 路由闸门（HTTP 400 那一拍）和 worker 线程
+    里 _fused_run 的第一拍。两拍都开 reclaim_first，就会连着卸两次；第二拍其实什么
+    都没得卸（worker 里已经空了），却会再跑 2~3 次 nvidia-smi（WDDM 上每次 ~80ms）。
+    gap 内的重复调用直接返回上一次的结果（带 throttled=True 留痕）。
+    """
+    # 回滚 / A-B 对照开关：1 = 完全不卸预览模型（日志里会写明是它，不装成「没得卸」）
+    if str(os.environ.get("DFL_VRAM_NO_RECLAIM") or "").strip().lower() in ("1", "true", "yes", "on"):
+        return {"ok": False, "did": False, "freed_mb": 0.0, "ms": 0.0, "models": [],
+                "before_mb": None, "after_mb": None,
+                "why": "DFL_VRAM_NO_RECLAIM=1（回滚/对照用：这一轮不卸预览模型）"}
+    now = time.time()
+    with _VRAM_LOCK:
+        at = float(_VRAM_RECLAIM_MARK.get("at") or 0.0)
+        last = dict(_VRAM_RECLAIM_MARK.get("rec") or {})
+    if at and (now - at) < float(gap):
+        out = dict(last or {})
+        out.update({"throttled": True, "age_ms": round((now - at) * 1000.0, 1)})
+        return out
+    try:
+        rec = _vram_reclaim(why)
+    except Exception as e:                                  # noqa: BLE001
+        rec = {"ok": False, "did": False, "freed_mb": 0.0, "ms": 0.0, "models": [],
+               "before_mb": None, "after_mb": None,
+               "why": "回收抛异常：%s: %s" % (e.__class__.__name__, str(e)[:140])}
+        print("[vram] 回收预览模型失败（%s）：%s" % (why, str(rec["why"])[:200]), flush=True)
+    with _VRAM_LOCK:
+        _VRAM_RECLAIM_MARK.update({"at": time.time(), "rec": dict(rec or {})})
+    return dict(rec or {})
 
 
 # ---------------- 进程内存（工作集 / 提交）：导出前后差，用户看的就是这两个数 ----
@@ -10537,14 +10628,23 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
             sess_src = ("权重 + context + 运行时工作集 %dMB（标定值）"
                         % int(_VRAM_SESS_RUNTIME_MB))
     frame_mb = _vram_frame_mb(size_px)
-    # 先**按现状**探测（不回收）：预览常驻着模型时先照常算一遍，只有真装不下才回收
-    # 再算第二遍（两遍算账，见下面「装不下才回收」）。理由：前端每改一次参数都会打
-    # 一次 dry_run 预检，一进来就卸预览模型的代价是「拖一下滑杆，预览重载 4 秒」。
+    # ---- ★ 顺序（用户口径，别改回去）：先回收我们自己占的那块 → 再探测 → 再算预算 ----
+    # 以前是「先按现状算，**装不下才**回收」，而阶梯里永远有 8 帧 / 批 1 这一档 ——
+    # 于是「装得下（降档）」成立、回收那一步一次都没走到：日志里「可回收 2733 MB」进了
+    # 「显存去向」那一栏，公式里却是 0（reclaim_left 初值写死 0），帧预算 30 → 8、
+    # dfm 批 8 → 1，用户实测 22 → 15.8 帧/秒。
+    # reclaim_first=True = 导出真起手那一拍（路由闸门 + worker 线程里的那一次）：
+    #   卸掉常驻预览 worker 的模型，**用回收后的空闲**算账；dry_run 预检不传它
+    #   （预检不该为了算账去卸模型：拖一次滑杆就重载 4 秒），预检靠下面
+    #   「可回收计入可用」这一条拿到同样的结论，真起手时再真回收。
     rec = {}
     if opts.get("free_mb") is not None:
         free, total, src = int(opts["free_mb"]), opts.get("total_mb"), "override"
     else:
-        free, total, src = _vram_probe()
+        if opts.get("reclaim") and opts.get("reclaim_first"):
+            rec = _vram_reclaim_once(label)
+        # 开过回收就**重新探**（ttl=0）：拿回收前的旧数算账等于白回收一遍
+        free, total, src = _vram_probe(0.0 if rec else None)
 
     def _mk(frames, batch, nproc):
         # resident=1 时，第一份会话的「权重 + context」已经在这块卡上了（本进程持有），
@@ -10588,8 +10688,11 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
         "source": src, "avail_mb": None, "need_mb": round(floor["need_mb"], 1),
         "peak_mb": None, "procs": int(max_procs if mode == "procs" else procs),
         # 谁占着显存 + 我们回收掉了多少（拒绝消息/status/日志都读这几个键）
-        "reclaim": {}, "reclaimed_mb": 0.0, "reclaim_ms": 0.0,
-        "reclaim_left_mb": 0.0, "reclaim_note": "",
+        "reclaim": dict(rec or {}),
+        "reclaimed_mb": round(float((rec or {}).get("freed_mb") or 0.0), 1),
+        "reclaim_ms": round(float((rec or {}).get("ms") or 0.0), 1),
+        "reclaim_note": str((rec or {}).get("why") or ""),
+        "reclaim_left_mb": 0.0,
         "own_mb": None, "own_inproc_mb": None, "own_preview_mb": None,
         "reclaimable_mb": None, "other_mb": None, "preview_models": [],
         "free_torch_mb": None, "free_smi_mb": None, "resident_mb": round(floor["resident_mb"], 1),
@@ -10650,8 +10753,19 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
 
     own = _vram_owners(free, total, src)
     _apply_own(own)
+    # ---- 可回收**真的加进公式** ----
+    # 这一条以前是写死的 0：日志第二行把 reclaim_left_mb 当「+ 可回收」打出来，
+    # 而它只在「装不下才回收」那个分支里赋值 —— 那个分支永远走不到，于是
+    # 「可回收 2733 MB」只是个装饰数字，预算里加的是 0。
+    # 口径：回收**没成**（这回没卸 / 卸了没腾出来）时，那 N MB 仍按「可回收」计入
+    # 可用 —— 因为导出起手时还会再收一次；回收**成了**就不再计（那 N MB 已经算在
+    # 新的 free 里，重复加等于骗自己）。
+    # 只对真探测的 free 生效：env/file/override 是伪造/单测值，拿它加可回收就是假账。
     reclaim_left = 0.0
-    avail = _avail_for(0.0)
+    if opts.get("reclaim") and not (rec or {}).get("did") and _vram_src_real(src):
+        reclaim_left = float(own.get("reclaimable_mb") or 0.0)
+    plan["reclaim_left_mb"] = round(reclaim_left, 1)
+    avail = _avail_for(reclaim_left)
     hit = _pick(avail)
 
     # ---- 装不下才回收我们自己占的那块（预览 worker 里常驻的 dfm），然后算第二遍 ----
@@ -10661,13 +10775,10 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
     # 三档模式（frames / procs / none）都适用：阶段链的闸门也是 mode=none。
     # 预览自己不会走到这里 —— _preview_guard 明确传 reclaim=False（它要用的正是
     # worker 里那份常驻模型）。
-    if hit is None and opts.get("reclaim") and opts.get("free_mb") is None:
-        try:
-            rec = _vram_reclaim(label)
-        except Exception as e:                              # noqa: BLE001
-            rec = {"ok": False, "did": False, "freed_mb": 0.0, "ms": 0.0,
-                   "models": [], "before_mb": None, "after_mb": None,
-                   "why": "回收抛异常：%s" % str(e)[:160]}
+    # 补一次回收：只在「这一拍还没收过」且真的降到底才走（dry_run 预检的第一拍就会
+    # 命中这里 —— 预检不该先卸模型，但真降到底时宁可收一次也别把一个能跑的单子拒了）。
+    if hit is None and opts.get("reclaim") and opts.get("free_mb") is None and not rec:
+        rec = _vram_reclaim_once(label)
         plan.update({"reclaim": dict(rec or {}),
                      "reclaimed_mb": round(float((rec or {}).get("freed_mb") or 0.0), 1),
                      "reclaim_ms": round(float((rec or {}).get("ms") or 0.0), 1),
@@ -10681,13 +10792,15 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
             plan["free_mb"] = int(free)
             plan["total_mb"] = (None if total is None else int(total))
             plan["source"] = src
-            own = _vram_owners(free, total, src)
-            _apply_own(own)
-            if not rec.get("did"):                       # 没收成：按「可回收」算进去
-                reclaim_left = float(own.get("reclaimable_mb") or 0.0)
-            plan["reclaim_left_mb"] = round(reclaim_left, 1)
-            avail = _avail_for(reclaim_left)
-            hit = _pick(avail)
+        own = _vram_owners(free, total, src)
+        _apply_own(own)
+        # 没收成 → 那 N MB 仍按「可回收」计入（起 job 前 _fused_run/_stage_worker 会再收
+        # 一次；这一拍先别把它判死）。收成了 → 已经在 free 里，计 0，绝不重复加。
+        reclaim_left = (float(own.get("reclaimable_mb") or 0.0)
+                        if (not rec.get("did") and _vram_src_real(src)) else 0.0)
+        plan["reclaim_left_mb"] = round(reclaim_left, 1)
+        avail = _avail_for(reclaim_left)
+        hit = _pick(avail)
 
     # ---- 还装不下？那就放掉**本进程**常驻的会话（预览/下一次导出再懒加载）----
     # 只在「没有任何任务在跑」时做：有任务在跑时放掉 session 等于把它的腿锯了。
@@ -10727,12 +10840,14 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
                           if plan["downgraded"] else
                           "装得下：帧 %d / 批 %d / 进程 %d（不用降档）"
                           % (plan["frames"], plan["batch"], plan["procs"]))
-        if rec.get("did"):
+        if rec.get("did") and float(plan.get("reclaimed_mb") or 0.0) > 0:
             plan["reason"] += ("（回收预览模型 %.1f GB 之后才装得下）"
                                % (float(plan["reclaimed_mb"]) / 1024.0))
         elif reclaim_left > 0:
-            plan["reason"] += ("（其中 %.1f GB 要靠回收预览 worker 才腾得出来）"
-                               % (reclaim_left / 1024.0))
+            plan["reason"] += ("（其中 %.1f GB 要靠回收预览 worker 才腾得出来%s）"
+                               % (reclaim_left / 1024.0,
+                                  ("；这一拍没回收成：" + str(rec.get("why") or "没有原因")[:80])
+                                  if rec and not rec.get("did") else ""))
         plan["msg"] = "%s：%s · 预计峰值 %.0f MB / 可用 %.0f MB" % (
             label, plan["reason"], hit["need_mb"], avail)
         # 放行的这一份也带 summary：status 页 / 排障日志里的「本程序 / 其它程序 /
@@ -10873,6 +10988,21 @@ def _vram_summary_line(plan: dict) -> str:
                     % (float(own or 0.0) / 1024.0,
                        ("?" if other is None else "%.2f GB" % (float(other or 0.0) / 1024.0)),
                        ("?" if free is None else "%.2f GB" % (float(free) / 1024.0))))
+    # 回收预览模型的结果也进这一行：用户看 toast 就得知道「那 2.7GB 是我们自己的」，
+    # 以及**为什么没腾出来**（只说 0 = 什么也没说）。
+    _rec = dict(plan.get("reclaim") or {})
+    _got = float(plan.get("reclaimed_mb") or 0.0)
+    _why2 = str((_rec or {}).get("why") or "").strip()
+    if _rec and not _rec.get("did") and float(plan.get("reclaimable_mb") or 0.0) <= 0.0:
+        _rec = {}                       # 没有常驻模型可收 = 正常，不进 summary
+    if _got > 0 and not _why2:
+        bits.append("（已回收预览模型 %.2f GB）" % (_got / 1024.0))
+    elif _rec and not _rec.get("did"):
+        bits.append("（预览模型 %.2f GB 回收失败：%s）"
+                    % (float(plan.get("reclaimable_mb") or 0.0) / 1024.0,
+                       (_why2 or "没有原因")[:80]))
+    elif _rec and _why2:
+        bits.append("（预览模型只腾出 %.2f GB：%s）" % (_got / 1024.0, _why2[:80]))
     if plan.get("forced"):
         bits.append("（强制尝试）")
     return " · ".join(bits)
@@ -10967,6 +11097,35 @@ def _vram_log_lines(plan: dict, tag: str = "") -> list:
                 int(plan.get("frames") or 0), float(plan.get("frame_mb") or 0.0),
                 plan.get("batch_mb") if plan.get("batch_mb") is not None else "?",
                 int(plan.get("arena_mb") or 0))]
+    # ---- 回收结果单独一行：成功要能看见「卸了多少 / 空闲涨到哪 / 花了多久」，
+    #      失败**必须写出原因**（用户口径：不能只打一个 0）----
+    _rec = dict(plan.get("reclaim") or {})
+    # 「worker 里本来就没有常驻模型」不是故障：那一栏空着，别写成「没回收掉」吓人。
+    if _rec and not _rec.get("did") and float(plan.get("reclaimable_mb") or 0.0) <= 0.0 \
+            and not _rec.get("freed_mb"):
+        _rec = {}
+    if _rec:
+        _freed = float(_rec.get("freed_mb") or 0.0)
+        _why = str(_rec.get("why") or "").strip()
+        _rb = _rec.get("before_mb")
+        _ra = _rec.get("after_mb")
+        # 形状只有一个：「回收预览模型 <freed> MB（<ms>ms · …）：空闲 A → B MB · 附注」
+        # —— 人眼和验收脚本的正则都只认这一种，别按分支换写法。
+        if _rec.get("did"):
+            _tail = (" · " + _why) if _why else (
+                (" · " + str(_rec.get("note") or "")) if _rec.get("note") else "")
+            lines.insert(2, "%s：回收预览模型 %.0f MB（%.0fms%s）：空闲 %s → %s MB%s"
+                         % (tag, _freed, float(_rec.get("ms") or 0.0),
+                            " · 进程已回收" if _rec.get("recycled") else "",
+                            "?" if _rb is None else int(_rb),
+                            "?" if _ra is None else int(_ra), _tail))
+        else:
+            lines.insert(2, "%s：预览 worker 的模型没回收掉 —— %s"
+                         "（可回收 %.0f MB 已按「计入可用」算，导出起手时会再收一次）"
+                         % (tag, _why or "没有原因（worker 没回 why）",
+                            float(plan.get("reclaim_left_mb")
+                                  if plan.get("reclaim_left_mb") is not None
+                                  else plan.get("reclaimable_mb") or 0.0)))
     if plan.get("mode") == "procs":
         lines.append("%s：计划 %d 个 worker × %d 线程（请求 %d × %d）· 预计峰值 %.0f MB"
                      % (tag, int(plan.get("procs") or 1), int(plan.get("batch") or 1),
@@ -13942,7 +14101,8 @@ def _stage_model_resident(stage: str, paths: list, cfg: dict) -> bool:
     return False
 
 
-def _stage_vram_gate(cfg: dict, stage: str, force: bool = False) -> dict:
+def _stage_vram_gate(cfg: dict, stage: str, force: bool = False,
+                     dry: bool = False) -> dict:
     """阶段起手前的显存闸门 —— **在起 job / 加载模型 / 开线程之前**跑。
 
     用户口径（截图 2）：显存不够时点导出，不许先起一个 job 再把六个阶段全打失败。
@@ -13966,6 +14126,9 @@ def _stage_vram_gate(cfg: dict, stage: str, force: bool = False) -> dict:
         pass
     # 真装不下时允许放掉本进程里**别人的**会话（没有任务在跑才敢，见 _vram_plan）
     opts["reclaim_inproc"] = True
+    # 真起手（非 dry_run）：先卸常驻预览 worker 的模型 → 再探 → 再算账（顺序见 _vram_plan）。
+    # 分段链每个阶段都过这道闸，但 worker 里第一次之后就空了，第二次起是零成本的空转。
+    opts["reclaim_first"] = (not dry)
     # force：「仍然尝试（可能 OOM）」—— 只放行最小档，真 OOM 由 _stage_worker 回滚
     opts["force"] = bool(force)
     return _vram_guard(paths, opts, label=label, force=bool(force))
@@ -14012,7 +14175,8 @@ def merge_stage(name: str, body: dict = None):
     # 顺序有讲究：先跑前置检查（缺上游 → 409 点名要跑哪一步），再算显存账。
     # 反过来的话，一个"还没切帧"的用户会拿到「显存不够」，而真原因是那个 409。
     # 闸门只算账：不加载模型、不建 job、不开线程 —— 拒绝 = 这一单什么都没发生。
-    vplan = _stage_vram_gate(cfg, stage, force=_bool_val(body.get("force"), False))
+    vplan = _stage_vram_gate(cfg, stage, force=_bool_val(body.get("force"), False),
+                             dry=_bool_val(body.get("dry_run"), False))
     cfg["vram_plan"] = vplan
     cfg["vram_force"] = bool(vplan.get("forced"))
     if _bool_val(body.get("dry_run"), False):
@@ -14543,7 +14707,8 @@ def _fused_frame_mb(size_px: int) -> float:
 
 def _fused_budget(want: int, free_mb, total_mb, size_px: int, model_mb: float = 0.0,
                   batch: int = 0, label: str = "快速导出",
-                  resident: bool = False, force: bool = False) -> dict:
+                  resident: bool = False, force: bool = False,
+                  reclaim: bool = False, reclaim_first: bool = False) -> dict:
     """fused 的帧预算 —— 现在就是 _vram_plan 的一层壳（老调用方读的键一个都不改）。
 
     和以前那一版（只按 30/16/8 降帧）的区别只有两点，但都是这次要治的病：
@@ -14560,7 +14725,10 @@ def _fused_budget(want: int, free_mb, total_mb, size_px: int, model_mb: float = 
     """
     opts = {"mode": "frames", "size_px": int(size_px or _VRAM_BASE_PX),
             "frames": int(want or 0), "batch": int(batch or 0), "procs": 1,
-            "label": label, "resident": bool(resident), "force": bool(force)}
+            "label": label, "resident": bool(resident), "force": bool(force),
+            # reclaim_first：先卸掉常驻预览 worker 的模型，再用**回收后**的空闲算账
+            # —— 这就是「帧预算不该因为自己的预览 worker 占着而降到 8」那一条。
+            "reclaim": bool(reclaim), "reclaim_first": bool(reclaim_first)}
     if free_mb is not None:
         opts["free_mb"] = int(free_mb)
         if total_mb is not None:
@@ -15146,9 +15314,14 @@ def _fused_run(cfg: dict) -> dict:
     model_mb = _vram_model_mb(cfg["dfm"])
     size_hint = _dfm_size_hint(cfg["dfm"])
     want_frames = int(cfg.get("frame_budget_want") or 0)
+    # ★ reclaim_first：**导出起手第一件事**是把常驻预览 worker 的模型卸掉，然后
+    #   重新探显存、再算这一份预算。顺序反过来的代价是实测的 22 → 15.8 帧/秒：
+    #   预览 worker 常驻 2733MB 时「空闲」只有 2766MB，帧预算被压到 8、dfm 批压到 1，
+    #   而占着那 2733MB 的正是我们自己。
     bud = _fused_budget(want_frames, None, None, size_hint,
                         model_mb=model_mb, batch=int(batch_target),
-                        force=bool(cfg.get("vram_force")))
+                        force=bool(cfg.get("vram_force")),
+                        reclaim=True, reclaim_first=True)
     _vram_apply(bud, "快速导出")
     for _ln in _vram_log_lines(bud, "快速导出"):
         _vid_log(_ln)
@@ -15195,7 +15368,8 @@ def _fused_run(cfg: dict) -> dict:
         # 只判增量：检测/遮罩（检测器上面已经加载了）+ 帧缓冲 + dfm 批。
         bud = _fused_budget(want_frames, None, None, size_px,
                             model_mb=model_mb, batch=int(batch_target),
-                            resident=True, force=bool(cfg.get("vram_force")))
+                            resident=True, force=bool(cfg.get("vram_force")),
+                            reclaim=True, reclaim_first=False)
         _vram_apply(bud, "快速导出")
         for _ln in _vram_log_lines(bud, "快速导出"):
             _vid_log(_ln)
@@ -16365,17 +16539,22 @@ def _start_video_export(body: dict):
     # 只放行、不改账（plan.forced=True 且 need/avail 照旧），真 OOM 由 worker 里的
     # _vram_oom_rollback 收现场并回到拒绝态 —— 见 _fused_worker / _stage_worker。
     _force = _bool_val(body.get("force"), False)
+    # dry_run 是预检（前端拖一次滑杆就打一次）：**不卸**预览模型，靠「可回收计入可用」
+    # 拿到同样的结论；真起手这一拍才卸（reclaim_first），因为那时模型才真的要腾地方。
+    _dry = _bool_val(body.get("dry_run"), False)
     if fused:
         plan = _vram_guard(_dfms,
                            {"mode": "frames", "frames": int(cfg.get("frame_budget_want") or 0),
-                            "batch": int(cfg.get("fused_batch") or 0), "procs": 1},
+                            "batch": int(cfg.get("fused_batch") or 0), "procs": 1,
+                            "reclaim_first": (not _dry)},
                            label="快速导出", force=_force)
     else:
-        plan = _vram_guard(_dfms, {"mode": "none", "procs": 1},
+        plan = _vram_guard(_dfms, {"mode": "none", "procs": 1,
+                                   "reclaim_first": (not _dry)},
                            label="分段导出", force=_force)
     cfg["vram_plan"] = plan
     cfg["vram_force"] = bool(plan.get("forced"))
-    if _bool_val(body.get("dry_run"), False):
+    if _dry:
         # 预检（前端在起 job 之前问一次）：只回计划，不建 job、不开线程、不碰 status。
         return _ok(dry_run=True, fused=bool(fused), stages=(["fused"] if fused
                                                            else list(_STAGE_ORDER)),

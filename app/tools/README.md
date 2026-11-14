@@ -18,7 +18,7 @@
 | `accept/roi_export_accept.py` | ROI 合成的端到端与续跑 | 120 s |
 | `accept/vram_plan_accept.py` | 显存预算三档（拒绝/降档/正常） | 88 s |
 | `accept/vram_force_accept.py` | 「仍然尝试」force=1 成功/失败两条路 | 60 s |
-| `accept/vram_reclaim_accept.py` | 预览显存回收与归属 | 59 s |
+| `accept/vram_reclaim_accept.py` | 预览显存回收与归属（含「可回收进不进公式」「先回收再算预算」的顺序钉子） | 82 s |
 | `accept/eff_accept.py` | `[eff]` 生效配置 + 三类告警 + 前端横幅 | 40 s |
 | `accept/merge_accept.py` | 合成器界面（时间轴/预览/导出按钮） | 76 s |
 | `accept/merge_ui_accept.py` | 合成器设置页布局与行数 | 30 s |
@@ -42,6 +42,7 @@
 | `bench/faces_profile.py` | 切脸/检测剖析 |
 | `bench/sess_bench.py` · `sess_sweep.py` · `sess_plan_probe.py` | session 池标定与策略扫描 |
 | `bench/vram_probe.py` | 显存探测口径对照 |
+| `bench/vram_export_ab.py` | 帧预算降档 A/B：预览常驻 → 30 帧/批 8 vs 8 帧/批 1（带帧率）78s |
 
 ## migrate/ 数据迁移与一次性工具
 

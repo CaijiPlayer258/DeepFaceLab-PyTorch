@@ -306,6 +306,10 @@ def case_refuse(clip):
               "需要=%s GB · 可用=%s GB" % (need_gb, avail_gb))
         check("建议" in msg, "a1 消息里有建议", msg[:120])
         check(str(d.get("ok")).lower() == "false", "a1 响应体 ok=false", "ok=%r" % d.get("ok"))
+        # 后端是子进程：print(flush=True) 之后那一行进 SERVER_LOG 还要过一层管道 +
+        # reader 线程。HTTP 400 一回来就读日志会撞上这几十毫秒的竞态（实测偶发），
+        # 所以给日志一拍时间 —— 断的是「日志里有账」，不是「管道有多快」。
+        time.sleep(0.4)
         blob = log_since(mark)
         check(bool(re.search("显存不够|显存预算", blob)), "a1 后端日志里也留了账",
               "%d 字节" % len(blob))

@@ -108,7 +108,7 @@ Windows/WDDM 上 `torch.cuda.mem_get_info` 报的空闲**比 nvidia-smi 高**：
 
 | 情形 | 以前 | 现在 |
 |---|---|---|
-| 预览过一帧（worker 里 dfm 常驻 2.0GB），再点导出 | 只看 free → 空闲 1.4GB → **拒绝** | 起算前先 `_vram_reclaim()` 把 worker 卸掉，等驱动真回收（轮询 ≤4s）再探 → 空闲 3.4GB |
+| 预览过一帧（worker 里 dfm 常驻 2.0~2.7GB），再点导出 | 只看 free → 空闲 1.4GB → **拒绝** | 起算前先 `_vram_reclaim()` 把 worker 卸掉，等驱动真回收（轮询 ≤4s）再探 → 空闲 3.4GB；**顺序见 2.5** |
 | 导出过程中，加载完 dfm 后拿实测尺寸重算一次（文件名没带尺寸时必走） | 把「会话 1567+512MB」**又算一遍**，而它已经在卡上了 | `resident=True`：会话那项不计入需求，只判增量（检测/遮罩 + 帧 + 批） |
 | 六阶段连着跑（pred → mask → merge） | 每个阶段的闸门都按「一份新会话」算 | 阶段要的模型已经在 `_DFM_SESS` / 检测器缓存 / `_XSEG_SESS` 里时 `resident=True`（`_stage_model_resident`）；真装不下且没有任务在跑 → `_vram_release_inproc()` 放掉旧会话再算一遍 |
 | worker 忙/回收超时 | —— | 那 2GB 仍算进 `avail`（可回收），消息里注明「导出前会再收一次」 |
@@ -139,6 +139,64 @@ Windows/WDDM 上 `torch.cuda.mem_get_info` 报的空闲**比 nvidia-smi 高**：
 `_VRAM_SESS_RUNTIME_MB = 320` 就是这两次实测的中间偏上（旧值 1300 是把 dfm 批重复算进
 会话里了，已修正）；量到的真值优先（`_vram_sess_peak_mb`，口径版本 `v=2`，旧文件自动作废）。
 
+### 2.5 顺序：先回收 → 再探测 → 再算预算（这一版之前是真 bug）
+
+用户实测那一单（8GB 卡 · 384 模型 · 先预览一帧再点导出）：帧预算 30 → 8、dfm 批 8 → 1，
+22 → 15.8 帧/秒。日志那一行本身就是自证的：
+
+    显存 空闲 2766 / 共 8150 MB（min(torch 6687 / smi 2766)）· 预算 2510 MB
+           = 空闲 − 预留 256 MB + 可回收 0 MB          ← 可回收写成 0
+    显存去向 本程序 2741 MB（本进程 8 + 预览 worker 2733）· 可回收 2733 MB
+
+「可回收 2733」在第二行，「+ 可回收 0」在第一行。三处一起坏才成这样：
+
+1. **可用只加 0**：`_vram_plan` 里 `reclaim_left = 0.0` 是写死的初值，真正的赋值只在
+   「装不下才回收」那个分支里 —— 而日志第二行打的就是它，于是「可回收」只是个装饰数字；
+2. **那个分支永远走不到**：`_vram_cands` 的阶梯里有「8 帧 / 批 1」这一档，2510MB 刚好够
+   它 → `hit is not None` → 一次都不回收（先算预算、后回收，**顺序反了**）；
+3. **回收失败被吞**：`_vram_reclaim` 只在 `unload()` **抛异常**时算失败。worker 在子进程里
+   回 `ok=false`、或原样带着 `models` 清单回来时，被记成「成功、腾出 0MB」——
+   日志上只剩一个 0，原因永远看不见。
+
+改法：
+
+* `_vram_plan(..., reclaim_first=True)` 在**探测之前**调 `_vram_reclaim_once()`（卸模型 →
+  轮询驱动回收 → `_vram_probe(0)` 重探），真起手那一拍才用；`dry_run` 预检不卸模型
+  （拖一次滑杆不该重载 4 秒），它靠下一条拿到同样的结论；
+* `avail = 空闲 − 预留 + reclaim_left`，`reclaim_left` 取自 `_vram_owners()["reclaimable_mb"]`
+  （回收**没成**时计入；回收**成了**那 N MB 已经在新的 free 里，绝不重复加；`env/file/override`
+  伪造的 free 一律不加，否则一个文本文件就能把预算抬 2.7GB）；
+* `_vram_reclaim` 把 worker 的回应也当证据：模型还在 / `ok=false` → `ok=false` + `why`；
+  卸了但只腾出 <50%（WDDM 不会立刻还给驱动）→ 同样是失败并写原因；50~85% 只记一句 note；
+* 失败原因同时进 `[vram]` 日志第三行、`plan.reclaim`（status 可查）、`summary`（toast 可看）、
+  拒绝消息；
+* 接线：融合导出的路由闸门与 `_fused_run` 第一拍、`_stage_vram_gate`（非 dry_run）、项目导出的
+  `_vram_guard` 都传 `reclaim_first`；`DFL_VRAM_NO_RECLAIM=1` 可整轮关掉（A/B 与回滚用）。
+
+复现 / A-B（`app/tools/bench/vram_export_ab.py`，本机 RTX 5070 Laptop 8GB · 1080p · 张元英 384
+· 90 帧 · retinaface_10g）：
+
+| 臂 | 预算那一拍（日志原文） | 帧预算 / dfm 批 | 帧/秒 |
+|---|---|---|---|
+| A 修复后 | 「回收预览模型 2464 MB（261ms）：空闲 3820 → 6284 MB」→ 再算 | **30 / 8**（不用降档） | **19.27 / 19.31**（跑了两次） |
+| B 改动前的账 | `DFL_VRAM_NO_RECLAIM=1` + `DFL_FUSED_VRAM_FREE_MB=2766`（用户日志那个空闲） | 8 / 1（已降档） | **18.56** |
+
+（A 两臂 19.27 / 19.31 说明这一段可重复；B/A = −4.0%。）
+
+A/B 的结论要分开说，别混成一件事：
+
+* **预算**这一半是明确的 bug，修完就是 30/8：`vram_reclaim_accept` 的 A2c / A3 钉子
+  （「预算 = 空闲 − 预留 + 可回收」三个数对得上、成片日志里「回收预览模型 …」在「显存预算 →」
+  **之前**）；
+* **吞吐**这一半在本机**不由这两个旋钮决定**：空载时 A 19.3 / B 18.6（−4%），运行时
+  检测（retinaface_10g 52ms/帧）与合成（CPU 侧 186ms/帧）才是硬底。所以「22 → 15.8」
+  里的那 −6.2（−28%）在这台机器上复现不出来 —— 帧预算/dfm 批是**重叠度**与**攒批**的旋钮，
+  不是吞吐旋钮。
+* 顺带量到一件事：**同一台机器上再跑一个导出**（本次复现时另一个会话在跑同一套验收），
+  两臂一起掉到 15.6 / 16.1 —— 正好是用户报的那个数。所以「22 → 15.8」更像「卡被别的
+  东西分走了」，不是「预算降档」。判据在日志里：`显存去向 … 其它程序 X MB` 与
+  `流水线跑完 N 帧 · X s · Y 帧/秒 · 帧缓冲 Z`，两行并排看就能分清是哪种。
+
 ## 3. 三条路怎么接
 
 | 路径 | 旋钮 | 降档顺序 | 拒绝 |
@@ -161,6 +219,11 @@ Windows/WDDM 上 `torch.cuda.mem_get_info` 报的空闲**比 nvidia-smi 高**：
 | POST /api/merge/export（fused=0） | _vram_guard(mode=none) | 分段链一次一帧，只有一份会话 |
 | POST /api/merge/stage/{name} | _stage_vram_gate | 按阶段点名要加载的模型（pred/merge=dfm、mask=XSeg、faces=检测器、frames/encode 不加载模型）；顺序在 _stage_precheck **之后** —— 缺上游该给 409，别拿显存背锅 |
 | 预览 / 项目导出 | _preview_guard / _proj_run 的 _vram_guard | 老口径不变 |
+
+`reclaim_first`（= 真起手那一拍）与 `dry_run` 的分工：**预检不卸模型**（前端拖一次滑杆就打一次
+dry_run，卸了就要重载 4 秒），它靠「可回收计入可用」拿到同样的结论；真起手（路由闸门非 dry_run、
+`_fused_run` 第一拍、`_stage_vram_gate` 非 dry_run、项目导出）才**真回收 → 重探 → 再算**。
+同一单里 `_vram_reclaim_once` 6 秒内只真收一次（闸门与 worker 线程各算一遍预算，不必卸两次）。
 
 拒绝响应 = HTTP 400 + **结构化字段**（不是让前端去正则抠中文）：
 
@@ -258,6 +321,7 @@ nvidia-smi 的 free 只涨了 135MB。这种残留正是「我什么都没跑却
 | `DFL_VRAM_FREE_MB` | 伪造「可用显存」，三条路共用（验收/排障；`DFL_FUSED_VRAM_FREE_MB` 仍认） |
 | `DFL_VRAM_RESERVE_MODE=legacy20` | 复原老预留口径（free×20%+512MB），只给对照/回滚用 |
 | `DFL_VRAM_RECYCLE_WORKER=0` | 关掉「卸模型没腾出显存就把 worker 进程收掉」那条兜底（默认开） |
+| `DFL_VRAM_NO_RECLAIM=1` | 这一轮**完全不卸**预览模型（回滚 / A-B 对照用；日志会写明是它，不装成「没得卸」） |
 | `DFL_ALLOW_TEST_HOOK=1` + `DFL_VRAM_OOM_INJECT=1` | 验收专用：在 `_dfm_session` 里注入一次 OOM（生产不设就一个字节都不走） |
 | `<WORKSPACE>/_vram_free_mb.txt` | 同上，但**同一个后端进程里改得动**（验收用：验证「关掉占显存的程序后重试不用重启后端」）。文件不存在就当没有 |
 | `DFL_ALLOW_CPU_FALLBACK=1` | 显存不够时不拒绝，回落 CPU EP 照跑（416 实测慢 ~17 倍） |
@@ -284,7 +348,8 @@ provider、预览 worker 收 `DFL_FORCE_CPU_EP=1`。日志与 status 都写「�
 
 ```
 runtime\server\Scripts\python.exe app\tools\vram_plan_accept.py      # 三档伪造显存（51 项）
-runtime\server\Scripts\python.exe app\tools\vram_reclaim_accept.py   # 预览常驻 → 导出（26 项）
+runtime\server\Scripts\python.exe app\tools\vram_reclaim_accept.py   # 预览常驻 → 导出（35 项）
+runtime\server\Scripts\python.exe app\tools\bench\vram_export_ab.py  # 帧预算降档 A/B（30/8 vs 8/1，20 项 + 帧率）
 runtime\server\Scripts\python.exe app\tools\vram_force_accept.py     # 预留 / 归属 / 强制尝试（45 项）
 runtime\server\Scripts\python.exe app\tools\proj_default_accept.py    # 项目导出默认档（模型体量 → worker×线程、峰值 ≤85%、像素不变）
 ```
@@ -301,10 +366,14 @@ F 前端接线（按钮/force=1/字典/样式，静态断言）。
 | P0 | 我们的 free 与 nvidia-smi 原始行差 ≤256MB；`source` 写明两个来源 |
 | A1 | 预览一帧之后 worker 里 `models` 非空、`used_mb` ≥500MB、整卡空闲明显下降 |
 | A2 | 预览常驻着按下 dry_run：**ok=True**（不再 400）、`reclaimed_mb` ≥1GB、日志有「回收预览模型 X MB … 空闲 A → B」 |
-| A3 | 真导出 12 帧 phase=done、成片 12 帧、全程无 OOM |
+| A2a | dry_run 不卸模型时 `reclaim_left_mb` ≈ `reclaimable_mb`（**可回收真的进公式**，以前恒为 0） |
+| A2b | `avail_mb == free_mb − reserve_mb + reclaim_left_mb`（三个数对得上，容差 2MB） |
+| A2c | 30 帧 / 批 8 这一档装得下时，计划**必须**就是 30/8（不因为自己的预览 worker 降档） |
+| A3 | 真导出 12 帧 phase=done、成片 12 帧、全程无 OOM；成片日志里「回收预览模型 …」出现在「显存预算 → 帧缓冲 30 / dfm 批 8」**之前** |
 | A4 | 导出结束后 worker 不重载；再预览能出图（懒加载）、`spawns` 仍是 1 |
-| B1 | 自己可回收 + 别的进程占 2GB → 仍然放行；`other_mb` 认得出那 2GB |
-| B2 | 别的进程占 4.6GB → 400，消息里有「本程序 / 其它程序」两栏，结构化字段 `own_mb/other_mb` 有数 |
+| B1 | 自己可回收 + 别的进程占 1.2GB → 仍然放行（30/8）；`other_mb` 认得出那 1.2GB |
+| B2 | 别的进程占 4.6GB → 先回收（实测 2127MB）再算，仍放不下 → 400，消息带「本程序 / 其它程序」+「需要 / 可用」，`own_mb/other_mb` 有数 |
+| C1 | 干净后端 + 诱饵 `total − need − 400` → 400，且 `need > avail > 0`（拒绝有据）、无成片 |
 
 三档伪造显存（416 dfm）：1200 → 拒绝（需要 1.44GB / 可用 0.44GB）、3000 → 降档
 （30 帧 / 批 8→2）、8000 → 正常（30 帧 / 批 8）；`DFL_ALLOW_CPU_FALLBACK=1 + 1200`
