@@ -751,7 +751,7 @@ def case_wiring():
     js = (APP / "web" / "js" / "app.js").read_text("utf-8", "ignore")
     i18n = (APP / "web" / "js" / "i18n.js").read_text("utf-8", "ignore")
     css = (APP / "web" / "css" / "app.css").read_text("utf-8", "ignore")
-    py = (APP / "server" / "routes_merge.py").read_text("utf-8", "ignore")
+    py = (APP / "server" / "backend_merge/vram.py").read_text("utf-8", "ignore")
     check('id="mgpForceTry"' in html and "仍然尝试（可能 OOM）" in html,
           "f1 index.html 有那颗按钮（而且默认 hidden）",
           "id=%s hidden=%s" % ('id="mgpForceTry"' in html, "mgpForceTry" in html))
