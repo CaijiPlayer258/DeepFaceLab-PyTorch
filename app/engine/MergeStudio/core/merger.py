@@ -9,6 +9,10 @@ import numpy as np
 import traceback
 from facelib import FaceType, LandmarksProcessor
 from core import imagelib
+from MergeStudio.core.compose_common import (
+    color_transfer as _color_transfer,
+    has_color_transfer as _has_color_transfer,
+)
 
 _model_input_size = 256  # Overridden by model_loader
 
@@ -224,21 +228,22 @@ def build_debug_panels(capture, size=256):
     return [(key, label, imgs[key]) for key, label in DEBUG_PANELS]
 
 
-def _ct_table(mask_area):
-    """色彩迁移实现表（key = color_transfer_mode）。整帧版与 ROI 版共用。"""
-    return {
-        1: lambda s, t: imagelib.reinhard_color_transfer(s, t, target_mask=mask_area, source_mask=mask_area),
-        2: lambda s, t: imagelib.linear_color_transfer(s, t),
-        3: lambda s, t: imagelib.color_transfer_mkl(s, t),
-        4: lambda s, t: imagelib.color_transfer_mkl(s * mask_area, t * mask_area),
-        5: lambda s, t: imagelib.color_transfer_idt(s, t),
-        6: lambda s, t: imagelib.color_transfer_idt(s * mask_area, t * mask_area),
-        7: lambda s, t: imagelib.color_transfer_sot(s * mask_area, t * mask_area, steps=10, batch_size=30),
-        8: lambda s, t: imagelib.color_transfer_mix(s * mask_area, t * mask_area),
-        # 9/10 与训练预览侧对齐（config.ctm_dict 同步）
-        9: lambda s, t: imagelib.match_tone_np(s, t, src_mask=mask_area, trg_mask=mask_area),
-        10: lambda s, t: imagelib.color_transfer_lut(s, t),
-    }  # ct_functions
+def _apply_hist_mask(prd_face_bgr, dst_face_bgr, mask_area, cfg):
+    """hist-match：在 output_size 画布上把 prd 的直方图往 dst 上拉。
+
+    整帧参考实现与 ROI 快路原本各抄了一份（逐字相同），合并到这里；两边算出来的
+    像素与合并前逐位一致。masked_hist_match 决定直方图只统计遮罩内 —— 照 cfg 读，
+    4.0 的 MergerConfigMasked 里它是 True，但预览侧传的是 dict 出来的别的值。
+    """
+    hist_mask = np.ones(prd_face_bgr.shape[:2] + (1,), dtype=np.float32)
+    if cfg.masked_hist_match:
+        hist_mask *= mask_area
+    white = (1.0 - hist_mask) * np.ones(prd_face_bgr.shape[:2] + (1,), dtype=np.float32)
+    hm1 = prd_face_bgr * hist_mask + white
+    hm1[hm1 > 1.0] = 1.0
+    hm2 = dst_face_bgr * hist_mask + white
+    hm2[hm2 > 1.0] = 1.0
+    return imagelib.color_hist_match(hm1, hm2, cfg.hist_match_threshold).astype(np.float32)
 
 
 def _compose_roi_standard(frame_img, img_bgr, img_face_mask_full, prd_face_bgr,
@@ -301,26 +306,17 @@ def _compose_roi_standard(frame_img, img_bgr, img_face_mask_full, prd_face_bgr,
     mask_area = wrk_face_mask_a.copy()
     mask_area[mask_area > 0] = 1.0
 
-    # ---- ③ 色彩迁移（output_size 画布，与整帧版同一份代码）----
-    ct_functions = _ct_table(mask_area)
-    fn = ct_functions.get(cfg.color_transfer_mode)
-    if fn:
+    # ---- ③ 色彩迁移（output_size 画布，与整帧版同一份实现）----
+    if _has_color_transfer(cfg.color_transfer_mode):
         try:
-            prd_face_bgr = np.clip(fn(prd_face_bgr, dst_face_bgr), 0, 1)
+            prd_face_bgr = np.clip(
+                _color_transfer(prd_face_bgr, dst_face_bgr, mask_area, cfg.color_transfer_mode), 0, 1)
         except Exception:
             pass
 
     # Hist-match（画布上的活，整脸）
     if cfg.mode == 'hist-match':
-        hist_mask = np.ones(prd_face_bgr.shape[:2] + (1,), dtype=np.float32)
-        if cfg.masked_hist_match:
-            hist_mask *= mask_area
-        white = (1.0 - hist_mask) * np.ones(prd_face_bgr.shape[:2] + (1,), dtype=np.float32)
-        hm1 = prd_face_bgr * hist_mask + white
-        hm1[hm1 > 1.0] = 1.0
-        hm2 = dst_face_bgr * hist_mask + white
-        hm2[hm2 > 1.0] = 1.0
-        prd_face_bgr = imagelib.color_hist_match(hm1, hm2, cfg.hist_match_threshold).astype(np.float32)
+        prd_face_bgr = _apply_hist_mask(prd_face_bgr, dst_face_bgr, mask_area, cfg)
 
     # ---- ④ seamless 用的二值遮罩（只在遮罩包围盒里做；盒外恒 0）----
     seam_r = None
@@ -386,15 +382,12 @@ def _compose_roi_standard(frame_img, img_bgr, img_face_mask_full, prd_face_bgr,
 
         if 'seamless' in cfg.mode and cfg.color_transfer_mode != 0:
             try:
-                fn_pp = ct_functions.get(cfg.color_transfer_mode)
-                if fn_pp:
-                    out_face_bgr_pp = np.clip(fn_pp(out_face_bgr_pp, dst_face_bgr), 0, 1)
+                if _has_color_transfer(cfg.color_transfer_mode):
+                    out_face_bgr_pp = np.clip(
+                        _color_transfer(out_face_bgr_pp, dst_face_bgr, mask_area,
+                                        cfg.color_transfer_mode), 0, 1)
             except Exception:
                 pass
-                try:
-                    out_face_bgr_pp = np.clip(fn_pp(out_face_bgr_pp, dst_face_bgr), 0, 1)
-                except Exception:
-                    pass
 
         if cfg.mode == 'seamless-hist-match':
             out_face_bgr_pp = imagelib.color_hist_match(out_face_bgr_pp, dst_face_bgr, cfg.hist_match_threshold)
@@ -699,26 +692,18 @@ def MergeMaskedFace(frame_img, face_landmarks, cfg, predictor_func=None,
                         mask_area = wrk_face_mask_a.copy()
                         mask_area[mask_area > 0] = 1.0
 
-                        # Color transfer functions（整帧版与 ROI 版共用同一张表）
-                        ct_functions = _ct_table(mask_area)
-                        fn = ct_functions.get(cfg.color_transfer_mode)
-                        if fn:
+                        # Color transfer（整帧版与 ROI 版共用同一份实现）
+                        if _has_color_transfer(cfg.color_transfer_mode):
                             try:
-                                prd_face_bgr = np.clip(fn(prd_face_bgr, dst_face_bgr), 0, 1)
+                                prd_face_bgr = np.clip(
+                                    _color_transfer(prd_face_bgr, dst_face_bgr, mask_area,
+                                                    cfg.color_transfer_mode), 0, 1)
                             except Exception:
                                 pass
 
                         # Hist-match
                         if cfg.mode == 'hist-match':
-                            hist_mask = np.ones(prd_face_bgr.shape[:2] + (1,), dtype=np.float32)
-                            if cfg.masked_hist_match:
-                                hist_mask *= mask_area
-                            white = (1.0 - hist_mask) * np.ones(prd_face_bgr.shape[:2] + (1,), dtype=np.float32)
-                            hm1 = prd_face_bgr * hist_mask + white
-                            hm1[hm1 > 1.0] = 1.0
-                            hm2 = dst_face_bgr * hist_mask + white
-                            hm2[hm2 > 1.0] = 1.0
-                            prd_face_bgr = imagelib.color_hist_match(hm1, hm2, cfg.hist_match_threshold).astype(np.float32)
+                            prd_face_bgr = _apply_hist_mask(prd_face_bgr, dst_face_bgr, mask_area, cfg)
 
                         # Seamless mask
                         img_face_seamless_mask = None
@@ -766,15 +751,12 @@ def MergeMaskedFace(frame_img, face_landmarks, cfg, predictor_func=None,
 
                             if 'seamless' in cfg.mode and cfg.color_transfer_mode != 0:
                                 try:
-                                    fn_pp = ct_functions.get(cfg.color_transfer_mode)
-                                    if fn_pp:
-                                        out_face_bgr_pp = np.clip(fn_pp(out_face_bgr_pp, dst_face_bgr), 0, 1)
+                                    if _has_color_transfer(cfg.color_transfer_mode):
+                                        out_face_bgr_pp = np.clip(
+                                            _color_transfer(out_face_bgr_pp, dst_face_bgr, mask_area,
+                                                            cfg.color_transfer_mode), 0, 1)
                                 except Exception:
                                     pass
-                                    try:
-                                        out_face_bgr_pp = np.clip(fn_pp(out_face_bgr_pp, dst_face_bgr), 0, 1)
-                                    except Exception:
-                                        pass
 
                             if cfg.mode == 'seamless-hist-match':
                                 out_face_bgr_pp = imagelib.color_hist_match(out_face_bgr_pp, dst_face_bgr, cfg.hist_match_threshold)
@@ -863,76 +845,3 @@ def MergeMaskedFace(frame_img, face_landmarks, cfg, predictor_func=None,
     except Exception as e:
         traceback.print_exc()
         return frame_img, np.zeros(frame_img.shape[:2], dtype=np.uint8)
-
-
-def MergeMasked(frame_info, cfg, predictor_func=None, face_enhancer_func=None,
-                xseg_256_extract_func=None):
-    """Merge all faces in a frame. Returns RGBA."""
-    frame_img = cv2.imread(str(frame_info.filepath))
-    if frame_img is None:
-        return None
-    out_img = None
-    full_mask = np.zeros(frame_img.shape[:2], dtype=np.float32)
-    for landmarks in frame_info.landmarks_list:
-        face_img, face_mask = MergeMaskedFace(
-            frame_img, landmarks, cfg, predictor_func,
-            face_enhancer_func, xseg_256_extract_func)
-        if out_img is None:
-            out_img = face_img.astype(np.float32)
-            full_mask = face_mask.astype(np.float32)
-        else:
-            m = (face_mask.astype(np.float32) / 255.0) * (1.0 - full_mask / 255.0)
-            m3 = np.stack([m, m, m], axis=-1)
-            out_img = out_img * (1 - m3) + face_img.astype(np.float32) * m3
-            full_mask = np.maximum(full_mask, face_mask.astype(np.float32))
-    if out_img is None:
-        out_img = frame_img.astype(np.float32)
-    rgba = np.concatenate([
-        np.clip(out_img, 0, 255).astype(np.uint8),
-        np.clip(full_mask, 0, 255).astype(np.uint8)[:, :, None]
-    ], axis=-1)
-    return rgba
-
-
-def MergeFaceAvatar(predictor_func, predictor_input_shape, cfg,
-                    prev_temporal_frame_infos, frame_info, next_temporal_frame_infos):
-    """FaceAvatar merge with temporal context."""
-    try:
-        frame_img = cv2.imread(str(frame_info.filepath))
-        if frame_img is None:
-            return None
-        prev_imgs = []
-        for fi in prev_temporal_frame_infos:
-            img = cv2.imread(str(fi.filepath))
-            if img is not None:
-                prev_imgs.append(img)
-        next_imgs = []
-        for fi in next_temporal_frame_infos:
-            img = cv2.imread(str(fi.filepath))
-            if img is not None:
-                next_imgs.append(img)
-        if not frame_info.landmarks_list:
-            return frame_img
-        landmarks = frame_info.landmarks_list[0]
-        mat = LandmarksProcessor.get_transform_mat(landmarks, 256, FaceType.FULL)
-        face_img = cv2.warpAffine(frame_img, mat, (256, 256), flags=cv2.INTER_LANCZOS4)
-        pred = predictor_func(face_img)
-        out_img = pred.astype(np.float32) if pred is not None else face_img.astype(np.float32)
-        if cfg.sharpen_mode != 0 and cfg.blursharpen_amount != 0:
-            amount = cfg.blursharpen_amount / 100.0
-            if cfg.sharpen_mode == 1:
-                blurred = cv2.blur(out_img, (3, 3))
-            else:
-                blurred = cv2.GaussianBlur(out_img, (0, 0), 1.0)
-            out_img = cv2.addWeighted(out_img, 1.0 + amount, blurred, -amount, 0)
-            out_img = np.clip(out_img, 0, 255)
-        if cfg.add_source_image:
-            h, w = frame_img.shape[:2]
-            out_img = np.concatenate([frame_img.astype(np.float32), out_img], axis=1)
-            out_img = cv2.resize(out_img, (w, h))
-        return np.clip(out_img, 0, 255).astype(np.uint8)
-    except Exception as e:
-        traceback.print_exc()
-        if frame_info.filepath:
-            return cv2.imread(str(frame_info.filepath))
-        return None

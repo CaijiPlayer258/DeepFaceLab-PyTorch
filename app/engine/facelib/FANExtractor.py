@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from facelib import FaceType, LandmarksProcessor
+from facelib._runtime import forward, init_leras, pick_device, to_nchw
 from core.leras import nn
 
 
@@ -214,8 +215,7 @@ class FANExtractor(object):
     """DeepFaceLab FAN landmark extractor (Torch port, weights from DeepFaceLab-master)."""
 
     def __init__(self, landmarks_3D: bool = False, place_model_on_cpu: bool = False):
-        nn.initialize_main_env()
-        nn.initialize(data_format='NCHW')
+        init_leras('NCHW')
 
         model_path = Path(__file__).resolve().parents[1] / 'DeepFaceLab-master' / 'facelib' / (
             '3DFAN.npy' if landmarks_3D else '2DFAN.npy'
@@ -226,7 +226,7 @@ class FANExtractor(object):
         if not model_path.exists():
             raise Exception('Unable to load FANExtractor model .npy')
 
-        self._device = torch.device('cpu') if place_model_on_cpu else nn.device
+        self._device = pick_device(place_model_on_cpu)
         self.model = _FAN().to(self._device)
         _load_fan_npy(self.model, model_path)
         self.model.eval()
@@ -262,9 +262,8 @@ class FANExtractor(object):
 
                 images = np.stack(images).astype(np.float32) / 255.0
 
-                with torch.no_grad():
-                    x = torch.from_numpy(images).permute(0, 3, 1, 2).to(self._device, dtype=torch.float32)
-                    pred = self.model(x).detach().to('cpu').numpy()
+                x = to_nchw(images, device=self._device, dtype=torch.float32)
+                pred = forward(self.model, x).detach().to('cpu').numpy()
 
                 for i in range(pred.shape[0]):
                     ptss.append(self.get_pts_from_predict(pred[i], centers[i], scale))
