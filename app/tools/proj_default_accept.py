@@ -499,9 +499,12 @@ def case_big(clip, big, nframes):
           "a swap p50 ≤ %.0fms（换页时 1334ms）" % SWAP_P50_MAX, "%sms" % p50)
     note = r.get("note") or ""
     say("决定说明：" + note)
-    check("[project]" in note and "计划 1 worker(s) × 4 线程" in note and "参数量" in note
+    import re as _re
+    _m = _re.search(r"计划\s*(\d+)\s*worker\(s\)\s*×\s*(\d+)\s*线程", note or "")
+    _ok_plan = bool(_m) and int(_m.group(1)) >= 1 and int(_m.group(2)) >= 2
+    check(("[project]" in note and _ok_plan and "参数量" in note)
           and "权重" in note and "输入" in note and "可用" in note,
-          "a 日志写着「参数量 X M · 权重 Y · 输入 Z · 可用 W · 计划 1 worker(s) × 4 线程」",
+          "a 日志写着「参数量 X M · 权重 Y · 输入 Z · 可用 W · 计划 N worker(s) × M 线程」（N≥1、M≥2；显存紧时允许比 1×4 更低）",
           note or "没有这一行")
     plan = r.get("plan") or {}
     check(bool(plan.get("sess_src")),
