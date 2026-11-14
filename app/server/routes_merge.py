@@ -225,3 +225,9 @@ from .backend_merge.routes import (
     router,
 )
 
+# 拆分前 rm 就是 routes_merge 自己，所以 _proj_pipe.py 里写的是 rm._app_mod._imread_any(...)；
+# 拆开后 shim 必须照样把 _app_mod 再导出，否则那一行只剩 AttributeError，而它套在
+# 「读帧线程的 except」里 → 12 帧全记成「这一帧读不出来（损坏？）」，收尾只报
+# 「merged/ 里一帧都没有」，真实原因一点痕迹都没有（fused_export_accept case f 就挂在这）。
+from . import app as _app_mod                                    # noqa: E402
+

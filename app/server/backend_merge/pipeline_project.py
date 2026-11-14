@@ -540,12 +540,19 @@ def run(cfg: dict):
                     _put(q_done, (i, job))
                     continue
                 try:
-                    frame = rm._app_mod._imread_any(str(src_p))
-                except Exception:                           # noqa: BLE001
+                    frame = _app_mod._imread_any(str(src_p))
+                    why = ""
+                except Exception as e:                      # noqa: BLE001
+                    # 别把真实原因吞成「这一帧读不出来（损坏？）」：拆分后有 12 帧全走这条
+                    # 分支（rm._app_mod 在 routes_merge 上不存在 → AttributeError），收尾只
+                    # 报「merged/ 里一帧都没有」，真实错误一点痕迹都没有。异常类型跟到
+                    # failed_frames 里，下次一眼能看出是读图坏了还是代码缺符号。
+                    why = "%s: %s" % (e.__class__.__name__, str(e)[:160])
                     frame = None
                 if frame is None:
                     job["kind"] = "err"
-                    job["error"] = "这一帧读不出来（损坏？）"
+                    job["error"] = ("这一帧读不出来（损坏？）"
+                                    + ("：" + why if why else ""))
                     _put(q_done, (i, job))
                     continue
                 job["frame"] = frame
@@ -569,7 +576,7 @@ def run(cfg: dict):
                             # 画布尺寸可能是 512、也可能是 462（老版本按框裁的），
                             # 一律缩到模型输入 S：mat 乘以 S/S_al，几何仍然精确
                             # （整张画布按比例缩放，仿射矩阵线性缩放即等价）。
-                            aligned = rm._app_mod._imread_any(str(face["file"]))
+                            aligned = _app_mod._imread_any(str(face["file"]))
                             if aligned is None:
                                 raise RuntimeError("对齐脸读不出来：%s" % face["file"])
                             s_al = int(aligned.shape[0])
