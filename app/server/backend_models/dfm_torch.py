@@ -91,10 +91,22 @@ class DfmTorch:
         self.mb = max(1, int(max_batch))       # 预编译/单次前向的 batch 上限
         self.channels_last = bool(channels_last)
         self.pin = bool(pin)
+        # 出参 pinned buffer 的复用开关（默认关：一次前向一条，谁拿到谁拥有，
+        # 不存在"下一次前向把上一次的 numpy 覆盖掉"这种坑）。实测复用只省 0.2ms/次，
+        # 不值得为它背一个生命周期约定 —— 见 app/tools/bench/dfm_out_bench.py 的表。
+        self.pin_reuse = _env("DFL_DFM_PIN_REUSE", "0").lower() in ("1", "true", "yes", "on")
+        # 出参搬法：merged（默认，一条 pinned + 一次同步）| legacy（每张量各自分配+同步）。
+        # 留 legacy 是为了随时能 A/B 和回退 —— 它不是"死代码"，是逃生门。
+        self.out_mode = _env("DFL_DFM_OUT", "merged").lower()
+        self._pins = {}
         self.lock = threading.RLock()
         self.nets = {}
+        # t_in / t_fwd / t_out 是墙钟三段；t_gpu 是 CUDA event 量的**前向真忙**；
+        # t_pin / t_copy / t_dsync 把出参段再拆成「分配 + 拷贝入队 + 等同步」。
         self.stats = {"calls": 0, "faces": 0, "ms": 0.0, "last_ms": 0.0,
-                      "compile_ms": 0.0, "t_in": 0.0, "t_fwd": 0.0, "t_out": 0.0}
+                      "compile_ms": 0.0, "t_in": 0.0, "t_fwd": 0.0, "t_out": 0.0,
+                      "t_gpu": 0.0, "t_pin": 0.0, "t_copy": 0.0, "t_dsync": 0.0,
+                      "t_np": 0.0}
         self.log = []
 
         t0 = time.perf_counter()
@@ -244,7 +256,8 @@ class DfmTorch:
         self._log("预热 batch %s · 稳态单张 %.2f ms（首帧 %.1f）· 合计 %.0f ms"
                   % (sorted(per), one, per.get(1, 0.0), self.warm_s * 1000.0))
         self.stats.update({"calls": 0, "faces": 0, "ms": 0.0, "last_ms": 0.0,
-                           "t_in": 0.0, "t_fwd": 0.0, "t_out": 0.0})
+                           "t_in": 0.0, "t_fwd": 0.0, "t_out": 0.0, "t_gpu": 0.0,
+                           "t_pin": 0.0, "t_copy": 0.0, "t_dsync": 0.0, "t_np": 0.0})
 
     # ------------------------------------------------------------ 前向
     def _to_device(self, x):
@@ -268,16 +281,90 @@ class DfmTorch:
         return t
 
     def _out(self, t):
-        """一个输出张量 → numpy（pinned 缓冲 + 异步拷贝：pageable 下 27MB 要 9ms）。"""
-        t = t.detach()
-        if t.dtype != torch.float32:
-            t = t.float()
-        if self.pin and t.is_cuda:
-            buf = torch.empty(t.shape, dtype=torch.float32, pin_memory=True)
-            buf.copy_(t, non_blocking=True)
-            torch.cuda.current_stream().synchronize()
-            return buf.numpy()
-        return t.cpu().numpy()
+        """单个张量 → numpy（旧口径：自己的 pinned + 自己的同步）。_outs 的兼容入口。"""
+        return self._outs((t,))[0]
+
+    def _outs(self, ys):
+        """一整批出参 → numpy：**一次** pinned 分配 + **一次**流同步。
+
+        为什么不是一个张量一张量地搬（旧写法见下），实测（app/tools/bench/dfm_out_bench.py
+        与 fused 150 帧的 t_pin/t_copy/t_dsync）：
+
+          · 旧写法每个张量各自 cudaHostAlloc + copy_ + current_stream().synchronize()。
+            416 一次前向有 3 个出参 → 3 次分配、3 次**全流**同步；
+          · 第 1 次同步确实要等前向算完（那是必须的，省不掉）；第 2、3 次同步
+            **一分钱数据都不搬**，纯粹是 WDDM 的提交/回环，白等；
+          · 拼成一条 pinned buffer 之后只剩那一次必须的同步，且 numpy 视图是
+            zero-copy（.numpy() 不复制 26MB）。
+
+        精度：这里**不改任何 dtype/布局** —— 只是把「3 条到 3 块 host 内存」改成
+        「3 条到 1 块的 3 段」，逐位不变。gpu 侧仍然先 float() 到 fp32（输出本来
+        就是 fp32，实测 .float() 是 no-op）。
+
+        t_pin  = detach + dtype 转换 + 分配（CPU 侧，几微秒）
+        t_copy = 所有 copy_ 的入队（异步，正常应当远小于一次拷贝的传输时间）
+        t_dsync = 那**一次**同步等的时间（含前向尾巴 —— 它就是 t_out 的大头）
+        """
+        t0 = time.perf_counter()
+        if self.pin and self.out_mode == "legacy":
+            out = []
+            for y in ys:
+                t = y.detach()
+                if t.dtype != torch.float32:
+                    t = t.float()
+                buf = torch.empty(t.shape, dtype=torch.float32, pin_memory=True)
+                t1 = time.perf_counter()
+                buf.copy_(t, non_blocking=True)
+                t2 = time.perf_counter()
+                torch.cuda.current_stream().synchronize()
+                t3 = time.perf_counter()
+                self.stats["t_pin"] += (t1 - t0) * 1000.0
+                self.stats["t_copy"] += (t2 - t1) * 1000.0
+                self.stats["t_dsync"] += (t3 - t2) * 1000.0
+                t0 = t3
+                out.append(buf.numpy())
+            return out
+        tens = []
+        for y in ys:
+            t = y.detach()
+            if t.dtype != torch.float32:
+                t = t.float()
+            tens.append(t)
+        if not (self.pin and tens and tens[0].is_cuda):
+            # 不做 pinned 的老路（pin=False）：保持原语义，出参 dtype 不强制 fp32
+            out = []
+            for y in ys:
+                out.append(y.detach().cpu().numpy())
+            self.stats["t_dsync"] += (time.perf_counter() - t0) * 1000.0
+            return out
+        tot = 0
+        for t in tens:
+            tot += int(t.numel())
+        key = tuple(tuple(t.shape) for t in tens)
+        buf = self._pins.get(key) if self.pin_reuse else None
+        if buf is None:
+            buf = torch.empty(tot, dtype=torch.float32, pin_memory=True)
+            if self.pin_reuse:
+                self._pins[key] = buf
+        t1 = time.perf_counter()
+        views = []
+        off = 0
+        for t in tens:
+            n = int(t.numel())
+            v = buf[off:off + n].view(t.shape)
+            v.copy_(t, non_blocking=True)
+            off += n
+            views.append(v)
+        t2 = time.perf_counter()
+        torch.cuda.current_stream().synchronize()
+        t3 = time.perf_counter()
+        arrs = [v.numpy() for v in views]
+        t4 = time.perf_counter()
+        self.stats["t_pin"] += (t1 - t0) * 1000.0
+        self.stats["t_copy"] += (t2 - t1) * 1000.0
+        self.stats["t_dsync"] += (t3 - t2) * 1000.0
+        self.stats["t_np"] += (t4 - t3) * 1000.0
+        return arrs
 
     def run(self, output_names=None, input_feed=None):
         """两种调用方式：
@@ -315,6 +402,12 @@ class DfmTorch:
         xd = self._to_device(x)
         b = int(xd.shape[0])
         net = self._net(b)
+        # CUDA event 夹住**只有前向**那一段 —— 这是「GPU 真忙」的唯一直接证据：
+        # 不看它，t_fwd 只是入队时间、t_out 里混着前向尾巴，两个数都会说谎。
+        ev0 = ev1 = None
+        if self.device.type == "cuda":
+            ev0, ev1 = torch.cuda.Event(True), torch.cuda.Event(True)
+            ev0.record()
         t1 = time.perf_counter()
         with torch.no_grad():
             if self.dtype == "bf16":
@@ -325,8 +418,15 @@ class DfmTorch:
             else:
                 ys = net(xd)
         t2 = time.perf_counter()
-        outs = [self._out(y) for y in ys]
+        if ev1 is not None:
+            ev1.record()
+        outs = self._outs(ys)
         t3 = time.perf_counter()
+        if ev0 is not None:
+            try:
+                self.stats["t_gpu"] += float(ev0.elapsed_time(ev1))
+            except Exception:                              # noqa: BLE001
+                pass
         self.stats["calls"] += 1
         self.stats["faces"] += b
         self.stats["last_ms"] = (t3 - t0) * 1000.0
@@ -379,6 +479,7 @@ class DfmTorch:
             except Exception:                              # noqa: BLE001
                 pass
             self._shared.clear()
+            self._pins.clear()
             self.graph.close()
             try:
                 torch.cuda.empty_cache()

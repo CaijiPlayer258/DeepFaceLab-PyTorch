@@ -308,8 +308,11 @@ def sweep(args):
     for i, c in enumerate(cells):
         blob = base64.b64encode(json.dumps(c).encode()).decode()
         t0 = time.time()
+        # encoding 必须写死：子进程打的是 UTF-8 中文，不写就按 GBK 解，
+        # 在 cp936 控制台上直接 UnicodeDecodeError，整个 sweep 一格都跑不出来。
         p = subprocess.run([py, str(Path(__file__)), "--cell", blob],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
         line = ""
         for ln in (p.stdout or "").splitlines():
             if ln.startswith("[cell]"):

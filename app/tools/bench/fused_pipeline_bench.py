@@ -116,8 +116,11 @@ def head(title):
     say("=" * 78)
 
 
-def table(rows, cols):
+def table(rows, cols, title=None):
     """rows: [[...]]；cols: [(标题, 宽度, 对齐)]，对齐 'l' | 'r'。"""
+    if title:
+        say("")
+        say(title)
     line = "  ".join((str(h).ljust(w) if a == "l" else str(h).rjust(w)) for h, w, a in cols)
     say(line)
     say("-" * len(line))
@@ -457,6 +460,11 @@ class FusedEngine:
         self.FaceType = None
         self.get_transform_mat = None
         self.ticks = Ticks()
+        # 逐位对拍走两条独立证据，不在这里做：
+        #   ① dfm_out_bench.py --ab  → 同一份 device 输出，两种搬法各搬一次，max|diff| 必须 0；
+        #   ② 两种实现各跑一遍 150 帧，比较 C_out 的 PNG（逐帧逐像素）。
+        # （曾经想在这里给每次前向的出参加 sha1，但**分批本身会变**（队列时序决定攒几张），
+        #   跨进程的 sha 序列对不齐，证据是假的 —— 所以删掉，别留一个会骗人的开关。）
 
     # ---- 一次加载（不进测量窗口）----
     def load(self):
@@ -586,13 +594,26 @@ class FusedEngine:
 
     # ---- ④ dfm + ⑤ xseg（一批脸一次前向）----
     def gpu_batch(self, faces):
+        """返回各段的**墙钟分段**（拆 GPU 线程的空转靠它，不许拍脑袋）：
+        pack=拼 batch_in / dfm=_dfm_run_batch 整段（含 H2D·前向·D2H）/ quant=u8 量化
+        / xseg=两张遮罩 / stats=这次调用内会话自己记的 t_in·t_fwd·t_out 增量。
+        """
         n = len(faces)
+        t0 = time.perf_counter()
         batch_in = np.empty((n, self.size, self.size, 3), np.float32)
         for i, f in enumerate(faces):
             batch_in[i] = f["dfm_in"]
-        t = time.perf_counter()
+        t1 = time.perf_counter()
+        sess = self.ent[0] if self.ent else None
+        _st0 = dict(getattr(sess, "stats", None) or {})
         outs = rm._dfm_run_batch(self.ent, batch_in)
-        dt_dfm = time.perf_counter() - t
+        t2 = time.perf_counter()
+        _st = {}
+        if _st0:
+            _now = getattr(sess, "stats", {}) or {}
+            _st = {k: float(_now.get(k, 0.0)) - float(_st0.get(k, 0.0))
+                   for k in ("t_in", "t_fwd", "t_out", "t_gpu", "t_pin", "t_copy",
+                             "t_dsync", "t_np", "calls", "faces")}
         # u8 量化 = A 的 PNG 往返（写 u8 → 读回 → /255），只是不落盘
         for i, triple in enumerate(outs):
             face, prd, dst = triple[0], triple[1], triple[2]
@@ -602,7 +623,7 @@ class FusedEngine:
                            else np.clip(prd * 255.0, 0, 255).astype(np.uint8))
             f["dstdfm_u8"] = (None if dst is None
                               else np.clip(dst * 255.0, 0, 255).astype(np.uint8))
-        t = time.perf_counter()
+        t3 = time.perf_counter()
         # 与 _stage_do_mask 的 _flush 同口径：一张脸一次 mask_batch([pred, dst])；
         # 默认 mbatch=1，不跨脸攒批（跨批会换归约顺序，遮罩差 1~2 LSB，见那里的注释）。
         for f in faces:
@@ -614,8 +635,9 @@ class FusedEngine:
                                 if len(got) > 0 and got[0] is not None else None)
             f["xseg_dst_u8"] = (np.clip(got[1] * 255.0, 0, 255).astype(np.uint8)
                                 if len(got) > 1 and got[1] is not None else None)
-        dt_xseg = time.perf_counter() - t
-        return dt_dfm, dt_xseg
+        t4 = time.perf_counter()
+        return {"n": n, "pack": t1 - t0, "dfm": t2 - t1, "quant": t3 - t2,
+                "xseg": t4 - t3, "stats": _st}
 
     # ---- ⑥ 合成（纯 CPU，和 ⑤ 合成阶段同一个函数）----
     def compose(self, frame, faces, timings=None):
@@ -779,9 +801,9 @@ def run_mode_b(args, eng, clip, w, h, out_dir, cv2_threads, info):
             eng.embed(frame, boxes, n)
             ticks.add("embed", time.perf_counter() - t)
             if faces:
-                d1, d2 = eng.gpu_batch(faces)
-                ticks.add("dfm", d1)
-                ticks.add("xseg", d2)
+                bt = eng.gpu_batch(faces)
+                for _k in ("pack", "dfm", "quant", "xseg"):
+                    ticks.add("gpu_" + _k if _k in ("pack", "quant") else _k, bt[_k])
                 faces_total += len(faces)
             else:
                 no_face += 1
@@ -869,6 +891,7 @@ def run_mode_c(args, eng, clip, w, h, out_dir, cv2_threads, info):
     order = []
     order_info = {}
     bstat = {"calls": 0, "faces": 0, "max": 0, "hist": {}}
+    dstat = {}                     # 会话自报的 t_in/t_fwd/t_out/t_gpu 增量（ms 累加）
     sem = threading.BoundedSemaphore(budget)
 
     q_dec = queue.Queue(maxsize=qd)
@@ -884,6 +907,23 @@ def run_mode_c(args, eng, clip, w, h, out_dir, cv2_threads, info):
     def _fail(stage, exc):
         errors.append("%s: %r" % (stage, exc))
         stop.set()
+
+    def _guard(name, fn):
+        """线程体包一层：异常必须喊出来。
+
+        为什么：这些 worker 原来是 try/finally 无 except —— 抛了异常线程就静默死掉，
+        上游的 put 卡在满队列上，主线程 join 等满 join_timeout，看起来像"流水线不动了"。
+        一次排查要半小时。这里把 traceback 打出来，并且照常置 stop。
+        """
+        def _run():
+            try:
+                fn()
+            except Exception as e:                             # noqa: BLE001
+                import traceback
+                say("[bench] ★ %s 线程异常：%r" % (name, e))
+                say(traceback.format_exc()[-1400:])
+                _fail(name, e)
+        return _run
 
     def _put(q, item, timeout=0.2):
         while not stop.is_set():
@@ -983,27 +1023,39 @@ def run_mode_c(args, eng, clip, w, h, out_dir, cv2_threads, info):
             del pend[:]
             faces = [b[2] for b in part]
             try:
-                d1, d2 = eng.gpu_batch(faces)
+                bt = eng.gpu_batch(faces)
             except Exception as e:                             # noqa: BLE001
                 _fail("gpu", e)
                 return False
-            ticks.add("dfm", d1)
-            ticks.add("xseg", d2)
+            ticks.add("pack", bt["pack"])
+            ticks.add("dfm", bt["dfm"])
+            ticks.add("quant", bt["quant"])
+            ticks.add("xseg", bt["xseg"])
+            _st = bt.get("stats") or {}
+            if _st:
+                for _k in ("t_in", "t_fwd", "t_out", "t_gpu", "t_pin", "t_copy",
+                           "t_dsync", "t_np"):
+                    if _k in _st:
+                        dstat[_k] = dstat.get(_k, 0.0) + float(_st[_k])
             bstat["calls"] += 1
             bstat["faces"] += len(part)
             bstat["max"] = max(bstat["max"], len(part))
             key = str(len(part))
             bstat["hist"][key] = int(bstat["hist"].get(key) or 0) + 1
+            t_h = time.perf_counter()
             for job, i, f in part:
                 job.slots[i] = f
                 job.done += 1
                 if job.done >= job.pending:
                     _put(q_cmp, job)
+            ticks.add("handoff", time.perf_counter() - t_h)
             return True
 
         try:
             while True:
+                _tq = time.perf_counter()
                 item = q_gpu.get()
+                ticks.add("wait", time.perf_counter() - _tq)
                 if item is END:
                     if not flush():
                         break
@@ -1031,6 +1083,12 @@ def run_mode_c(args, eng, clip, w, h, out_dir, cv2_threads, info):
                     for _ in range(n_cmp):
                         q_cmp.put(END)
                     break
+        except Exception as e:                                 # noqa: BLE001
+            # 线程静默死掉 = 整条流水线卡在 q_gpu 上，看不出原因。必须喊出来。
+            import traceback
+            say("[bench] ★ GPU 线程异常：%r" % (e,))
+            say(traceback.format_exc()[-1500:])
+            _fail("gpu", e)
         finally:
             win["gpu"] = time.perf_counter() - t_win
 
@@ -1105,25 +1163,31 @@ def run_mode_c(args, eng, clip, w, h, out_dir, cv2_threads, info):
     reader.open()
     t_all = time.perf_counter()
     try:
-        ths["write"] = threading.Thread(target=_write, name="c-write", daemon=True)
+        ths["write"] = threading.Thread(target=_guard("write", _write), name="c-write",
+                                        daemon=True)
         ths["write"].start()
         for i in range(n_enc):
-            th = threading.Thread(target=_encode, name="c-enc%d" % i, daemon=True)
+            th = threading.Thread(target=_guard("encode", _encode), name="c-enc%d" % i,
+                                  daemon=True)
             ths["enc%d" % i] = th
             th.start()
         for i in range(n_cmp):
-            th = threading.Thread(target=_compose, name="c-cmp%d" % i, daemon=True)
+            th = threading.Thread(target=_guard("compose", _compose), name="c-cmp%d" % i,
+                                  daemon=True)
             ths["cmp%d" % i] = th
             th.start()
-        ths["gpu"] = threading.Thread(target=_gpu, name="c-gpu", daemon=True)
+        ths["gpu"] = threading.Thread(target=_guard("gpu", _gpu), name="c-gpu", daemon=True)
         ths["gpu"].start()
         for i in range(n_prep):
-            th = threading.Thread(target=_prep, name="c-prep%d" % i, daemon=True)
+            th = threading.Thread(target=_guard("prep", _prep), name="c-prep%d" % i,
+                                  daemon=True)
             ths["prep%d" % i] = th
             th.start()
-        ths["detect"] = threading.Thread(target=_detect, name="c-det", daemon=True)
+        ths["detect"] = threading.Thread(target=_guard("detect", _detect), name="c-det",
+                                         daemon=True)
         ths["detect"].start()
-        ths["decode"] = threading.Thread(target=_decode, name="c-dec", daemon=True)
+        ths["decode"] = threading.Thread(target=_guard("decode", _decode), name="c-dec",
+                                         daemon=True)
         ths["decode"].start()
         ths["write"].join(timeout=args.join_timeout)
         wall = time.perf_counter() - t_all
@@ -1163,6 +1227,8 @@ def run_mode_c(args, eng, clip, w, h, out_dir, cv2_threads, info):
         "batch_actual": {"calls": bstat["calls"], "faces": bstat["faces"],
                          "mean": round(bstat["faces"] / max(1, bstat["calls"]), 2),
                          "max": bstat["max"], "hist": bstat["hist"]},
+        "call_stats_ms": {k: round(v, 2) for k, v in dstat.items()},
+        "call_stats_per_frame": {k: round(v / max(1, n), 3) for k, v in dstat.items()},
         "threads": {"decode": 1, "detect": 1, "prep": n_prep, "gpu": 1,
                     "compose": n_cmp, "encode": n_enc, "write": 1},
         "queue_depth": dirq, "budget": budget,
@@ -1569,6 +1635,7 @@ def main(argv=None):
         head("模型加载（B/C 共用，不进测量窗口）")
         eng = FusedEngine(dfm, DETECTOR_ALIGN, batch=args.batch,
                           embedding=args.embedding).load()
+
         d = eng.describe()
         say("  dfm         %s · %s · %dx%d · batch=%s(%s)"
             % (d["dfm"], d["dfm_backend"], d["dfm_size"], d["dfm_size"],
@@ -1610,6 +1677,7 @@ def main(argv=None):
             % (c["wall"], c.get("fps") or 0, c.get("cores") or 0,
                c.get("ms_per_frame") or 0, c.get("gpu_idle_pct") or 0))
         print_fused_stages(c, n)
+        print_gpu_attribution(c, n)
         fb = c.get("frame_buffer") or {}
         say("  帧缓冲：峰值 %s 帧（上限 %s）≈ %.1f MB · 重排缓冲峰值 %s 帧 · 队列深度 %s"
             % (fb.get("peak_live"), fb.get("budget"), fb.get("peak_mb_est") or 0,
@@ -1739,6 +1807,58 @@ def main(argv=None):
         say("json: %s" % args.json)
     bad = [c_ for c_ in checks if not c_[1]]
     return 2 if bad else 0
+
+
+def print_gpu_attribution(c, n):
+    """GPU 线程（流水线里唯一那一个）的墙钟都花在哪了 —— 空转的构因必须落到段上。
+
+    口径：win = GPU 线程自己的窗口 / 帧；下面各项也是 / 帧，加起来应当贴近 win。
+    dfm 那一行是**整段调用**（H2D + 前向 + D2H + 同步），再按会话自报的
+    t_in / t_fwd / t_out 拆开；t_gpu 是 CUDA event 量的**前向真忙**，
+    所以 "dfm 调用 − t_gpu" 就是这一段里的空转（等前向算完 + 等拷贝）。
+    """
+    win = 1000.0 * float(c.get("gpu_window_s") or 0.0) / max(1, n)
+    ps = c.get("per_stage_ms") or {}
+    cs = c.get("call_stats_per_frame") or {}
+    ca = c.get("batch_actual") or {}
+    rows = []
+    acc = 0.0
+    for key, label in (("wait", "等脸（q_gpu 空）"), ("pack", "车道打包（拼 batch_in）"),
+                       ("dfm", "dfm 调用（H2D+前向+D2H+sync）"),
+                       ("quant", "出参 u8 量化/交接"), ("xseg", "xseg 两张遮罩"),
+                       ("handoff", "回填队列交接")):
+        v = float(ps.get(key) or 0.0)
+        acc += v
+        rows.append([label, "%.2f" % v,
+                     "%.1f%%" % (100.0 * v / win if win else 0)])
+    rows.append(["（以上合计）", "%.2f" % acc, "%.1f%%" % (100.0 * acc / win if win else 0)])
+    rows.append(["（窗口余量：调度/关队列）", "%.2f" % max(0.0, win - acc),
+                 "%.1f%%" % (100.0 * max(0.0, win - acc) / win if win else 0)])
+    table(rows, [("GPU 线程墙钟构成", 34, "l"), ("ms/帧", 9, "r"), ("占窗口", 8, "r")],
+          title="GPU 线程空转构因（窗口 %.2f ms/帧 · %d 次调用 · 平均 %.2f 张/次）"
+                % (win, ca.get("calls") or 0, ca.get("mean") or 0))
+    if cs:
+        sub = []
+        tot_out = float(cs.get("t_out") or 0.0)
+        calls = max(1, int(ca.get("calls") or 1))
+        # cs 是「整轮累计 / 帧数」，换成「每次调用」要再乘 帧数/调用数
+        per_call = float(n) / float(calls)
+        for k, label in (("t_in", "t_in（H2D 入参）"), ("t_fwd", "t_fwd（前向入队）"),
+                         ("t_out", "t_out（出参 D2H + 同步）"),
+                         ("t_pin", "  └ t_pin（detach+分配）"),
+                         ("t_copy", "  └ t_copy（copy_ 入队）"),
+                         ("t_dsync", "  └ t_dsync（流同步等待）"),
+                         ("t_np", "  └ t_np（numpy 视图）"),
+                         ("t_gpu", "t_gpu（event：前向真忙）")):
+            v = float(cs.get(k) or 0.0)
+            sub.append([label, "%.2f" % (v * per_call), "%.2f" % v])
+        # 出参段里"不是在拷数据"的那部分
+        gap = float(cs.get("t_fwd") or 0.0) + tot_out - float(cs.get("t_gpu") or 0.0)
+        sub.append(["dfm 调用里的空转 = t_fwd + t_out − t_gpu",
+                    "%.2f" % (gap * per_call), "%.2f" % gap])
+        table(sub, [("dfm 调用内部", 44, "l"), ("ms/次", 9, "r"), ("ms/帧", 9, "r")],
+              title="dfm 调用内部的再拆（%d 次调用 · 平均 %.2f 张/次）"
+                    % (calls, ca.get("mean") or 0))
 
 
 def String_or_dash(v):
