@@ -7651,7 +7651,8 @@ function mgStageEmpty(on) {
       var eff = MGP_EFF.eff;
       if (!grid || !eff) return false;
       var paintKey = String(eff.route || "") + "|" + String(eff.at || "") + "|" +
-                     String(eff.kind || "") + "|" + String((MGP_EFF.warns || []).length);
+                     String(eff.kind || "") + "|" + String((MGP_EFF.warns || []).length) +
+                     "|" + String(eff.compose_why || "");
       if (!force && MGP_EFF.paintKey === paintKey) return true;
       MGP_EFF.paintKey = paintKey;
       if (routeEl) {
@@ -7669,10 +7670,23 @@ function mgStageEmpty(on) {
         var k = document.createElement("span"); k.className = "k"; k.textContent = name;
         var b = document.createElement("b"); b.className = "v";
         b.textContent = mgpEffFmt(eff[key]);
+        /* 被降级（选了 gpu 但实际跑 cpu 之类）：值仍是真实生效值，另挂「已降级」小标，
+           原因放 title —— 光靠顶部横幅，用户点开抽屉会以为「我选的就是 cpu」。 */
+        var why = (key === "compose_backend" && eff.compose_why) ? String(eff.compose_why) : "";
         var s = document.createElement("i"); s.className = "s " + src;
         s.textContent = mgpEffSrcText(src);
         if (eff.src_note && eff.src_note[key]) s.title = String(eff.src_note[key]);
-        item.appendChild(k); item.appendChild(b); item.appendChild(s);
+        item.appendChild(k); item.appendChild(b);
+        if (why) {
+          var d = document.createElement("em"); d.className = "d"; d.textContent = "已降级";
+          d.title = why;
+          item.appendChild(d);
+          s.className = "s downgraded";
+          s.textContent = "降级";
+          s.title = why;
+          item.classList.add("downgraded");
+        }
+        item.appendChild(s);
         grid.appendChild(item);
       }
       return true;
