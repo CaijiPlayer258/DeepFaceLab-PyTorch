@@ -8,6 +8,7 @@ DFL 的对齐空间（眼睛/嘴巴位置会飘），所以 _forward 把 kps 分
 """
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 import numpy as np
@@ -64,6 +65,13 @@ KNOWN_GPU_FWD_MS = {
 def _env_str(name):
     import os
     return str(os.environ.get(name) or "").strip()
+
+
+def _env_flag(name, default: bool) -> bool:
+    v = _env_str(name)
+    if not v:
+        return bool(default)
+    return v.lower() not in ("0", "off", "false", "no")
 
 
 def mode() -> str:
@@ -198,6 +206,22 @@ def _prep_ctx(img_bgr, input_size, pad):
     return {"canvas": canvas, "scale": scale, "w": int(W), "h": int(H)}
 
 
+_NULL_CTX = contextlib.nullcontext()
+
+
+def _stream_ctx(det):
+    """检测器该在哪条 CUDA 流上跑（自己那条；没有这个概念就是空上下文）。
+
+    为什么检测要独占一条流（2026-11 实测）：dfm 走 torch、xseg 走 torch，两者都在
+    **默认流**上。检测以前也在默认流，于是它 1.27ms 的前向只能插在 21ms 的 dfm 两批
+    之间；更糟的是 TrtSession 每次 replay 还调了整块卡同步（见 trt_session.py 开头的
+    「同步口径」），detect 那一笔因此量到 19~46ms。独占流 + 帧级事件同步之后，检测的
+    1.27ms 真跟 dfm 的 21ms 重叠，detect 那一笔回到 2~3ms。
+    """
+    fn = getattr(getattr(det, "sess", None), "own_stream_ctx", None)
+    return fn() if fn is not None else _NULL_CTX
+
+
 def _faces_from_fwd(det, fwd, ctx, min_face=16):
     """前向输出（canvas 坐标）→ 原图坐标的人脸列表。
 
@@ -270,6 +294,9 @@ class RetinaFaceDet:
                      "[RetinaFaceDet] 使用 onnxruntime（providers=%s）" % (list(_providers),))
             self.sess = ort.InferenceSession(str(model_path), sess_options=sess_options,
                                              providers=_providers)
+        # 检测独占一条 CUDA 流（DFL_DET_OWN_STREAM=0 可关；见 _stream_ctx 的注释）
+        if hasattr(self.sess, "own_stream"):
+            self.sess.own_stream = _env_flag("DFL_DET_OWN_STREAM", True)
         self.input_name = self.sess.get_inputs()[0].name
         self.input_size = int(input_size)
         self.thresh = float(thresh)
@@ -371,7 +398,10 @@ class RetinaFaceDet:
 
     def detect_ctx(self, ctx, min_face=16):
         """上下文 → [{'box','kps','score'}]（原图坐标）。和 detect() 完全同一条口径。"""
-        return _faces_from_fwd(self, self._forward(ctx["canvas"]), ctx, min_face)
+        # 整个调用（GPU 预处理 + 前向 + NMS）都在检测自己的流上：进流前输入还在 host，
+        # 设备上没有要接的依赖，所以不 wait 调用方的流（那正是要躲掉的串行化）。
+        with _stream_ctx(self):
+            return _faces_from_fwd(self, self._forward(ctx["canvas"]), ctx, min_face)
 
     def detect(self, img_bgr, min_face=16):
         """返回 [{'box': [x1,y1,x2,y2], 'score': float}, ...]（原图坐标）。"""
@@ -447,6 +477,10 @@ class TinyMogDet:
                     self.sess_batch = ort.InferenceSession(str(model_path),
                                                            sess_options=sess_options,
                                                            providers=list(providers))
+        if hasattr(self.sess, "own_stream"):
+            self.sess.own_stream = _env_flag("DFL_DET_OWN_STREAM", True)
+        if hasattr(self.sess_batch, "own_stream") and self.sess_batch is not self.sess:
+            self.sess_batch.own_stream = _env_flag("DFL_DET_OWN_STREAM", True)
         self.input_name = self.sess.get_inputs()[0].name
         self.batch_input_name = (self.sess_batch.get_inputs()[0].name
                                  if self.sess_batch is not None else self.input_name)
@@ -610,7 +644,9 @@ class TinyMogDet:
         return _prep_ctx(img_bgr, self.input_size, 128)
 
     def detect_ctx(self, ctx, min_face=16):
-        return _faces_from_fwd(self, self._forward(ctx["canvas"]), ctx, min_face)
+        # 同 RetinaFaceDet.detect_ctx：预处理 + 前向都在检测自己的流上（理由见 _stream_ctx）
+        with _stream_ctx(self):
+            return _faces_from_fwd(self, self._forward(ctx["canvas"]), ctx, min_face)
 
     def detect(self, img_bgr, min_face=16):
         return self.detect_ctx(self.prep(img_bgr), min_face=min_face)
