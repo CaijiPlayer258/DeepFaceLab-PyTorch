@@ -25,6 +25,7 @@ from fastapi.responses import StreamingResponse
 from .._common.http import (
     _BadInput, _api, _as_dict, _bool_val, _float_val, _int_val, _ok,
 )
+from .._common import det_names as _det_names
 from .._common.proc import (
     _kill_proc_tree,
 )
@@ -419,6 +420,18 @@ def merge_export(body: dict):
     encoder = _encoder_val(body.get("encoder"))
     hwaccel = _hwaccel_val(body.get("hwaccel"))
 
+    # ---- 6b) 检测器：这条链**以前完全不读它** ----
+    # 4.0 子进程（_merge_runner → run_export_pipeline）的 detector 默认是 "YOLOv8"
+    # （最重那个），而下面的生效配置硬写 tinymog —— 抽屉说 tinymog、实跑 YOLOv8，
+    # 用户体感就是「选了 tinymog 还是慢」。现在：
+    #   · 读了就以它为准（未知名字 400，不替你挑一个）；
+    #   · 没给 = 4.1 的默认档（tinymog），**显式传下去**，两侧从此同一个值。
+    # 转名只在 app/server/_common/det_names.py 一张表里做。
+    try:
+        det_name = _det_names.canon(body.get("detector"), _det_names.DEFAULT)
+    except ValueError as e:
+        raise _BadInput(str(e), 400)
+
     # ---- 7) 起线程：先把状态置成 running 再起线程 ----
     with _merge_job_lock:
         if _merge_job.get("running"):
@@ -443,7 +456,9 @@ def merge_export(body: dict):
     # 这条路的检测器由子进程选，但合成参数/模型/并发照样要对得上账。
     try:
         _pcfg = {"settings": settings, "config": _merge_settings_to_config(settings),
-                 "detector": _DEFAULT_DETECTOR, "det_align": _DEFAULT_DETECTOR,
+                 # 以前这两个都是 _DEFAULT_DETECTOR（写死 tinymog，只为「对上账」）：
+                 # 子进程按 4.0 的默认 YOLOv8 跑，抽屉却报 tinymog。现在报的是真值。
+                 "detector": det_name, "det_align": det_name,
                  "mask_src": _mask_src(settings, settings.get("mask_mode")),
                  "dfm": str(dfm), "model": model_name, "single_models": [],
                  "library": "", "use_library": False, "chain": False, "fused": False,
@@ -458,11 +473,13 @@ def merge_export(body: dict):
     threading.Thread(target=_run_export,
                      args=(str(ip), str(out_mp4), str(aligned), str(dfm), settings,
                            mask_onnx, fps, workers, encoder, hwaccel),
+                     kwargs={"detector": det_name},
                      daemon=True, name="merge-export").start()
     return _ok(input_dir=str(ip), aligned_dir=str(aligned), output=str(out_mp4),
                output_dir=str(out_mp4), dfm=str(dfm), model=model_name,
                settings=settings, fps=fps, workers=workers, encoder=encoder,
-               hwaccel=hwaccel, mask_onnx=mask_onnx)
+               hwaccel=hwaccel, mask_onnx=mask_onnx,
+               detector=det_name, detector_engine=_det_names.engine(det_name))
 
 
 @router.get("/api/merge/export/status")

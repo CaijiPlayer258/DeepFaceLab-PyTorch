@@ -90,7 +90,7 @@ def _finalize():
 
 
 def _run_export(input_dir, out_mp4, aligned_dir, dfm, settings, mask_onnx,
-                fps, workers, encoder, hwaccel):
+                fps, workers, encoder, hwaccel, detector=""):
     """合成线程。
 
     _merge_worker 在起子进程之前就会抛（找不到引擎 python / MergeStudio / 桥脚本），
@@ -98,7 +98,7 @@ def _run_export(input_dir, out_mp4, aligned_dir, dfm, settings, mask_onnx,
     """
     try:
         _merge_worker(input_dir, out_mp4, aligned_dir, dfm, settings, mask_onnx,
-                      fps, workers, encoder, hwaccel)
+                      fps, workers, encoder, hwaccel, detector=detector)
     except Exception as e:                       # noqa: BLE001
         traceback.print_exc()
         with _merge_job_lock:

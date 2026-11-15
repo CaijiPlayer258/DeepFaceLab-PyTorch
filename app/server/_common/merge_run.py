@@ -369,7 +369,8 @@ def _merge_models_args(plan, dfm):
 
 def _merge_worker(input_dir: str, out_mp4: str, aligned_dir: str, dfm: str,
                   settings: dict, mask_onnx: str, fps: float = 25.0, workers: int = 0,
-                  encoder: str = "h264_nvenc", hwaccel: str = "auto", models=None):
+                  encoder: str = "h264_nvenc", hwaccel: str = "auto", models=None,
+                  detector: str = ""):
     """跑 _merge_runner.py（4.0 的 python + MergeStudio 导出管线）。
 
     以前这里是 "main.py merge"，而 mainscripts/Merger.py 依赖一个不存在的
@@ -401,7 +402,17 @@ def _merge_worker(input_dir: str, out_mp4: str, aligned_dir: str, dfm: str,
     mode_word = "多模型导出" if plan else "单模型导出"
     mode_detail = _merge_plan_label(plan) if plan else _merge_single_label(dfm, settings)
 
+    # 检测器：4.1 规范名 → 4.0 引擎名（转名只在 _common/det_names 一张表里做）。
+    # 以前这里**一个字节都不传**，4.0 引擎就按它自己的默认 YOLOv8（最重那个）跑，
+    # 而生效配置里硬写 tinymog —— 界面/日志说一套、实跑另一套。
+    # 空 = 调用方没给（老调用点）：按 4.1 默认档显式传下去，别让引擎自己挑。
+    from . import det_names as _det_names
+    try:
+        det_engine = _det_names.engine(detector, _det_names.DEFAULT)
+    except ValueError as e:                       # 未知名字：起进程之前就炸
+        raise RuntimeError(str(e))
     cmd_tail = ["--out", out_mp4,
+                "--detector", str(det_engine),
                 "--config", json.dumps(_merge_settings_to_config(settings), ensure_ascii=False),
                 "--dfl-root", str(_DFL_ROOT),
                 "--fps", str(float(fps or 25.0))]
@@ -440,6 +451,9 @@ def _merge_worker(input_dir: str, out_mp4: str, aligned_dir: str, dfm: str,
             _merge_job["log"].append("模型清单（--settings）: %s" % settings_file)
         if src_video:
             _merge_job["log"].append("源视频（音轨来源）: %s" % src_video)
+        _merge_job["log"].append(
+            "检测器: %s（4.1 名 %s · 4.0 引擎名 %s）"
+            % (det_engine, _det_names.canon(detector, _det_names.DEFAULT), det_engine))
     try:
         env_note = "PYTHONIOENCODING=utf-8"
         import os as _os

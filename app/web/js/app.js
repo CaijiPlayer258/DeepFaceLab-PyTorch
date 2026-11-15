@@ -8434,6 +8434,10 @@ function mgStageEmpty(on) {
            导出用**全部选中项**（mgExportModelsPayload），不按预览那套按脸分摊。 */
         models: (window.mgExportModelsPayload ? window.mgExportModelsPayload() : mgModelsPayload()),
         keep_cache: !!payload.keep_cache,
+        /* 检测器：这条（项目模式，走 4.0 子进程）以前**根本不发**，后端也不读，
+           等于界面选什么都不算数、引擎按自己的默认 YOLOv8 跑，抽屉却写 tinymog。
+           现在和视频/分段两条路一样，把下拉的值发出去。 */
+        detector: payload.detector || "",
         workers: parseInt(payload.num_workers, 10) || 0,
         encoder: payload.encoder || "h264_nvenc",
         hwaccel: payload.hwaccel === "" ? "off" : (payload.hwaccel || "auto"),
