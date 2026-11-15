@@ -6569,7 +6569,7 @@ function mgStageEmpty(on) {
       var W = 1200, H = 340, PADL = 56, TOPY = 58, BOXW = 74, GAP = 7;
       /* 右侧留 84px 给「成片」那一格（水位杯 + 标题）。它**不是第七列**：没有 lane、
          没有 t-stage，只画一杯水 —— 六列仍然是六列（验收按 text.t-stage 数）。 */
-      var RGT = 84, OUTW = 20;
+      var RGT = 0, OUTW = 56;   /* 成片杯现在吃满一格宽度 */
       /* 光点密度由**两个物理上限**决定，不再按「每次轮询硬切 10 个」：
            · PULSE_PER_S：每秒最多放多少个（按 POLL_MS 折算成每次轮询的预算）；
            · MAX_PULSE  ：同屏最多几个在飞（≈ 40 帧/秒 × 8 张脸 × 0.6s 飞行时间的极端值）。
@@ -6667,7 +6667,7 @@ function mgStageEmpty(on) {
         geo = {}; edgesIn = {}; edgesOut = {}; waists = {}; pulses = []; pool = [];
         bypassD = "";
         bLabel = null;
-        var colW = (W - PADL - RGT) / (KEYS.length - 1);
+        var colW = (W - PADL * 2) / KEYS.length;   /* 七等分：6 个阶段 + 成片各占一格（成片不再被挤在最右边） */
         var space = H - TOPY - 46;
         var i, j, k;
         for (i = 0; i < KEYS.length; i++) {
@@ -6727,7 +6727,7 @@ function mgStageEmpty(on) {
         }
         /* 六列之后的「成片」：一只窄水杯（缓存里的水倒进这里）。它不进 KEYS、没有 lane，
            所以 text.t-stage 仍然只有 6 个、rect.lane 仍然只数真线程。 */
-        var ocx = W - 14 - OUTW / 2;
+        var ocx = PADL + KEYS.length * colW;
         var ocid = "mgpWout";
         var ocp = mk("clipPath", { id: ocid });
         ocp.appendChild(mk("rect", { x: ocx - OUTW / 2, y: TOPY, width: OUTW,
