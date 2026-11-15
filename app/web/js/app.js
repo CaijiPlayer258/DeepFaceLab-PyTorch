@@ -6585,6 +6585,11 @@ function mgStageEmpty(on) {
       var geo = {};            /* key -> {cx, off, lanes:[{y,rect,txt}], count, queue, col} */
       var edgesIn = {};        /* "si:ai" -> {d, el}：源 lane → 腰点 */
       var edgesOut = {};       /* "si:bi" -> {d, el}：腰点 → 目标 lane（和 edgesIn 共用腰点） */
+      /* "in:out:q" / "out:out" -> d：编码列 → 成片的 n+1 条。**以前这个变量没声明**，
+         只要 geo.out 先于这段 IIFE 被建出来（下面那版就是把杯子提前了），
+         第一句 edges[...] 就是 ReferenceError → build() 直接抛出去，
+         svg 一个子节点都没挂上、drawBypass() 永远走不到。 */
+      var edges = {};
       var waists = {};         /* si -> {x, y}：这一对相邻列的腰点（进出共用） */
       var pulses = [];         /* 活跃光点 {c, path, L, t0, dur} */
       var pool = [];           /* 复用起来的 <circle>：不每个 tick 重建 DOM */
@@ -6601,6 +6606,10 @@ function mgStageEmpty(on) {
       var lastSpawn = 0;       /* 最近一拍实际放出去几个光点（验收要看「按预算稀释」有没有生效） */
       var lastBypass = 0;      /* 其中走旁路的几个（无脸帧） */
       var layers = null;
+      /* 旁路几何的「版本号」：build() 每重建一次结构就 +1（lane 数/列宽/杯子位置全变了）。
+         drawBypass() 画完把当时的版本记下来，setBypass() 一比就知道要不要重画 ——
+         以前它无条件只改读数，旁路因此会冻在**旧坐标**上。 */
+      var bypassGen = 0, bypassDrawnGen = -1;
       /* 截图专用：把光点的时钟按住（>0 = 定格在这个时刻），只给验收拍照用。
          光点只有 470–750ms 的命，一张 headless 截图往返就可能比它长 —— 拍照时
          用 mgpPipeFreeze() 把它们钉在曲线上，运行时代码路径完全不看这个值。 */
@@ -6664,7 +6673,8 @@ function mgStageEmpty(on) {
         layers = { defs: mk("defs", {}), edge: mk("g", { "class": "edges" }),
                    bypass: mk("g", { "class": "bypass" }), box: mk("g", {}),
                    lbl: mk("g", {}), pulse: mk("g", { "class": "pulses" }) };
-        geo = {}; edgesIn = {}; edgesOut = {}; waists = {}; pulses = []; pool = [];
+        geo = {}; edgesIn = {}; edgesOut = {}; edges = {}; waists = {};
+        pulses = []; pool = [];
         bypassD = "";
         bLabel = null;
         var colW = (W - PADL * 2) / KEYS.length;   /* 七等分：6 个阶段 + 成片各占一格（成片不再被挤在最右边） */
@@ -6725,7 +6735,28 @@ function mgStageEmpty(on) {
                                 rect: rect, txt: tx, water: water });
           }
         }
-        /* 编码列 → 成片：与其它列同构（每条 lane 收束到腰点，再一条进杯）。
+        /* 六列之后的「成片」：一只窄水杯（缓存里的水倒进这里）。它不进 KEYS、没有 lane，
+           所以 text.t-stage 仍然只有 6 个、rect.lane 仍然只数真线程。 */
+        var ocx = PADL + KEYS.length * colW;
+        var ocid = "mgpWout";
+        var ocp = mk("clipPath", { id: ocid });
+        ocp.appendChild(mk("rect", { x: ocx - OUTW / 2, y: TOPY, width: OUTW,
+                                     height: space, rx: 7 }));
+        layers.defs.appendChild(ocp);
+        /* 壳子用 .outcup 而不是 .lane：rect.lane 只数真线程（验收按它数 lane），
+           给它挂 lane 会让「lane 方块数 == status 里的线程数」这条断言多出一个 */
+        layers.box.appendChild(mk("rect", { x: ocx - OUTW / 2, y: TOPY, width: OUTW,
+                                            height: space, rx: 7, "class": "outcup" }));
+        var owater = mk("rect", { x: ocx - OUTW / 2, y: TOPY, width: OUTW, height: space,
+                                  "class": "water out", "data-level": "0" });
+        var owg = mk("g", { "clip-path": "url(#" + ocid + ")" });
+        owg.appendChild(owater);
+        layers.box.appendChild(owg);
+        var otxt = mk("text", { x: ocx, y: 24, "text-anchor": "middle", "class": "t-out" });
+        otxt.textContent = "成片";
+        layers.lbl.appendChild(otxt);
+        geo.out = { cx: ocx, water: owater };
+  /* 编码列 → 成片：与其它列同构（每条 lane 收束到腰点，再一条进杯）。
      成片不是一个 lane 列，所以单独画：n 条入腰 + 1 条腰→杯，都走 arc()。 */
   (function () {
     var E = geo.encode, O = geo.out;
@@ -6749,28 +6780,15 @@ function mgStageEmpty(on) {
       "stroke-width": 1, opacity: ".75" });
     layers.edge.appendChild(pcup);
     edges["out:out"] = dcup;
+    /* 旁路要「并进主路」：把**腰点**和**这段进杯曲线**都挂到 geo.out 上，
+       让 bypassGeom() 复用同一份数字（同一个腰点、同一条三次贝塞尔）。
+       各算一条「差不多」的曲线在杯口碰一下，差 0.1px 就会被看成两条线，
+       读者不会觉得那是「汇入主流」——所以尾段必须是这一个 d 的子串。 */
+    O.waist = { x: wx, y: wy };
+    O.tailD = dcup;
+    O.tailC = String(dcup).replace(/^\s*M[^C]*/, "");   /* 去掉开头的 M，只剩那段 C */
   })();
-  /* 六列之后的「成片」：一只窄水杯（缓存里的水倒进这里）。它不进 KEYS、没有 lane，
-           所以 text.t-stage 仍然只有 6 个、rect.lane 仍然只数真线程。 */
-        var ocx = PADL + KEYS.length * colW;
-        var ocid = "mgpWout";
-        var ocp = mk("clipPath", { id: ocid });
-        ocp.appendChild(mk("rect", { x: ocx - OUTW / 2, y: TOPY, width: OUTW,
-                                     height: space, rx: 7 }));
-        layers.defs.appendChild(ocp);
-        /* 壳子用 .outcup 而不是 .lane：rect.lane 只数真线程（验收按它数 lane），
-           给它挂 lane 会让「lane 方块数 == status 里的线程数」这条断言多出一个 */
-        layers.box.appendChild(mk("rect", { x: ocx - OUTW / 2, y: TOPY, width: OUTW,
-                                            height: space, rx: 7, "class": "outcup" }));
-        var owater = mk("rect", { x: ocx - OUTW / 2, y: TOPY, width: OUTW, height: space,
-                                  "class": "water out", "data-level": "0" });
-        var owg = mk("g", { "clip-path": "url(#" + ocid + ")" });
-        owg.appendChild(owater);
-        layers.box.appendChild(owg);
-        var otxt = mk("text", { x: ocx, y: 24, "text-anchor": "middle", "class": "t-out" });
-        otxt.textContent = "成片";
-        layers.lbl.appendChild(otxt);
-        geo.out = { cx: ocx, water: owater };
+
         /* 连线：源侧 lane → 腰点、腰点 → 目标侧 lane（相邻两列共用同一个腰点）。
            空列（off）不连线，光点会跳过它。 */
         for (i = 0; i < KEYS.length - 1; i++) {
@@ -6808,6 +6826,10 @@ function mgStageEmpty(on) {
         lenCache = {};                   /* 连线/旁路的 d 都变了：量过的长度作废 */
         /* 结构重建后把上一拍的读数补回去：水位/旁路是「数据」，不是「结构」 */
         setWater(waterLv.cache, waterLv.out);
+        /* 注：没有 edges["out:out"] 就没有「腰点 → 成片」那条实线，也就没有可并的
+           汇合点 —— 那种情况下 bypassGeom() 直接返回 null（宁可不画，也不自己猜落点）。 */
+        /* 结构重建 = 坐标全变：先升版本，再按新坐标重画（setBypass 靠这个版本号判定） */
+        bypassGen += 1;
         drawBypass();
         return true;
       }
@@ -6869,15 +6891,19 @@ function mgStageEmpty(on) {
          ============================================================ */
       var bypassN = 0, bypassD = "", bLabel = null;
       function bypassGeom() {
-        var A = geo.det, B = geo.encode;
+        var A = geo.det, B = geo.encode, O = geo.out;
         if (!A || !B || A.off || B.off || !A.lanes.length || !B.lanes.length) return null;
-        var a0 = A.lanes[0], b0 = B.lanes[0];
+        /* 没有 O.waist / O.tailC 就不画：那条「腰点 → 成片」的实线是汇合点，
+           它不存在时旁路就无处可并（以前这里会退到 B.cx 上另算一个落点 ——
+           于是「旁路」和主路各走各的，这正是用户说「看着和主路没关系」的由来）。 */
+        if (!O || !O.waist || !O.tailC) return null;
+        var a0 = A.lanes[0];
         var x1 = A.cx + BOXW / 2, y1 = a0.y;
-        /* 旁路的终点：**并进主路那一撮**（编码列 → 成片 的腰点），不再单独怼到 e0 左边 —— */
-    /* 让读者看到「无脸帧和主路汇到同一处，再一起倒进成片」。 */
-    var x2, y2;
-    if (B.waist) { x2 = B.waist.x; y2 = B.waist.y; }
-    else { x2 = B.cx - BOXW / 2; y2 = b0.y; }
+        /* 汇合点 = 主路腰点：x = (缓存帧右缘 + 杯左缘) / 2，y = 编码 lane 的中线。
+           末段直接拼 O.tailC（主路 out:out 去掉 M 的那一段）——**同一份坐标**，
+           所以虚线的尾巴就压在进杯实线上，看起来是「汇进去、一起倒进成片」，
+           而不是两条线在杯口各画各的。 */
+        var wx = O.waist.x, wy = O.waist.y;
         /* 沉到**所有列**的 lane 底下（再往下 20px）：只看首尾两列不够 —— 中间那列
            合成有 8 条 lane，比切脸/编码都深，旁路会从它最后两条中间穿过去。 */
         var bot = 0, i2, g2, l2;
@@ -6889,17 +6915,30 @@ function mgStageEmpty(on) {
           }
         }
         var yb = Math.min(H - 12, (bot || (a0.y0 + a0.h)) + 20);
-        var mx = (x1 + x2) / 2;
+        /* 「竖起来」的那一段要留在**缓存帧列右缘之外的空档**里（xr → wx 这一段，
+           999.7~1116 之间）。以前是从 mx 一路斜拉到腰点，曲线中段正好从 e4/e5
+           两个方块背后穿过去 —— 方块盖在旁路上面，只看得到几个角上的虚线段，
+           读者根本读不出「升上来、汇进去」这件事。 */
+        var xr = B.cx + BOXW / 2 + 12;       /* 刚出缓存帧列：竖起来的起点 */
+        var mx = (x1 + xr) / 2;              /* 谷底水平段的中点（标签挂这儿） */
         var r = function (v) { return Math.round(v * 10) / 10; };
-        return { d: "M" + r(x1) + "," + r(y1) +
-                    " C" + r(x1 + 90) + "," + r(y1) + " " + r(x1 + 90) + "," + r(yb) +
-                    " " + r(mx) + "," + r(yb) +
-                    " C" + r(x2 - 90) + "," + r(yb) + " " + r(x2 - 90) + "," + r(y2) +
-                    " " + r(x2) + "," + r(y2),
-                 label: { x: mx, y: yb - 6 } };
+        var rel = function (a, b) { return arc(a, b).replace(/^M[^C]*/, ""); };
+        return { /* ① det 右缘 →（沉到谷底）→ 空档里竖直升起 → 腰点
+                    每段两端切线都水平，和主路同一个 arc() 约定，接上去不打折 */
+                 d: "M" + r(x1) + "," + r(y1) +
+                    rel({ x: x1, y: y1 }, { x: xr, y: yb }) +
+                    rel({ x: xr, y: yb }, { x: wx, y: wy }) +
+                    /* ② 腰点 → 杯左缘：主路那一段的原文（含控制点），一字不改地接上 */
+                    O.tailC,
+                 label: { x: mx, y: yb - 6 },
+                 merge: { x: wx, y: wy },                     /* 汇合点 = 主路腰点 */
+                 end: { x: O.cx - OUTW / 2, y: wy } };        /* 终点 = 杯左缘 */
       }
       function drawBypass() {
         if (!layers) return;
+        /* 「我已经按这一版结构算过了」——即便下面因为 bypassN=0 提前返回也要记，
+           否则 setBypass 会以为没画过、每一拍都重建 DOM。 */
+        bypassDrawnGen = bypassGen;
         var g = layers.bypass;
         while (g.firstChild) g.removeChild(g.firstChild);
         bypassD = "";
@@ -6921,7 +6960,11 @@ function mgStageEmpty(on) {
         var had = bypassN > 0;
         var shown = !!(layers && layers.bypass && layers.bypass.firstChild);
         bypassN = n;
-        if (n > 0 && shown) {                 /* 已经画着：只改读数，不重建（250ms 一拍） */
+        /* 已经画着**而且结构没重建过**，才只改读数（250ms 一拍，不重建 DOM）。
+           以前这里是无条件 return —— 只要先画过一次，之后 build() 哪怕把列宽、
+           杯子位置全换了，旁路的 d 也冻在旧坐标上（用户改了两版都「没被画出来」，
+           另一半原因就是它）。bypassDrawnGen !== bypassGen 就说明坐标已经作废。 */
+        if (n > 0 && shown && bypassDrawnGen === bypassGen) {
           if (bLabel && bLabel.textContent !== ("无脸 " + n + " 帧")) {
             bLabel.textContent = "无脸 " + n + " 帧";
           }
@@ -7225,6 +7268,17 @@ function mgStageEmpty(on) {
                     last_flashed: lastFlashed, last_spawn: lastSpawn,
                     last_bypass: lastBypass, water: { cache: waterLv.cache, out: waterLv.out },
                     bypass: bypassN, bypass_drawn: !!bypassD,
+                    /* 旁路原文 + 两个关键点：验收/排障直接读，不用再从像素里猜。
+                       merge = 与主路汇合的腰点；end = 杯左缘（贴着进杯实线走完最后一段）；
+                       out_tail_c = 主路 out:out 去掉 M 的那一段 —— bypass_d 必须**以它结尾**，
+                       否则就还是「两条线各画各的」。 */
+                    bypass_d: bypassD,
+                    bypass_merge: (bypassD && geo.out && geo.out.waist)
+                      ? { x: geo.out.waist.x, y: geo.out.waist.y } : null,
+                    bypass_end: (bypassD && geo.out && geo.out.waist)
+                      ? { x: geo.out.cx - OUTW / 2, y: geo.out.waist.y } : null,
+                    out_tail_c: (geo.out && geo.out.tailC) || "",
+                    bypass_gen: bypassGen, bypass_drawn_gen: bypassDrawnGen,
                     max_pulse: MAX_PULSE, pulse_per_s: PULSE_PER_S, poll_ms: POLL_MS,
                     built: !!layers };
         var i, k;

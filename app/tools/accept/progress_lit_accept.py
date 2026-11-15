@@ -896,10 +896,16 @@ def main(argv=None):
         check(int(dom.get("off")) == 0, "C3 这一单六列都有真 lane（没有占位格）",
               "off=%s" % dom.get("off"))
         # 腰点几何：相邻两列共用 1 个腰点 → 条数 = 源 lane 数 + 目标 lane 数
+        # 第六列右边还有「成片」那只杯子：n 条 encode lane 收束到腰点（n 条）+ 1 条腰点→杯。
+        # 这 n+1 条以前是死代码（IIFE 在 geo.out 赋值之前跑，直接 return），所以这里的
+        # 期望值一直只算了 5 对相邻列 —— 现在它真画出来了，必须算进来。
+        n_pairs = len(STAGES) - 1
+        cup_paths = len(lanes["encode"]) + 1
         want_paths = 0
-        for i in range(len(STAGES) - 1):
+        for i in range(n_pairs):
             want_paths += len(lanes[STAGES[i]]) + len(lanes[STAGES[i + 1]])
-        want_waists = len(STAGES) - 1
+        want_paths += cup_paths
+        want_waists = n_pairs + 1          # 5 个相邻腰点 + 「缓存帧 → 成片」那个腰点
         check(int(dom.get("paths")) == want_paths,
               "C4 连线条数 = Σ(源 lane + 目标 lane)（合成8×导出6 的 48 条交叉没了）",
               "DOM %s / 期望 %d（旧写法会是 %d）"
@@ -915,8 +921,10 @@ def main(argv=None):
         starts_k = set((dom.get("starts") or {}).keys())
         ends_k = set((dom.get("ends") or {}).keys())
         shared = sorted(starts_k & ends_k)
-        n_src = sum(len(lanes[STAGES[i]]) for i in range(len(STAGES) - 1))
-        n_tgt = sum(len(lanes[STAGES[i + 1]]) for i in range(len(STAGES) - 1))
+        # 发光的一端：5 对相邻列的源 lane + 收束到成片的那 n 条（encode lane）
+        # 收光的一端：5 对相邻列的目标 lane + 杯口（腰点→杯那条的终点）
+        n_src = sum(len(lanes[STAGES[i]]) for i in range(n_pairs)) + len(lanes["encode"])
+        n_tgt = sum(len(lanes[STAGES[i + 1]]) for i in range(n_pairs)) + 1
         check(len(starts_k) == n_src + want_waists
               and len(ends_k) == n_tgt + want_waists,
               "C5b 起点/终点个数 = (源 lane 数 + 腰点数) / (目标 lane 数 + 腰点数)",
@@ -1167,8 +1175,11 @@ def main(argv=None):
                         parseFloat(lanes[j].getAttribute('height'));
                 if (y > bot) bot = y;
               }
+              var dbg = (window.__mgpPipe && window.__mgpPipe()) || {};
               return JSON.stringify({
                 paths: g ? g.querySelectorAll('path').length : 0,
+                d: d, merge: dbg.bypass_merge || null, end: dbg.bypass_end || null,
+                tail: dbg.out_tail_c || '',
                 txt: t ? String(t.textContent) : '',
                 stroke: cs ? cs.stroke : '', op: cs ? parseFloat(cs.opacity) : -1,
                 width: cs ? cs.strokeWidth : '',
@@ -1197,6 +1208,15 @@ def main(argv=None):
         check(float(by.get("dip") or 0) > float(by.get("lanebot") or 0),
               "C35 旁路真的沉到所有 lane 下面再升上来（不是贴着主路走）",
               "dip=%s / lane 底 %s" % (by.get("dip"), by.get("lanebot")))
+        # 「无脸帧汇入主流」这件事要在**几何**上成立：旁路的最后一段必须就是主路
+        # 「腰点 → 成片杯口」那条 d 的原文（含控制点）。各算一条差不多的曲线，
+        # 差 0.1px 在屏幕上就是两条线 —— 那还是「旁路各自落地」，不是汇入。
+        say("旁路 d = %s" % by.get("d"))
+        say("汇合点(腰点) = %s · 终点(杯左缘) = %s" % (by.get("merge"), by.get("end")))
+        _tail = str(by.get("tail") or "")
+        check(bool(_tail) and str(by.get("d") or "").endswith(_tail),
+              "C37 旁路尾段 == 主路「腰点 → 成片」那条 d（同一段线，不是并排两条）",
+              "tail=%s…" % _tail[:40])
 
         ev("window.mgpPipe(%s); true" % json.dumps(water_status(36, 12, nf=0),
                                                  ensure_ascii=False))
