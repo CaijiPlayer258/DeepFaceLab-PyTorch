@@ -7599,11 +7599,18 @@ function mgStageEmpty(on) {
       ["blend", "融合方式"], ["erode", "遮罩腐蚀"], ["blur", "遮罩羽化"],
       ["models", "模型"], ["faces_project", "人脸库"], ["library_enabled", "人脸库启用"],
       ["fast_export", "快速导出"], ["frame_range", "帧范围"], ["workers", "并发"],
-      ["batch", "批大小"], ["jpeg_quality", "JPEG 质量"]
+      ["batch", "批大小"], ["jpeg_quality", "JPEG 质量"],
+      /* 14 → 16：设置页「性能」区那两个下拉。它们的来源多一档 "auto" ——
+         界面选了「自动」，档位交给后端定（不是「默认」：用户确实选过）。 */
+      ["dfm_dtype", "推理精度"], ["compose_backend", "合成后端"]
     ];
 
+    /* 来源标签：ui→界面 / inferred→推断 / auto→自动 / 其余→默认 */
     function mgpEffSrcText(s) {
-      return s === "ui" ? "界面" : (s === "inferred" ? "推断" : "默认");
+      if (s === "ui") return "界面";
+      if (s === "inferred") return "推断";
+      if (s === "auto") return "自动";
+      return "默认";
     }
     function mgpEffFmt(v) {
       if (v === true) return "开";
@@ -8051,6 +8058,7 @@ function mgStageEmpty(on) {
       if (!isNaN(frameFrom) && frameFrom > 0) body.start_frame = frameFrom;
       var frameTo = parseInt(payload.frame_to, 10);
       if (!isNaN(frameTo) && frameTo > 0) body.end_frame = frameTo;
+      mgPerfBody(body, payload);          /* 性能那两个下拉：只有非「自动」才带键 */
 
       /* ★ 显存预检（dry_run）：分段链有六个阶段，但显存是**一条链共用的**。
          在这里问一次，装不下就整条拒绝 —— 不然六个阶段会各失败一次
@@ -8241,6 +8249,7 @@ function mgStageEmpty(on) {
       if (!isNaN(frameFrom) && frameFrom > 0) body.start_frame = frameFrom;
       var frameTo = parseInt(payload.frame_to, 10);
       if (!isNaN(frameTo) && frameTo > 0) body.end_frame = frameTo;
+      mgPerfBody(body, payload);          /* 性能那两个下拉：只有非「自动」才带键 */
 
       /* ★ 显存预检（dry_run）：装不下就**在这里**收口 —— 不进进度页、不起 job。
          以前是先把六步画成「并行中」，再把六步打红 + 三条一样的 toast。 */
@@ -8382,6 +8391,24 @@ function mgStageEmpty(on) {
     }
     window.mgMergeSettings = mgMergeSettings;
 
+    /* 两个性能旋钮 -> 请求体。
+         ★ 选「自动」时**不带这个键**（不是发 "auto"、更不是发一个替用户选好的具体值）：
+           带了就等于替用户做了决定，而他以后看到的界面仍是「自动」—— 那种
+           「界面上设一套、实际跑另一套」正是这轮要根治的东西。
+         ★ 前端不发 auto，后端也有兜底：body 里没有这两个键 = 用 env / 后端默认
+           （见 app/server/backend_merge/knobs.py 的三条口径）。 */
+    function mgPerfBody(body, payload) {
+      body = body || {};
+      payload = payload || {};
+      var dt = String(payload.dfm_dtype == null ? "auto" : payload.dfm_dtype).trim().toLowerCase();
+      if (dt && dt !== "auto") body.dfm_dtype = dt;
+      var cb = String(payload.compose_backend == null ? "auto" : payload.compose_backend).trim().toLowerCase();
+      if (cb === "gpu") body.compose_gpu = 1;
+      else if (cb === "cpu") body.compose_gpu = 0;
+      return body;
+    }
+    window.mgPerfBody = mgPerfBody;
+
     /* 真跑一次合成。工作台里的「导出」会先走到导出设置页，
        两个「开始导出」（#mgStartExport2 在工作台、#mgStartExport 在子页）共用这一份逻辑。 */
     function mgRunExport(payload) {
@@ -8439,6 +8466,7 @@ function mgStageEmpty(on) {
           toast("输出路径被忽略", "只认 Windows 绝对路径，这次按默认命名输出", "warn");
         }
       }
+      mgPerfBody(body, payload);          /* 性能那两个下拉：只有非「自动」才带键 */
 
       fetch("/api/merge/export", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -12975,7 +13003,19 @@ function mgStageEmpty(on) {
           return String(v === null ? '1' : v) !== '';
         })(),
         frame_from: Math.max(0, parseInt(byId('mgFrameFrom'), 10) || 0),
-        frame_to: Math.max(0, parseInt(byId('mgFrameTo'), 10) || 0)
+        frame_to: Math.max(0, parseInt(byId('mgFrameTo'), 10) || 0),
+        /* 性能那两个下拉（data-cfg 记忆的同一份值）：
+             dfm_dtype      auto / fp32 / bf16 / bf16w    → body.dfm_dtype（auto 时不带）
+             compose_backend auto / cpu / gpu             → body.compose_gpu（1 / 0，auto 时不带）
+           组装请求体在 mgPerfBody（app.js 里那一份），这里只报「用户选了什么」。 */
+        dfm_dtype: (function () {
+          var el = document.getElementById('mgDfmDtype');
+          return el ? String(el.value || 'auto') : 'auto';
+        })(),
+        compose_backend: (function () {
+          var el = document.getElementById('mgCmpBackend');
+          return el ? String(el.value || 'auto') : 'auto';
+        })()
       };
     },
 
@@ -13050,6 +13090,61 @@ function mgStageEmpty(on) {
   }
   window.mgSavePrefs = mgSavePrefs;
   window.mgLoadPrefs = mgLoadPrefs;
+
+  /* ---------- 导出设置页的下拉记忆（data-cfg）----------
+     和训练器参数页同一套键名约定：控件上打 data-cfg="dfm_dtype"，值按这个键存取。
+     训练页那份记忆是模型 .dat 里的（后端给回来的）；导出设置这两颗是**用户偏好**，
+     和主题 / 侧栏一样存本机 localStorage —— 刷新、关掉再开，还是上次选的那一档。
+     为什么必须有：这两个值会改变画质 / 显存 / 速度。刷新一下就悄悄回到「自动」，
+     用户会以为「设了没用」，然后去翻日志找原因。 */
+  var MG_CFG_MEM_KEY = "dfl-mg-cfg-memory";
+  function mgCfgMemRead() {
+    try {
+      var raw = localStorage.getItem(MG_CFG_MEM_KEY);
+      var obj = raw ? JSON.parse(raw) : null;
+      return (obj && typeof obj === "object") ? obj : {};
+    } catch (e) { return {}; }
+  }
+  function mgCfgMemSave(key, val) {
+    key = String(key || "");
+    if (!key) return;
+    var mem = mgCfgMemRead();
+    mem[key] = String(val == null ? "" : val);
+    try { localStorage.setItem(MG_CFG_MEM_KEY, JSON.stringify(mem)); } catch (e) {}
+  }
+  function mgCfgMemApply() {
+    var mem = mgCfgMemRead();
+    var els = document.querySelectorAll('#p-merge .mgview [data-cfg]');
+    Array.prototype.forEach.call(els, function (el) {
+      var k = el.getAttribute('data-cfg');
+      if (!k || !Object.prototype.hasOwnProperty.call(mem, k)) return;
+      var v = String(mem[k]);
+      if (el.tagName === 'SELECT') {
+        var hit = false;
+        for (var i = 0; i < el.options.length; i++) {
+          if (String(el.options[i].value) === v) { hit = true; break; }
+        }
+        /* 存的值不在选项里（老版本存的）就保留当前默认 —— 别把控件置成空值 */
+        if (hit) el.value = v;
+      } else if (String(el.value) !== v) {
+        el.value = v;
+      }
+    });
+  }
+  window.mgCfgMemApply = mgCfgMemApply;
+  window.mgCfgMemSave = mgCfgMemSave;
+  window.__mgCfgMem = mgCfgMemRead;          /* 验收读快照用（只读） */
+  (function bindCfgMem() {
+    var view = document.querySelector('#p-merge .mgview[data-view="settings"]');
+    if (!view || view.dataset.cfgMemBound) return;
+    view.dataset.cfgMemBound = '1';
+    view.addEventListener('change', function (e) {
+      var el = e.target && e.target.closest ? e.target.closest('[data-cfg]') : null;
+      if (!el) return;
+      mgCfgMemSave(el.getAttribute('data-cfg'), el.value);
+    });
+  })();
+  mgCfgMemApply();
 
   /* ---------- 事件绑定 ---------- */
 
@@ -13141,6 +13236,9 @@ function mgStageEmpty(on) {
     MergePages.syncStatus();
     bindSeg();
     bindActions();
+    /* 记忆里的两档要**先**回填：syncStatus 只读格式/编码/进程，但用户在设置页
+       第一眼就得看到上次选的精度/后端，而不是等某次渲染才补上。 */
+    try { if (window.mgCfgMemApply) window.mgCfgMemApply(); } catch (e) {}
   }
 
   window.MergePages = MergePages;

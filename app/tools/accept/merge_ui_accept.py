@@ -161,6 +161,21 @@ PROBE = r"""
       has_cc: rows.filter(function(r){ return !!q('.cc', r); }).length,
       seg: qa('.seg', view).length,
       mgsel: qa('.mgsel', view).length,
+      /* 两个性能下拉（推理精度 / 合成后端）：id、data-cfg 记忆键、当前值、显示文字、尺寸。
+         尺寸取**计算值**（getComputedStyle）而不是 getBoundingClientRect：后者在有滚动
+         容器 / 无头视口下会给出 0×0（元素明明画出来了），断言会假红。计算值能直接证明
+         「#p-merge .mgsel{width:100%} 被本页那条 152×30 的规则压住了」—— 那才是要证的。 */
+      sels: qa('select.mgsel[data-cfg]', view).map(function(s){
+        var o = s.options[s.selectedIndex];
+        var cs = getComputedStyle(s);
+        return {id: s.id, cfg: s.getAttribute('data-cfg'), v: String(s.value),
+                txt: o ? String(o.textContent).trim() : '',
+                cw: parseFloat(cs.width) || 0, ch: parseFloat(cs.height) || 0,
+                ow: s.offsetWidth, oh: s.offsetHeight,
+                w: rect(s) ? rect(s).w : -1, h: rect(s) ? rect(s).h : -1,
+                disp: String(cs.display),
+                ov: s.scrollWidth > s.clientWidth + 1};
+      }),
       inp: qa('.inp', view).length,
       mini: qa('.mini', view).length,
       legacy_sec: qa('.mgp-sec, .mgp-hd, .mgnum, .mgtiny, .mgp-scroll, .mgp-footrow, .mgrow', view).length,
@@ -282,10 +297,11 @@ def main():
               "cards=%s" % s["cards"])
         check(s["titles"] == ["这次导出", "输出", "编码", "性能"],
               "A 分组标题用训练页 .cardhd 那套", "%s" % (s["titles"],))
-        # 10 行 = 这次导出 3 + 输出 2 + 编码 2 + 性能 3
+        # 12 行 = 这次导出 3 + 输出 2 + 编码 2 + 性能 5
         # （「质量」那一行已经删掉：帧图 JPEG 固定 quality=100，界面不再暴露；
-        #   性能那一组多了一行「快速导出」= 视频模式的融合流水线开关）
-        check(s["rows"] == 10, "A 共 10 行 .cfgrow（3+2+2+3）", "rows=%s" % s["rows"])
+        #   性能那一组是 并行进程 / 保留 cache / 快速导出 + 这轮新增的两个下拉
+        #   推理精度 / 合成后端 —— 37 个 DFL_* 里只有这两个值得给用户选，见 docs/27）
+        check(s["rows"] == 12, "A 共 12 行 .cfgrow（3+2+2+5）", "rows=%s" % s["rows"])
         # 两个「路径行」(.cfgpathrow) 的标签在输入框里（.inp > .lb），本来就没有 .cl/.cc
         check(s["has_cl"] == s["rows"] - 2 and s["has_cc"] == s["rows"] - 2,
               "A 除 2 个路径行外，每行都有左侧标签 .cl + 右侧控件 .cc",
@@ -304,9 +320,11 @@ def main():
               "min=%.1f max=%.1f · >48px 的行 %s · 逐行 %s"
               % (min(rh), max(rh), tall, [round(x, 1) for x in rh]))
         # 5 个 .seg = 格式 / 编码器 / 解码加速 / 保留 cache / 快速导出
-        check(s["seg"] == 5 and s["mini"] == 1 and s["inp"] >= 5,
-              "A 控件复用训练页的 .seg / .inp / .mini", "seg=%s inp=%s mini=%s"
-              % (s["seg"], s["inp"], s["mini"]))
+        # 2 个 .mgsel = 推理精度 / 合成后端（>4 档用 select、≤4 档用 seg 的那条口径）
+        check(s["seg"] == 5 and s["mini"] == 1 and s["inp"] >= 5 and s["mgsel"] == 2,
+              "A 控件复用训练页的 .seg / .inp / .mini / .mgsel",
+              "seg=%s inp=%s mini=%s mgsel=%s"
+              % (s["seg"], s["inp"], s["mini"], s["mgsel"]))
         check(s["legacy_sec"] == 0, "A 旧的 .mgp-sec/.mgp-hd/.mgnum/.mgtiny 已全部去掉",
               "残留 %s 个" % s["legacy_sec"])
         check(s["overflow"] == 0, "A 没有控件溢出（.cc scrollWidth ≤ clientWidth）",
@@ -314,6 +332,102 @@ def main():
         check(s["foot_cfgactions"], "A 底部动作条 = 训练页 .cfgactions")
         check(s["foot_btns"][-2:] == ["mgCancelExport", "mgStartExport"],
               "A 按钮顺序 = 取消 / 开始导出", "%s" % (s["foot_btns"],))
+
+        # ---- C：两个性能下拉（推理精度 / 合成后端）----
+        sels = p0["settings"]["sels"]
+        check([x["id"] for x in sels] == ["mgDfmDtype", "mgCmpBackend"],
+              "C1 性能区两颗下拉都在（#mgDfmDtype / #mgCmpBackend）",
+              str([x["id"] for x in sels]))
+        check([x["cfg"] for x in sels] == ["dfm_dtype", "compose_backend"],
+              "C2 都带 data-cfg（与训练器参数页同一套记忆键）",
+              str([x["cfg"] for x in sels]))
+        check([x["v"] for x in sels] == ["auto", "auto"]
+              and all("自动" in x["txt"] for x in sels),
+              "C3 默认值 = auto，显示文字是「自动」（不是 auto 原文）",
+              str([(x["v"], x["txt"]) for x in sels]))
+        check(all(abs(float(x["cw"]) - 152) <= 2 and abs(float(x["ch"]) - 30) <= 2
+                  and not x["ov"] for x in sels),
+              "C4 尺寸与训练页下拉一致（152×30 · 不溢出）",
+              str([(x["id"], x["cw"], x["ch"], x["ow"], x["oh"], x["disp"], x["ov"])
+                   for x in sels]))
+        # 档位齐全：auto/fp32/bf16/bf16w 与 auto/cpu/gpu
+        opts = json.loads(b.eval(
+            "(function(){var g=function(id){var s=document.getElementById(id);"
+            "if(!s) return [];return Array.prototype.map.call(s.options,function(o){"
+            "return String(o.value);});};"
+            "return JSON.stringify({d:g('mgDfmDtype'),c:g('mgCmpBackend')});})()") or "{}")
+        check(opts.get("d") == ["auto", "fp32", "bf16", "bf16w"]
+              and opts.get("c") == ["auto", "cpu", "gpu"],
+              "C5 选项值就是后端认的那几个（auto 不写成具体档）", str(opts))
+
+        # ---- D：请求体（默认不带键 / 选了才带）+ data-cfg 记忆（刷新后保持）----
+        js_settings = ("(function(){var s=window.MergePages.settings();"
+                       "return JSON.stringify({dfm_dtype:s.dfm_dtype,"
+                       "compose_backend:s.compose_backend});})()")
+        set_sel = ("(function(id,v){var e=document.getElementById(id);e.value=v;"
+                   "e.dispatchEvent(new Event('change',{bubbles:true}));return e.value;})")
+        # 默认态：settings 报 auto，mgPerfBody 不往请求体里塞这两个键
+        d0 = json.loads(b.eval(
+            "(function(){var s=window.MergePages.settings();"
+            "var body=window.mgPerfBody({video:'clip.mp4',fused:1},s);"
+            "return JSON.stringify({s:s.dfm_dtype+'/'+s.compose_backend,body:body});})()") or "{}")
+        check(d0.get("s") == "auto/auto", "D1 默认态 settings 报 auto/auto", str(d0.get("s")))
+        check("dfm_dtype" not in (d0.get("body") or {})
+              and "compose_gpu" not in (d0.get("body") or {}),
+              "D2 默认（自动）时请求体**不带**这两个键",
+              json.dumps(d0.get("body") or {}, ensure_ascii=False)[:160])
+        # 选 fp32 / gpu：请求体带 dfm_dtype=fp32、compose_gpu=1
+        b.eval(set_sel + "('mgDfmDtype','fp32'); true")
+        b.eval(set_sel + "('mgCmpBackend','gpu'); true")
+        time.sleep(0.2)
+        d1 = json.loads(b.eval(
+            "(function(){var s=window.MergePages.settings();"
+            "var b1=window.mgPerfBody({video:'clip.mp4',fused:1},s);"
+            "var b2=window.mgPerfBody({video:'clip.mp4'},{dfm_dtype:'fp32',compose_backend:'cpu'});"
+            "return JSON.stringify({body:b1,cpu:b2});})()") or "{}")
+        body1 = d1.get("body") or {}
+        check(body1.get("dfm_dtype") == "fp32" and body1.get("compose_gpu") == 1,
+              "D3 选 fp32 + gpu → dfm_dtype=fp32 / compose_gpu=1",
+              json.dumps(body1, ensure_ascii=False)[:200])
+        check((d1.get("cpu") or {}).get("compose_gpu") == 0,
+              "D4 选 cpu → compose_gpu=0（「关」也要明确说出来）",
+              json.dumps(d1.get("cpu") or {}, ensure_ascii=False)[:160])
+        mem = json.loads(b.eval(
+            "(function(){var m=window.__mgCfgMem?window.__mgCfgMem():null;"
+            "return JSON.stringify(m||{});})()") or "{}")
+        check(mem.get("dfm_dtype") == "fp32" and mem.get("compose_backend") == "gpu",
+              "D5 改完写进记忆（localStorage · data-cfg 键）", str(mem))
+        # 刷新页面：两个下拉必须还是 fp32 / gpu（记忆回填）
+        # 用 Page.navigate 而不是 location.reload()：reload 之后 CDP 的执行上下文会被销毁，
+        # 紧接着的 Runtime.evaluate 有概率落到旧上下文上报个莫名其妙的异常。
+        b.goto(BASE + "/")
+        t0 = time.time()
+        while time.time() - t0 < 60:
+            try:
+                if b.eval("typeof window.go === 'function'"):
+                    break
+            except Exception:                              # noqa: BLE001
+                pass
+            time.sleep(0.3)
+        time.sleep(0.5)
+        b.eval("(function(){var w=document.getElementById('welcome'); if(w) w.style.display='none';"
+               " var m=document.getElementById('modal'); if(m) m.style.display='none';"
+               " return true;})()")
+        b.eval("window.go('merge'); true")
+        time.sleep(0.5)
+        b.eval("window.mgStep('settings'); true")
+        time.sleep(0.5)
+        back = b.js(sh)["settings"]["sels"]
+        check([x["v"] for x in back] == ["fp32", "gpu"],
+              "D6 刷新后还是 fp32 / gpu（data-cfg 记忆，不是回默认）",
+              str([(x["cfg"], x["v"]) for x in back]))
+        shot(b, SHOTS / ("%s-settings-picked.png" % tag))
+        # 收拾干净：记忆清掉、界面回 auto（不把测试状态留给下一轮/下次人工看）
+        b.eval("(function(){try{localStorage.removeItem('dfl-mg-cfg-memory');}catch(e){}"
+               "document.getElementById('mgDfmDtype').value='auto';"
+               "document.getElementById('mgCmpBackend').value='auto';"
+               "return true;})()")
+        time.sleep(0.2)
 
         # ---- B：进度页宽度 ----
         b.eval("window.mgStep('progress'); true")

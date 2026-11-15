@@ -315,6 +315,17 @@ def _fused_cfg(body: dict) -> dict:
         "fused": True, "cache": "", "meta": {}, "stages": ["fused"],
         "chain": True, "force": True, "keep_cache": False, "range_changed": False,
     }
+    # 两个用户可调的性能旋钮（设置页「性能」区那两个下拉）：请求体 -> 进程 env，
+    # 并把「这一单打算怎么跑」记进 cfg["knobs"]（[eff] 的两个新列就取它）。
+    # 在这里就把 env 写下去的理由：下面的显存账（_vram_guard → _vram_plan）和 dfm 会话
+    # 都按 dtype 算，晚一步写就会用上一单的档算这一单的账。
+    _kn = _knobs.refine_compose(_knobs.resolve(body),
+                                str((cfg.get("config") or {}).get("mode") or ""),
+                                fused=True)
+    # env 先写：下面的显存账（_vram_guard）按 dtype 算「权重砍半」那一项
+    for _t in _knobs.apply(_kn):
+        _knobs.warn_line(_t)
+    cfg["knobs"] = _kn
     return cfg
 
 
@@ -609,6 +620,7 @@ def _fused_run(cfg: dict) -> dict:
     from .compose_gpu import (compose_frame_gpu, env_on as _compose_gpu_on,
                               ready as _compose_gpu_ready, last_error as _compose_gpu_err,
                               seamless_on as _compose_gpu_seamless_on)
+    from .knobs import skip_text as _knob_skip_text
     ensure_engine_path()
     from facelib import FaceType
     from facelib.LandmarksProcessor import get_transform_mat
@@ -669,6 +681,36 @@ def _fused_run(cfg: dict) -> dict:
     cfg["_compose_backend"] = "gpu" if gpu_cmp["on"] else "cpu"
     cfg["_compose_threads"] = int(n_cmp)
     cfg["_compose_why"] = str(gpu_cmp.get("why") or "")
+    # ★ 选了 gpu、实际跑 cpu → 必须喊出来（检测器那次事故的同类：界面写一套、日志跑另一套）。
+    # 这一条只能在**这里**判：torch/cuda 起不起得来要真碰一次 torch，路由线程里碰会把
+    # 一条 POST 卡好几秒，所以 [eff] 那行先按「打算怎么跑」写，跑之前的真实结论在这里补。
+    # 文案三件事必须齐：选了 X、实际跑 Y、原因 Z（见 knobs.skip_text）。
+    if str((cfg.get("knobs") or {}).get("compose_backend") or "") == "gpu" and not gpu_cmp["on"]:
+        _kw = _knob_skip_text("合成后端", "gpu", "cpu",
+                              gpu_cmp.get("why") or "torch/cuda 不可用")
+        _knobs.warn_line(_kw)
+        _vid_log("[eff-warn] " + _kw)
+        with _merge_job_lock:
+            _patch = {"code": "eff-skipped", "field": "compose_backend",
+                      "level": "warn", "text": _kw}
+            _merge_job["eff_warnings"] = list(_merge_job.get("eff_warnings") or []) + [_patch]
+            _merge_job["warnings"] = list(_merge_job.get("warnings") or []) + [_kw]
+            # 同一个 eff 对象就是 status.eff（_eff_publish 返回的那份，按引用存进来）：
+            # 就地改成**实际跑的值**，界面抽屉里那一格才不会继续说 gpu。
+            _e = _merge_job.get("eff")
+            if isinstance(_e, dict):
+                _e["compose_backend"] = "cpu"
+                _e["compose_why"] = str(gpu_cmp.get("why") or "")
+                _e["warnings"] = list(_e.get("warnings") or []) + [_patch]
+        with _STAGE_LOCK:
+            _STAGE_JOB["eff_warnings"] = list(_STAGE_JOB.get("eff_warnings") or []) + [_patch]
+            _STAGE_JOB["warnings"] = list(_STAGE_JOB.get("warnings") or []) + [_kw]
+            _e2 = _STAGE_JOB.get("eff")
+            if isinstance(_e2, dict) and _e2 is not _merge_job.get("eff"):
+                _e2["compose_backend"] = "cpu"
+                _e2["compose_why"] = str(gpu_cmp.get("why") or "")
+                _e2["warnings"] = list(_e2.get("warnings") or []) + [_patch]
+        cfg.setdefault("knobs", {})["compose_backend"] = "cpu"
     # PNG 编码是这一条链上最贵的纯 CPU 活（1080p 实测 94ms/帧，cv2.imencode 会放 GIL，
     # 多线程是真并行：2 线程 ≈2 倍、4 线程 ≈3.6 倍）。默认 3：detect（52.8ms/帧）才是硬底，
     # 再往上加只会跟检测抢 CPU。
@@ -2052,6 +2094,8 @@ from .._media.encoder import (
 from .._media.frames import (
     _VIDEO_EXT,
 )
+
+from . import knobs as _knobs
 
 from .meter import (
     _FusedTicks, _STAGE_METER, _STAGE_MS_SRC, _stage_tick,

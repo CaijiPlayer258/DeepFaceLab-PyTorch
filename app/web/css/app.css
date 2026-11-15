@@ -5593,6 +5593,16 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   text-align: center;
   font-variant-numeric: tabular-nums;
 }
+/* 下拉（推理精度 / 合成后端）：与训练页「设备」「预览调色」那两颗 select 同尺寸
+   （152×30 · 不参与伸缩）。必须写在 #p-merge 这一级：下面 #p-merge .mgsel 的
+   width:100%（id+class）压得住 .cfgrow .cc .mgsel 那三条类选择器，不标到同一级
+   的话下拉会被拉成整列宽、行高跟着变。 */
+#p-merge .mgset .cfgrow .cc .mgsel {
+  flex: 0 0 auto;
+  width: 152px;
+  height: 30px;
+  align-self: center;
+}
 #p-merge .mgset .cfgrow .cc .unit {
   font-size: 11px;
   color: var(--ink-3);
@@ -5927,6 +5937,9 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 .mgeff-i .s.ui { color: var(--ok); border-color: var(--line-strong); }
 .mgeff-i .s.inferred { color: var(--warn); border-color: var(--line-strong); }
 .mgeff-i .s.default { color: var(--ink-3); }
+/* 「自动」= 界面选了自动、档位由后端定（dfm_dtype / compose_backend 这两格）：
+   和「界面」一样是用户的选择，但结果是后端定的，所以用品牌色而不是 ok 绿。 */
+.mgeff-i .s.auto { color: var(--brand); border-color: var(--line-strong); }
 
 /* ============================================================
    流水线实况（进度页）：6 列 lane + 三次贝塞尔曲线 + 光点

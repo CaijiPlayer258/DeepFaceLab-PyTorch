@@ -3566,7 +3566,7 @@ def _stage_cfg(body: dict, stage: str, chain: bool = False) -> dict:
     if not model_name:
         model_name = str(models[0].get("name") or "")
 
-    return {
+    cfg = {
         "video": str(video), "cache": str(cache), "out": str(out),
         "total": int(probe.get("frames") or 0),
         # 帧范围（1 起闭区间）：range_total = 后五个阶段真正要处理的帧数
@@ -3621,6 +3621,16 @@ def _stage_cfg(body: dict, stage: str, chain: bool = False) -> dict:
         "mask_writers": _int_val("mask_writers", body.get("mask_writers"), 0, 16, 0),
         "mask_batch": _int_val("mask_batch", body.get("mask_batch"), 0, 32, 0),
     }
+    # 两个用户可调的性能旋钮（设置页「性能」区）：请求体 -> 进程 env + cfg["knobs"]。
+    # 分段链的合成只有 CPU 实现，所以这里 refine 会把「选了 gpu」改回 cpu 并带一条
+    # [eff-warn] 文案（[eff] 那行照实写 cpu，不让界面和日志各说一套）。
+    _kn = _knobs.refine_compose(_knobs.resolve(body),
+                                str((cfg.get("config") or {}).get("mode") or ""),
+                                fused=False)
+    for _t in _knobs.apply(_kn):
+        _knobs.warn_line(_t)
+    cfg["knobs"] = _kn
+    return cfg
 
 
 def _stage_precheck(cfg: dict, stage: str) -> dict:
@@ -4072,6 +4082,8 @@ from .._media.encoder import (
 from .._media.frames import (
     _VIDEO_EXT,
 )
+
+from . import knobs as _knobs
 
 from .meter import (
     _STAGE_METER, _StageTicks, _stage_tick,

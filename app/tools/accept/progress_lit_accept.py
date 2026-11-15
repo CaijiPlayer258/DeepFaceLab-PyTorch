@@ -63,9 +63,12 @@ RESULTS = []
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 
+# 14 → 16：多了 dfm_dtype / compose_backend（设置页「性能」区那两个下拉的回显）
 FIELDS = ("detector", "mask_source", "ct_mode", "blend", "erode", "blur", "models",
           "faces_project", "library_enabled", "fast_export", "frame_range",
-          "workers", "batch", "jpeg_quality")
+          "workers", "batch", "jpeg_quality", "dfm_dtype", "compose_backend")
+# 抽屉里来源小标签允许的取值：界面 / 推断 / 默认，外加「自动」（选了自动，档位由后端定）
+SRC_LABELS = ("界面", "推断", "默认", "自动")
 STAGES = ("frames", "det", "dfm", "xseg", "compose", "encode")
 
 # 这一单要的线程数（写进请求体，后端按它起线程 —— 断言就断「lanes == 这个数」）
@@ -723,8 +726,9 @@ def main(argv=None):
         if args.shots_only:
             eff = json.loads((BOX / "eff.json").read_text(encoding="utf-8")) or None
         check(bool(eff) and all(k in (eff or {}) for k in FIELDS),
-              "A14 拿到 [eff] 回显（14 个字段齐全）",
-              "keys=%d" % len((eff or {}).keys()))
+              "A14 拿到 [eff] 回显（%d 个字段齐全）" % len(FIELDS),
+              "keys=%d · 缺 %s" % (len((eff or {}).keys()),
+                                  [k for k in FIELDS if k not in (eff or {})]))
         if not args.shots_only:
             # 给 --shots-only 留现场：以后改样式重拍截图，不用再跑一遍导出
             (BOX / "eff.json").write_text(json.dumps(eff or {}, ensure_ascii=False),
@@ -819,12 +823,14 @@ def main(argv=None):
           });
         })()"""))
         check(drawer.get("open") is True, "B7 点开后抽屉可见")
-        check(int(drawer.get("items") or 0) == len(FIELDS), "B8 抽屉里 14 个字段",
+        check(int(drawer.get("items") or 0) == len(FIELDS),
+              "B8 抽屉里 %d 个字段（14 → 16）" % len(FIELDS),
               "items=%s" % drawer.get("items"))
         check(list(drawer.get("keys") or []) == list(FIELDS), "B9 字段顺序/键名对得上",
               str(drawer.get("keys"))[:120])
-        check(all(s in ("界面", "推断", "默认") for s in (drawer.get("srcs") or [])),
-              "B10 每行都有来源小标签", str(sorted(set(drawer.get("srcs") or []))))
+        check(all(s in SRC_LABELS for s in (drawer.get("srcs") or [])),
+              "B10 每行都有来源小标签（界面/推断/默认/自动）",
+              str(sorted(set(drawer.get("srcs") or []))))
         ev("document.getElementById('mgpEffClose').click(); true")
         time.sleep(0.2)
 

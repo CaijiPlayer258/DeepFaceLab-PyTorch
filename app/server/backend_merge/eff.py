@@ -25,6 +25,10 @@ FIELDS = (
     "detector", "mask_source", "ct_mode", "blend", "erode", "blur",
     "models", "faces_project", "library_enabled", "fast_export",
     "frame_range", "workers", "batch", "jpeg_quality",
+    # 用户可调的两个性能旋钮（设置页「性能」区那两个下拉）。它们的值不是 cfg 字段，
+    # 而是由 backend_merge/knobs.py 从请求体翻译成进程 env —— 来源也多一档 "auto"
+    # （界面选了「自动」：档位交给后端定，不写死成具体值）。
+    "dfm_dtype", "compose_backend",
 )
 
 
@@ -45,6 +49,11 @@ UI_DEFAULTS = {
     "workers": None,                # #mgWorkers value=0 = 自动
     "batch": None,                  # 界面没有这个旋钮
     "jpeg_quality": 100,            # 界面没有这个旋钮，固定 100
+    # 设置页「性能」区两个下拉的初始值。dfm_dtype 的「自动」= 不写死档位（后端默认档，
+    # 落到哪一档看 [eff] 的 dfm 列：torch · bf16w）；compose_backend 的「自动」就是
+    # 现在这条 CPU 路径（GPU 合成要显式选，docs/26 实测不是处处更快）。
+    "dfm_dtype": "auto",
+    "compose_backend": "cpu",
 }
 
 
@@ -64,6 +73,8 @@ UI_LABELS = {
     "workers": "自动",
     "batch": "自动",
     "jpeg_quality": "100",
+    "dfm_dtype": "自动",
+    "compose_backend": "自动（CPU）",
 }
 
 
@@ -87,6 +98,10 @@ BODY_KEYS = {
     "workers": ("workers", "merge_workers", "merge_threads", "threads", "num_workers"),
     "batch": ("batch", "pred_batch"),
     "jpeg_quality": ("jpeg_quality",),
+    # 两个性能旋钮：compose_backend 在请求体里叫 compose_gpu（1/0），别写错名字 ——
+    # 写错了 [_has] 就永远 False，「界面选的」会被当成「默认」。
+    "dfm_dtype": ("dfm_dtype",),
+    "compose_backend": ("compose_gpu", "compose_backend"),
 }
 
 
@@ -113,6 +128,8 @@ KNOWN_KEYS = {
     "face_type", "blend", "ct_mode", "mask_source", "mask_mode", "mask_erode",
     "mask_blur", "erode_mask", "blur_mask", "color_transfer", "mode",
     "keep_aligned", "video_name", "source", "fuse", "fused_only",
+    # 两个用户可调的性能旋钮（backend_merge/knobs.py 消费，不进 KNOWN 会被误报 [req-unused]）
+    "dfm_dtype", "compose_gpu", "compose_backend",
 }
 
 
@@ -312,18 +329,22 @@ def _warn_text(kind: str, field: str, value, src_note: str, requested) -> str:
 
 def build(route: str, kind: str, body: dict, values: dict,
           inferred: dict = None, quiet: set = None, requested: dict = None,
-          warnings_out: list = None) -> dict:
+          warnings_out: list = None, src_override: dict = None) -> dict:
     """拼出生效配置 + 一致性自检。
 
     values     规范字段 -> 真正生效的值（调用方从 cfg 里取，别在这里重算一遍）
     inferred   缺字段但值是推出来的：{field: "quality=high"}（会写进 src_note）
     quiet      推出来也不用警告的字段（契约上就该推的，例如 mask_source ← mask_mode）
     requested  请求体写的原值：{field: 2}，和 values 不一致 = 后端改写过
+    src_override  直接指定某些字段的来源（{field: "auto"}）—— 只有「自动」这一档需要：
+                  请求体给了 dfm_dtype=auto/compose_gpu=auto 时它既不是 ui（没钉死值）
+                  也不是 default（不是没给），来源就是「自动」本身。
     """
     body = body if isinstance(body, dict) else {}
     inferred = dict(inferred or {})
     quiet = set(quiet or ())
     requested = dict(requested or {})
+    src_override = dict(src_override or {})
     warned = set()
     warnings = []
 
@@ -337,7 +358,8 @@ def build(route: str, kind: str, body: dict, values: dict,
             value = [str(x) for x in (value or [])]
             if not value:
                 value = []
-        src = "ui" if _has(body, name) else ("inferred" if name in inferred else "default")
+        src = src_override.get(name) or (
+            "ui" if _has(body, name) else ("inferred" if name in inferred else "default"))
 
         # ---- 三类警告（quiet 里的字段不报警：它在这次入口里本来就不适用）----
         default = UI_DEFAULTS.get(name)
@@ -478,6 +500,7 @@ def _eff_values_of(cfg: dict, kind: str) -> dict:
             q = int(cfg.get("quality"))
         except (TypeError, ValueError):
             q = _STAGE_JPEG_QUALITY
+    kn = _knobs_of(cfg)
     return {
         "detector": str(cfg.get("det_align") or cfg.get("detector") or _DEFAULT_DETECTOR),
         "mask_source": str(mask.get("label") or ""),
@@ -494,7 +517,26 @@ def _eff_values_of(cfg: dict, kind: str) -> dict:
         "workers": int(workers or 0),
         "batch": int(batch or 0),
         "jpeg_quality": int(q or 0),
+        # 两个性能旋钮：值来自 cfg["knobs"]（请求体 → env 的那一份），不是这里重算的
+        "dfm_dtype": str(kn.get("dfm_dtype") or "auto"),
+        "compose_backend": str(kn.get("compose_backend") or "cpu"),
     }
+
+
+def _knobs_of(cfg) -> dict:
+    """cfg -> 这一单的两个性能旋钮（没有就走「谁都没说」那一档，按进程 env 报）。
+
+    预览 / 项目导出这些入口不经过 _fused_cfg / _stage_cfg，也就没有 cfg["knobs"]；
+    这时候按 env 现算一份 —— [eff] 的这两列永远有值，不会出现「这一栏是空的」。
+    """
+    raw = (cfg or {}).get("knobs")
+    if isinstance(raw, dict) and raw.get("dfm_dtype"):
+        return raw
+    try:
+        from . import knobs as _knobs
+        return _knobs.resolve({})
+    except Exception:                                       # noqa: BLE001
+        return {}
 
 
 def _eff_inferred_of(cfg: dict, body: dict) -> dict:
@@ -569,28 +611,58 @@ def _eff_publish(route: str, kind: str, body: dict, cfg: dict,
     if kind == "preview":
         # 预览不是导出：没有「快速导出」这个选择
         quiet.add("fast_export")
+    kn = _knobs_of(cfg)
+    # 兜底：只有快速导出（fused）才有 GPU 合成。别让 [eff] 在分段链 / 项目导出 / 预览上
+    # 说 gpu（那几条路的合成只有 compose_frame 的 CPU 实现）—— 改成 cpu 并带一句原因，
+    # 文案和流水线里那一条同一个口径（选了 X、实际跑 Y、原因 Z）。
+    if str(kind) != "fused" and str(kn.get("compose_backend") or "") == "gpu":
+        kn = _knobs.refine_compose(kn, "", fused=False)
+        if isinstance(cfg, dict):
+            cfg["knobs"] = kn
     eff = _eff.build(route, kind, body, _eff_values_of(cfg, kind),
                      inferred=_eff_inferred_of(cfg, body),
                      quiet=quiet,
-                     requested=_eff_requested_of(body, kind))
+                     requested=_eff_requested_of(body, kind),
+                     # 两个性能旋钮的来源是 knobs 算出来的（ui / auto / default），
+                     # 不能靠「请求体里有没有这个键」推 —— 「自动」也是请求体给了的。
+                     src_override={"dfm_dtype": kn.get("dfm_dtype_src"),
+                                   "compose_backend": kn.get("compose_backend_src")})
     eff["req_unused"] = _eff.unused_keys(body)
     # dfm 的推理后端 / 精度：**不是 cfg 字段**（它由进程级环境变量定），所以不走 build()
     # 那套「请求体缺字段」的自检，直接挂到 [eff] 那一行的末尾。用户要能一眼看到
     # 「我这单的 dfm 到底跑在 onnx 还是 torch、fp32 还是 bf16」——这一栏就是那个答案。
-    eff["dfm"] = _dfm_eff_text()
+    eff["dfm"] = _dfm_eff_text(cfg)
+    # knobs 自带的告警（env 覆盖了请求体 / 选了 gpu 但这单上不了 GPU）也要进横幅。
+    # 这些在「值已经确定」的时刻就算得出来，不用等流水线开跑。
+    for _code, _field, _text in (kn.get("warnings") or []):
+        if not _text:
+            continue
+        _w = {"code": str(_code or "eff-knob"), "field": str(_field or ""),
+              "level": "warn", "text": str(_text)}
+        eff.setdefault("warnings", []).append(_w)
+        if cfg is not None and isinstance(cfg, dict):
+            cfg.setdefault("_eff_warnings", []).append(_w)
     _eff.log_eff(eff, dedupe=dedupe)
     return eff
 
 
-def _dfm_eff_text() -> str:
-    """'torch · bf16' / 'onnx · fp32' —— [eff] 与状态栏共用一份口径。"""
+def _dfm_eff_text(cfg=None) -> str:
+    """'torch · bf16' / 'onnx · fp32' —— [eff] 与状态栏共用一份口径。
+
+    精度优先取**这一单**的旋钮（cfg["knobs"]）：env 是在 cfg 建好之后才写的，
+    这里若只读 env，[eff] 会回显上一单的精度（「界面上选 fp32、日志里 bf16w」这种
+    对不上账，正是这次要治的东西）。没有 knobs 的入口（预览/项目）才读 env。
+    """
+    knob = str((_knobs_of(cfg).get("dfm_dtype") or "")).strip().lower()
+    if knob == "auto":
+        knob = ""                                       # 「自动」= 交给后端挑，别冒充具体档
     try:
         from .vram import _dfm_backend_sel
         kind, dt, _why = _dfm_backend_sel()
     except Exception:                                   # noqa: BLE001
-        return "?"
+        return ("torch · %s" % knob) if knob else "?"
     if kind == "torch":
-        return "torch · %s" % (dt or "tf32")
+        return "torch · %s" % (knob or dt or "tf32")
     return "onnx · fp32"
 
 
@@ -610,6 +682,8 @@ def _eff_status_patch(eff: dict) -> dict:
 # 对方再来取名字一定拿得到，先 import 谁都一样。
 # ============================================================
 from .. import _eff as _eff
+
+from . import knobs as _knobs
 
 from .pipeline_stages import (
     _STAGE_JPEG_QUALITY, _mask_src,

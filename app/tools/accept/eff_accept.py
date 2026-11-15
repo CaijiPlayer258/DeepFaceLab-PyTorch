@@ -48,9 +48,11 @@ SHOT = BOX / "banner.png"
 DFM = "\u963f\u8a3c\u8a3c\u8a3c\u8a3c-416"
 SETTINGS = {"mask_mode": 8, "mask_source": "XSegLite", "color_transfer": "mt",
             "blend": "seamless", "mask_erode": 0, "mask_blur": 4}
+# 14 → 16：多了两个用户可调的性能旋钮（dfm_dtype / compose_backend，设置页「性能」区）。
+# 它们和其他 14 个字段同一套「值 + _src」，来源多一档 "auto"（界面选了自动）。
 FIELDS = ("detector", "mask_source", "ct_mode", "blend", "erode", "blur", "models",
           "faces_project", "library_enabled", "fast_export", "frame_range",
-          "workers", "batch", "jpeg_quality")
+          "workers", "batch", "jpeg_quality", "dfm_dtype", "compose_backend")
 
 BASE = ""
 RESULTS = []
@@ -423,7 +425,15 @@ def main(argv=None):
                   "%s/%s" % (e.get("detector"), e.get("detector_src")))
             missing = [f for f in FIELDS
                        if f not in e or (f + "_src") not in e]
-            check(not missing, "A4 字段表齐全（值 + 来源）", "缺 %s" % missing if missing else "14/14")
+            check(not missing, "A4 字段表齐全（值 + 来源）",
+                  "缺 %s" % missing if missing else "%d/%d" % (len(FIELDS), len(FIELDS)))
+            # 默认态（请求体没给这两个键）：值报「自动」、来源 default —— 不冒充具体档
+            check(e.get("dfm_dtype") == "auto" and e.get("dfm_dtype_src") == "default",
+                  "A4b 请求体没给 dfm_dtype → auto / default",
+                  "%s/%s" % (e.get("dfm_dtype"), e.get("dfm_dtype_src")))
+            check(e.get("compose_backend") == "cpu" and e.get("compose_backend_src") == "default",
+                  "A4c 请求体没给 compose_gpu → cpu（现在的 CPU 路径）/ default",
+                  "%s/%s" % (e.get("compose_backend"), e.get("compose_backend_src")))
             check(not a[-1]["warns"], "A5 这一段没有 [eff-warn]", "; ".join(a[-1]["warns"]))
         s = wait_terminal("/api/merge/export/status")
         check(not (s.get("warnings") or []), "A6 status.warnings 为空",
@@ -456,6 +466,65 @@ def main(argv=None):
               "B6 eff_warnings 结构（code=eff-inferred）",
               str(s.get("eff_warnings"))[:160])
 
+        # ---- G：两个用户可调的性能旋钮（请求体 → [eff]，被跳过时 [eff-warn]）----
+        head("G  性能旋钮：dfm_dtype=fp32 / compose_gpu=1（选了就要能看到，跳过了要喊）")
+        st, d = post("/api/merge/export", {
+            "video": str(clip), "fused": 1, "detector": "tinymog", "model": model,
+            "settings": SETTINGS, "dfm_dtype": "fp32", "compose_gpu": 1})
+        check(st == 200 and d.get("ok"), "G1 带旋钮的导出启动", "HTTP %s" % st)
+        time.sleep(0.8)
+        blocks = eff_blocks(read_log())
+        kn = [b for b in blocks if b["eff"].get("kind") == "fused"]
+        check(bool(kn), "G2 有 [eff] 行（kind=fused）", "%d 条" % len(kn))
+        e = kn[-1]["eff"] if kn else {}
+        check(e.get("dfm_dtype") == "fp32" and e.get("dfm_dtype_src") == "ui",
+              "G3 dfm_dtype 回显实际值 fp32（不是 auto 解析后的档）+ src=ui",
+              "%s/%s" % (e.get("dfm_dtype"), e.get("dfm_dtype_src")))
+        # 这一单的 blend 是 seamless：docs/26 实测无缝融合在 GPU 上更慢，所以 compose_gpu.ready
+        # 之前就把它判回 CPU —— 于是 [eff] 必须写 cpu（不是 gpu），并**必须**有一条
+        # [eff-warn] 说清「选了 gpu、实际跑 cpu、原因」，和检测器那次事故同一个口径。
+        check(e.get("compose_backend") == "cpu" and e.get("compose_backend_src") == "ui",
+              "G4 compose_backend 写实际值 cpu（选了 gpu 但 seamless 不进 GPU）",
+              "%s/%s want=%s" % (e.get("compose_backend"), e.get("compose_backend_src"),
+                                 "cpu/ui"))
+        g_warns = kn[-1]["warns"] if kn else []
+        joined = " | ".join(g_warns)
+        check(any(("选了 gpu" in w) and ("实际跑 cpu" in w) and ("原因" in w) for w in g_warns),
+              "G5 [eff-warn] 三件事都说了（选了 X / 实际 Y / 原因 Z）", joined[:240] or "(无)")
+        s = wait_terminal("/api/merge/export/status")
+        check(any(w.get("field") == "compose_backend"
+                  for w in (s.get("eff_warnings") or [])),
+              "G6 status.eff_warnings[] 里也有这条（进度页横幅才有得显示）",
+              str(s.get("eff_warnings"))[:200])
+        check((s.get("eff") or {}).get("compose_backend") == "cpu",
+              "G7 status.eff 回显 cpu（界面抽屉那一格不会继续说 gpu）",
+              str((s.get("eff") or {}).get("compose_backend")))
+        # 日志里那一行 dfm 也必须是 fp32：界面选的档 = 真在跑的档
+        check(any("fp32" in str(x) for x in (s.get("eff") or {}).values()) or
+              re.search(r'"dfm": "[^"]*fp32', read_log()) is not None,
+              "G8 [eff] 的 dfm 那一列写着 fp32", str((s.get("eff") or {}).get("dfm")))
+
+        # overlay + compose_gpu=1：要么真跑 GPU，要么回退到 CPU 并留下同一条口径的告警。
+        # 两种情况都算过 —— 断言的是「**永远可复盘**」，不是「这台机器一定有 GPU」。
+        head("G9  合成后端 gpu（overlay）：真跑 or 可复盘的回退")
+        st, d = post("/api/merge/export", {
+            "video": str(clip), "fused": 1, "detector": "tinymog", "model": model,
+            "settings": dict(SETTINGS, blend="overlay"), "compose_gpu": 1})
+        check(st == 200 and d.get("ok"), "G9a 导出启动", "HTTP %s" % st)
+        time.sleep(0.8)
+        blocks = eff_blocks(read_log())
+        ov = [b for b in blocks if b["eff"].get("kind") == "fused"]
+        e2 = ov[-1]["eff"] if ov else {}
+        back = str(e2.get("compose_backend") or "")
+        check(back in ("gpu", "cpu"), "G9b compose_backend 有明确结论", back)
+        if back == "cpu":
+            check(any("选了 gpu" in w for w in (ov[-1]["warns"] if ov else [])),
+                  "G9c 回退了 → 有「选了 gpu、实际跑了什么」的 [eff-warn]",
+                  " | ".join((ov[-1]["warns"] if ov else []))[:200])
+        else:
+            say("这一单真跑在 GPU 上（%s.torch 可用）→ 没有回退告警是正确行为" % "compose_gpu")
+        wait_terminal("/api/merge/export/status")
+
         if not args.no_browser:
             head("F  前端横幅 + 「当前生效」面板（真实页面，Edge headless）")
             ui = shot_banner(s.get("eff"), s.get("eff_warnings") or [])
@@ -466,7 +535,8 @@ def main(argv=None):
                 check("detector" in str(ui.get("text")), "F2 横幅文案里有 detector",
                       str(ui.get("text"))[:160])
                 check(ui.get("gone") is True, "F3 常驻面板 #mgpEff 已删除", str(ui.get("gone")))
-                check(int(ui.get("items") or 0) >= len(FIELDS), "F4 抽屉里 14 个字段",
+                check(int(ui.get("items") or 0) >= len(FIELDS),
+                      "F4 抽屉里 %d 个字段（14 → 16）" % len(FIELDS),
                       "items=%s" % ui.get("items"))
                 check(ui.get("panel") is True, "F5 抽屉（#mgpEffDrawer）可见",
                       str(ui.get("panel")))

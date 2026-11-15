@@ -1018,6 +1018,40 @@
               <!-- 组 3：性能 -->
               <div class="card">
                 <div class="cardhd"><b>性能</b></div>
+                <!-- 整条合成链有 37 个 DFL_* 环境变量（清单见 app/docs/27-ENV-KNOBS.md），
+                     其中 35 个是「已经量到最优」的调优口 / 排障开关 —— 摆到界面上只会
+                     得到「调坏了却不知道为什么慢」。只留这两个真正要给用户选的：
+                       推理精度（DFL_DFM_DTYPE）：画质/显存/速度的取舍，没有唯一正确答案；
+                       合成后端（DFL_COMPOSE_GPU）：GPU 合成在 8GB 卡上不一定更快（docs/26）。
+                     ★ 两个都是「自动 = 请求体不带这个键」：别把「自动」写死成某个具体值
+                       发过去，那等于替用户做了决定，还让他以后找不到原因。
+                     ★ data-cfg 是记忆键（与训练器参数页同一套）：dfl-mg-cfg-memory 里
+                       存值，刷新/下次进页面回填 —— 见 app.js 的 mgCfgMem*。 -->
+                <div class="cfgrow">
+                  <span class="cl" title="DFL_DFM_DTYPE · 只影响 .dfm 推理">推理精度</span>
+                  <span class="cd">自动 = 不写死档位（后端默认 bf16w）</span>
+                  <span class="cc">
+                    <select class="mgsel" id="mgDfmDtype" data-cfg="dfm_dtype"
+                            title="自动：交给后端定档（默认 bf16w）；fp32 只用于与 onnx 对拍，比默认慢 2.4 倍">
+                      <option value="auto" selected>自动（推荐）</option>
+                      <option value="fp32" title="严格 fp32（关 TF32）：对拍用，慢 2.4 倍">fp32</option>
+                      <option value="bf16" title="权重 fp32 + autocast(bf16)：精度更高的那一档">bf16</option>
+                      <option value="bf16w" title="权重也压 bf16：更省显存（-250MB~-1.1GB）">bf16w</option>
+                    </select>
+                  </span>
+                </div>
+                <div class="cfgrow">
+                  <span class="cl" title="DFL_COMPOSE_GPU · 合成放在哪算">合成后端</span>
+                  <span class="cd">自动 = 现在的 CPU 路径</span>
+                  <span class="cc">
+                    <select class="mgsel" id="mgCmpBackend" data-cfg="compose_backend"
+                            title="自动：CPU 合成（默认）；gpu 走 torch CUDA，8GB 卡上 overlay 持平、seamless 更慢，所以不默认开">
+                      <option value="auto" selected>自动（推荐）</option>
+                      <option value="cpu" title="compose_frame（OpenCV，CPU）">cpu</option>
+                      <option value="gpu" title="compose_frame_gpu（torch CUDA）：起不来会自动回退并告警">gpu</option>
+                    </select>
+                  </span>
+                </div>
                 <div class="cfgrow">
                   <span class="cl">并行进程</span>
                   <span class="cd">num_workers · 0 = 自动</span>
