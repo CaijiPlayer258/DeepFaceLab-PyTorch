@@ -6747,15 +6747,35 @@ function mgStageEmpty(on) {
            给它挂 lane 会让「lane 方块数 == status 里的线程数」这条断言多出一个 */
         layers.box.appendChild(mk("rect", { x: ocx - OUTW / 2, y: TOPY, width: OUTW,
                                             height: space, rx: 7, "class": "outcup" }));
+        /* 杯子里的**两层**水（以前只有一层：蓝面直接画 encode，于是「编码一开始蓝面就突然满」）：
+             蓝面 .water.out = 已合成 = cache + out = compose / 总帧   ← 帧已经从合成那列出来了
+             绿面 .encflow  = 已编码 = out           = encode / 总帧   ← 帧已经变成视频了
+           绿面画在蓝面**之上**、半透明（让蓝透出来）：两层之间的那一段蓝就是「合成好了、
+           还没编码」的帧。编码阶段绿面从下往上追蓝面 —— 看起来就是「水被倒进视频里」。
+           绿面用 .encflow 而不是再加一块 .water：验收按 rect.water 的条数断言「水位只填
+           两处（缓存列 n 条 + 成片 1 条）」，多一块 .water 会把它数成 8 条。 */
         var owater = mk("rect", { x: ocx - OUTW / 2, y: TOPY, width: OUTW, height: space,
                                   "class": "water out", "data-level": "0" });
+        var oenc = mk("rect", { x: ocx - OUTW / 2, y: TOPY, width: OUTW, height: space,
+                                "class": "encflow", "data-level": "0" });
         var owg = mk("g", { "clip-path": "url(#" + ocid + ")" });
         owg.appendChild(owater);
+        owg.appendChild(oenc);
         layers.box.appendChild(owg);
+        /* 水面线：蓝色填充的顶边原本糊在底色里，「水在哪」没有明确边界。这条 1.5px 的
+           半透明白线压在蓝面顶边上，就是那条边界。线本体停在杯口（y1 = y2 = TOPY），
+           位置全部交给 translateY(space × (1 − 蓝面level)) —— 和蓝面同一条 .3s 补间，
+           所以它永远贴着水位走，不会自己跳一格。挂在 clip 组**外面**：满格时它就在最上沿，
+           塞进 clip 里会被切掉半条描边，1.5px 变成 0.75px 的灰边。 */
+        var osurf = mk("line", { x1: ocx - OUTW / 2 + 1, x2: ocx + OUTW / 2 - 1,
+                                 y1: TOPY, y2: TOPY, "class": "out-surf",
+                                 "data-level": "0", "data-y": String(TOPY) });
+        layers.box.appendChild(osurf);
         var otxt = mk("text", { x: ocx, y: 24, "text-anchor": "middle", "class": "t-out" });
         otxt.textContent = "成片";
         layers.lbl.appendChild(otxt);
-        geo.out = { cx: ocx, water: owater };
+        /* top/span = 杯子的杯口与杯高：setWater 用它们算水面线的 translateY */
+        geo.out = { cx: ocx, water: owater, enc: oenc, surf: osurf, top: TOPY, span: space };
   /* 编码列 → 成片：与其它列同构（每条 lane 收束到腰点，再一条进杯）。
      成片不是一个 lane 列，所以单独画：n 条入腰 + 1 条腰→杯，都走 arc()。 */
   (function () {
@@ -6845,8 +6865,13 @@ function mgStageEmpty(on) {
          用 encode 与 compose 的差值推「已倒出多少」，不要新造后端字段）。
          快速导出（fused）是边合成边编码，这个差值就只有队列里那几十帧 —— 按真实比例，
          不做「先攒满再倒」的假动画。
+         成片那杯是**两层**（就是用户要的「绿追蓝」）：
+           blue  = cache + out = compose / 总帧   ← 蓝面：已经合成出来的帧
+           green = out         = encode / 总帧    ← 绿面：已经编码成视频的帧（半透明，在蓝面之上）
+         绿面永远 ≤ 蓝面；差值在收尾那一拍可能瞬时为负，setWater 里夹一刀。
+         收工那一拍 compose = encode = 总帧 → 两层都到 1、两块面重合。
          ============================================================ */
-      var waterLv = { cache: 0, out: 0 };
+      var waterLv = { cache: 0, out: 0, blue: 0, green: 0 };
       function wkey(v) { return Math.round(v * 1000) / 1000; }
       function setWater(cache, out) {
         cache = Math.max(0, Math.min(1, Number(cache) || 0));
@@ -6869,14 +6894,38 @@ function mgStageEmpty(on) {
             ln.water.style.transform = "scaleY(" + wkey(k) + ")";
           }
         }
-        if (geo.out && geo.out.water) {
-          geo.out.water.setAttribute("data-level", String(wkey(out)));
-          geo.out.water.style.transform = "scaleY(" + wkey(out) + ")";
+        /* 成片杯的两层水：蓝面 = 已合成（cache + out = compose/总帧）、绿面 = 已编码（out）。
+           以前蓝面直接画 out —— 于是「编码一开始蓝面就突然满」，看不出水在被倒进视频。
+           绿面夹在蓝面以内：encode 追不过 compose（差值瞬时为负时也不倒挂）。 */
+        var blue = Math.max(0, Math.min(1, cache + out));
+        var green = Math.min(blue, Math.max(0, Math.min(1, out)));
+        waterLv.blue = blue;
+        waterLv.green = green;
+        var O = geo.out;
+        if (O && O.water) {
+          O.water.setAttribute("data-level", String(wkey(blue)));
+          O.water.style.transform = "scaleY(" + wkey(blue) + ")";
         }
+        if (O && O.enc) {
+          O.enc.setAttribute("data-level", String(wkey(green)));
+          O.enc.style.transform = "scaleY(" + wkey(green) + ")";
+        }
+        if (O && O.surf) {
+          /* 水面线贴蓝面顶边：y = 杯顶 + 杯高 × (1 − blue)。线本体画在杯口（y1=y2=TOPY），
+             所以位移就是 杯高 × (1 − blue)，和蓝面同一条 .3s 补间 —— 线跟着水走，不自己跳。
+             data-y / data-level 是给验收读的绝对位置（不用再从 computed matrix 里反推）。 */
+          var dy = (Number(O.span) || 0) * (1 - blue);
+          O.surf.setAttribute("data-level", String(wkey(blue)));
+          O.surf.setAttribute("data-y", String(wkey((Number(O.top) || 0) + dy)));
+          O.surf.style.transform = "translateY(" + wkey(dy) + "px)";
+          /* 空杯不画线：level=0 时那条线正好落在杯底内沿，看着像「底下还压着一层水」 */
+          O.surf.style.opacity = blue > 0.004 ? "1" : "0";
+        }
+        /* 标题区那颗小杯跟成片**同一个数**（蓝面 = 已合成）：它的 aria-label 写的是「已完成帧」 */
         var cup = $("mgPipeCupFill");
         if (cup) {
-          cup.setAttribute("data-level", String(wkey(out)));
-          cup.style.transform = "scaleY(" + wkey(out) + ")";
+          cup.setAttribute("data-level", String(wkey(blue)));
+          cup.style.transform = "scaleY(" + wkey(blue) + ")";
         }
       }
 
@@ -7266,7 +7315,10 @@ function mgStageEmpty(on) {
                     stalled: {}, ticks: {}, state: {}, lanes: {},
                     edges: 0, edges_in: 0, edges_out: 0, waists: {},
                     last_flashed: lastFlashed, last_spawn: lastSpawn,
-                    last_bypass: lastBypass, water: { cache: waterLv.cache, out: waterLv.out },
+                    last_bypass: lastBypass,
+                    /* cache/out 是**口径源**（差值 / encode），blue/green 是成片杯真正画出来的两层 */
+                    water: { cache: waterLv.cache, out: waterLv.out,
+                             blue: waterLv.blue, green: waterLv.green },
                     bypass: bypassN, bypass_drawn: !!bypassD,
                     /* 旁路原文 + 两个关键点：验收/排障直接读，不用再从像素里猜。
                        merge = 与主路汇合的腰点；end = 杯左缘（贴着进杯实线走完最后一段）；

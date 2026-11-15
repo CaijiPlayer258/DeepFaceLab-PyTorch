@@ -1105,6 +1105,41 @@ def main(argv=None):
               });
             })()"""))
 
+        def layers_probe():
+            """成片杯的**两层水** + 水面线的 DOM 读数。
+
+            只读画出来的东西：data-level（写进去的口径）和 computed matrix（真正渲染的
+            比例/位移）各读一遍，两条互相当尺子 —— 只看 data-level 的话，「属性写对了但
+            没画出来」也会过。
+            """
+            return json.loads(ev_json(call, r"""(function(){
+              var svg = document.getElementById('mgPipeSvg');
+              var enc = svg.querySelector('rect.encflow');
+              var blue = svg.querySelector('rect.water.out');
+              var surf = svg.querySelector('line.out-surf');
+              var cup = svg.querySelector('rect.outcup');
+              function lv(e) { return e ? parseFloat(e.getAttribute('data-level') || '0') : -1; }
+              function mm(e) {
+                if (!e) return null;
+                var m = /matrix\(([^)]+)\)/.exec(getComputedStyle(e).transform || '');
+                return m ? m[1].split(',').map(parseFloat) : null;
+              }
+              var me = mm(enc), mb = mm(blue), ms = mm(surf);
+              return JSON.stringify({
+                n_enc: svg.querySelectorAll('rect.encflow').length,
+                green: lv(enc), green_sy: me ? me[3] : -1,
+                green_tr: enc ? getComputedStyle(enc).transitionDuration : '',
+                blue: lv(blue), blue_sy: mb ? mb[3] : -1,
+                surf: !!surf, surf_y: ms ? ms[5] : -1,
+                surf_abs: surf ? parseFloat(surf.getAttribute('data-y') || '-1') : -1,
+                surf_sw: surf ? getComputedStyle(surf).strokeWidth : '',
+                surf_stroke: surf ? getComputedStyle(surf).stroke : '',
+                cup_y: cup ? parseFloat(cup.getAttribute('y')) : -1,
+                cup_h: cup ? parseFloat(cup.getAttribute('height')) : -1,
+                w: (window.__mgpPipe && window.__mgpPipe().water) || {}
+              });
+            })()"""))
+
         ev("window.mgpReset(); true")
         ev("window.mgpPipe(%s); true" % json.dumps(water_status(36, 0, nf=nf_live),
                                                  ensure_ascii=False))
@@ -1149,6 +1184,38 @@ def main(argv=None):
               "cache=%s out=%s" % (w3["cache"], w3["water_out"]))
         check(abs(float(w3["cup"]) - 1.0) <= 0.005,
               "C30 标题区那颗小杯跟成片同一档水位（完成后到顶）", str(w3["cup"]))
+
+        # ---- 成片杯的两层：蓝面 = 已合成（compose/总帧）、绿面 = 已编码（encode/总帧）----
+        # 用户口径：绿面画在蓝面**之上**、半透明，永远 ≤ 蓝面；编码阶段绿面从下往上追蓝面
+        # →「水在被倒进视频」。以前蓝面直接画 encode（= out），编码一开始杯子就满了，
+        # 看不出两层 —— 这两条断言钉的是**两个数各自吃哪个 tick**，不是样式。
+        ev("window.mgpPipe(%s); true" % json.dumps(water_status(36, 12, nf=nf_live),
+                                                 ensure_ascii=False))
+        flush_frames(ev, 2)
+        L2 = layers_probe()
+        say("成片两层：蓝 %s（scaleY %s）· 绿 %s（scaleY %s，transition %s）· "
+            "水面线 y=%s（data-y %s · %s / %s）· 杯 y=%s h=%s"
+            % (L2["blue"], L2["blue_sy"], L2["green"], L2["green_sy"], L2["green_tr"],
+               L2["surf_y"], L2["surf_abs"], L2["surf_sw"], L2["surf_stroke"],
+               L2["cup_y"], L2["cup_h"]))
+        want_blue = 36.0 / total_fr
+        want_green = 12.0 / total_fr
+        check(int(L2["n_enc"]) == 1
+              and abs(float(L2["blue"]) - want_blue) <= 0.011
+              and abs(float(L2["green"]) - want_green) <= 0.011
+              and float(L2["green"]) <= float(L2["blue"]) + 1e-6,
+              "C38 成片杯两层：绿面 == 已编码 12/72、蓝面 == 已合成 36/72（不是缓存差值）、绿 ≤ 蓝",
+              "绿 %s / 蓝 %s（期望 %.3f / %.3f）· 绿块 %s 个"
+              % (L2["green"], L2["blue"], want_green, want_blue, L2["n_enc"]))
+        ev("window.mgpPipe(%s); true" % json.dumps(
+            water_status(total_fr, total_fr, running=False, ok=True, nf=nf_live),
+            ensure_ascii=False))
+        flush_frames(ev, 2)
+        L3 = layers_probe()
+        check(abs(float(L3["green"]) - 1.0) <= 0.005
+              and abs(float(L3["blue"]) - 1.0) <= 0.005,
+              "C39 完成态：绿面 = 蓝面 = 1（两块面重合，绿不再追蓝）",
+              "绿 %s / 蓝 %s" % (L3["green"], L3["blue"]))
 
         # ---- 无脸旁路：只有本单真有无脸帧才出现 ----
         def bypass_probe():
