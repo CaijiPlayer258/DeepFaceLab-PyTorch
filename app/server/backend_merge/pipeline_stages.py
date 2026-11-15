@@ -1453,7 +1453,7 @@ def _dfm_session(dfm: str):
                               "NHWC" if not sess.nchw else "NCHW",
                               len(sess.store._buffers),
                               "%dMB" % int(sess.graph.weights_mb),
-                              float(getattr(sess, "warm_ms", {}).get(1, 0.0)),
+                              float(getattr(sess, "one_ms", 0.0)),
                               _v.get("alloc_mb", "?"), _bwhy, _bdtype))
             except Exception as _e:                     # noqa: BLE001
                 # 起不来就明确回落到 onnx —— 但**必须喊出来**，不许静默换后端
