@@ -139,6 +139,45 @@ _FUSED_CV2_DEFAULT = 0
 # 会自己掉到 1~2，同一个产品在两台机器上跑出两种口径。现在钉成常量，要改走环境变量。
 _FUSED_PREP_DEFAULT = max(1, min(16, _env_int("DFL_FUSED_PREP", 4)))
 _FUSED_CMP_DEFAULT = max(1, min(32, _env_int("DFL_FUSED_CMP", 8)))
+# u8 量化的写法（DFL_FUSED_U8，**默认 1**）：
+#   0 = 老口径 np.clip(x * 255.0, 0, 255).astype(np.uint8)，每张脸连着开三个 float32 临时量
+#       （416×416×3 = 2MB 一个），全是刚 mmap 出来的新页 —— 第一次写就缺页，这部分比算术本身贵；
+#   1 = 复用一条 float32 暂存（out= 原位三连）+ astype，只有最后的 uint8 是新的（1/4 体量）。
+# 逐位相同（对拍见 experiments/enc_quant_diag/bench_quant.py：真实帧分布 + k/255 边界 + 越界样本，
+# max=0），因为乘的是同一个 255.0、clip 只截两端、astype 就是 C 的截断。0 留着是为了随时退回老口径对照。
+_FUSED_ENV_U8 = "DFL_FUSED_U8"
+_FUSED_U8_DEFAULT = 1
+# 「clip 恒等」这条路只对 dfm 的 face 输出成立：_dfm_run_batch 出参前已经 np.clip(face, 0, 1)，
+# 再乘 255 的上限正好是 255.0（1.0×255 是精确值），所以那道 clip 一个像素都改不动。遮罩（_mask2d
+# 不 clip）和 XSeg 输出想都别想，照旧 clip。
+
+
+_U8_SCRATCH = {}
+
+
+def _fused_q_u8(x, fast: int, clip: bool = True):
+    """float 0..1 → uint8，**逐位等于** np.clip(x * 255.0, 0, 255).astype(np.uint8)。
+
+    fast=0 就是那句话本身（老口径）。fast=1 只改「临时量从哪来」：复用一条按形状缓存的
+    float32 暂存（out= 原位乘 → 原位 clip），再 astype 出 uint8 —— 算术顺序、dtype、
+    舍入点一个都没动，省掉的是每帧两三个 2~4MB 的新页分配与缺页。
+
+    clip=False 只对 **dfm 的 face 输出** 合法（见 _FUSED_U8_DEFAULT 上方那段）：
+    _dfm_run_batch 已经 clip(0,1)，×255 上限正好 255.0 —— 恒等。别的地方传 False 就是改像素。
+
+    只给 GPU 那一个线程用（_gpu()），所以缓存不用加锁；返回的 uint8 是**新数组**，
+    不共享缓冲（这些数组要跟着 face 一路活到合成，共享会被下一张脸覆盖）。
+    """
+    if not fast or x.dtype != np.float32:
+        return np.clip(x * 255.0, 0, 255).astype(np.uint8)
+    buf = _U8_SCRATCH.get(x.shape)
+    if buf is None:
+        buf = np.empty(x.shape, np.float32)
+        _U8_SCRATCH[x.shape] = buf
+    np.multiply(x, 255.0, out=buf)
+    if clip:
+        np.clip(buf, 0.0, 255.0, out=buf)
+    return buf.astype(np.uint8)
 
 
 def _fused_det_plan(det_name, w, h, over=None) -> dict:
@@ -734,6 +773,9 @@ def _fused_run(cfg: dict) -> dict:
     # 但**整条线**上两者一样（18.62 vs 18.18，都在噪声里，见报告的表），所以默认回到
     # 「不设」（= OpenCV 自己的默认），谁也不改谁的池。
     cv2_threads = _fused_cv2_threads(cfg)
+    # u8 量化的写法（DFL_FUSED_U8，默认 1 = 复用暂存；0 = 老口径，见 _FUSED_U8_DEFAULT）
+    _u8_fast = 1 if str(os.environ.get(_FUSED_ENV_U8) or str(_FUSED_U8_DEFAULT)).strip() \
+        not in ("0", "off", "false", "no") else 0
 
     cache_dir = Path(str(video.parent / (video.stem + "_cache")))
     cache_pre = cache_dir.is_dir()
@@ -874,6 +916,9 @@ def _fused_run(cfg: dict) -> dict:
     _vid_log("快速导出：合成后端回显 compose_backend=%s · 线程 %d%s"
              % (cfg["_compose_backend"], cfg["_compose_threads"],
                 ("（%s）" % cfg["_compose_why"]) if cfg["_compose_why"] else ""))
+    _vid_log("快速导出：u8 量化 %s（%s）"
+             % ("复用 float 暂存 + astype" if _u8_fast else "老口径 np.clip(x*255).astype",
+                "%s=%d" % (_FUSED_ENV_U8, _u8_fast)))
     _vid_log("快速导出：临时帧目录 %s（成功/取消都删；<视频>_cache/ 一个都不建）" % frames_dir)
 
     END = object()
@@ -1381,13 +1426,17 @@ def _fused_run(cfg: dict) -> dict:
                     bstat["max"] = max(bstat["max"], len(faces))
                     key = str(len(faces))
                     bstat["hist"][key] = int(bstat["hist"].get(key) or 0) + 1
+                    # 量化单独记一笔（以前它摊在 dfm 与 xseg 之间的空档里，谁都不知道它多贵）：
+                    # pred 的 clip 是恒等的（_dfm_run_batch 已 clip(0,1)），prd/dst 的遮罩不 clip 会改像素。
+                    t_u8 = time.perf_counter()
                     for k, f in enumerate(faces):
                         prd, dst = outs[k][1], outs[k][2]
-                        f["pred_u8"] = np.clip(outs[k][0] * 255.0, 0, 255).astype(np.uint8)
+                        f["pred_u8"] = _fused_q_u8(outs[k][0], _u8_fast, clip=False)
                         f["prd_u8"] = (None if prd is None
-                                       else np.clip(prd * 255.0, 0, 255).astype(np.uint8))
+                                       else _fused_q_u8(prd, _u8_fast))
                         f["dstdfm_u8"] = (None if dst is None
-                                          else np.clip(dst * 255.0, 0, 255).astype(np.uint8))
+                                          else _fused_q_u8(dst, _u8_fast))
+                    ticks.add("u8", time.perf_counter() - t_u8)
                     t = time.perf_counter()
                     if need_xseg:
                         # 和 ④ 遮罩阶段同一个口径：一张脸一次 mask_batch([pred, dst])
@@ -1399,12 +1448,15 @@ def _fused_run(cfg: dict) -> dict:
                                 masks = xseg.mask_batch(imgs, out_size=256) or []
                             except Exception as e:             # noqa: BLE001
                                 raise _BadInput("遮罩推理失败：%s" % (str(e)[:160]), 500)
+                            t_um = time.perf_counter()
                             f["xseg_prd_u8"] = (
-                                np.clip(masks[0] * 255.0, 0, 255).astype(np.uint8)
+                                _fused_q_u8(masks[0], _u8_fast)
                                 if len(masks) > 0 and masks[0] is not None else None)
                             f["xseg_dst_u8"] = (
-                                np.clip(masks[1] * 255.0, 0, 255).astype(np.uint8)
+                                _fused_q_u8(masks[1], _u8_fast)
                                 if len(masks) > 1 and masks[1] is not None else None)
+                            ticks.add("u8_mask", time.perf_counter() - t_um)  # ⊂ xseg 那一笔
+
                     ticks.add("xseg", time.perf_counter() - t)
                     for job, _f in chunk:
                         rec = pend_frames.get(id(job))

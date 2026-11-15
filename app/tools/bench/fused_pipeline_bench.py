@@ -460,11 +460,12 @@ class FusedEngine:
         self.FaceType = None
         self.get_transform_mat = None
         self.ticks = Ticks()
-        # 逐位对拍走两条独立证据，不在这里做：
-        #   ① dfm_out_bench.py --ab  → 同一份 device 输出，两种搬法各搬一次，max|diff| 必须 0；
-        #   ② 两种实现各跑一遍 150 帧，比较 C_out 的 PNG（逐帧逐像素）。
-        # （曾经想在这里给每次前向的出参加 sha1，但**分批本身会变**（队列时序决定攒几张），
-        #   跨进程的 sha 序列对不齐，证据是假的 —— 所以删掉，别留一个会骗人的开关。）
+        # 逐位对拍**不要**在这里做，走两条独立证据（口径见 app/docs/28-PIXEL-PARITY.md）：
+        #   ① dfm_out_bench.py --ab → 同一份 device 输出，两种搬法各搬一次，max|diff| 必须 0；
+        #   ② 确定性模式（--modes B 串行）跑端到端，两遍逐字节相同。
+        # 为什么不能用 mode C 的 C_out 比：攒批组成随队列时序变（实测 3.33 vs 3.57 张/次），
+        # bf16 卷积的归约顺序跟着变 —— **同一个实现跑两遍** 150 帧里也只有 62 帧逐字节相同
+        # （最差 35 LSB）。那种对拍测的是机器状态，不是被测的东西。
 
     # ---- 一次加载（不进测量窗口）----
     def load(self):

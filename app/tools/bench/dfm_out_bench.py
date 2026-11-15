@@ -14,7 +14,7 @@ r"""dfm 出参路径（D2H + 流同步）的拆解 —— 只量这一件事，�
     ... --batch 8 --reps 30 --dtype bf16w --source real
     ... --json out.json
 
-口径：
+口径（像素为什么只能这样比，见 app/docs/28-PIXEL-PARITY.md）：
   · 「隔离态」= 先 torch.cuda.synchronize() 再做那一步：量的是这一步自己的钱；
   · 「真实态」= forward 刚入队就做出参：量的是生产里 t_out 真正等的那段（含前向尾巴）；
   · 两列都报，因为优化只该砍「隔离态」里属于多余开销的部分。

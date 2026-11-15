@@ -30,6 +30,7 @@ import json
 import os
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 import threading
@@ -57,8 +58,13 @@ DFM = "阿証証証証-416"
 # 0.5 会随机红。反过来，把 dfm 切回引擎（DFL_DFM_TRT=1）时这里恒为 **0.0000 / max 0**：
 # 那是 TRT 定档 tactics 带来的「确定性」巧合，不是 onnxruntime 也能做到的精度。
 # 1.0 LSB 仍远低于任何真实错位（换错画布/矩阵那档是 10+ LSB），保留判别力。
+# ★ 同一份代码跑两遍（攒批时序不同）本身就能差到 35 LSB / 62 of 150 帧 —— 所以这条
+#   TOL_MEAN 只能当「统计口径」用，逐位对拍要换确定性模式（app/docs/28-PIXEL-PARITY.md）。
 TOL_MEAN = 1.0
 TOL_DUR = 0.12          # 时长误差（秒）
+# 「换检测档」那条断言的采样轮数：每轮一条完整导出（每轮 8~12s，所以这里是 +40s 的账）。
+# 为什么要 3：整轮之间的抖动（GPU 时钟/热/后台进程）能到 ±10%~70%，单次采样不可比。
+DET_ROUNDS = 3
 SETTINGS = {"mask_mode": 8, "color_transfer": "mt", "blend": "seamless",
             "mask_erode": 0, "mask_blur": 4}
 
@@ -342,6 +348,50 @@ def pick(log, tag):
     return [ln for ln in (log or "").splitlines() if tag in ln]
 
 
+def det_rounds(clip, quality, tag, out_path, rounds=DET_ROUNDS):
+    """同一个检测档真跑 rounds 次，返回 (detect ms 列表, 检测器名列表, fps 列表)。
+
+    quality=None 表示不带这个键（走后端默认档 = retinaface_10g）。
+    每轮都换一个输出文件、并清掉旧的：同一个 out 被复用时 <成片>.log 会被覆盖，
+    而「检测器是谁」正是从那份日志里抠的 —— 不清理就会把上一轮的字读到这一轮头上。
+    """
+    dets, keys, fpss = [], [], []
+    for i in range(rounds):
+        try:
+            if out_path.exists():
+                out_path.unlink()
+        except OSError:
+            pass
+        body = {"video": str(clip), "model": DFM, "settings": dict(SETTINGS),
+                "output_dir": str(out_path)}
+        if quality:
+            body["quality"] = quality
+        start_export(body, "%s#%d" % (tag, i + 1))
+        fin = wait_export(1800.0)
+        v = fin.get("vid") or {}
+        d = float((v.get("per_stage_ms") or {}).get("detect") or 0.0)
+        f = float((v.get("stats") or {}).get("fps") or 0.0)
+        k = det_key_of_log(log_of(out_path))
+        dets.append(d)
+        keys.append(k)
+        fpss.append(f)
+        say("%s 第 %d/%d 轮：detect %.1f ms/帧 · %.2f 帧/秒 · 检测器 %s"
+            % (tag, i + 1, rounds, d, f, k or "?"))
+    return dets, keys, fpss
+
+
+def det_key_of_log(log):
+    """从 <成片>.log 里抠「快速导出：检测器 tinymog（…）」那一行 → 规范名。
+
+    ★ 为什么断言要咬这一行而不是只比速度：这条用例的因果是「档位换了 → 换了模型」，
+    速度只是它的一个结果。EP 退化到 CPU、或 quality 参数没接到 det_align 上，
+    detect 也可能刚好变快 —— 那只证明「有个东西更快」，不证明「换对了模型」。
+    日志行由 pipeline_fused._fused_run 在建流水线之前写死（用户看得到的同一份证据）。
+    """
+    m = re.search(r"检测器\s+([A-Za-z0-9_.]+)\s*（", log or "")
+    return m.group(1) if m else ""
+
+
 def make_clip(src, dst, ss, dur, expect_frames=None):
     run_ff(["-ss", str(ss), "-t", str(dur), "-i", src, "-c:v", "libx264", "-crf", "18",
             "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", dst],
@@ -450,27 +500,61 @@ def case_a(clip, src_info):
     #   而且它是拿两个单次采样比 10% 的差，本身就是噪声。
     #   现在判的是**因果**那一半：换了 fast 档之后 detect 每帧真的更短（这才是这个开关做的事），
     #   帧/秒只作为信息打印。哪一段是墙由 per_stage_ms / util 那两行回答，不靠这条断言。
-    out2 = OUT / "a_fused_fast.mp4"
-    if out2.exists():
-        out2.unlink()
+    #
+    # ★ 判据 2026-11 第二版（这一版是修 flaky，别改回去）：上一版是
+    #   「det2 < det1 * 0.8」，实测 24.2 → 19.9 = **−17.7%**，差 2.3 个点判红 ——
+    #   不是快档没生效，是**阈值卡在噪声边上**。噪声不在采样上（per_stage_ms.detect 已经是
+    #   整段 139 帧的均值，帧间误差 <1%），而在**整轮之间**：GPU 时钟/热状态、后台进程、
+    #   同机并跑的别的东西。今天同一套代码量到的绝对值：
+    #     默认档 24.2 / 35.5 / 35.7 / 37.5 / 38.0 / 38.1 / 38.6 / 38.8 ms
+    #     fast  档  7.2 / 7.6 /  8.0 / 19.2 / 20.6 / 22.1 / 22.4 / 22.7 / 23.0 / 24.0 / 24.1 ms
+    #   同一档位跨运行能差 3.3×（fast 那 7.6 vs 24.1）—— 拿两个单次采样的**比值**去卡
+    #   20% 本来就站不住（fp32 的 dfm 前向在 16.4~25.7ms 之间摆是同一个成因，
+    #   见 DFM_TORCH_BF16_REPORT.md）。注意两档是在**同一轮里**量的，所以比值本身可信；
+    #   不可信的是「每次只用一发」。
+    #   所以这一版做三件事，缺一不可：
+    #     ① **两档各跑 DET_ROUNDS 轮、取中位** —— 消掉整轮漂移。只给 fast 取中位是不够的：
+    #        比值里另一半噪声来自 det1，它也必须是个中位；
+    #     ② 阈值 15%（0.85）而不是 20%：中位之后 10% 的余量仍然偏紧，15% 给真实生效留
+    #        2 个点的容错，同时离「完全没生效（≈1.0）」还很远，判别力没丢；
+    #        为什么不是 20%：20% 会把「真实生效但这一轮慢 2 个点」判成红（今天就是）。
+    #     ③ **还断言模型真的换了**（<成片>.log 里的「检测器 tinymog / retinaface_10g」）——
+    #        光比速度测不到东西：EP 退化到 CPU、或档位没接上，detect 照样可能是 0.6 倍。
+    #        顺序也不能反：先证换的是模型，再谈快慢。
+    det_h, key_h, fps_h = [], [], []
+    det_f, key_f, fps_f = [], [], []
+    fps2 = 0.0
     try:
-        start_export({"video": str(clip), "model": DFM, "settings": dict(SETTINGS),
-                      "output_dir": str(out2), "quality": "fast"}, "A-fast")
-        fin2 = wait_export(1800.0)
-        v2 = (fin2.get("vid") or {}).get("stats") or {}
-        fps2 = float(v2.get("fps") or 0.0)
-        say("同一段片 · quality=fast（tinymog）：%.2f 帧/秒 · 每帧 %s"
-            % (fps2, json.dumps((fin2.get("vid") or {}).get("per_stage_ms") or {},
-                                ensure_ascii=False)))
-        # per_stage_ms 在 vid 上（不在 stats 里）：detect 那一格的单位是 ms/帧
-        det1 = float((vf.get("per_stage_ms") or {}).get("detect") or 0.0)
-        det2 = float(((fin2.get("vid") or {}).get("per_stage_ms") or {}).get("detect") or 0.0)
-        check(det2 > 0.0 and det1 > 0.0 and det2 < det1 * 0.8,
-              "a 换快档检测器后 detect 每帧明显更短（这个开关唯一保证的事）",
-              "detect %.1f → %.1f ms/帧 · 帧/秒 %.2f → %.2f（哪段是墙看 per_stage_ms）"
-              % (det1, det2, fps, fps2))
+        # 默认档第 1 轮直接复用 case a 已经跑完的那一单，不再多烧一次导出
+        det_h.append(float((vf.get("per_stage_ms") or {}).get("detect") or 0.0))
+        key_h.append(det_key_of_log(log_of(out)))
+        fps_h.append(float(fps or 0.0))
+        say("默认档 第 1/%d 轮（复用 case a）：detect %.1f ms/帧 · %.2f 帧/秒 · 检测器 %s"
+            % (DET_ROUNDS, det_h[0], fps_h[0], key_h[0] or "?"))
+        d, k, f = det_rounds(clip, None, "默认档", OUT / "a_det_high.mp4", DET_ROUNDS - 1)
+        det_h += d
+        key_h += k
+        fps_h += f
+        det_f, key_f, fps_f = det_rounds(clip, "fast", "fast",
+                                         OUT / "a_fused_fast.mp4", DET_ROUNDS)
+        det1 = statistics.median(det_h)
+        det2 = statistics.median(det_f)
+        fps2 = statistics.median(fps_f)
+        check(det1 > 0.0 and det2 > 0.0, "a 两档的 detect 都量到了（%d 轮中位）" % DET_ROUNDS,
+              "%.1f vs %.1f ms/帧" % (det1, det2))
+        check(key_h and all(x == "retinaface_10g" for x in key_h),
+              "a 默认档真的用 retinaface_10g（日志为证）", str(key_h))
+        check(key_f and all(x == "tinymog" for x in key_f),
+              "a 快档真的换成 tinymog（日志为证）", str(key_f))
+        check(det2 < det1 * 0.85,
+              "a 换快档后 detect 每帧至少短 15%%（两档各 %d 轮中位）" % DET_ROUNDS,
+              "det1 %.1f → det2 %.1f（%+.1f%%）· 默认档原始 %s · fast 原始 %s · "
+              "帧/秒 %.2f → %.2f"
+              % (det1, det2, 100.0 * (det2 / det1 - 1.0) if det1 else 0.0,
+                 [round(x, 1) for x in det_h], [round(x, 1) for x in det_f],
+                 statistics.median(fps_h), fps2))
     except Exception as e:                                    # noqa: BLE001
-        check(False, "a 快档数据点跑挂了", str(e)[:160])
+        check(False, "a 检测档数据点跑挂了", str(e)[:160])
         fps2 = 0.0
     return {"out": out, "info": info, "fps": fps, "stats": stats, "vid": vf,
             "frame_budget": vf.get("frame_budget"), "fps_fast": fps2}
