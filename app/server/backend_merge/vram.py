@@ -2116,6 +2116,128 @@ def _vram_oom_rollback(label: str = "任务", model_mb: float = 0.0, opts: dict 
 _PRED_VRAM_SAFETY = 0.20      # 留 20% 余量：探测量打八折才是敢用的预算
 
 
+# ============================================================
+# 批目标的滞回（hysteresis）：同一份素材、同一张卡，两次启动不该给出两种调度
+# ------------------------------------------------------------
+# 为什么需要它（实测，见 app/tools/bench/pred_pick_jitter.py）：
+#   台阶是**实测**的，可这个量测本身不可重复。同一台机、同一份 416 dfm，
+#       冷进程（刚启动，只有 dfm 会话）：B1=35.1ms/张、B8=37.9ms/张 → 按 5% 带选 1
+#       热进程（跑过几单，arena 长开）：B1=38.1ms/张、B8=39.0ms/张 → 按 5% 带选 8
+#   两次量测的「B8 比 B1 慢多少」在 0.91~1.08 之间摆（跨进程），而旧规则的分界线
+#   正好是 1.05 —— 于是**谁先跑**决定了批目标：同一个模型，重启一次就从 8 变 1。
+#   这不是「上限选错了」，是「同一输入两次给出不同输出」：调度不该有记忆以外的随机。
+#
+# 做法（三条，全部落在量测**之后**；上面挑台阶的公式一行没动）：
+#   ① 记住上次的决定：按 (dfm, 输入尺寸, 单次上限) 存到 workspace/_pred_batch_pick.json
+#      —— 必须落盘：抖动本来发生在**两次启动之间**，只放进程内存等于没修；
+#   ② 死区（±_PRED_HYST_BAND）：这次的「每张耗时」和上次差在死区以内 → 量测分辨不出
+#      谁快，沿用上次。死区取 10% 不是拍的：跨进程实测的比值 spread 是 0.91~1.08
+#      （±10%），比它更窄的带必然会在冷/热两种状态之间来回翻；
+#   ③ 真变化才切：小档明显更快（> 死区）→ **立刻**降档（OOM/拥挤方向不能拖）；
+#      大档明显更快 → 还要连续 _PRED_HYST_UP_N 次都这样才升档（升档多占显存，最贵）。
+#
+# 关掉：DFL_PRED_BATCH_HYST=0 → 连缓存都不读不写，逐字节回到旧行为。
+# ============================================================
+_PRED_HYST_ENV = "DFL_PRED_BATCH_HYST"     # 1（默认）= 滞回；0 = 旧行为
+_PRED_HYST_BAND = 0.10                     # 死区：差这么点算「量测分辨不出」
+_PRED_HYST_UP_N = 3                        # 升档要连续确认几次（降档不等）
+_PRED_HYST_CACHE = "_pred_batch_pick.json"
+_PRED_PICK_LOCK = threading.Lock()
+_PRED_PICK_MEM = None                      # None = 还没读过盘
+
+
+def _pred_hyst_on() -> bool:
+    """DFL_PRED_BATCH_HYST（默认 1）。=0 → 完全旧行为（不读盘、不写盘、不沿用）。"""
+    v = str(os.environ.get(_PRED_HYST_ENV, "1") or "1").strip().lower()
+    return v not in ("0", "false", "off", "no")
+
+
+def _pred_pick_file() -> Path:
+    return Path(WORKSPACE) / _PRED_HYST_CACHE
+
+
+def _pred_pick_state() -> dict:
+    """进程内一份 + 盘上一份（跨启动）。读失败就当没有 —— 滞回坏了不该拖垮导出。"""
+    global _PRED_PICK_MEM
+    with _PRED_PICK_LOCK:
+        if _PRED_PICK_MEM is not None:
+            return _PRED_PICK_MEM
+        data = {}
+        try:
+            p = _pred_pick_file()
+            if p.is_file():
+                d = json.loads(p.read_text("utf-8", "ignore") or "{}")
+                if isinstance(d, dict):
+                    data = {str(k): dict(v) for k, v in d.items() if isinstance(v, dict)}
+        except Exception:                                   # noqa: BLE001
+            data = {}
+        _PRED_PICK_MEM = data
+        return _PRED_PICK_MEM
+
+
+def _pred_pick_put(key: str, row: dict):
+    st = _pred_pick_state()
+    with _PRED_PICK_LOCK:
+        st[str(key)] = dict(row)
+        snap = {k: dict(v) for k, v in st.items()}
+    try:
+        _pred_pick_file().write_text(json.dumps(snap, ensure_ascii=False, indent=1), "utf-8")
+    except Exception:                                       # noqa: BLE001
+        pass
+
+
+def _pred_pick_key(cfg: dict, ent) -> str:
+    """(dfm, 输入尺寸, 单次上限)：换了模型/换了形状就不该沿用上一次的数。"""
+    try:
+        dfm = str(cfg.get("dfm") or cfg.get("model") or "")
+        name = Path(dfm).name if dfm else "?"
+        size = int(ent[2] or 0) if len(ent) > 2 else 0
+        cap = int(ent[5] or 1) if len(ent) > 5 else 1
+        return "%s|%d|%d" % (name, size, cap)
+    except Exception:                                       # noqa: BLE001
+        return "?"
+
+
+def _pred_pick_hyst(key: str, rows: list, want: dict) -> tuple:
+    """拿上次的决定去否决这次量测：返回 (要用的那一行, 滞回说明)。
+
+    只在 hyst 打开时被调用。want 是旧公式（5% 带里最大的档）的结论。
+    """
+    by = {int(r["batch"]): r for r in rows}
+    st = _pred_pick_state()
+    cur_row = st.get(str(key)) or {}
+    cur = int(cur_row.get("batch") or 0)
+    want_b = int(want["batch"])
+    note = {"on": True, "cur": cur or None, "want": want_b, "band": _PRED_HYST_BAND}
+    if not cur or cur not in by:
+        note["action"] = "init" if not cur else "reladder"
+        return want, note
+    if cur == want_b:
+        note["action"] = "same"
+        return want, note
+    cur_per = float(by[cur]["per_face_ms"] or 0.0)
+    want_per = float(want["per_face_ms"] or 0.0)
+    gain = ((cur_per - want_per) / cur_per) if cur_per > 0 else 0.0   # >0 = want 更快
+    note["gain_pct"] = round(100.0 * gain, 1)
+    if abs(gain) < _PRED_HYST_BAND:
+        # 死区：这次的量测分辨不出谁快 —— 沿用上次（这就是「同一素材跑两次差 20%」的根治点）
+        note["action"] = "band-keep"
+        return by[cur], note
+    if want_b < cur:
+        # 降档方向：小档明显更快（拥挤 / arena 撑爆 / 别的进程抢卡）→ 立刻切，不拖
+        note["action"] = "down-switch"
+        return want, note
+    # 升档方向：连续 N 次都明显更快才升（多占显存，最贵的一步）
+    same_challenger = int(cur_row.get("challenger") or 0) == want_b
+    streak = (int(cur_row.get("streak") or 0) + 1) if same_challenger else 1
+    note["streak"] = streak
+    if streak >= _PRED_HYST_UP_N:
+        note["action"] = "up-switch"
+        return want, note
+    note["action"] = "up-wait"
+    return by[cur], note
+
+
 def _pred_pick_batch(cfg: dict, ent) -> tuple:
     """挑 batch：请求里写了就照用，没写就**把阶梯真跑一遍再决定**（不写死、也不猜）。
 
@@ -2132,7 +2254,12 @@ def _pred_pick_batch(cfg: dict, ent) -> tuple:
          + 下一档塞得进 80% 预算」三条同时成立时，才继续试 16 / 32。
          本机上 8 只比 1 快 1.3×，而 16 会把 8GB 顶到 7806/8151 MB 且并不更快，
          还会让 ORT 的 arena 撑爆、之后整个进程掉到 15 张/秒 —— 所以老实停在 8；
-      4. 每一步都按实测单张开销核对 80% 显存预算，不够就停。
+      4. 每一步都按实测单张开销核对 80% 显存预算，不够就停；
+      5. **滞回**：拿上次的决定去否决这次量测（死区 10%，真变化才切；见
+         _pred_pick_hyst）。为什么第 2 步必须配这一道：同机同模型的「B8 比 B1 慢
+         多少」在冷/热进程之间是 0.91~1.08，而分界线是 1.05 —— 不滞回的话，
+         **重启一次就可能从 8 变 1**。落盘在 workspace/_pred_batch_pick.json，
+         因为它要跨启动生效；DFL_PRED_BATCH_HYST=0 完全回旧行为。
     运行中还有两道保险：OOM → 8→4→2→1 退档；比历史最好慢 60% → 主动退半（见 _flush）。
 
     返回 (batch, {"source","ladder","free_mb","total_mb","per_item_mb","best_per_face_ms"})
@@ -2217,15 +2344,42 @@ def _pred_pick_batch(cfg: dict, ent) -> tuple:
                    "free_mb": free0, "total_mb": total0,
                    "per_item_mb": None, "best_per_face_ms": None}
     ok = [r for r in rows if r["per_face_ms"] <= best_per * 1.05]
-    pick = max(ok or rows[:1], key=lambda r: r["batch"])
+    want = max(ok or rows[:1], key=lambda r: r["batch"])
+    # ---- 滞回：拿「上次的决定」去否决这一次的量测（公式没改，只是多一道门）----
+    pick = want
+    hyst = {"on": False}
+    if _pred_hyst_on():
+        try:
+            _key = _pred_pick_key(cfg, ent)
+            pick, hyst = _pred_pick_hyst(_key, rows, want)
+            _pred_pick_put(_key, {
+                "batch": int(pick["batch"]),
+                "per_face_ms": round(float(pick["per_face_ms"]), 2),
+                "challenger": (int(want["batch"])
+                               if int(want["batch"]) != int(pick["batch"]) else 0),
+                "streak": int(hyst.get("streak") or 0),
+                "ladder": [int(r["batch"]) for r in rows],
+                "at": round(time.time(), 1),
+            })
+        except Exception as e:                              # noqa: BLE001
+            # 滞回是锦上添花：它自己出问题就退回「这次实测说了算」，绝不拖垮导出
+            _stage_log("换脸：批目标滞回没生效（%s）→ 用本次实测" % str(e)[:120])
+            pick, hyst = want, {"on": False, "err": str(e)[:120]}
     meta = {"source": "auto", "batch": int(pick["batch"]), "ladder": rows,
             "free_mb": free0, "total_mb": total0,
             "per_item_mb": pick.get("per_item_mb"),
             "best_per_face_ms": round(min(r["per_face_ms"] for r in rows), 2),
-            "safety": _PRED_VRAM_SAFETY}
-    _stage_log("换脸：batch 阶梯 %s → 选 %d"
+            "safety": _PRED_VRAM_SAFETY,
+            "want_batch": int(want["batch"]), "hyst": hyst}
+    _stage_log("换脸：batch 阶梯 %s → 选 %d%s"
                % (" / ".join("B%d=%.1fms(%.2fms/张)" % (r["batch"], r["ms"], r["per_face_ms"])
-                             for r in rows), int(pick["batch"])))
+                             for r in rows), int(pick["batch"]),
+                  ("（本次实测倾向 %d，滞回 %s%s）"
+                   % (int(want["batch"]), hyst.get("action"),
+                      "" if hyst.get("gain_pct") is None
+                      else "，差 %.1f%% / 死区 %.0f%%" % (hyst["gain_pct"],
+                                                      100.0 * _PRED_HYST_BAND)))
+                  if hyst.get("on") and int(want["batch"]) != int(pick["batch"]) else ""))
     return int(pick["batch"]), meta
 
 
