@@ -13,6 +13,7 @@ from pathlib import Path
 from .._common.http import (
     _BadInput,
 )
+from .._common import encoder_sel as _esel
 
 
 # MergeStudio 的 -c:v 只认这些（其余名字 ffmpeg 会直接报 Unknown encoder）
@@ -68,8 +69,30 @@ def _vid_probe(video: Path) -> dict:
 
 
 
+def _vid_enc_args(wh, video: Path) -> list:
+    """-c:v 那一段（真正的口径在 _common/encoder_sel.py，这里只管"判 4K 要的宽高从哪来"）。
+
+    wh 没给 → 现探一次源视频（_vid_probe 自带重试；探不出来就按"不是 4K"走 x264，
+    不能因为探不到尺寸就把一单导出判死 —— 那是 auto 的本分，不是错误）。
+    """
+    w = h = 0
+    if wh:
+        try:
+            w, h = int(wh[0] or 0), int(wh[1] or 0)
+        except (TypeError, ValueError, IndexError):
+            w = h = 0
+    if (not w or not h) and _esel.mode() == "auto":
+        try:
+            info = _vid_probe(Path(video))
+            w, h = int(info.get("w") or 0), int(info.get("h") or 0)
+        except Exception:                                     # noqa: BLE001
+            w = h = 0
+    return _esel.encoder_args(w or None, h or None)
+
+
 def _vid_cmd(pattern: str, dest: Path, video: Path, fps: float, img_start: int = 1,
-             audio_ss: float = None, audio_t: float = None, limit: int = None) -> list:
+             audio_ss: float = None, audio_t: float = None, limit: int = None,
+             wh: tuple = None) -> list:
     """一帧不差地构造导出用的 ffmpeg 命令（分段链和快速导出**共用这一份**）。
 
     ```
@@ -86,6 +109,13 @@ def _vid_cmd(pattern: str, dest: Path, video: Path, fps: float, img_start: int =
       · 音轨 -c:a copy：不重编码、**不带 -shortest**（带上去会按视频/音轨较短的一边截断，
         帧范围的片子就少一截音）；
       · 奇数宽高先 pad 一像素，否则 x264 直接拒。
+
+    **-c:v 那一段不在这里写死**（见 _common/encoder_sel.py）：默认仍是 libx264 crf16，
+    逐字节不变；DFL_FUSED_ENCODER=nvenc-h264|nvenc-hevc 才换成 NVENC。raw 管道那条出口
+    （pipeline_fused._fused_pipe_cmd）调的是**同一个** encoder_sel.encoder_args() —— 两条路
+    的编码器必须一起换，否则「两条路成片 md5 相同」这条不变量就破了。
+    wh：这一单的显示宽高（只有 auto 判"是不是 4K"要用）。给不起就现探一次源视频；
+    探不出来 → auto 走 x264（判不出 4K 就不替用户换编码器，见 encoder_sel.effective_mode）。
     """
     pre_img = ["-start_number", str(int(img_start))]
     pre_aud = []
@@ -98,8 +128,9 @@ def _vid_cmd(pattern: str, dest: Path, video: Path, fps: float, img_start: int =
            "-nostats", "-nostdin", "-framerate", "%.6g" % fps] + pre_img + \
           ["-i", str(pattern)] + pre_aud + ["-i", str(video),
            "-map", "0:v:0", "-map", "1:a?",
-           "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2,scale=out_range=tv",
-           "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p",
+           "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2,scale=out_range=tv"] + \
+          _vid_enc_args(wh, video) + \
+          ["-pix_fmt", "yuv420p",
            "-c:a", "copy"] + lim
     if Path(dest).suffix.lower() in (".mp4", ".mov", ".m4v"):
         cmd += ["-movflags", "+faststart"]

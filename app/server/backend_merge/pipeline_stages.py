@@ -28,6 +28,7 @@ from .._common.env import (
 from .._common.http import (
     _BadInput, _as_dict, _bool_val, _float_val, _int_val,
 )
+from .._common import encoder_sel as _esel
 from .._common.proc import (
     _kill_proc_tree,
 )
@@ -3197,6 +3198,16 @@ def _stage_do_encode(cfg: dict) -> dict:
                         % (int(rng["start"]), int(rng["end"])), 409)
 
     fps = float(cfg.get("fps") or (meta.get("source") or {}).get("fps") or 30.0)
+    # 编码器：默认还是 libx264 crf16（逐字节不变），DFL_FUSED_ENCODER=nvenc-* 才换。
+    # 宽高只给 auto 判「是不是 4K」用（见 _common/encoder_sel）。
+    _src = meta.get("source") or {}
+    _wh = (int(_src.get("width") or 0), int(_src.get("height") or 0))
+    _enc_patch = _esel.warn_patch(_wh[0], _wh[1])
+    if _enc_patch:                                  # 4K + x264：只喊一次，不换编码器
+        _stage_log("[eff-warn] " + str(_enc_patch.get("text") or ""))
+        _STAGE_JOB["eff_warnings"] = list(_STAGE_JOB.get("eff_warnings") or []) + [_enc_patch]
+        _STAGE_JOB["warnings"] = list(_STAGE_JOB.get("warnings") or []) + \
+            [str(_enc_patch.get("text") or "")]
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -3214,7 +3225,8 @@ def _stage_do_encode(cfg: dict) -> dict:
                    img_start=(1 if rng["full"] else int(start_no)),
                    audio_ss=(None if rng["full"] else t0_audio),
                    audio_t=(None if rng["full"] else dur),
-                   limit=(None if rng["full"] else int(total)))
+                   limit=(None if rng["full"] else int(total)),
+                   wh=_wh)
 
     _stage_log("导出：第 %d..%d 帧（%d 帧 @ %.6g fps · 时长 %.4f s）-> %s"
                % (int(start_no), int(start_no) + total - 1, total, fps, dur, out.name))

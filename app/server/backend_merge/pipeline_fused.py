@@ -25,6 +25,7 @@ from .._common.env import (
 from .._common.http import (
     _BadInput, _as_dict, _bool_val, _float_val, _int_val,
 )
+from .._common import encoder_sel as _esel
 from .._common.proc import (
     _kill_proc_tree, _proc_mem_mb,
 )
@@ -336,6 +337,32 @@ class _FusedSkipBad:
             self.closing = True
 
 
+def _warn_encoder_4k(probe) -> str:
+    """4K + auto(=x264) 时喊一次：`[eff-warn]` + `status.eff_warnings[]`（同合成后端那条）。
+
+    为什么只喊不切：换编码器 = 换 md5 / 换体积 / 换兼容面（见 _common/encoder_sel 纪律 2）。
+    文案自带实测（59 ms/帧、吃满 15/16 核、切过去约 3 倍），用户看得懂也能自己决定。
+    一单导出只一条：重复调用按文本去重，不按帧刷。
+    """
+    w = int((probe or {}).get("w") or 0)
+    h = int((probe or {}).get("h") or 0)
+    patch = _esel.warn_patch(w, h)
+    if not patch:
+        return ""
+    text = str(patch.get("text") or "")
+    _knobs.warn_line(text)
+    _vid_log("[eff-warn] " + text)
+    with _merge_job_lock:
+        if text not in [str(x) for x in (_merge_job.get("warnings") or [])]:
+            _merge_job["eff_warnings"] = list(_merge_job.get("eff_warnings") or []) + [patch]
+            _merge_job["warnings"] = list(_merge_job.get("warnings") or []) + [text]
+    with _STAGE_LOCK:
+        if text not in [str(x) for x in (_STAGE_JOB.get("warnings") or [])]:
+            _STAGE_JOB["eff_warnings"] = list(_STAGE_JOB.get("eff_warnings") or []) + [patch]
+            _STAGE_JOB["warnings"] = list(_STAGE_JOB.get("warnings") or []) + [text]
+    return text
+
+
 def _fused_pipe_cmd(part, video, fps, w, h, audio_ss=None, audio_t=None, limit=None) -> list:
     """rawvideo 版 _vid_cmd：同一个滤镜、同一个编码器、同一段音轨，只是帧从 pipe:0 来。
 
@@ -349,6 +376,11 @@ def _fused_pipe_cmd(part, video, fps, w, h, audio_ss=None, audio_t=None, limit=N
     路径（png 解码器出的是 rgb24）**不是**逐位相同 —— 实测 12/12 帧 md5 全不同。中间插一层
     format=rgb24（ffmpeg 自己换通道，在它自己的线程里，约 1ms/帧）之后，成片文件 md5 与老路径
     **完全相同**（150 帧实测 8af9c0e8f81c / 321466B）。
+
+    **-c:v 那一段不在这里写死**（_common/encoder_sel.py）：默认仍是 libx264 crf16，逐字节
+    不变；DFL_FUSED_ENCODER=nvenc-h264|nvenc-hevc 才换。PNG 落盘那条出口
+    （_media/encoder._vid_cmd）调的是**同一个** encoder_args() —— 两条路必须一起换，
+    否则「两条路成片 md5 相同」这条不变量就破了。
 
     也**不给 -progress pipe:1**：那条进度走 stdout，没人读就会把 ffmpeg 堵在管道上；
     进度由写者线程逐帧上报（比解析 ffmpeg 的 frame= 更准，而且它本来就知道写到了第几帧）。
@@ -370,8 +402,9 @@ def _fused_pipe_cmd(part, video, fps, w, h, audio_ss=None, audio_t=None, limit=N
            "-framerate", "%.6g" % float(fps), "-i", "pipe:0"] + pre_aud + \
           ["-i", str(video),
            "-map", "0:v:0", "-map", "1:a?",
-           "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2,format=rgb24,scale=out_range=tv",
-           "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p",
+           "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2,format=rgb24,scale=out_range=tv"] + \
+          _esel.encoder_args(int(w), int(h)) + \
+          ["-pix_fmt", "yuv420p",
            "-c:a", "copy"]
     if Path(str(part)).suffix.lower() in (".mp4", ".mov", ".m4v"):
         cmd += ["-movflags", "+faststart"]
@@ -2342,6 +2375,9 @@ def _fused_run(cfg: dict) -> dict:
     _STAGE_METER.bind({"frames": q_dec, "det": q_det, "dfm": q_gpu,
                        "xseg": q_cmp, "compose": q_enc})
 
+    # 4K + 默认 x264：喊一次（只告警、不换编码器 —— 换 md5 的事必须用户自己点头）
+    _warn_encoder_4k(probe)
+
     # ---- 成片出口：raw 管道要先起 ffmpeg，再起唯一写者 ----
     # 顺序要紧：ffmpeg 必须在**第一帧之前**就位（管道是阻塞流，写者一上来就写），
     # 而写者必须比编码线程先从下游起（和队列那条规则一样：先有消费者）。
@@ -2638,7 +2674,8 @@ def _fused_run(cfg: dict) -> dict:
         cmd = _vid_cmd(str(frames_dir / "%06d.png"), part, video, fps, img_start=1,
                        audio_ss=(None if full else t_audio),
                        audio_t=(None if full else dur),
-                       limit=(None if full else int(written)))
+                       limit=(None if full else int(written)),
+                       wh=(probe.get("w"), probe.get("h")))
 
         def _on_prog(done):
             pct = _VID_PCT_SWAP + (100 - _VID_PCT_SWAP) * min(1.0, done / max(1, written))

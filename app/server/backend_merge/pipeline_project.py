@@ -20,6 +20,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
+from .._common import encoder_sel as _esel
 from .._common.http import (
     _BadInput,
 )
@@ -1306,6 +1307,11 @@ def _proj_encode(pattern, start, fps, video, out_video, total) -> dict:
     """按需求里那条命令编码：merged 帧 + 原视频音轨，libx264 / crf16 / faststart。
 
     刻意**不加 -shortest**：音轨比画面长时它会把成片截短（4.0 那边踩过）。
+
+    -c:v 那一段走 _common/encoder_sel（和快速导出 / 分段导出同一个函数）：默认 libx264 crf16
+    逐字节不变，DFL_FUSED_ENCODER=nvenc-* 才换。**这里不给宽高** —— 判 4K 要读源帧 / 读 PNG，
+    比这一单本身还贵；所以 auto 在项目导出上永远等于 x264（那本来就是默认），
+    显式点名 nvenc 时照样生效（含 4K）。见 docs/29-ENCODER.md。
     """
     ffmpeg = str(_app_mod._ffmpeg_exe())
     ext = Path(str(out_video)).suffix.lower()
@@ -1317,8 +1323,9 @@ def _proj_encode(pattern, start, fps, video, out_video, total) -> dict:
            # 1) 奇数宽高在 yuv420p 下会被 libx264 直接拒绝，垫一像素最省事；
            # 2) merged 是 JPEG（full range），不显式转 limited 的话成片的 pix_fmt
            #    会被标成 yuvj420p(pc)，很多播放器按 tv 解释 → 整体发灰。
-           "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2,scale=out_range=tv",
-           "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p",
+           "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2,scale=out_range=tv"] + \
+          _esel.encoder_args() + \
+          ["-pix_fmt", "yuv420p",
            "-c:a", "copy"]
     if ext in (".mp4", ".mov", ".m4v"):
         cmd += ["-movflags", "+faststart"]

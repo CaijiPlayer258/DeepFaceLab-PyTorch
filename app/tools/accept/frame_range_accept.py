@@ -283,6 +283,9 @@ def start_server(tag="帧范围"):
     env = dict(os.environ)
     env["DFL_WORKSPACE"] = str(WS)
     env["PYTHONIOENCODING"] = "utf-8"
+    # 编码器钉回默认：成片的字节/像素基线不许被 shell 里的 DFL_FUSED_ENCODER 影响
+    # （4K 换成 NVENC 是另一份文件，见 app/docs/29-ENCODER.md）
+    env["DFL_FUSED_ENCODER"] = "x264"
     env["NO_PROXY"] = env["no_proxy"] = "127.0.0.1,localhost"
     env["DFL_STAGE_KEEP"] = "1"          # 验收要反复读 cache/，别让 encode 把它删了
     env.pop("DFL_PORT", None)
