@@ -205,8 +205,13 @@ provider（CUDA vs CPU）都比它大（0.00146 = 1.5 LSB，见 `DFM_TORCH_REPOR
 ## 7. 日志 / [eff] 回显
 
 `[stage]`（加载时，一行）：
-`换脸：dfm 走 torch(cuda) · 精度=bf16（TF32=开）· 416×416 · NHWC · 权重 172 张量/514MB · 预热单张 30.1 ms · 卡上 1185.0 MB · DFL_DFM_BACKEND 未设（默认 torch+bf16；回退用 DFL_DFM_BACKEND=onnx）`
-`[dfm-torch] 预热 batch [1..8] · 单张 24.0 ms · 合计 1224 ms`
+实测抄下来的一行（fused 验收的 server.log）：
+
+`[stage] 换脸：dfm 走 torch(cuda) · 精度=bf16w（allow_tf32=开）· 416×416 · NHWC · 权重 172 张量/514MB · 预热单张 20.34 ms · 卡上 949.5 MB · DFL_DFM_BACKEND 未设（默认 torch + bf16w：权重压 bf16，显存少 250MB~1.1GB、速度不慢；回退用 DFL_DFM_BACKEND=onnx） · 请求=bf16w`
+`[dfm-torch] 预热 batch [1, 2, 3, 4, 5, 6, 7, 8] · 稳态单张 20.34 ms（首帧 249.4）· 合计 1224 ms`
+
+「预热单张」报的是**稳态**（预热跑完再单独量一次）：进程的第一次前向含 cuDNN 选算法与
+分配器首次落地，实测 **249 ms** —— 拿它当「一张脸要多久」会把人吓到，所以不报它。
 
 `[eff]` 那一行的末尾多一个键：`"dfm": "torch · bf16"`（`DFL_DFM_BACKEND=onnx` 时是 `"onnx · fp32"`）。
 预览 worker 也走同一个后端（日志 `[merge-preview] dfm 走 torch(cuda) 精度=bf16`）——

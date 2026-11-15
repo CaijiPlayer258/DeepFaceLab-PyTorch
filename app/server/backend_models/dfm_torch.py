@@ -228,8 +228,21 @@ class DfmTorch:
         torch.cuda.synchronize()
         self.warm_ms = per
         self.warm_s = (time.perf_counter() - t0)
-        self._log("预热 batch %s · 单张 %.2f ms · 合计 %.0f ms"
-                  % (sorted(per), per.get(1, 0.0), self.warm_s * 1000.0))
+        # 上面 per[1] 是**这个进程的第一次前向**（含 cuDNN 选算法 / 分配器首次落地），
+        # 实测能到 249ms —— 那不是「一张脸要多久」。稳态值单独量一次再报。
+        one = per.get(1, 0.0)
+        if 1 in self.nets:
+            x = torch.zeros((1, self.size, self.size, 3), dtype=torch.float32,
+                            device=self.device)
+            if self.nchw:
+                x = x.permute(0, 3, 1, 2).contiguous()
+            s0 = time.perf_counter()
+            self._forward_one(x)
+            torch.cuda.synchronize()
+            one = round((time.perf_counter() - s0) * 1000.0, 2)
+        self.one_ms = one
+        self._log("预热 batch %s · 稳态单张 %.2f ms（首帧 %.1f）· 合计 %.0f ms"
+                  % (sorted(per), one, per.get(1, 0.0), self.warm_s * 1000.0))
         self.stats.update({"calls": 0, "faces": 0, "ms": 0.0, "last_ms": 0.0,
                            "t_in": 0.0, "t_fwd": 0.0, "t_out": 0.0})
 
