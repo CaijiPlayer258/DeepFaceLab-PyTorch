@@ -297,10 +297,11 @@ stream 上，所以「compose 墙钟 54ms」里绝大部分是在排队。真实
   没在 GPU 上复刻；默认 erode=0，热路径碰不到）。
 - **mask_mode 9 且遮罩尺寸不一致**：CPU 上 numpy 会直接抛，GPU 也不替它猜 —— 原样回退。
 - **GPU 那条整段挂了**：本单退回 CPU（日志一行），结果与「一开始就用 CPU」相同。
-- **合成后端回显**：fused 的导出日志里有一行
-  「合成后端回显 compose_backend=gpu · 线程 4」（已实测）。status 里也想回显一份，
-  但这次没打通（写 routes.py 时把文件截断了，恢复后没再补），所以前端暂时读不到；
-  排障看日志那一行就够。
+- **合成后端回显**（两处都有，都实测过）：
+  · 导出日志一行：「合成后端回显 compose_backend=gpu · 线程 4」；
+  · status 的 vram_plan 里：compose_backend = gpu / cpu、compose_threads = 4 / 8
+    （前端读 vram_plan 那一块就能直接显示；走 CPU 时是 cpu / 8）。
+  · GPU 那条被跳过时还会带 compose_why（比如「DFL_COMPOSE_GPU=1 但 torch/cuda 起不来」）。
 - **只接了 fused（视频模式快速导出）**：分段链 ⑤ 和项目模式的 compose_aligned_frame 仍走
   CPU 那份（compose.py 一行没动）。GPU 版已经支持 aligned 画布（compose_aligned_frame_gpu），
   只是没往那两条流水线里接。
