@@ -13126,6 +13126,34 @@ function mgStageEmpty(on) {
      和主题 / 侧栏一样存本机 localStorage —— 刷新、关掉再开，还是上次选的那一档。
      为什么必须有：这两个值会改变画质 / 显存 / 速度。刷新一下就悄悄回到「自动」，
      用户会以为「设了没用」，然后去翻日志找原因。 */
+  /* ---------- 合成后端 × 融合方式：界面上先互斥，别让用户选了再被后台降级 ----------
+     GPU 合成目前只实现了 overlay（seamless 那条在 8GB 卡上实测更慢，默认不进 GPU）。
+     以前的做法是「随便选、后台退回 CPU 并弹横幅」——用户看到的是「界面 cpu / 顶部说选了 gpu」，
+     两边像在互相打架。现在：融合方式是 seamless 时，把 gpu 这一档**禁用**并在 title 里说清；
+     如果它已经是 gpu（上一次选的、记忆存着），静默改成「自动」并留一条说明。 */
+  function mgGateCmpBackend() {
+    var sel = document.getElementById('mgCmpBackend');
+    var modeEl = document.getElementById('mgMode');
+    if (!sel || !modeEl) return;
+    var seamless = String(modeEl.value || '').indexOf('seamless') >= 0;
+    var gpuOpt = null, i;
+    for (i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value === 'gpu') { gpuOpt = sel.options[i]; break; }
+    }
+    if (!gpuOpt) return;
+    gpuOpt.disabled = seamless;
+    gpuOpt.title = seamless
+      ? '融合方式是 seamless：GPU 合成只实现了 overlay，选 gpu 也会被退回 CPU（先把融合方式改成 overlay 再试）'
+      : 'compose_frame_gpu（torch CUDA）：起不来会自动回退并告警';
+    if (seamless && sel.value === 'gpu') {
+      sel.value = 'auto';
+      try {
+        if (window.MG_CFG_MEM && MG_CFG_MEM.set) MG_CFG_MEM.set('compose_backend', 'auto');
+      } catch (e) {}
+      if (window.console) console.warn('[导出] 融合方式=seamless，合成后端 gpu 已禁用 → 已改回「自动」');
+    }
+  }
+  window.mgGateCmpBackend = mgGateCmpBackend;
   var MG_CFG_MEM_KEY = "dfl-mg-cfg-memory";
   function mgCfgMemRead() {
     try {
