@@ -6085,7 +6085,7 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 /* ---------- 水位：只填「缓存帧」那一列（+ 右侧「成片」那一格） ----------
    填充比例 = 这一列里**现存的帧** / 总帧数（后端 compose.ticks − encode.ticks）；
    成片杯是**两层**：蓝面 = 已合成（compose.ticks / 总帧）、绿面 = 已编码（encode.ticks / 总帧）
-   —— 见下面 .encflow / .out-surf。所有数字都来自 status，前端不编。
+   —— 见下面 .encflow。所有数字都来自 status，前端不编。
    实现：水面是贴在 lane 方块里的一整块 rect，用 clip-path 保留方块的圆角，
    再 scaleY(level)（origin 在底边）—— transform 是 CSS 能平滑过渡的那一档，
    每 250ms 更新一次、300ms 补间，所以看起来是水位在涨/在落，不是跳格子。 */
@@ -6118,13 +6118,6 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
    把「水在哪」那条边界画出来（以前填充的顶边糊在底色里，看不见水位在哪）。
    位置由 JS 用 translateY 给（和蓝面同一条 .3s 补间，线跟着水走、不自己跳一格），
    这里只管外观。 */
-#p-merge .mgpipe .out-surf {
-  stroke: rgba(255, 255, 255, .55);
-  stroke-width: 1.5;
-  stroke-linecap: round;
-  pointer-events: none;
-  transition: transform .3s cubic-bezier(.25,.46,.45,.94);
-}
 
 /* 「成片」那一格的壳（不是 lane：lane 只数真线程）。
    只画一圈细线，不铺底色 —— 一块 20×236 的实心面板太抢眼，图上应该是「一杯水」。 */
@@ -6172,7 +6165,6 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   /* 水位也直接到位：减动效的人要的是「别晃」，不是「没有水位」 */
   #p-merge .mgpipe .water,
   #p-merge .mgpipe .encflow,
-  #p-merge .mgpipe .out-surf,
   #p-merge .mgpipe-cup i { transition: none; }
   .mgeff-mask,
   .mgeff-sheet { animation: none !important; }

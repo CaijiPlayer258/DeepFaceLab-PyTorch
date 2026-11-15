@@ -6762,20 +6762,12 @@ function mgStageEmpty(on) {
         owg.appendChild(owater);
         owg.appendChild(oenc);
         layers.box.appendChild(owg);
-        /* 水面线：蓝色填充的顶边原本糊在底色里，「水在哪」没有明确边界。这条 1.5px 的
-           半透明白线压在蓝面顶边上，就是那条边界。线本体停在杯口（y1 = y2 = TOPY），
-           位置全部交给 translateY(space × (1 − 蓝面level)) —— 和蓝面同一条 .3s 补间，
-           所以它永远贴着水位走，不会自己跳一格。挂在 clip 组**外面**：满格时它就在最上沿，
-           塞进 clip 里会被切掉半条描边，1.5px 变成 0.75px 的灰边。 */
-        var osurf = mk("line", { x1: ocx - OUTW / 2 + 1, x2: ocx + OUTW / 2 - 1,
-                                 y1: TOPY, y2: TOPY, "class": "out-surf",
-                                 "data-level": "0", "data-y": String(TOPY) });
-        layers.box.appendChild(osurf);
+
         var otxt = mk("text", { x: ocx, y: 24, "text-anchor": "middle", "class": "t-out" });
         otxt.textContent = "成片";
         layers.lbl.appendChild(otxt);
         /* top/span = 杯子的杯口与杯高：setWater 用它们算水面线的 translateY */
-        geo.out = { cx: ocx, water: owater, enc: oenc, surf: osurf, top: TOPY, span: space };
+        geo.out = { cx: ocx, water: owater, enc: oenc,  };
   /* 编码列 → 成片：与其它列同构（每条 lane 收束到腰点，再一条进杯）。
      成片不是一个 lane 列，所以单独画：n 条入腰 + 1 条腰→杯，都走 arc()。 */
   (function () {
@@ -6909,17 +6901,6 @@ function mgStageEmpty(on) {
         if (O && O.enc) {
           O.enc.setAttribute("data-level", String(wkey(green)));
           O.enc.style.transform = "scaleY(" + wkey(green) + ")";
-        }
-        if (O && O.surf) {
-          /* 水面线贴蓝面顶边：y = 杯顶 + 杯高 × (1 − blue)。线本体画在杯口（y1=y2=TOPY），
-             所以位移就是 杯高 × (1 − blue)，和蓝面同一条 .3s 补间 —— 线跟着水走，不自己跳。
-             data-y / data-level 是给验收读的绝对位置（不用再从 computed matrix 里反推）。 */
-          var dy = (Number(O.span) || 0) * (1 - blue);
-          O.surf.setAttribute("data-level", String(wkey(blue)));
-          O.surf.setAttribute("data-y", String(wkey((Number(O.top) || 0) + dy)));
-          O.surf.style.transform = "translateY(" + wkey(dy) + "px)";
-          /* 空杯不画线：level=0 时那条线正好落在杯底内沿，看着像「底下还压着一层水」 */
-          O.surf.style.opacity = blue > 0.004 ? "1" : "0";
         }
         /* 标题区那颗小杯跟成片**同一个数**（蓝面 = 已合成）：它的 aria-label 写的是「已完成帧」 */
         var cup = $("mgPipeCupFill");
