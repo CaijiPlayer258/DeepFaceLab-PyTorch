@@ -1344,14 +1344,19 @@ def _dfm_engines_on_disk(ws, name: str) -> list:
 
 
 def _dfm_session(dfm: str):
-    """常驻的 dfm session：**默认 ort-CUDA（fp32）**；CPU 只在真装不下时（且喊出来）。
+    """常驻的 dfm session。**默认 torch-CUDA + bf16**（2026-11 用户拍板）。
 
-    用户硬规则：**dfm 只走 onnxruntime，不编 TRT 引擎、不降精度。**
-    所以判定顺序是：
+    判定顺序：
 
-        DFL_DFM_TRT=1（显式要求，仅供对照实验）→ 原生 TRT 引擎 → ort-CUDA
-        DFL_DFM_TRT=0（**默认**）              → ort-CUDA（磁盘上的 .engine 忽略 + 喊一行）
-        显存装不下 + DFL_ALLOW_CPU_FALLBACK=1  → CPU EP（慢 ~17 倍，日志写死）
+        DFL_DFM_BACKEND=torch（**默认**）      → torch eager（精度 DFL_DFM_DTYPE，默认 bf16）
+            起不来 → 喊一行 → 回落到下面那条（绝不静默换后端）
+        DFL_DFM_BACKEND=onnx（回退）           → TRT 引擎（要显式 DFL_DFM_TRT=1）/ ort-CUDA
+        显存装不下 + DFL_ALLOW_CPU_FALLBACK=1  → CPU EP（慢 ~17 倍，日志写死；
+                                                torch 在这条路上没有意义，仍走 ort-CPU）
+
+    为什么把默认从 onnx 换成 torch：实测（app/tools/bench/DFM_TORCH_BF16_REPORT.md）
+    torch+bf16 在 batch 8 上是 **20.0 ms/张（416）/ 22.5（384）**，onnx fp32 是 39.5 / 32.6；
+    成片逐像素对拍 mean 0.009 LSB、max 5 LSB、>4 LSB 占 0.00%。
 
     历史背景（留给想看数的人）：416 dfm 上 ort-CUDA 35.9 ms/张（27.9 张/秒）、
     原生 TRT(bf16) 30.9 ms/张（32.3 张/秒）—— 那 ~16% 就是换掉 ONNX 的代价，
@@ -1374,16 +1379,26 @@ def _dfm_session(dfm: str):
         raise RuntimeError("CUDA out of memory. Tried to allocate 2079 MiB"
                            " (DFL_VRAM_OOM_INJECT=1 注入的 OOM，验收用)")
     cpu = _vram_cpu_on()            # 显存不够 + DFL_ALLOW_CPU_FALLBACK=1 → 整条链走 CPU EP
-    ckey = (key + "|cpu") if cpu else key
+    # ---- 后端选择：默认 torch（精度 bf16w）；DFL_DFM_BACKEND=onnx 是回退档 ----
+    _bkind, _bdtype, _bwhy = _dfm_backend_sel()
+    use_torch = (_bkind == "torch" and not cpu)
+    if _bkind == "torch" and cpu:
+        _stage_log("换脸：DFL_DFM_BACKEND=torch 但这条链已强制 CPU（DFL_ALLOW_CPU_FALLBACK=1）"
+                   " → 仍走 onnxruntime CPU EP（torch 的 CPU 前向比 ORT CPU 更慢，没有意义）")
+    ckey = key + ("|torch:" + _bdtype if use_torch else ("|cpu" if cpu else ""))
     with _PRED_LOCK:
         hit = _DFM_SESS.get(ckey)
         if hit is not None:
             return hit
-        import onnxruntime as ort
-        try:
-            _ensure_ort_dll_dirs()
-        except Exception:                                   # noqa: BLE001
-            pass
+        # torch 后端根本不 import onnxruntime（那 0.3~1s 和一堆 DLL 都不需要；
+        # 这条路径要能在没装 onnxruntime 的机器上跑）。
+        ort = None
+        if not use_torch:
+            import onnxruntime as ort
+            try:
+                _ensure_ort_dll_dirs()
+            except Exception:                               # noqa: BLE001
+                pass
         # 量这一份会话到底吃掉多少显存（权重 + 这个进程的 CUDA context + ORT arena）。
         # 为什么要量：arena 会长（384 模型：建会话 +2.3GB，之后每批 8 张的前向再涨 ~1GB），
         # 估出来的数偏小 —— 而「显存去向」那一栏必须是真数，不能是拍的。
@@ -1392,7 +1407,10 @@ def _dfm_session(dfm: str):
         info = {}
         sess = None
         backend = "ort-cuda"
-        if cpu:
+        if use_torch:
+            # torch 这一档不走 TRT / 不看 .engine：图已经编成 nn.Module 了
+            info = {"reason": _bwhy}
+        elif cpu:
             info = {"reason": "DFL_ALLOW_CPU_FALLBACK=1（显存预算装不下，主动回落 CPU）"}
         elif not _dfm_trt_enabled():
             # 用户硬规则：**dfm 只用 onnxruntime**。引擎在磁盘上也不加载 —— 但必须喊出来，
@@ -1417,7 +1435,43 @@ def _dfm_session(dfm: str):
             except Exception as e:                      # noqa: BLE001
                 info = {"reason": "try_engine 抛异常：%r" % (e,)}
                 sess = None
-        if cpu:
+        if use_torch:
+            # ---- torch 后端（见 backend_models/dfm_torch.py）----
+            try:
+                from ..backend_models import dfm_torch as _DFMT
+                sess = _DFMT.load(key, dtype=_bdtype)
+                backend = "torch-" + sess.dtype
+                shape = list(sess.get_inputs()[0].shape)
+                name = sess.input_name
+                provs = list(sess.get_providers())
+                _v = sess.vram_mb()
+                _stage_log("换脸：dfm 走 torch(%s) · 精度=%s（allow_tf32=%s）· %d×%d · %s ·"
+                           " 权重 %d 张量/%s · 预热单张 %.2f ms · 卡上 %s MB · %s · 请求=%s"
+                           % (sess.device, sess.dtype,
+                              "开" if _bdtype != "fp32" else "关",
+                              int(sess.size), int(sess.size),
+                              "NHWC" if not sess.nchw else "NCHW",
+                              len(sess.store._buffers),
+                              "%dMB" % int(sess.graph.weights_mb),
+                              float(getattr(sess, "warm_ms", {}).get(1, 0.0)),
+                              _v.get("alloc_mb", "?"), _bwhy, _bdtype))
+            except Exception as _e:                     # noqa: BLE001
+                # 起不来就明确回落到 onnx —— 但**必须喊出来**，不许静默换后端
+                _stage_log("换脸：torch 后端起不来（%s: %s）→ 回落到 onnxruntime CUDA"
+                           % (type(_e).__name__, str(_e)[:200]))
+                use_torch = False
+                sess = None
+                backend = "ort-cuda"
+                ckey = key + ("|cpu" if cpu else "")     # 别把 onnx 会话挂在 torch 的 key 上
+                if ort is None:
+                    import onnxruntime as ort
+                    try:
+                        _ensure_ort_dll_dirs()
+                    except Exception:                   # noqa: BLE001
+                        pass
+        if use_torch:
+            pass                  # 上面那一支已经把 sess / shape / name / provs 都备齐了
+        elif cpu:
             backend = "ort-cpu-forced"
             so = ort.SessionOptions()
             so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
@@ -4032,7 +4086,8 @@ from .preview import (
 )
 
 from .vram import (
-    _PRED_VRAM_SAFETY, _VRAM_CPU_SLOW, _ensure_ort_dll_dirs, _gpu_mem_used_mb, _is_oom,
+    _PRED_VRAM_SAFETY, _VRAM_CPU_SLOW, _dfm_backend_sel, _ensure_ort_dll_dirs,
+    _gpu_mem_used_mb, _is_oom,
     _pred_pick_batch, _sess_batch_cap, _vram_cpu_on, _vram_forced_rollback, _vram_guard,
     _vram_measure_begin, _vram_measure_end, _vram_models_mb, _vram_oom_inject_on,
     _vram_release_inproc,

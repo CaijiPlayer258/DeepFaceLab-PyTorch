@@ -606,6 +606,9 @@ def _fused_run(cfg: dict) -> dict:
     import cv2
     import numpy as np
     from .compose import compose_frame, ensure_engine_path
+    from .compose_gpu import (compose_frame_gpu, env_on as _compose_gpu_on,
+                              ready as _compose_gpu_ready, last_error as _compose_gpu_err,
+                              seamless_on as _compose_gpu_seamless_on)
     ensure_engine_path()
     from facelib import FaceType
     from facelib.LandmarksProcessor import get_transform_mat
@@ -634,7 +637,34 @@ def _fused_run(cfg: dict) -> dict:
     det_prep_on = str(os.environ.get(_FUSED_ENV_DET_PREP) or "1").strip().lower() \
         not in ("0", "off", "false", "no")
     png_level = int(cfg.get("png_level") if cfg.get("png_level") is not None else 1)
-    n_cmp = max(1, int(_merge_worker_count(cfg)))
+    # ---- 合成放在哪儿算：CPU（默认）还是 GPU（DFL_COMPOSE_GPU=1）----
+    # GPU 那条路的每帧墙钟是 1~2ms 量级，一条线程就够（多开会挤同一个 CUDA stream，
+    # 只会互相等）；顺带把 8 条合成线程的 CPU 占用整个还回去。
+    # seamless 不进 GPU（那条要解 Poisson 方程，见 compose_gpu 的开头），继续走 CPU。
+    gpu_cmp = {"on": False, "why": ""}
+    if _compose_gpu_on():
+        _mode0 = str(dict(cfg.get("config") or {}).get("mode") or "overlay").strip().lower()
+        if "seamless" in _mode0 and not _compose_gpu_seamless_on():
+            gpu_cmp["why"] = "mode=%s 且 DFL_COMPOSE_GPU_SEAMLESS=0，走 CPU" % _mode0
+        elif _compose_gpu_ready():
+            gpu_cmp["on"] = True
+        else:
+            gpu_cmp["why"] = "torch/cuda 起不来：%s" % (_compose_gpu_err() or "?")
+    # GPU 合成开几条线程：**默认 4**（量出来的，150 帧同段，只差这个数）：
+    #   overlay   1 条 14.72 帧/秒 → 4 条 21.04 帧/秒
+    #   seamless  1 条 10.54 → 2 条 19.23 → 4 条 19.46
+    # 原因：GPU 合成线程每次 .cpu() 都要等**整条 CUDA stream**（dfm/xseg/detect 也在上面），
+    # 单线程时「墙钟 54~78ms/帧」里绝大部分是在排队，一条线程就把自己变成瓶颈了；
+    # 多开几条把「等队列」和「真算」重叠起来。DFL_COMPOSE_GPU_THREADS 可压。
+    if gpu_cmp["on"]:
+        try:
+            _n_gpu = max(1, min(8, int(str(os.environ.get("DFL_COMPOSE_GPU_THREADS")
+                                           or "4").strip() or 4)))
+        except (TypeError, ValueError):
+            _n_gpu = 4
+        n_cmp = _n_gpu
+    else:
+        n_cmp = max(1, int(_merge_worker_count(cfg)))
     # PNG 编码是这一条链上最贵的纯 CPU 活（1080p 实测 94ms/帧，cv2.imencode 会放 GIL，
     # 多线程是真并行：2 线程 ≈2 倍、4 线程 ≈3.6 倍）。默认 3：detect（52.8ms/帧）才是硬底，
     # 再往上加只会跟检测抢 CPU。
@@ -788,6 +818,13 @@ def _fused_run(cfg: dict) -> dict:
                 "自适应" if _FUSED_BATCH_ADAPT else "固定超时",
                 ("攒不满就立刻送、GPU 空着也立刻送，超时只当上限" if _FUSED_BATCH_ADAPT
                  else "一律等满超时（老口径）"), _FUSED_ENV_ADAPT))
+    _vid_log("快速导出：合成在 %s（%s）· 线程 %d"
+             % (("GPU（torch cuda）" if gpu_cmp["on"] else "CPU"),
+                ("DFL_COMPOSE_GPU=1 · 只上传人脸框、只下载合成后的框"
+                 if gpu_cmp["on"] else
+                 ("DFL_COMPOSE_GPU=1 但%s" % gpu_cmp["why"] if gpu_cmp["why"]
+                  else "默认（DFL_COMPOSE_GPU=1 可切 GPU）")),
+                n_cmp))
     _vid_log("快速导出：临时帧目录 %s（成功/取消都删；<视频>_cache/ 一个都不建）" % frames_dir)
 
     END = object()
@@ -1372,7 +1409,35 @@ def _fused_run(cfg: dict) -> dict:
         except BaseException as e:                             # noqa: BLE001
             _fail("gpu", e)
 
-    # ---- ⑤ 合成（纯 CPU，就是 ⑤ 合成阶段那个 compose_frame）----
+    # ---- ⑤ 合成（CPU：compose_frame；GPU：compose_frame_gpu，DFL_COMPOSE_GPU=1）----
+    def _compose_args_gpu(job):
+        """GPU 入口直接吃 uint8 —— 省掉 CPU 上的 5 次 astype(/255)（实测 1.2ms/张脸）。"""
+        return [{"landmarks": f["lm"], "pred": f["pred_u8"],
+                 "prd_dfm": f.get("prd_u8"), "dst_dfm": f.get("dstdfm_u8"),
+                 "xseg_prd": f.get("xseg_prd_u8"), "xseg_dst": f.get("xseg_dst_u8")}
+                for f in (job.faces or [])]
+
+    def _compose_args_cpu(job):
+        args = []
+        for f in (job.faces or []):
+            prd = f.get("prd_u8")
+            dst = f.get("dstdfm_u8")
+            xp = f.get("xseg_prd_u8")
+            xd = f.get("xseg_dst_u8")
+            args.append({
+                "landmarks": f["lm"],
+                "pred": f["pred_u8"].astype(np.float32) / 255.0,
+                "prd_dfm": (None if prd is None
+                            else prd.astype(np.float32) / 255.0),
+                "dst_dfm": (None if dst is None
+                            else dst.astype(np.float32) / 255.0),
+                "xseg_prd": (None if xp is None
+                             else xp.astype(np.float32) / 255.0),
+                "xseg_dst": (None if xd is None
+                             else xd.astype(np.float32) / 255.0),
+            })
+        return args
+
     def _compose():
         try:
             while True:
@@ -1382,28 +1447,26 @@ def _fused_run(cfg: dict) -> dict:
                 if job is END:
                     return
                 t = time.perf_counter()
-                args = []
-                for f in (job.faces or []):
-                    prd = f.get("prd_u8")
-                    dst = f.get("dstdfm_u8")
-                    xp = f.get("xseg_prd_u8")
-                    xd = f.get("xseg_dst_u8")
-                    args.append({
-                        "landmarks": f["lm"],
-                        "pred": f["pred_u8"].astype(np.float32) / 255.0,
-                        "prd_dfm": (None if prd is None
-                                    else prd.astype(np.float32) / 255.0),
-                        "dst_dfm": (None if dst is None
-                                    else dst.astype(np.float32) / 255.0),
-                        "xseg_prd": (None if xp is None
-                                     else xp.astype(np.float32) / 255.0),
-                        "xseg_dst": (None if xd is None
-                                     else xd.astype(np.float32) / 255.0),
-                    })
-                try:
-                    out_frame = compose_frame(job.frame, args, comp_cfg, job.timings)
-                except Exception as e:                         # noqa: BLE001
-                    raise _BadInput("第 %d 帧合成失败：%s" % (job.idx, str(e)[:160]), 500)
+                args = job.faces or []          # 只给下面的记账用（faces=张数）
+                if gpu_cmp["on"]:
+                    try:
+                        out_frame = compose_frame_gpu(job.frame, _compose_args_gpu(job),
+                                                      comp_cfg, job.timings)
+                    except Exception as e:                     # noqa: BLE001
+                        # 整段退回 CPU（不逐帧来回切：同一单里两套口径比慢更糟）。
+                        # 回退后 n_cmp 已经是 1，会慢一些，但结果与「一开始就用 CPU」相同。
+                        _vid_log("快速导出：GPU 合成失败（%s）→ 本单退回 CPU 合成"
+                                 % str(e)[:200])
+                        gpu_cmp["on"] = False
+                        gpu_cmp["why"] = str(e)[:200]
+                        out_frame = compose_frame(job.frame, _compose_args_cpu(job),
+                                                  comp_cfg, job.timings)
+                else:
+                    try:
+                        out_frame = compose_frame(job.frame, _compose_args_cpu(job),
+                                                  comp_cfg, job.timings)
+                    except Exception as e:                     # noqa: BLE001
+                        raise _BadInput("第 %d 帧合成失败：%s" % (job.idx, str(e)[:160]), 500)
                 ticks.add("compose", time.perf_counter() - t)
                 if dump_frames and int(job.idx) in dump_frames:
                     _fused_dump(cfg, job, out_frame)

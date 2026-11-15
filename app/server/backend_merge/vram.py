@@ -647,13 +647,25 @@ def _vram_release_inproc(reason: str = "任务收尾") -> dict:
     只动本进程的缓存，**不动预览 worker**（那一路有自己的懒加载节奏）。
     """
     freed = []
+    torch_paths = []
     try:
         with _PRED_LOCK:
             for k in list(_DFM_SESS):
                 _DFM_SESS.pop(k, None)
+                torch_paths.append(str(k).split("|")[0])
                 freed.append("dfm:" + Path(str(k).split("|")[0]).name)
     except Exception:                                       # noqa: BLE001
         pass
+    # torch 后端自己还攥着一份会话缓存（backend_models.dfm_torch._CACHE）——
+    # 只把 _DFM_SESS 里的元组 pop 掉不会真的还显存，必须叫它自己卸。
+    # onnx 那条路进来是空操作（模块都没 import）。
+    if torch_paths:
+        try:
+            from ..backend_models import dfm_torch as _DFMT
+            for _p in set(torch_paths):
+                _DFMT.unload(_p)
+        except Exception:                                   # noqa: BLE001
+            pass
     try:
         with _XSEG_SESS_LOCK:
             for _k in list(_XSEG_SESS):
@@ -895,6 +907,87 @@ def _dfm_info(path) -> dict:
     with _DFM_INFO_LOCK:
         _DFM_INFO[key] = dict(info)
     return dict(info)
+
+
+# ------------------------------------------------------------
+# dfm 的推理后端：onnx（默认）| torch。显存账要按后端分开算，
+# 因为同一份权重在两家手里的「会话 + 批」不是一个数（实测见 DFM_TORCH_BF16_REPORT.md）。
+# ------------------------------------------------------------
+_DFM_BACKEND_ENV = "DFL_DFM_BACKEND"     # torch（默认）| onnx（回退）| torch:bf16
+_DFM_DTYPE_ENV = "DFL_DFM_DTYPE"         # 只对 torch 生效：fp32 | tf32 | bf16 | bf16w（默认）| auto
+_DFM_BACKENDS = ("onnx", "torch")
+_DFM_DTYPES = ("fp32", "tf32", "bf16", "bf16w", "auto")
+# 「auto」按权重体量选 bf16w 的门槛 —— **必须和 backend_models/dfm_torch.py 的
+# _DFM_AUTO_BF16W_MB 一致**（那边是权威实现，这边只是算账时提前用同一个政策）。
+_DFM_AUTO_BF16W_MB = 900.0
+# torch 比 onnx **多占**的显存（MB），按「输入边长 → {batch: 增量}」实测。
+#
+# 2026-11 实测（torch.cuda.max_memory_allocated，进程私有、不受别的进程干扰；
+#   batch 8、8 个 batch 档全预热后 —— 就是最坏的那一拍）：
+#     416 · 权重 514MB：tf32 1824 / bf16 **1184** / bf16w **935**
+#     384 · 权重 1567MB：tf32 2684 / bf16 **2502** / bf16w **1360**
+#   对照 onnx 的会话实测（本文件 _VRAM_SESS_RUNTIME_MB 那段的老数）：416 = 1240、
+#   384 = 2434（权重 + context + 320 运行时）。
+# 结论：**bf16 与 onnx 同量级、bf16w 明显更低**（把权重砍半）。所以这里不加正增量 ——
+#   加一个拍出来的数只会把能跑的单子判死；真要比 onnx 更省的那部分（bf16w 的权重减半）
+#   已经在 _vram_plan 里用 model_mb × 0.5 明着算了。
+_VRAM_TORCH_EXTRA = {416: {1: 0.0, 4: 0.0, 8: 0.0}, 384: {1: 0.0, 4: 0.0, 8: 0.0}}
+# torch 会话相对 onnx 会话多出来的「运行时工作集」（MB；项目导出那条路会加进去）。
+# 实测 bf16 的峰值**低于**上面那个 320MB 的标定值（416：1184 vs 1240 会话；384：2502 vs 2434
+# 高 68MB，落在 5% 预留里），所以取 0：沿用 onnx 那张已经偏保守的表。
+_VRAM_TORCH_SESS_EXTRA = {416: 0.0, 384: 0.0}
+
+
+def _dfm_backend_sel():
+    """(backend, dtype, why) —— 只读环境变量，不做任何加载。
+
+    也认 DFL_DFM_BACKEND=torch:bf16 这种简写（省得记两个变量）。
+    """
+    raw = str(os.environ.get(_DFM_BACKEND_ENV) or "").strip().lower()
+    dtype = str(os.environ.get(_DFM_DTYPE_ENV) or "").strip().lower()
+    if raw:
+        for sep in (":", "+", "/"):
+            if sep in raw:
+                raw, dtype = [x.strip() for x in raw.split(sep, 1)]
+                break
+    if dtype in ("fp16", "half"):
+        dtype = "bf16"                  # 8GB 卡上 fp16 定不了位（见 dfm_torch 的注释）
+    if raw in ("torch", "pt", "pytorch", "eager"):
+        dtype = dtype if dtype in _DFM_DTYPES else "bf16w"     # 默认档（用户拍板 + A/B 实测）
+        why = "%s=%s" % (_DFM_BACKEND_ENV, raw) + ((" · %s=%s" % (_DFM_DTYPE_ENV, dtype))
+                                                    if dtype else "")
+        return "torch", dtype, why
+    if raw == "onnx":
+        return "onnx", "", "%s=onnx（显式回退到 onnxruntime）" % _DFM_BACKEND_ENV
+    if raw:
+        return "onnx", "", "%s=%s（不认识，按 onnx）" % (_DFM_BACKEND_ENV, raw)
+    # 谁都没设 → **torch + bf16**（用户 2026-11 拍板：精度可接受，速度快一倍）。
+    # 回退一条 env：DFL_DFM_BACKEND=onnx。
+    return "torch", "bf16w", "%s 未设（默认 torch + bf16w：权重压 bf16，"         "显存少 250MB~1.1GB、速度不慢；回退用 %s=onnx）" % (_DFM_BACKEND_ENV, _DFM_BACKEND_ENV)
+
+
+def _dfm_torch_mode() -> bool:
+    return _dfm_backend_sel()[0] == "torch"
+
+
+def _vram_torch_extra_mb(size_px: int, batch) -> float:
+    """torch 后端在 batch 张时比 onnx 多占的显存（0 = 还没量到）。"""
+    tbl = _VRAM_TORCH_EXTRA.get(int(size_px) if int(size_px) in _VRAM_TORCH_EXTRA else 416)
+    if not tbl:
+        return 0.0
+    b = max(1, int(batch or 1))
+    if b in tbl:
+        return float(tbl[b])
+    ks = sorted(tbl)
+    if b <= ks[0]:
+        return float(tbl[ks[0]])
+    if b >= ks[-1]:
+        return float(tbl[ks[-1]])
+    for i in range(1, len(ks)):
+        if b <= ks[i]:
+            b0, b1 = ks[i - 1], ks[i]
+            return float(tbl[b0] + (tbl[b1] - tbl[b0]) * (b - b0) / float(b1 - b0))
+    return 0.0
 
 
 def _vram_model_mb(path) -> float:
@@ -1167,7 +1260,18 @@ def _vram_batch_mb(size_px: int, batch, model_mb=None, mode: str = "frames") -> 
 
     点集按模型体量挑（_vram_batch_table），再按 (size/基准边长)² 缩放：基准边长就是
     那张表量的时候那个模型的输入（384 表在 384 上量的，416 表在 416 上量的）。
+
+    torch 后端在此之上加一个**实测的**增量（_VRAM_TORCH_EXTRA）：torch 的 caching
+    allocator 在 batch 张时要多留几块（每条 aten 各自申请输出），比 ORT 的 arena 碎；
+    没量到就是 0 —— 宁可保守成现状，也不要凭空调高。
     """
+    v = _vram_batch_mb_onnx(size_px, batch, model_mb, mode)
+    if _dfm_torch_mode():
+        v += _vram_torch_extra_mb(size_px, batch)
+    return v
+
+
+def _vram_batch_mb_onnx(size_px: int, batch, model_mb=None, mode: str = "frames") -> float:
     b = int(batch or 0)
     if b <= 0:
         return 0.0
@@ -1351,17 +1455,32 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
     # 再长一块（实测 +1190 / +1390MB，见 _VRAM_SESS_RUNTIME_MB）：那一块必须明着算，
     # 否则 384 模型 2 个 worker 会被算成 4538MB（≤ 可用）放行，真跑起来顶到 94.9%
     # → WDDM 换页 → 3.61 帧/秒。调用方给了 sess_mb（实测值）就照给的算。
+    # torch 后端：权重要么保持 fp32（fp32/tf32/bf16-autocast），要么压成 bf16（bf16w，
+    # 显存直接减半）；会话还要多一段 caching allocator 的常驻块（实测，没量到就 0）。
+    _tb, _tdt, _twhy = _dfm_backend_sel()
+    _torch = (_tb == "torch")
+    if _torch and _tdt == "auto":
+        # 和 dfm_torch 同一条政策：大的压 bf16 权重（省一半），小的不动
+        _tdt = "bf16w" if model_mb >= _DFM_AUTO_BF16W_MB else "bf16"
+    weight_mb = model_mb
+    if _torch and _tdt == "bf16w":
+        weight_mb = model_mb * 0.5
     sess_override = opts.get("sess_mb")
     if sess_override is not None:
-        sess_mb = max(float(sess_override or 0.0), model_mb)
+        sess_mb = max(float(sess_override or 0.0), weight_mb)
         sess_src = str(opts.get("sess_src") or "调用方给的实测值")
     else:
-        sess_mb = model_mb + float(_VRAM_CTX_MB)
+        sess_mb = weight_mb + float(_VRAM_CTX_MB)
         sess_src = "权重 + context"
+        if _torch and _tdt == "bf16w":
+            sess_src = "权重(bf16) + context"
         if mode == "procs":
-            sess_mb += float(_VRAM_SESS_RUNTIME_MB)
-            sess_src = ("权重 + context + 运行时工作集 %dMB（标定值）"
-                        % int(_VRAM_SESS_RUNTIME_MB))
+            _extra = float(_VRAM_SESS_RUNTIME_MB)
+            if _torch:
+                _extra += float(_VRAM_TORCH_SESS_EXTRA.get(int(size_px), 0.0))
+            sess_mb += _extra
+            sess_src = "权重 + context + 运行时工作集 %dMB（标定值）" % int(_extra)
+    model_mb = weight_mb                       # 后面挑 batch 表用的就是「实际权重」
     frame_mb = _vram_frame_mb(size_px)
     # ---- ★ 顺序（用户口径，别改回去）：先回收我们自己占的那块 → 再探测 → 再算预算 ----
     # 以前是「先按现状算，**装不下才**回收」，而阶梯里永远有 8 帧 / 批 1 这一档 ——
@@ -1399,6 +1518,8 @@ def _vram_plan(model_mb, opts: dict = None) -> dict:
     plan = {
         "ok": False, "cpu": False, "mode": mode, "label": label, "size_px": int(size_px),
         "model_mb": round(model_mb, 1), "sess_mb": round(sess_mb, 1),
+        # 这份账是按哪个 dfm 后端算的（torch 的会话/批与 onnx 不是一个数）
+        "dfm_backend": _tb, "dfm_dtype": (_tdt or ""), "dfm_backend_src": _twhy,
         # 模型体量的来路：参数量 / 权重 MB / 输入边长（全部来自 ONNX 图，不看文件名）
         "params_m": (round(float(minfo.get("params_m") or 0.0), 2)
                      if minfo.get("params_m") else None),

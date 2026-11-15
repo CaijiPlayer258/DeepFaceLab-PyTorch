@@ -237,6 +237,7 @@ def main():
                 pass
         ent = None
         del ent
+        # （预览 worker 只建 ORT 会话，没有第二个缓存要放；见 _load 上面的注释。）
         _vram_flush()
         print("[merge-preview] unload %s" % os.path.basename(str(path)),
               file=sys.stderr, flush=True)
@@ -261,6 +262,11 @@ def main():
             return _drop(path)
         return ""
 
+    # 预览 worker 跑在**4.0 引擎的 python**（独立解释器 + MergeStudio + engine 的 torch 2.7），
+    # 不 import 4.1 的 backend_models —— 所以这里仍旧只建 ORT 会话，不跟 DFL_DFM_BACKEND 走。
+    # 代价：导出（torch+bf16）与预览（ORT fp32）同一帧差 ≤5 LSB（真脸 + 成片实测，见
+    # app/tools/bench/DFM_TORCH_BF16_REPORT.md §5）；stage6 的 g 段（成片 vs 预览 ≤8）实测
+    # 仍远在容差内。等 4.0 引擎那边的 torch 版本与这边对齐了再谈统一。
     def _load(dfm, rid):
         hit = models.get(dfm)
         if hit is not None:

@@ -60,12 +60,18 @@ def say(*a):
 def _http():
     import urllib.request
 
+    # **必须显式关掉代理**：这台机开着系统级 HTTP 代理（Watt Toolkit 127.0.0.1:26561），
+    # urllib 默认读注册表里的代理设置，于是发往 127.0.0.1 的请求会被代理接走、回 404
+    # （现象是「后端明明起来了，/api/merge/stage/status 一直是 404/超时」）。
+    # Invoke-WebRequest 因为有 localhost 旁路才不中招 —— 别拿它当「服务没起」的证据。
+    _op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
     def post(path, body, timeout=60):
         req = urllib.request.Request(
             BASE + path, data=json.dumps(body).encode("utf-8"),
             headers={"Content-Type": "application/json"}, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with _op.open(req, timeout=timeout) as r:
                 return r.status, json.loads(r.read().decode("utf-8") or "{}")
         except Exception as e:                      # noqa: BLE001
             body = getattr(e, "read", lambda: b"{}")()
@@ -76,7 +82,7 @@ def _http():
 
     def get(path, timeout=30):
         try:
-            with urllib.request.urlopen(BASE + path, timeout=timeout) as r:
+            with _op.open(urllib.request.Request(BASE + path), timeout=timeout) as r:
                 return r.status, json.loads(r.read().decode("utf-8") or "{}")
         except Exception as e:                      # noqa: BLE001
             return 0, {"error": str(e)}

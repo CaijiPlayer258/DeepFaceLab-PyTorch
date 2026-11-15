@@ -574,8 +574,24 @@ def _eff_publish(route: str, kind: str, body: dict, cfg: dict,
                      quiet=quiet,
                      requested=_eff_requested_of(body, kind))
     eff["req_unused"] = _eff.unused_keys(body)
+    # dfm 的推理后端 / 精度：**不是 cfg 字段**（它由进程级环境变量定），所以不走 build()
+    # 那套「请求体缺字段」的自检，直接挂到 [eff] 那一行的末尾。用户要能一眼看到
+    # 「我这单的 dfm 到底跑在 onnx 还是 torch、fp32 还是 bf16」——这一栏就是那个答案。
+    eff["dfm"] = _dfm_eff_text()
     _eff.log_eff(eff, dedupe=dedupe)
     return eff
+
+
+def _dfm_eff_text() -> str:
+    """'torch · bf16' / 'onnx · fp32' —— [eff] 与状态栏共用一份口径。"""
+    try:
+        from .vram import _dfm_backend_sel
+        kind, dt, _why = _dfm_backend_sel()
+    except Exception:                                   # noqa: BLE001
+        return "?"
+    if kind == "torch":
+        return "torch · %s" % (dt or "tf32")
+    return "onnx · fp32"
 
 
 def _eff_status_patch(eff: dict) -> dict:

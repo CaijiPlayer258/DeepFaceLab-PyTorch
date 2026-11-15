@@ -438,8 +438,18 @@ def case_a(clip, src_info):
     check(fps >= 8.0, "a 吞吐 ≥ 8 帧/秒（分段实测 7.20）", "%.2f 帧/秒" % fps)
 
     # 追加一个「换快档检测器」的数据点：默认档（quality=high → retinaface_10g）单帧检测
-    # 就要 52~55ms，是这条链的硬底；换 fast（tinymog，有 TRT 引擎 16.2ms）能直接看出
-    # 瓶颈到底在流水线还是在检测模型本身。这是**同一份** fused 代码，只改检测档。
+    # 52~55ms，换 fast（tinymog，有 TRT 引擎 16~30ms）能看出瓶颈到底在流水线还是在检测模型。
+    # 这是**同一份** fused 代码，只改检测档。
+    #
+    # ★ 判据 2026-11 改过一次，原因写在这里（别改回去）：原来判「fast 的**帧/秒**必须更高」，
+    #   那条在 dfm 还是 onnx fp32（40.7ms/帧）时成立 —— detect 与 dfm 抢同一段 GPU，
+    #   砍 detect 就直接涨帧率（实测 16.57 → 18.29）。dfm 换成 torch+bf16（26.7ms）之后
+    #   GPU 段不再是墙：compose 111~127ms、encode 75~90ms 才是（cmp_wait 占比 66.9%），
+    #   同一个 fast 档只跑出 18.24 帧/秒（和 onnx 那次的 18.29 一样，因为它压根没用到 dfm 那 14ms），
+    #   而默认档已经涨到 20.76 —— 于是「fast 必须更快」这条**在新的瓶颈下不成立**，
+    #   而且它是拿两个单次采样比 10% 的差，本身就是噪声。
+    #   现在判的是**因果**那一半：换了 fast 档之后 detect 每帧真的更短（这才是这个开关做的事），
+    #   帧/秒只作为信息打印。哪一段是墙由 per_stage_ms / util 那两行回答，不靠这条断言。
     out2 = OUT / "a_fused_fast.mp4"
     if out2.exists():
         out2.unlink()
@@ -452,8 +462,13 @@ def case_a(clip, src_info):
         say("同一段片 · quality=fast（tinymog）：%.2f 帧/秒 · 每帧 %s"
             % (fps2, json.dumps((fin2.get("vid") or {}).get("per_stage_ms") or {},
                                 ensure_ascii=False)))
-        check(fps2 > fps, "a 换快档检测器后更快（说明瓶颈在检测模型，不在流水线）",
-              "fast %.2f > 默认 %.2f 帧/秒" % (fps2, fps))
+        # per_stage_ms 在 vid 上（不在 stats 里）：detect 那一格的单位是 ms/帧
+        det1 = float((vf.get("per_stage_ms") or {}).get("detect") or 0.0)
+        det2 = float(((fin2.get("vid") or {}).get("per_stage_ms") or {}).get("detect") or 0.0)
+        check(det2 > 0.0 and det1 > 0.0 and det2 < det1 * 0.8,
+              "a 换快档检测器后 detect 每帧明显更短（这个开关唯一保证的事）",
+              "detect %.1f → %.1f ms/帧 · 帧/秒 %.2f → %.2f（哪段是墙看 per_stage_ms）"
+              % (det1, det2, fps, fps2))
     except Exception as e:                                    # noqa: BLE001
         check(False, "a 快档数据点跑挂了", str(e)[:160])
         fps2 = 0.0
@@ -515,12 +530,17 @@ def case_b(clip, a):
 # 案例 C：显存降档（请求 30 → 实际 16）并成功出片；装不下时明确拒绝
 # ------------------------------------------------------------
 # 口径变了（_vram_plan 上台）：以前是「连最小档都装不下也压到 8 帧照跑」，
-# 现在是「沿阶降档，连最小档都装不下就 400」。所以这一档的伪造显存从 1500/1100
-# 上调到 2600（帧预算降 16）和 1200（拒绝）—— 数字是照新公式算的，不是拍的：
-#   avail = 空闲 − max(256MB, 空闲×5%)（2026-05 起）；416 的会话 1026MB + 检测遮罩
-#   300MB = 固定 1326MB，帧 7.92MB/帧，dfm 批 8/4/2/1 = 1150/1100/160/80MB。
-#   1850 → avail 1594 → 30 帧最小 1644 装不下 → 16 帧 / 批 1（1533）采用；
-#   1200 → avail 944 → 连 8 帧 / 批 1（1469）都装不下 → 400。
+# 现在是「沿阶降档，连最小档都装不下就 400」。
+# 这一档的伪造显存**跟着 dfm 后端的会话体量走**，数字是照公式算的，不是拍的：
+#   avail = 空闲 − max(256MB, 空闲×5%)；aux（检测/遮罩）300MB；帧 7.92MB/帧；
+#   dfm 批 8/4/2/1 = 1150/1100/160/80MB；会话 = 权重 + context(512)。
+#   · torch+bf16w（**默认**）：权重压 bf16 → 会话 257+512 = 769MB
+#       1600 → avail 1344 → 30 帧最省也要 1467（批 2）装不下 → 16 帧 / 批 1（1276）采用；
+#       1200 → avail 944 → 连 8 帧 / 批 1（1212）都装不下 → 400。
+#   · onnx fp32（DFL_DFM_BACKEND=onnx）：会话 1026MB
+#       1850 → avail 1594 → 16 帧 / 批 1（1533）；1200 → 944 → 连 8 帧（1469）都不够 → 400。
+# 所以默认档下这一档用 1600（不是原来的 1850）：会话便宜了 257MB，同一个 1850 现在
+# 连 30 帧都放得下（30/批 2 = 1467 ≤ 1594），根本不会降档 —— 那是**省下来的显存**，不是 bug。
 # ============================================================
 def case_c(clip, tag, fake_free, expect):
     head("C · 显存降档：DFL_VRAM_FREE_MB=%s → 期望帧预算 %s" % (fake_free, expect))
@@ -812,7 +832,10 @@ def main(argv=None):
         # max(256MB, free×5%)，2600 空闲时 avail=2344 → 30 帧 / 批 2（1723）本来就装得下，
         # 不会降帧。要让**帧预算**降下来得把 avail 压到 1723 以下：1850 空闲 →
         # avail 1594 → 30 帧哪一档都塞不进（最小 30/批1 = 1644），16 帧 / 批 1（1533）才行。
-        c["16"] = case_c(clip, "降档16", 1850, 16)
+            # 1600 是「默认档（torch+bf16w）下必定降档、且一定装得下」的那一档
+        # （算法见 case_c 上面的注释）。想复现 onnx fp32 的老数字就
+        # DFL_DFM_BACKEND=onnx 跑，那一档用 1850。
+        c["16"] = case_c(clip, "降档16", 1600, 16)
         c["refuse"] = case_c_refuse(clip, 1200)
 
     fails = [r for r in RESULTS if not r[0]]
