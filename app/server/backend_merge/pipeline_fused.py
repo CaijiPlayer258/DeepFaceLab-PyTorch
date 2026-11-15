@@ -645,6 +645,16 @@ _PNG_SIG = b"\x89PNG\r\n\x1a\n"
 _FUSED_ENV_DECODE = "DFL_FUSED_DECODE"
 # 检测输入（letterbox canvas）在 decode 线程先算：DFL_FUSED_DET_PREP=0 关（回老口径）
 _FUSED_ENV_DET_PREP = "DFL_FUSED_DET_PREP"
+# 解码线程只做 read() + ndarray：DFL_FUSED_READINTO=0 退回「read() 出 bytes 再 .copy()」。
+# 1（默认）时 read 直接落进一个预分配环形缓冲（池 = 帧预算 + 4，见 _fused_budget/sem），
+# 省掉每帧一次 6.2MB 的 bytes 分配 + 一次 6.2MB memcpy。像素不受影响（同一份字节、同一个
+# ndarray 形状），实测 25.2→ 见 experiments/dec_lane/REPORT.md：隔离台架 101→119 帧/秒。
+_FUSED_ENV_READINTO = "DFL_FUSED_READINTO"
+# 解码那条 ffmpeg 的 -threads（-i 之前）。0/空 = auto（现状，= 逻辑核数）。
+# 为什么可以动：解码是确定性的，-threads 1/2/4/8/16/auto 输出的 rawvideo 逐帧 sha1 完全相同
+# （experiments/dec_lane/control.py），和 x264 那边「改 -threads 会换 md5」不是一回事。
+# 为什么要动：auto 在 32 逻辑核上开一整池解码线程，和 x264/合成抢核；见同一份 REPORT 的核数列。
+_FUSED_ENV_DEC_THREADS = "DFL_FUSED_DEC_THREADS"
 _FUSED_RAW_MODES = ("raw", "rawvideo", "bgr24", "bgr48le")
 # -i 的流信息里挑「pix_fmt, 宽x高」这一对；位深只从 pix_fmt 名字看
 _FUSED_PIX_TOKEN = re.compile(r"Video:\s[^\n]*?,\s*([a-z][a-z0-9]+)(?:\([^)\n]*\))?,\s*\d+x\d+")
@@ -681,7 +691,8 @@ def _fused_src_bits(video: Path) -> int:
     return 16 if d.group(1) in ("48", "64") else int(d.group(1))
 
 
-def _fused_open_frames(video: Path, start_i: int, size=None, mode="raw", bits=None):
+def _fused_open_frames(video: Path, start_i: int, size=None, mode="raw", bits=None,
+                       threads=0):
     """开一路「ffmpeg → rawvideo 帧流」（默认）或「ffmpeg → PNG 帧流」，返回 (proc, 读一帧的函数)。
 
     默认 raw：`-f rawvideo -pix_fmt bgr24`（8bit 源）/`bgr48le -> >>8`（>8bit 源），
@@ -726,8 +737,11 @@ def _fused_open_frames(video: Path, start_i: int, size=None, mode="raw", bits=No
         deep = int(bits) > 8
 
     ffmpeg = str(_app_mod._ffmpeg_exe())
-    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-nostats", "-nostdin",
-           "-i", str(video), "-map", "0:v:0", "-an"]
+    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-nostats", "-nostdin"]
+    if int(threads or 0) > 0:
+        # 解码线程数（见 _FUSED_ENV_DEC_THREADS 的注释：逐帧 sha1 与 auto 相同）
+        cmd += ["-threads", str(int(threads))]
+    cmd += ["-i", str(video), "-map", "0:v:0", "-an"]
     if int(start_i) > 1:
         cmd += ["-vf", "select=gte(n\\,%d)" % (int(start_i) - 1)]
     # -vsync 0：原样搬每一帧（不按时间戳丢/补），帧数 = 选中的帧数
@@ -765,14 +779,39 @@ def _fused_open_frames(video: Path, start_i: int, size=None, mode="raw", bits=No
             if typ == b"IEND":
                 return b"".join(parts)
 
-    def _next_frame_raw():
+    _mv = {}
+
+    def _read_into(fh, arr):
+        """把一整帧读进调用方给的 ndarray（readinto，不经过 bytes 中转）。"""
+        e = _mv.get(id(arr))
+        if e is None:
+            # 顺手按住 arr，别让 id() 被回收后复用
+            e = (memoryview(arr).cast("B"), arr)
+            _mv[id(arr)] = e
+        mv = e[0]
+        n = 0
+        total = len(mv)
+        while n < total:
+            k = fh.readinto(mv[n:])
+            if not k:
+                return False
+            n += k
+        return True
+
+    def _next_frame_raw(buf=None):
         """rawvideo：定长读一帧 → (h,w,3) BGR uint8；流结束返回 None。
 
         >8bit 的源进的是 bgr48le（w*h*3*2 字节），这里 `>> 8` 取高字节 —— 和 16bit PNG
         被 libpng chop（= 取高字节）的结果逐位相同；用 swscale 的 10→8 舍入就对不上了。
+
+        buf 给了且是 8bit 源：直接 readinto 那块内存（省一次 6.2MB 拷贝 + 一次 bytes 分配）。
         """
         bpp = 6 if deep else 3
         nb = rf[0] * rf[1] * bpp
+        if buf is not None and not deep:
+            if not _read_into(proc.stdout, buf):
+                return None
+            return buf
         buf = proc.stdout.read(nb)
         if not buf or len(buf) < nb:
             return None
@@ -780,10 +819,10 @@ def _fused_open_frames(video: Path, start_i: int, size=None, mode="raw", bits=No
             return (np.frombuffer(buf, "<u2").reshape(rf[1], rf[0], 3) >> 8).astype(np.uint8)
         return np.frombuffer(buf, np.uint8).reshape(rf[1], rf[0], 3).copy()
 
-    def _next_frame():
+    def _next_frame(buf=None):
         """读下一帧 → BGR uint8；流结束返回 None。"""
         if raw:
-            return _next_frame_raw()
+            return _next_frame_raw(buf)
         blob = _read_png(proc.stdout)
         if not blob:
             return None
@@ -916,11 +955,16 @@ def _fused_run(cfg: dict) -> dict:
     det_name = str(cfg.get("det_align") or "retinaface_10g")
     det_src = str(cfg.get("det_align_src") or "cfg.det_align")
     det_thresh = float(cfg.get("align_thresh") or 0.5)
-    # 检测的 letterbox 在 decode 线程先做（检测线程只留前向 + NMS）。关掉 = 回到老口径，
-    # 两条路逐位一致（同一个 prep()，见 app/tools/accept/det_prep_parity.py），留这个开关
-    # 只是为了 A/B 与排障时能量到两边的账。
-    det_prep_on = str(os.environ.get(_FUSED_ENV_DET_PREP) or "1").strip().lower() \
-        not in ("0", "off", "false", "no")
+    # 检测的 letterbox 在**哪儿**做 —— 三档，像素完全一样（同一个 _prep_ctx，同一张 canvas 的
+    # 几何），区别只是「这一笔 0.6~6.4ms 记在谁头上」：
+    #   decode（默认，=1）  decode 线程：它同时要 read 6.2MB，letterbox 排在同一线程里串起来
+    #   detect（=0）        detect 线程：老口径，两段分在两处
+    #   pool（=detect）     detect 线程 + 复用本线程画布（省每帧 1.2MB 的 np.full）
+    # 三档逐位一致，回归见 app/tools/accept/det_prep_parity.py；A/B 的账见
+    # experiments/dec_lane/REPORT.md（同进程交替、3 轮、探针/无探针两套）。
+    _dp_raw = str(os.environ.get(_FUSED_ENV_DET_PREP) or "1").strip().lower()
+    det_prep_on = _dp_raw not in ("0", "off", "false", "no")
+    det_prep_pool = _dp_raw in ("detect", "pool", "detect_pool")
     png_level = int(cfg.get("png_level") if cfg.get("png_level") is not None else 1)
     # ---- 合成放在哪儿算：CPU（默认）还是 GPU（DFL_COMPOSE_GPU=1）----
     # GPU 那条路的每帧墙钟是 1~2ms 量级，一条线程就够（多开会挤同一个 CUDA stream，
@@ -1298,19 +1342,50 @@ def _fused_run(cfg: dict) -> dict:
                 else "DFL_FUSED_DECODE=png，可选；同一条 PNG 编解码路径，约 25 ms/帧",
                 probe.get("w"), probe.get("h"), src_bits))
 
+    readinto_on = str(os.environ.get(_FUSED_ENV_READINTO) or "1").strip().lower() \
+        not in ("0", "off", "false", "no")
+    dec_threads = 0
+    try:
+        dec_threads = max(0, int(str(os.environ.get(_FUSED_ENV_DEC_THREADS) or "0").strip()))
+    except Exception:                                          # noqa: BLE001
+        dec_threads = 0
+    _vid_log("快速导出：解码线程 %s · readinto %s · 检测 letterbox 在 %s"
+             % (("ffmpeg -threads %d" % dec_threads) if dec_threads else "auto（ffmpeg 默认）",
+                "开（预分配环形缓冲，帧预算+4 槽）" if readinto_on else "关（read()+copy()）",
+                "decode 线程" if det_prep_on else "detect 线程"))
+
     def _decode():
         proc = None
+        # readinto 的环形缓冲：槽数 = 帧预算 + 4。为什么不担心被覆盖：在飞帧由 sem 卡在
+        # budget 帧（decode 这里是「先读、后 acquire」，所以最多 budget+1 块同时活着），
+        # 而 frame 引用在合成之后就放了（_compose 里 job.frame = None）。
+        pool = []
+        if readinto_on:
+            try:
+                _pw, _ph = int(probe.get("w") or 0), int(probe.get("h") or 0)
+                if _pw > 0 and _ph > 0:
+                    pool = [np.empty((_ph, _pw, 3), np.uint8)
+                            for _ in range(int(budget) + 4)]
+            except Exception:                                  # noqa: BLE001
+                pool = []
+        pi = 0
         try:
             proc, next_frame = _fused_open_frames(video, start_i,
                                                  size=(probe.get("w"), probe.get("h")),
-                                                 mode=dec_mode, bits=(src_bits or None))
+                                                 mode=dec_mode, bits=(src_bits or None),
+                                                 threads=dec_threads)
             gen["proc"] = proc
             n = start_i - 1
             while not stop.is_set():
                 if n >= end_i:
                     break
                 t_rd = time.perf_counter()
-                frame = next_frame()
+                if pool:
+                    frame = next_frame(pool[pi])
+                    if frame is not None:
+                        pi = (pi + 1) % len(pool)
+                else:
+                    frame = next_frame()
                 ticks.add("decode", time.perf_counter() - t_rd)
                 if frame is None:
                     break
@@ -1366,6 +1441,15 @@ def _fused_run(cfg: dict) -> dict:
                     break
                 t = time.perf_counter()
                 try:
+                    if job.det_ctx is None and det_prep_pool and not det_prep_on:
+                        # pool 档：letterbox 在本线程做，并复用本线程那张画布
+                        # （prep → 前向 → 立刻 drop，所以复用安全；见 _prep_ctx 的注释）
+                        tq = time.perf_counter()
+                        _ctx = _det_prep(det if det_obj is None else det_obj, job.frame,
+                                         reuse=True)
+                        if _ctx is not None:
+                            ticks.add("det_prep", time.perf_counter() - tq)
+                            job.det_ctx = _ctx
                     if job.det_ctx is not None:
                         # 主路径：canvas 已经在 decode 线程做好，这里只剩前向 + NMS
                         boxes = (_detect_on_ctx(det_obj, job.det_ctx, det_thresh)
@@ -2280,6 +2364,11 @@ def _fused_run(cfg: dict) -> dict:
             "batch_target": int(batch_target),
             "batch_wait_ms": int(round(batch_wait * 1000.0)),
             "decode_mode": dec_mode,
+            # 解码腿的三个旋钮（见 _FUSED_ENV_* 的注释与 experiments/dec_lane/REPORT.md）
+            "decode_threads": int(dec_threads or 0),
+            "readinto": bool(readinto_on),
+            "det_prep_where": ("decode" if det_prep_on
+                               else ("detect-pool" if det_prep_pool else "detect")),
             "detector": str(det_name), "detector_src": str(det_src),
             "det_prep": bool(det_prep_on), "det_probe": dict(_dp or {})}
 

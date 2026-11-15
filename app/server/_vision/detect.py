@@ -9,6 +9,7 @@ DFL 的对齐空间（眼睛/嘴巴位置会飘），所以 _forward 把 kps 分
 from __future__ import annotations
 
 import contextlib
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -188,11 +189,24 @@ def cpu_session_options(nthr=None):
     return so
 
 
-def _prep_ctx(img_bgr, input_size, pad):
+_PREP_CANVAS = threading.local()
+
+
+def _prep_ctx(img_bgr, input_size, pad, reuse=False):
     """整帧 → {'canvas','scale','w','h'}：letterbox + 填边，**只此一份**。
 
     RetinaFace 用 0 填边、TinyMog 用 128（和 4.0 的 modelgraph 一致），插值都是
     INTER_LINEAR —— 这里的每一个字都决定框的位置，改一处就是另一套坐标。
+
+    reuse=True 时画布**按线程复用**（填边只做第一次）：调用方必须保证「同一线程里上一张
+    canvas 已经用完、并且不会再被别处引用」—— 融合流水线的 detect 线程就是这样（prep →
+    前向 → 立刻 drop），省掉每帧一次 640²×3 = 1.2MB 的 np.full（实测 0.72 → 0.33 ms/帧，
+    experiments/dec_lane/prep.py）。默认 False：老调用方（切脸等）照旧拿独立画布。
+
+    另外记一笔**没采用**的路子：cv2 的 INTER_LINEAR 在奇数整数倍下采样（1080x1920→360x640，
+    k=3）上恰好等于步长采样 frame[(k-1)//2::k, (k-1)//2::k]（0 像素不同，control.py 量的），
+    但步长采样本身比 cv2.resize 更慢（1.15 vs 0.72 ms/帧）—— 它是 6.2MB 的跨步 gather，
+    cv2 是流式 SIMD。所以这里不做这个"优化"。
     """
     import cv2
 
@@ -200,8 +214,18 @@ def _prep_ctx(img_bgr, input_size, pad):
     S = int(input_size)
     scale = min(S / float(W), S / float(H))
     nw, nh = max(1, int(round(W * scale))), max(1, int(round(H * scale)))
-    canvas = (np.full((S, S, 3), int(pad), np.uint8) if pad
-              else np.zeros((S, S, 3), np.uint8))
+    canvas = None
+    if reuse:
+        c = getattr(_PREP_CANVAS, "buf", None)
+        if c is not None and c.shape == (S, S, 3) and c.dtype == np.uint8:
+            canvas = c
+        else:
+            canvas = (np.full((S, S, 3), int(pad), np.uint8) if pad
+                      else np.zeros((S, S, 3), np.uint8))
+            _PREP_CANVAS.buf = canvas
+    if canvas is None:
+        canvas = (np.full((S, S, 3), int(pad), np.uint8) if pad
+                  else np.zeros((S, S, 3), np.uint8))
     canvas[:nh, :nw] = cv2.resize(img_bgr, (nw, nh), interpolation=cv2.INTER_LINEAR)
     return {"canvas": canvas, "scale": scale, "w": int(W), "h": int(H)}
 
@@ -386,7 +410,7 @@ class RetinaFaceDet:
         return keep
 
     # ---------- 对外 ----------
-    def prep(self, img_bgr):
+    def prep(self, img_bgr, reuse=False):
         """整帧 → 检测输入上下文 {'canvas','scale','w','h'}。**不改像素，只做 letterbox**。
 
         单独拆出来是为了让调用方在**别的线程**先把这一步做掉（decode 线程有富余，
@@ -394,7 +418,7 @@ class RetinaFaceDet:
         「CPU 的 resize / 填边」与「前向 + NMS」，拆开前后逐位一致（同一个函数、
         同一个插值、同一张 canvas），见 app/tools/accept/det_prep_parity.py。
         """
-        return _prep_ctx(img_bgr, self.input_size, 0)
+        return _prep_ctx(img_bgr, self.input_size, 0, reuse=reuse)
 
     def detect_ctx(self, ctx, min_face=16):
         """上下文 → [{'box','kps','score'}]（原图坐标）。和 detect() 完全同一条口径。"""
@@ -639,9 +663,12 @@ class TinyMogDet:
             out.append(faces)
         return out
 
-    def prep(self, img_bgr):
-        """整帧 → {'canvas','scale','w','h'}（letterbox 填 128，和 4.0 的预处理一致）。"""
-        return _prep_ctx(img_bgr, self.input_size, 128)
+    def prep(self, img_bgr, reuse=False):
+        """整帧 → {'canvas','scale','w','h'}（letterbox 填 128，和 4.0 的预处理一致）。
+
+        reuse=True：本线程复用自己的画布（调用方保证上一张已用完，见 _prep_ctx）。
+        """
+        return _prep_ctx(img_bgr, self.input_size, 128, reuse=reuse)
 
     def detect_ctx(self, ctx, min_face=16):
         # 同 RetinaFaceDet.detect_ctx：预处理 + 前向都在检测自己的流上（理由见 _stream_ctx）

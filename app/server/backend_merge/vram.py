@@ -2646,15 +2646,24 @@ def _detect_on(det, frame, thresh: float) -> list:
     return det.detect(frame) or []
 
 
-def _det_prep(det, frame):
+def _det_prep(det, frame, reuse=False):
     """把检测器的 letterbox 先算出来（decode 线程干，检测线程只留前向 + NMS）。
 
     检测器没有 prep（老/第三方实现）就返回 None，调用方退回「帧直接丢给 detect」。
     prep 只读 self.input_size、不碰 session，所以可以和安全跑着的 detect 并发。
+
+    reuse=True：让 prep 复用**本线程**的画布（省每帧 1.2MB 的 np.full）。只允许在
+    「prep → 前向 → 立刻 drop」的单线程路径上用（融合流水线的 detect 线程就是），
+    否则上一张 canvas 可能还在别处被引用。
     """
     fn = getattr(det, "prep", None)
     if fn is None:
         return None
+    if reuse:
+        try:
+            return fn(frame, reuse=True)
+        except TypeError:                                  # 老实现没有这个参数
+            pass
     return fn(frame)
 
 
