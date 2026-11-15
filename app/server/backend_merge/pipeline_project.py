@@ -55,7 +55,22 @@ _ENV_DFM_BATCH = "DFL_PROJ_DFM_BATCH"    # dfm 攒批目标（默认 max(计划 
 _ENV_WAIT = "DFL_PROJ_BATCH_WAIT_MS"     # 攒批超时（默认 20ms）
 
 
-_ENV_PNG = "DFL_PROJ_PNG_LEVEL"          # .png 帧的压缩级别（默认 3，与老路逐字节同档）
+_ENV_PNG = "DFL_PROJ_PNG_LEVEL"          # .png 帧的压缩级别（默认见 _PNG_LEVEL_DEFAULT）
+
+
+# .png 帧的压缩级别默认值 = 1 + Z_RLE（和 ⑤ 合成阶段、快速导出同档）。
+#
+# 改之前的默认是 3 且**不带策略**（裸 cv2.imencode），实测是本仓最贵的一次编码：
+# 1080×1920 单线程 6 帧中位 ——
+#     level 3 · 默认策略  144.3 ms/帧  · 1.249 MB
+#     level 3 · Z_RLE      75.7 ms/帧  · 1.231 MB
+#     level 1 · 默认策略   74.5 ms/帧  · 1.371 MB
+#     level 1 · Z_RLE      65.4 ms/帧  · 1.231 MB
+#     level 0              40.2 ms/帧  · 5.944 MB（体积翻 4.8 倍，不划算）
+# PNG 无损，解码出来的像素逐位相同（8 档全部实测 np.array_equal），只有文件字节变；
+# 这一档**又快又小**（比 level 3 默认策略少 55% 时间、还小 1.4%），所以直接做成默认。
+# 老行为仍然可复现：DFL_PROJ_PNG_LEVEL=3（策略固定 RLE，只是 level 不同）。
+_PNG_LEVEL_DEFAULT = 1
 
 
 _QDEPTH = 24            # 段间队列深度（和 fused 同口径）
@@ -335,7 +350,7 @@ def run(cfg: dict):
     n_cmp = compose_threads(4)
     n_read = _int_env(_ENV_READ, 4, 1, 8)
     n_enc = _int_env(_ENV_ENC, 6, 1, 8)
-    png_level = _int_env(_ENV_PNG, 3, 0, 9)
+    png_level = _int_env(_ENV_PNG, _PNG_LEVEL_DEFAULT, 0, 9)
     wait_s = max(0.0, float(_int_env(_ENV_WAIT, int(_BATCH_WAIT_MS), 0, 500)) / 1000.0)
 
     quit_event = threading.Event()
@@ -799,15 +814,16 @@ def run(cfg: dict):
                 t_enc = time.perf_counter()
                 try:
                     if Path(job["name"]).suffix.lower() == ".png":
-                        ok, buf = cv2.imencode(
-                            ".png", job["out"],
-                            [int(cv2.IMWRITE_PNG_COMPRESSION), png_level])
+                        # 和 ⑤ 合成阶段 / 快速导出**同一个**编码函数（含 Z_RLE 策略）：
+                        # 以前这里是裸 imencode(.png, level=3)，是三条导出链里唯一没走
+                        # _stage_imencode_png 的一处，也是唯一还在用 level 3 的一处。
+                        job["data"] = rm._stage_imencode_png(job["out"], png_level)
                     else:
                         ok, buf = cv2.imencode(
                             ".jpg", job["out"], [int(cv2.IMWRITE_JPEG_QUALITY), q])
-                    if not ok:
-                        raise RuntimeError("编码失败")
-                    job["data"] = buf.tobytes()
+                        if not ok:
+                            raise RuntimeError("编码失败")
+                        job["data"] = buf.tobytes()
                 except Exception as e:                      # noqa: BLE001
                     job["kind"] = "err"
                     job["error"] = "编码失败：%s" % str(e)[:120]
