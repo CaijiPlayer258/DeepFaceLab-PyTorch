@@ -27,7 +27,7 @@ torch eager + TF32 比 ONNX 快 3~13%，而 bf16 是**这台 5070 Laptop 唯一�
     DFL_DFM_CL=1                            权重转 channels_last（384 那份 B8 快 13%）
     DFL_DFM_MB=8                            预编译的 batch 上限（超过就分块跑）
     DFL_DFM_PIN=0                           关掉 pinned 出参缓冲（默认开）
-    DFL_DFM_GRAPH=1                         **CUDA Graph 重放**（默认 0 = 现状 eager）
+    DFL_DFM_GRAPH=1                         **CUDA Graph 重放**（默认 1；=0 回到 eager。逐位不变：parity max|diff|=0、26 次导出同 md5）
         一次 dfm 前向是 156 个 aten 算子提交（416 那张图）+ 1 次流同步。静默态那 156 次
         提交只花 ~5ms，但在生产的 15 条 CPU 车道（cv2/numpy + Python 胶水）旁边抢 GIL，
         它变成 20.3~22.6ms —— 帧被压在 ≥20.3ms。图重放把「156 次提交」换成「1 次
@@ -150,10 +150,10 @@ class DfmTorch:
         self._pins = {}
         self.lock = threading.RLock()
         self.nets = {}
-        # ---- CUDA Graph（DFL_DFM_GRAPH；默认关）----
+        # ---- CUDA Graph（DFL_DFM_GRAPH；默认开，=0 回 eager）----
         # graph_on 可以在运行时用 set_graph() 翻 —— A/B 台架就是靠它在**同一份会话**上交替
         # （不重载模型 = 不改 cuDNN 状态 = 两个臂比的是同一个计算）。
-        self.graph_on = _flag("DFL_DFM_GRAPH", "0")
+        self.graph_on = _flag("DFL_DFM_GRAPH", "1")
         self.g_batches = _env_batches("DFL_DFM_GRAPH_B", "1,2,4,8")
         try:
             self.g_warm = max(1, int(_env("DFL_DFM_GRAPH_WARM", "3") or 3))
