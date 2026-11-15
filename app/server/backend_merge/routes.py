@@ -573,12 +573,22 @@ def merge_export_status():
                        "cache_dir": str(snap.get("cache_dir") or ""),
                        "per_stage_ms": dict(stats.get("per_stage_ms") or {}),
                        "stage_util_pct": dict(stats.get("stage_util_pct") or {}),
-                       "pipeline": dict(stats.get("pipeline") or {})}
+                       "pipeline": dict(stats.get("pipeline") or {}),
+                       # 坏帧降级（DFL_FUSED_SKIP_BAD=1，默认关）：成了几帧坏帧、
+                       # 帧号是哪些。默认关时这里恒为 0/[]（键在，值空）。
+                       "skip_bad": bool(snap.get("skip_bad") or stats.get("skip_bad")),
+                       "skipped_count": int(snap.get("skipped_count")
+                                            or stats.get("skipped_count") or 0),
+                       "skipped_frames": list(snap.get("skipped_frames")
+                                              or stats.get("skipped_frames") or [])}
         # 顶层也给一份（前端不必再进 vid 里翻）
         resp["fused"] = fused
         resp["resumable"] = (not fused)
         resp["frame_budget"] = resp["vid"]["frame_budget"]
         resp["no_cache"] = bool(fused)
+        resp["skip_bad"] = resp["vid"]["skip_bad"]
+        resp["skipped_count"] = resp["vid"]["skipped_count"]
+        resp["skipped_frames"] = list(resp["vid"]["skipped_frames"])
     # 显存计划（三条路共用一个形状）：训练/导出出问题时第一眼看它 ——
     # 里面有可用显存、需求拆项、选了哪一档、有没有降档、是不是在 CPU 上跑。
     resp["vram_plan"] = dict(snap.get("vram_plan") or _vram_last("快速导出") or {})
@@ -1786,6 +1796,12 @@ def merge_stage_status(cache_dir: str = "", video: str = ""):
         "skipped_why": str((stages.get(str(snap.get("stage") or "")) or {})
                            .get("skipped_why") or ""),
         "skipped": list(snap.get("skipped") or []),
+        # ★ 上面那个 skipped 是「跳过的**阶段**」（同名不同物，历史包袱），别混。
+        # 坏帧降级（DFL_FUSED_SKIP_BAD=1）用的是下面这三个键：帧数 / 帧号 / 进度页那行提示。
+        "skip_bad": bool(snap.get("skip_bad")),
+        "skipped_count": int(snap.get("skipped_count") or 0),
+        "skipped_frames": list(snap.get("skipped_frames") or []),
+        "skip_hint": str(snap.get("skip_hint") or ""),
         "started_at": snap.get("started_at"), "finished_at": snap.get("finished_at"),
         "log": log[-80:],
         "meta": meta,

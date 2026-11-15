@@ -7865,6 +7865,10 @@ function mgStageEmpty(on) {
           if (d.out_video || d.out) bits.push(String(d.out_video || d.out));
           if (d.cache_removed) bits.push("cache 已清理");
           if (d.fused) bits.push("快速导出（融合流水线）· 未建 cache");
+          /* 坏帧降级：成片出来了，但跳过的那几帧要当面说清楚（帧号在 <成片>.log 里） */
+          if (Number(d.skipped_count) || 0) {
+            bits.push("跳过 " + d.skipped_count + " 帧（坏帧降级 · 详见成片日志）");
+          }
         } else if (d.phase === "cancelled") {
           bits.push("已取消");
           /* 分段链有阶段游标、能接着跑；快速导出没有 —— 别把那句照抄过来 */
@@ -7902,6 +7906,13 @@ function mgStageEmpty(on) {
         if (d.running) eta.textContent = (d.eta_s != null ? ("剩余 " + d.eta_s + " 秒") : (d.msg || "剩余 —"));
         else eta.textContent = (d.phase === "done" ? "完成"
           : (d.phase === "cancelled" ? "已取消" : "已停"));
+      }
+      /* 坏帧降级（DFL_FUSED_SKIP_BAD=1）：真跳过过帧才改这句副标题 ——
+         没有跳过时一个字符都不动，默认路径的界面和现在逐像素相同。 */
+      var skp = Number(d.skipped_count) || 0;
+      var subEl = $("mgPipeSub");
+      if (subEl && skp) {
+        subEl.textContent = "跳过 " + skp + " 帧（坏帧降级 · 详见成片日志）";
       }
       var st = MGP_STAGES[idx] || "";
       var counts = d.counts || {};

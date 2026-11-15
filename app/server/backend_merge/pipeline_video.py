@@ -411,6 +411,9 @@ def _start_video_export(body: dict):
             "frames_done": 0, "frames": [], "stats": {}, "cache": {}, "encode": {},
             "fused": bool(fused), "frame_budget": None, "cache_dir": str(cfg.get("cache") or ""),
             "vram_plan": dict(cfg.get("vram_plan") or {}),
+            # 坏帧降级（DFL_FUSED_SKIP_BAD）：上一单跳过的帧号绝不能被当成这一单的
+            # —— 和上面 frames/stats 一起清，否则新一单刚开始就会显示上一单的「跳过 N 帧」。
+            "skip_bad": False, "skipped_count": 0, "skipped_frames": [],
         })
     with _STAGE_LOCK:
         _STAGE_JOB.update({
@@ -428,6 +431,9 @@ def _start_video_export(body: dict):
             "stages_done": ([] if fused else _stage_done_list(cfg["meta"])),
             "log": [], "meta": ({} if fused else cfg["meta"]),
             "seconds": {}, "skipped": [], "cache_removed": False,
+            # ★ 上面那个 skipped 是「跳过**阶段**」的名单（同名不同物）；
+            # 坏帧降级用的是 skipped_count / skipped_frames（帧），一起清干净
+            "skip_bad": False, "skipped_count": 0, "skipped_frames": [], "skip_hint": "",
             "counts": ({"frames": 0, "faces": 0, "pred": 0, "masks": 0} if fused
                        else _stage_counts(cfg["cache"])),
             "started_at": started,

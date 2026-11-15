@@ -199,6 +199,143 @@ def _fused_rawpipe_on() -> bool:
         not in ("0", "off", "false", "no")
 
 
+# ============================================================
+# 坏帧降级：一帧坏掉不再整单作废（DFL_FUSED_SKIP_BAD，**默认 0 = 与现状逐字节相同**）
+# ------------------------------------------------------------
+# 病：合成阶段某一帧抛异常（某张脸的解不开 / 遮罩形状不对 / 合成后端自己崩），
+#   整条线就 _fail 掉 —— 1500 帧的长片在第 1400 帧功亏一篑，这是最贵的一种失败。
+# 药：=1 时那一帧**跳过**：记一条日志（帧号 + 原因）+ 进 status 的 skipped_frames[]，
+#   成片照常出。
+#
+# ★ 跳过的语义是「顶替一帧」，**不是「少写一帧」**：
+#   raw 管道是定长流（-s WxH -pix_fmt bgr24），少写一帧 = 后面每一帧都错位；
+#   而帧范围导出带 -frames:v N，少写就永远凑不满 N（成片短一截、音轨比画面长 ——
+#   见 _fused_pipe_cmd 里那条「43 → 44 个音频包」的实测）。所以**每个帧号都必须写满
+#   一帧**，剩下的问题只有「这一格用谁的像素」。
+#
+# ★ 选「重复上一帧」，不选「黑帧」（唯一的例外是首帧，见下）：
+#   ① 这一帧的**原帧是好的**，坏的只是合成那一步。刷成黑 = 为了一步失败把整帧真实画面
+#      （背景、别人、没换的脸）一起扔掉，信息损失严格更大。
+#   ② 30fps 下重复一帧 = 33ms 的停顿，眼睛几乎看不见；黑帧是**整屏黑闪一下**，在成片里
+#      显眼得多，而且和「片子本来就有黑场」混在一起，事后根本分不清哪一帧是降级产物。
+#   ③ 黑帧唯一的好处是「诚实地暴露问题」，但可见性不该靠**烧进画面**来买：帧号 + 原因进
+#      日志、进 status.skipped_frames[]、进度页一行提示、收尾一行「本单跳过 N 帧」。
+#      日志是给人查的，画面是给人看的 —— 别让后者替前者受罚。
+#   ④ 顶替只借一帧：帧号 / 时长 / 音轨**一个字节都不动**（定长帧 + -framerate，重复 =
+#      时间轴原地停一帧），所以「时长不变」是构造上的，不靠测出来。
+#   ⑤ 首帧就坏（还没有「上一帧」）→ 退回黑帧。只可能发生一次。
+#   PNG 落盘那条排障路（DFL_FUSED_RAWPIPE=0）没有单写者、3 条编码线程乱序写 %06d.png，
+#   「上一帧」在那里没有定义 → 那条路一律黑帧顶替（同样是一帧，不是少一帧）。
+#
+# ★ 阈值：连续坏超过 N 帧、或整单累计坏超过 5%（下限 3 帧）→ **整单失败**。
+#   为什么必须有：一帧坏是意外，连着坏是病（模型/后端/素材整体不对）。这时候继续顶替
+#   出来的是一段**静止画面** —— 那才是真正的「静默产出坏片」，比失败更糟：用户要几个
+#   小时之后才会发现第 900 帧往后全冻住了。
+#   · 连续：min(30, 5%)，再压 3 帧的下限。为什么是 30 帧：30fps 下 <1 秒的素材不可能是
+#     系统性坏，但又长到不会被一次磁盘抖动 / 一次 OOM 重试误杀；5% 那一头管短片
+#     （120 帧 → 6 帧、40 帧 → 2 帧，压到下限 3），免得小单被两帧抖动直接判死。
+#   · 累计：5%（下限 3 帧）。这一头管的是「隔一帧坏一帧」那种：连续计数永远是 1，
+#     可它已经是一半的画面了 —— 40 帧的单子跳 3 帧以上就不再是零星坏帧。
+#     两头都算「不可恢复」，理由同一条：顶替只能糊一糊零星坏帧，糊不了成片的坏。
+_SKIP_TOTAL_MIN = 3                        # 累计上限的下限（帧）
+_FUSED_ENV_SKIP = "DFL_FUSED_SKIP_BAD"           # =1 打开坏帧降级
+_FUSED_ENV_SKIP_MAX = "DFL_FUSED_SKIP_MAX"       # 连续失败上限（默认 30，5% 更小时按 5%）
+_FUSED_ENV_FAULT = "DFL_FUSED_SKIP_BAD_FAULT"    # 验收注入：点名帧在合成阶段强制失败
+
+
+def _fused_skip_on() -> bool:
+    """这一单要不要坏帧降级。**默认 0（关）**：关的时候下面所有分支一次都不进。"""
+    return str(os.environ.get(_FUSED_ENV_SKIP) or "0").strip().lower() \
+        not in ("", "0", "off", "false", "no")
+
+
+def _fused_fault_frames() -> set:
+    """验收注入：这些**源视频绝对帧号**在合成阶段强制抛异常（默认空 = 一帧都不注入）。"""
+    out = set()
+    for tok in str(os.environ.get(_FUSED_ENV_FAULT) or "").replace(";", ",").split(","):
+        tok = tok.strip()
+        if tok.isdigit():
+            out.add(int(tok))
+    return out
+
+
+def _fused_skip_caps(plan_frames: int) -> tuple:
+    """(连续上限, 累计上限)。口径见上面那段：连续 min(30, 5%)、累计 5%，两头下限都是 3 帧。"""
+    n = max(1, int(plan_frames or 1))
+    try:
+        ceiling = int(str(os.environ.get(_FUSED_ENV_SKIP_MAX) or "30").strip() or 30)
+    except ValueError:
+        ceiling = 30
+    streak = max(3, min(max(1, ceiling), int(round(0.05 * n))))
+    total = max(_SKIP_TOTAL_MIN, int(round(0.05 * n)))
+    return int(streak), int(total)
+
+
+class _FusedSkipBad:
+    """坏帧账本：合成腿记「哪一帧坏、为什么」，写者腿记「连着坏了几帧」。
+
+    两条腿都会写，所以加锁。**按帧号去重**：一帧在合成失败、又在写管道被顶替，
+    账上仍然只是一帧（写者不新增记录，只查原因）。
+    """
+
+    __slots__ = ("lock", "cap_streak", "cap_total", "why", "streak", "worst", "closing")
+
+    def __init__(self, cap_streak: int, cap_total: int):
+        self.lock = threading.Lock()
+        self.cap_streak = max(1, int(cap_streak))
+        self.cap_total = max(1, int(cap_total))
+        self.why = {}                     # 帧号 -> 原因摘要
+        self.streak = 0                   # 写者腿看到的「连续坏」
+        self.worst = 0
+        self.closing = False              # 取消/收尾：从这里往后不算坏帧
+
+    # ---- 合成腿 ----
+    def note(self, idx: int, why: str) -> None:
+        with self.lock:
+            self.why.setdefault(int(idx), str(why)[:160])
+
+    def reason(self, idx: int) -> str:
+        with self.lock:
+            return self.why.get(int(idx), "")
+
+    def ids(self, limit: int = 2000) -> list:
+        with self.lock:
+            return sorted(self.why)[:int(limit)]
+
+    def total(self) -> int:
+        with self.lock:
+            return len(self.why)
+
+    # ---- 写者腿 ----
+    def hit(self, idx: int, why: str) -> str:
+        """这一帧被顶替了。返回非空 = 判定不可恢复（调用方立刻整单失败）。"""
+        with self.lock:
+            self.why.setdefault(int(idx), str(why)[:160])
+            n = len(self.why)
+            if self.closing:
+                return ""
+            self.streak += 1
+            self.worst = max(self.worst, self.streak)
+            if self.streak > self.cap_streak:
+                return ("连续 %d 帧失败（上限 %d 帧）—— 零星坏帧能顶替，连着坏说明"
+                        "这条线病了（模型/素材/编码器），判定不可恢复，整单作废"
+                        % (self.streak, self.cap_streak))
+            if n > self.cap_total:
+                return ("本单已跳过 %d 帧（累计上限 %d 帧 = 5%%，下限 %d 帧）—— 这不是"
+                        "零星坏帧，判定不可恢复，整单作废"
+                        % (n, self.cap_total, _SKIP_TOTAL_MIN))
+            return ""
+
+    def ok(self) -> None:
+        with self.lock:
+            self.streak = 0
+
+    def stop_skip(self) -> None:
+        """取消/收尾：从这里往后不再记坏帧 —— 取消不是坏帧。"""
+        with self.lock:
+            self.closing = True
+
+
 def _fused_pipe_cmd(part, video, fps, w, h, audio_ss=None, audio_t=None, limit=None) -> list:
     """rawvideo 版 _vid_cmd：同一个滤镜、同一个编码器、同一段音轨，只是帧从 pipe:0 来。
 
@@ -259,7 +396,8 @@ class _FusedRawWriter(threading.Thread):
     立刻停整条线，并把 stderr 尾巴交给调用方 → 用户拿到的是「为什么没出来」，不是一句「0 帧」。
     """
 
-    def __init__(self, proc, total, sem, live, live_lock, ticks, stop, on_frame, on_progress):
+    def __init__(self, proc, total, sem, live, live_lock, ticks, stop, on_frame,
+                 on_progress, skip=None, frame_bytes=0, on_skip=None):
         super().__init__(name="fused-raw", daemon=True)
         self.proc = proc
         self.total = int(total)
@@ -287,6 +425,18 @@ class _FusedRawWriter(threading.Thread):
         self.seconds = 0.0
         self.write_max = 0.0
         self._dead = False
+        # ---- 坏帧降级（DFL_FUSED_SKIP_BAD）----
+        # skip=None = 关（默认）：run() 里连一个判断都不做，与现状逐字节相同。
+        # 开着时：这一帧没图 / 字节数不对 → 用**上一帧真的写出去的那份字节**顶替。
+        # 为什么「上一帧」只能在这里算：这是全流程唯一的单写者，帧号严格递增 ——
+        # 合成是 n_cmp 条并发线程，谁先完成谁没有次序，"上一帧"在那儿没有定义。
+        self.skip = skip
+        self.frame_bytes = int(frame_bytes or 0)
+        self.on_skip = on_skip
+        self.last = None                 # 上一帧真的写进管道的字节（一帧 6.2MB，只留一份）
+        self.black = None                # 首帧就坏时的黑帧（懒分配，字节数与一帧严格相同）
+        self.skipped = 0
+        self.skip_abort = ""             # 非空 = 这一单是被「坏帧降级判死」的（错误文案要分开）
 
     # 上游：编码线程（可并发）
     def put(self, job, buf) -> bool:
@@ -312,6 +462,56 @@ class _FusedRawWriter(threading.Thread):
             self.store[seq] = (job, buf)
             self.cv.notify_all()
             return True
+
+    def _black(self):
+        """一帧黑帧（字节数与一帧严格相同）——首帧就坏 / PNG 路顶替时用。
+
+        必须和正常帧**同字节数**：管道是定长流，少一个字节后面就全错位。
+        """
+        n = int(self.frame_bytes or 0)
+        if n <= 0:
+            return None
+        if self.black is None:
+            self.black = memoryview(np.zeros(n, np.uint8))
+        return self.black
+
+    def _slot(self, job, buf):
+        """这一帧到底写什么字节：好帧就是它自己，坏帧用**上一帧**顶替（首帧用黑帧）。
+
+        返回 (要写的字节, 判定不可恢复的原因)。第二个非空 = 调用方立刻整单失败。
+        **默认口径（skip=None）原样返回** —— 关掉开关时这条路径上一次都不会进。
+        """
+        if self.skip is None:
+            return buf, ""
+        why = ""
+        # 账本的键一律用**源视频绝对帧号**（job.idx）：帧范围导出时 job.n 是段内序号，
+        # 拿它当键会和合成腿（记 job.idx）对不上，同一帧被数两次。
+        if buf is None:
+            why = self.skip.reason(int(job.idx)) or "合成阶段失败（没给这一帧的图）"
+        elif self.frame_bytes and len(buf) != self.frame_bytes:
+            # 定长流里字节数不对 = 整条流从这一帧起错位，必须按坏帧处理（不是照样写进去）
+            why = "这一帧字节数不对（%d，应为 %d）" % (len(buf), self.frame_bytes)
+        if not why:
+            self.last = buf                 # 只有真的写出去的帧才当「上一帧」
+            self.skip.ok()
+            return buf, ""
+        fatal = self.skip.hit(int(job.idx), why)
+        first = self.last is None
+        if first:
+            self.last = self._black()
+            if self.last is None:
+                return buf, ("坏帧顶替失败：拿不到一帧的字节数（probe 宽高缺失）"
+                             "—— 这一帧没图也顶不了")
+        self.skipped += 1
+        _vid_log("快速导出：第 %d 帧坏 → 跳过（%s）；这一格用%s顶替（本单已跳过 %d 帧）"
+                 % (int(job.idx), why, "黑帧（首帧没有上一帧）" if first else "上一帧",
+                    self.skipped))
+        if self.on_skip is not None:
+            try:
+                self.on_skip(int(job.n), why)
+            except Exception:                              # noqa: BLE001
+                pass
+        return self.last, fatal
 
     def start(self):                     # noqa: D102 - 先起 stderr 排空线程，再起写者
         threading.Thread(target=self._drain, name="fused-raw-err", daemon=True).start()
@@ -352,6 +552,13 @@ class _FusedRawWriter(threading.Thread):
                     self.stop.set()
                     return
                 t = time.perf_counter()
+                buf, _fatal = self._slot(job, buf)
+                if _fatal:
+                    self.err = "坏帧降级：" + _fatal
+                    self.skip_abort = _fatal
+                    self._dead = True
+                    self.stop.set()
+                    return
                 try:
                     self.proc.stdin.write(buf)
                 except (BrokenPipeError, ConnectionResetError, ValueError, OSError) as e:
@@ -1235,7 +1442,22 @@ def _fused_run(cfg: dict) -> dict:
     stat_lock = threading.Lock()
     bstat = {"calls": 0, "faces": 0, "max": 0, "hist": {}, "why": {}}
     rep = {"at": 0.0}
-    got = {"frames": 0, "swapped": 0, "copied": 0, "no_face": 0, "faces": 0, "skipped": 0}
+    got = {"frames": 0, "swapped": 0, "copied": 0, "no_face": 0, "faces": 0,
+           "skipped": 0, "bad_frames": 0}
+
+    # ---- 坏帧降级（DFL_FUSED_SKIP_BAD，**默认关**）----
+    # skip=None = 关：合成腿、写者腿、上报腿各多一次 `is None` 判断，别的什么都不变
+    # （「默认关逐字节相同」的证据见 experiments/skip_bad/：同一单两次成片 md5 相同）。
+    _cap_streak, _cap_total = _fused_skip_caps(int(end_i) - int(start_i) + 1)
+    skip = _FusedSkipBad(_cap_streak, _cap_total) if _fused_skip_on() else None
+    fault_frames = _fused_fault_frames() if skip is not None else set()
+    if skip is not None:
+        _vid_log("快速导出：坏帧降级 开（%s=1）—— 一帧坏只顶替这一格（重复上一帧），"
+                 "连续 %d 帧 / 累计 %d 帧仍判整单失败（关掉用 %s=0）"
+                 % (_FUSED_ENV_SKIP, _cap_streak, _cap_total, _FUSED_ENV_SKIP))
+        if fault_frames:
+            _vid_log("快速导出：★ 验收注入 %s=%s —— 这些帧在合成阶段被强制失败（不是真坏帧）"
+                     % (_FUSED_ENV_FAULT, ",".join(str(i) for i in sorted(fault_frames))))
 
     def _fail(stage, exc):
         errors.append("%s: %r" % (stage, exc))
@@ -1278,16 +1500,24 @@ def _fused_run(cfg: dict) -> dict:
         rate = float(done) / el
         eta = int((total - done) / rate) if rate > 0 and 0 < done < total else None
         pct = int(round(_VID_PCT_SWAP * float(done) / total)) if total else 0
-        _stage_progress(
-            "fused", min(100, pct),
-            "快速导出 %d/%d 帧（第 %d..%d 帧）· %.1f 帧/秒"
-            % (done, total, start_i, end_i, rate),
-            frames_done=int(done), frames_total=int(total),
-            frame_fps=round(rate, 2), eta_s=eta,
-            swapped=int(got["swapped"]), copied=int(got["copied"]),
-            no_face=int(got["no_face"]))
+        # 坏帧降级：进度页那一行提示（开关关着时 _sk 恒 0，文案与键一个都不变）
+        _sk = 0 if skip is None else skip.total()
+        _sk_ids = ([] if (skip is None or not _sk) else skip.ids(200))
+        _sk_kw = ({} if skip is None
+                  else {"skip_bad": True, "skipped_count": int(_sk),
+                        "skipped_frames": list(_sk_ids)})
+        _msg = ("快速导出 %d/%d 帧（第 %d..%d 帧）· %.1f 帧/秒"
+                % (done, total, start_i, end_i, rate))
+        if _sk:
+            _msg += " · 已跳过 %d 帧（坏帧降级）" % _sk
+        _stage_progress("fused", min(100, pct), _msg,
+                        frames_done=int(done), frames_total=int(total),
+                        frame_fps=round(rate, 2), eta_s=eta,
+                        swapped=int(got["swapped"]), copied=int(got["copied"]),
+                        no_face=int(got["no_face"]), **_sk_kw)
         _vid_stats(done=int(done), total=int(total), fps=round(rate, 2), eta_s=eta,
-                   frame_budget=budget, fused=True, peak_live=int(live["peak"]))
+                   frame_budget=budget, fused=True, peak_live=int(live["peak"]),
+                   **_sk_kw)
         # 每段的「每帧 ms」+ dfm 当前的攒批（界面 lane 旁边那个小字）；_report 自己
         # 就把频率压到 0.25s 一拍，所以这里不用再节流。
         try:
@@ -1306,7 +1536,11 @@ def _fused_run(cfg: dict) -> dict:
         """
         with stat_lock:
             got["frames"] += 1
-            if job.rec.get("no_face"):
+            if job.rec.get("skipped"):
+                # 坏帧（被上一帧顶替）：既不算换脸也不算直通 —— 单独一列，
+                # 否则 status 里的 swapped 会把降级帧当成功计入。
+                got["bad_frames"] += 1
+            elif job.rec.get("no_face"):
                 got["copied"] += 1
                 got["no_face"] += 1
             else:
@@ -1315,6 +1549,25 @@ def _fused_run(cfg: dict) -> dict:
             done = got["frames"]
         _vid_record(job.rec)
         _report(done)
+
+    def _skip_note():
+        """坏帧的可见性：status 的计数 + 帧号列表 + 进度页那一行（日志由调用处写）。
+
+        两把锁**不嵌套**（这个项目里的老规矩：_merge_job_lock 与 _STAGE_LOCK 分开拿）。
+        默认关时 skip 是 None，这个函数什么都不做 —— status 的键一个都不多。
+        """
+        if skip is None:
+            return
+        ids = skip.ids()
+        with _merge_job_lock:
+            _merge_job["skip_bad"] = True
+            _merge_job["skipped_count"] = len(ids)
+            _merge_job["skipped_frames"] = list(ids)
+        with _STAGE_LOCK:
+            _STAGE_JOB["skip_bad"] = True
+            _STAGE_JOB["skipped_count"] = len(ids)
+            _STAGE_JOB["skipped_frames"] = list(ids)
+            _STAGE_JOB["skip_hint"] = ("%d 帧被跳过（坏帧降级，详见成片日志）" % len(ids))
 
     # ---- 显存保护：dfm 批大小按 session 实测阶梯选（每个 dfm 一次）----
     batch_of = {}
@@ -1904,25 +2157,48 @@ def _fused_run(cfg: dict) -> dict:
                     return
                 t = time.perf_counter()
                 args = job.faces or []          # 只给下面的记账用（faces=张数）
-                if gpu_cmp["on"]:
-                    try:
-                        out_frame = compose_frame_gpu(job.frame, _compose_args_gpu(job),
+                try:
+                    if fault_frames and int(job.idx) in fault_frames:
+                        # 验收注入（DFL_FUSED_SKIP_BAD_FAULT）：装作这一帧合成炸了。
+                        # 走的是下面那个**真的** except —— 同一个失败路径，不是旁路。
+                        raise RuntimeError("注入的坏帧（%s）" % _FUSED_ENV_FAULT)
+                    if gpu_cmp["on"]:
+                        try:
+                            out_frame = compose_frame_gpu(job.frame, _compose_args_gpu(job),
+                                                          comp_cfg, job.timings)
+                        except Exception as e:                 # noqa: BLE001
+                            # 整段退回 CPU（不逐帧来回切：同一单里两套口径比慢更糟）。
+                            # 回退后 n_cmp 已经是 1，会慢一些，但结果与「一开始就用 CPU」相同。
+                            _vid_log("快速导出：GPU 合成失败（%s）→ 本单退回 CPU 合成"
+                                     % str(e)[:200])
+                            gpu_cmp["on"] = False
+                            gpu_cmp["why"] = str(e)[:200]
+                            out_frame = compose_frame(job.frame, _compose_args_cpu(job),
                                                       comp_cfg, job.timings)
-                    except Exception as e:                     # noqa: BLE001
-                        # 整段退回 CPU（不逐帧来回切：同一单里两套口径比慢更糟）。
-                        # 回退后 n_cmp 已经是 1，会慢一些，但结果与「一开始就用 CPU」相同。
-                        _vid_log("快速导出：GPU 合成失败（%s）→ 本单退回 CPU 合成"
-                                 % str(e)[:200])
-                        gpu_cmp["on"] = False
-                        gpu_cmp["why"] = str(e)[:200]
+                    else:
                         out_frame = compose_frame(job.frame, _compose_args_cpu(job),
                                                   comp_cfg, job.timings)
-                else:
-                    try:
-                        out_frame = compose_frame(job.frame, _compose_args_cpu(job),
-                                                  comp_cfg, job.timings)
-                    except Exception as e:                     # noqa: BLE001
+                except Exception as e:                         # noqa: BLE001
+                    # 默认（skip=None）或者已经取消：一个字节都不改，照旧整单失败。
+                    # 取消不算坏帧（stop 一起就说明这一单本来就要收），所以先看 stop。
+                    if skip is None or stop.is_set() or _fused_cancelled():
                         raise _BadInput("第 %d 帧合成失败：%s" % (job.idx, str(e)[:160]), 500)
+                    out_frame = None
+                    _why = ("%s: %s" % (e.__class__.__name__, str(e)[:120])).strip()
+                    skip.note(job.idx, _why)
+                    job.rec["skipped"] = True
+                    job.rec["why"] = _why[:160]
+                    job.rec["faces"] = 0
+                    job.rec["swapped"] = 0
+                    job.rec["no_face"] = False
+                    ticks.add("compose", time.perf_counter() - t)
+                    job.frame = None
+                    _vid_log("快速导出：第 %d 帧合成失败 → 跳过（%s）—— 成片这一格用上一帧顶替，"
+                             "帧号/时长/音轨不动" % (job.idx, _why))
+                    _skip_note()
+                    # 这一格**必须**占一个帧号交给下游：写者按帧序顶替（见 _FusedRawWriter._slot）
+                    _put(q_enc, (job, None))
+                    continue
                 ticks.add("compose", time.perf_counter() - t)
                 if dump_frames and int(job.idx) in dump_frames:
                     _fused_dump(cfg, job, out_frame)
@@ -1966,12 +2242,23 @@ def _fused_run(cfg: dict) -> dict:
                     # 而 pipe.write 只有写者线程做（帧序不能乱，见 _FusedRawWriter）。
                     # sem/计数/进度都由写者那一侧收（帧真正出去的时刻才算出去）。
                     t = time.perf_counter()
-                    buf = memoryview(img) if img.flags["C_CONTIGUOUS"] else                         memoryview(np.ascontiguousarray(img))
+                    # img=None = 坏帧占位（只可能在 DFL_FUSED_SKIP_BAD=1 时出现）。
+                    # 这里**不替换**：交给写者按帧序用上一帧顶替 —— 3 条编码线程并发，
+                    # 「上一帧」只有在唯一写者里才有定义（见 _FusedRawWriter._slot）。
+                    buf = (None if img is None
+                           else (memoryview(img) if img.flags["C_CONTIGUOUS"]
+                                 else memoryview(np.ascontiguousarray(img))))
                     ticks.add("encode", time.perf_counter() - t)
                     _stage_tick("encode")        # 交接点：合成 → 排队等写管道
-                    if not raw_w.put(job, buf.cast("B")):
+                    if not raw_w.put(job, None if buf is None else buf.cast("B")):
                         return
                     continue
+                if img is None:
+                    # PNG 落盘那条排障路没有单写者（3 条编码线程乱序写 %06d.png），
+                    # 「上一帧」在这里没有定义 → 用黑帧顶替（一样是「顶替一帧」，
+                    # 帧数/时长不变，只是画面上看得见）。
+                    _ph, _pw = int(probe.get("h") or 0), int(probe.get("w") or 0)
+                    img = np.zeros((max(1, _ph), max(1, _pw), 3), np.uint8)
                 t = time.perf_counter()
                 data = _stage_imencode_png(img, png_level)
                 ticks.add("encode", time.perf_counter() - t)
@@ -2094,7 +2381,14 @@ def _fused_run(cfg: dict) -> dict:
             stderr=subprocess.PIPE,
             creationflags=getattr(_app_mod, "_NO_WINDOW", 0) | _prio)
         raw_w = _FusedRawWriter(raw_proc, plan_frames, sem, live, live_lock, ticks, stop,
-                                _frame_done, _report)
+                                _frame_done, _report,
+                                # 坏帧降级（默认 skip=None = 关，与现状逐字节相同）：
+                                # 一帧的字节数按 probe 的显示宽高算 —— 必须和 -s WxH 一致，
+                                # 否则「顶替」这一下自己就把流写错位了。
+                                skip=skip,
+                                frame_bytes=(int(_pw) * int(_ph) * 3),
+                                on_skip=(None if skip is None
+                                         else (lambda _i, _w: _skip_note())))
         raw_w.start()
 
     ths = {}
@@ -2136,6 +2430,10 @@ def _fused_run(cfg: dict) -> dict:
     finally:
         wall = time.time() - t_all
         stop.set()
+        if skip is not None:
+            # 取消/收尾从这里开始：往后写者手里那几帧就算被顶替也不再算「坏帧」，
+            # 免得一次用户取消被降级逻辑记成「连着一堆坏帧」（取消不是坏帧）。
+            skip.stop_skip()
         for k, th in ths.items():
             try:
                 th.join(timeout=10.0)
@@ -2223,6 +2521,21 @@ def _fused_run(cfg: dict) -> dict:
     if written != total:
         _vid_log("快速导出：实解出 %d 帧（源信息说 %d 帧）→ 按实解帧数编码"
                  % (written, total))
+    # ---- 坏帧降级收口：日志里写清「本单跳过 N 帧」----
+    # 这一行是给人看的证据（<成片>.log 的最后几行之一）：哪几帧降级了、为什么降的、
+    # 以及「帧数/时长/音轨没变」这件事。默认关时 skip=None，一个字都不写。
+    if skip is not None and skip.total():
+        _ids = skip.ids()
+        _skip_line = ("本单跳过 %d 帧（共 %d 帧 · 帧号 %s%s）—— 每一帧都照常写进管道，"
+                      "坏的那几格用上一帧顶替，所以帧数/时长/音轨不变；%s=0 可回滚这个降级"
+                      % (len(_ids), written, "、".join(str(i) for i in _ids[:40]),
+                         " …" if len(_ids) > 40 else "", _FUSED_ENV_SKIP))
+        _vid_log("快速导出：" + _skip_line)
+        with _STAGE_LOCK:
+            _STAGE_JOB["warnings"] = list(_STAGE_JOB.get("warnings") or []) + [_skip_line]
+        with _merge_job_lock:
+            _merge_job["warnings"] = list(_merge_job.get("warnings") or []) + [_skip_line]
+        _skip_note()
     # 把这一轮实测的「段占用」留给下一轮的 derive()（这就是「按实测调配比」的回路）
     try:
         _SESS_BUSY["detect"] = round(float(util.get("detect") or 0.0) / 100.0, 3)
@@ -2303,6 +2616,11 @@ def _fused_run(cfg: dict) -> dict:
                 % (_rc, int(raw_w.n),
                    (raw_w.tail_text() or raw_w.err or "ffmpeg 没有输出")[-800:]), 500)
         if raw_w.err:
+            # 两种「写不进去」要分开说：**管道**坏了（ffmpeg 死了）说管道，
+            # **坏帧太多**说坏帧 —— 用户看到「raw 管道异常」会去查 ffmpeg，方向就错了。
+            if getattr(raw_w, "skip_abort", ""):
+                raise _BadInput("坏帧降级判定不可恢复（成片作废）：%s"
+                                % str(raw_w.skip_abort)[:400], 500)
             raise _BadInput("raw 管道异常（成片作废）：%s" % str(raw_w.err)[:400], 500)
         _pipe_s = time.perf_counter() - t_raw0
         _drain = max(0.0, _pipe_s - raw_w.seconds)
@@ -2382,7 +2700,13 @@ def _fused_run(cfg: dict) -> dict:
             "det_prep_where": ("decode" if det_prep_on
                                else ("detect-pool" if det_prep_pool else "detect")),
             "detector": str(det_name), "detector_src": str(det_src),
-            "det_prep": bool(det_prep_on), "det_probe": dict(_dp or {})}
+            "det_prep": bool(det_prep_on), "det_probe": dict(_dp or {}),
+            # 坏帧降级（默认关）：跳过几帧、哪几帧 —— status 与 <成片>.log 都取这一份
+            "skip_bad": bool(skip is not None),
+            "skipped_count": (0 if skip is None else int(skip.total())),
+            "skipped_frames": ([] if skip is None else skip.ids()),
+            "skip_caps": (None if skip is None
+                          else {"streak": int(_cap_streak), "total": int(_cap_total)})}
 
 
 def _fused_worker(cfg: dict):
@@ -2453,6 +2777,13 @@ def _fused_worker(cfg: dict):
         except OSError:
             pass
         res = cfg.get("_fused_result") or {}
+        # 坏帧降级：成功走 res（_fused_run 的账）；失败/取消时 res 是空的，但写者那条腿
+        # 可能已经跳过几帧了 —— 那份账在 _merge_job 里，别让终态把它清成 0。
+        _sk_ids = list((res or {}).get("skipped_frames") or [])
+        if not _sk_ids:
+            with _merge_job_lock:
+                _sk_ids = list(_merge_job.get("skipped_frames") or [])
+        _sk_n = int((res or {}).get("skipped_count") or len(_sk_ids))
         cache_state = clear_face_group_cache(
             "快速导出完成" if ok else ("快速导出取消" if cancelled else "快速导出失败"))
         wall = round(time.time() - t0, 2)
@@ -2496,6 +2827,10 @@ def _fused_worker(cfg: dict):
                 "meta": {}, "vram_plan": vplan, "on_cpu": bool(_vram_cpu_on()),
                 "compose_backend": str(cfg.get("_compose_backend") or "cpu"),
                 "compose_threads": int(cfg.get("_compose_threads") or 0),
+                # 坏帧降级（默认关）：跳过几帧、哪些帧号 —— 进度页/结果页读这两个键
+                "skip_bad": bool((res or {}).get("skip_bad")),
+                "skipped_count": int(_sk_n),
+                "skipped_frames": list(_sk_ids),
             })
         with _merge_job_lock:
             _merge_job.update({
@@ -2511,6 +2846,9 @@ def _fused_worker(cfg: dict):
                     list(_merge_job.get("log") or []), 30))[:4000]),
                 "cache": cache_state, "frame_budget": bud, "active": False,
                 "vram_plan": vplan, "on_cpu": bool(_vram_cpu_on()),
+                "skip_bad": bool((res or {}).get("skip_bad")),
+                "skipped_count": int(_sk_n),
+                "skipped_frames": list(_sk_ids),
                 "compose_backend": str(cfg.get("_compose_backend") or "cpu"),
                 "compose_threads": int(cfg.get("_compose_threads") or 0),
                 "vram_oom": (_oom or None),
