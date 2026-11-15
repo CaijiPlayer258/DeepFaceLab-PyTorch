@@ -247,6 +247,9 @@
     if (key === "merge") {
       bindMergeUI();
       if (window.mgLoadPrefs) window.mgLoadPrefs();
+      /* mgLoadPrefs 会把「模式」按上次的偏好写回下拉 —— 写完了再判一次门控，
+         否则「上次是 seamless、这次记忆里 gpu」这一路会漏过去。 */
+      if (window.mgGateCmpBackend) window.mgGateCmpBackend();
       var right = document.querySelector("#p-merge .mgright");
       if (right && !right.dataset.prefBound) {
         right.dataset.prefBound = "1";
@@ -5985,8 +5988,13 @@ function mgStageEmpty(on) {
     var modeEl = document.getElementById("mgMode");
     if (modeEl && !modeEl.dataset.blendBound) {
       modeEl.dataset.blendBound = "1";
-      modeEl.addEventListener("change", function () { mgSyncBlendSeg(modeEl.value); });
+      modeEl.addEventListener("change", function () {
+        mgSyncBlendSeg(modeEl.value);
+        /* 融合方式动了 → 合成后端那两档的可用性要跟着重判（seamless 时 gpu 选不了） */
+        if (window.mgGateCmpBackend) window.mgGateCmpBackend();
+      });
       mgSyncBlendSeg(modeEl.value);
+      if (window.mgGateCmpBackend) window.mgGateCmpBackend();
     }
     var bseg = page.querySelector('.seg[data-k="blend"]');
     if (bseg && !bseg.dataset.blendBound) {
@@ -13148,7 +13156,8 @@ function mgStageEmpty(on) {
     if (seamless && sel.value === 'gpu') {
       sel.value = 'auto';
       try {
-        if (window.MG_CFG_MEM && MG_CFG_MEM.set) MG_CFG_MEM.set('compose_backend', 'auto');
+        /* 记忆也要一起改，否则下次载入又回到 gpu（每开一次页面闪一下、日志里反复出现） */
+        if (typeof mgCfgMemSave === 'function') mgCfgMemSave('compose_backend', 'auto');
       } catch (e) {}
       if (window.console) console.warn('[导出] 融合方式=seamless，合成后端 gpu 已禁用 → 已改回「自动」');
     }
@@ -13296,6 +13305,16 @@ function mgStageEmpty(on) {
     /* 记忆里的两档要**先**回填：syncStatus 只读格式/编码/进程，但用户在设置页
        第一眼就得看到上次选的精度/后端，而不是等某次渲染才补上。 */
     try { if (window.mgCfgMemApply) window.mgCfgMemApply(); } catch (e) {}
+    /* 合成后端 × 融合方式的互斥要在「记忆 + 偏好都回填完」之后再判：
+       data-cfg 记忆在这里回填，#mgMode 由 go('merge') 的 mgLoadPrefs 回填，两者都可能
+       晚于 DOM（也晚于这一行）。所以判一次 + 三个时间点再兜底 —— 记忆回填是异步的，
+       只判一次会漏掉「先渲染、后回填」的那条路。 */
+    if (window.mgGateCmpBackend) {
+      try { window.mgGateCmpBackend(); } catch (e) {}
+      [0, 60, 400].forEach(function (ms) {
+        setTimeout(function () { try { window.mgGateCmpBackend(); } catch (e) {} }, ms);
+      });
+    }
   }
 
   window.MergePages = MergePages;

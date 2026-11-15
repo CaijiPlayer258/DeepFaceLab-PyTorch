@@ -5940,6 +5940,28 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 /* 「自动」= 界面选了自动、档位由后端定（dfm_dtype / compose_backend 这两格）：
    和「界面」一样是用户的选择，但结果是后端定的，所以用品牌色而不是 ok 绿。 */
 .mgeff-i .s.auto { color: var(--brand); border-color: var(--line-strong); }
+/* 被后端降级的那一格（选了 gpu、实际跑 cpu）：值仍是**真实生效值**，
+   旁边挂「已降级」小标把「这不是你选的那一档」说清楚；来源 chip 也从「界面」变「降级」。
+   ★ 这两条以前只写在 app.js 里、CSS 里一条都没有 —— 于是 <em class="d"> 只是继承正文色的
+     斜体，chip 丢了 .ui/.default 之后落回 --ink-3（深色下 3.39:1，10.5px 看不清），
+     等于「标了等于没标」。颜色统一用 --warn（浅色 #c2740b / 深色 #f0b429）：
+     和顶部那条横幅同一个语义，不另起一套。 */
+.mgeff-i .d {
+  flex: none;
+  font-style: normal;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.5;
+  padding: 0 5px;
+  border-radius: 999px;
+  color: var(--warn);
+  border: 1px dashed var(--line-strong);
+}
+.mgeff-i .s.downgraded {
+  color: var(--warn);
+  border-color: var(--line-strong);
+  font-weight: 600;
+}
 
 /* ============================================================
    流水线实况（进度页）：6 列 lane + 三次贝塞尔曲线 + 光点

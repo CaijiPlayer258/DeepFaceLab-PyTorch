@@ -628,6 +628,13 @@ def _eff_publish(route: str, kind: str, body: dict, cfg: dict,
                      src_override={"dfm_dtype": kn.get("dfm_dtype_src"),
                                    "compose_backend": kn.get("compose_backend_src")})
     eff["req_unused"] = _eff.unused_keys(body)
+    # 被 refine_compose 判回 CPU 的那一档（典型：融合方式 seamless 不进 GPU，
+    # 或这一单根本不是快速导出）要把**原因**一起回显：前端抽屉靠 eff.compose_why
+    # 挂「已降级」小标、把来源 chip 从「界面」换成「降级」（app.js mgpEffPaint）。
+    # 只留在 knobs 里的话，用户点开抽屉看到的还是「cpu · 界面」—— 那正是这一轮要消灭的观感：
+    # 值对、来源对，但看起来像「我选的就是 cpu」，只有顶部横幅能解释（而横幅可以关掉）。
+    if str(kn.get("compose_why") or ""):
+        eff["compose_why"] = str(kn["compose_why"])
     # dfm 的推理后端 / 精度：**不是 cfg 字段**（它由进程级环境变量定），所以不走 build()
     # 那套「请求体缺字段」的自检，直接挂到 [eff] 那一行的末尾。用户要能一眼看到
     # 「我这单的 dfm 到底跑在 onnx 还是 torch、fp32 还是 bf16」——这一栏就是那个答案。
