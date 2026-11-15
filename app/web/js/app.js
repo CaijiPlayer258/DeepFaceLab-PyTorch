@@ -6725,7 +6725,32 @@ function mgStageEmpty(on) {
                                 rect: rect, txt: tx, water: water });
           }
         }
-        /* 六列之后的「成片」：一只窄水杯（缓存里的水倒进这里）。它不进 KEYS、没有 lane，
+        /* 编码列 → 成片：与其它列同构（每条 lane 收束到腰点，再一条进杯）。
+     成片不是一个 lane 列，所以单独画：n 条入腰 + 1 条腰→杯，都走 arc()。 */
+  (function () {
+    var E = geo.encode, O = geo.out;
+    if (!E || !O || E.off || !E.lanes.length) return;
+    var ys = [], q;
+    for (q = 0; q < E.lanes.length; q++) ys.push(E.lanes[q].y);
+    var wy = (Math.min.apply(null, ys) + Math.max.apply(null, ys)) / 2;
+    var x1 = E.cx + BOXW / 2;
+    var x2 = O.cx - OUTW / 2;
+    var wx = (x1 + x2) / 2;
+    E.waist = { x: wx, y: wy };
+    for (q = 0; q < E.lanes.length; q++) {
+      var din2 = arc({ x: x1, y: E.lanes[q].y }, { x: wx, y: wy }, (x1 + wx) / 2);
+      var pin2 = mk("path", { d: din2, fill: "none", stroke: "var(--line-strong)",
+        "stroke-width": 1, opacity: ".75" });
+      layers.edge.appendChild(pin2);
+      edges["in:out:" + q] = din2;
+    }
+    var dcup = arc({ x: wx, y: wy }, { x: x2, y: wy }, (wx + x2) / 2);
+    var pcup = mk("path", { d: dcup, fill: "none", stroke: "var(--line-strong)",
+      "stroke-width": 1, opacity: ".75" });
+    layers.edge.appendChild(pcup);
+    edges["out:out"] = dcup;
+  })();
+  /* 六列之后的「成片」：一只窄水杯（缓存里的水倒进这里）。它不进 KEYS、没有 lane，
            所以 text.t-stage 仍然只有 6 个、rect.lane 仍然只数真线程。 */
         var ocx = PADL + KEYS.length * colW;
         var ocid = "mgpWout";
@@ -6848,7 +6873,11 @@ function mgStageEmpty(on) {
         if (!A || !B || A.off || B.off || !A.lanes.length || !B.lanes.length) return null;
         var a0 = A.lanes[0], b0 = B.lanes[0];
         var x1 = A.cx + BOXW / 2, y1 = a0.y;
-        var x2 = B.cx - BOXW / 2, y2 = b0.y;
+        /* 旁路的终点：**并进主路那一撮**（编码列 → 成片 的腰点），不再单独怼到 e0 左边 —— */
+    /* 让读者看到「无脸帧和主路汇到同一处，再一起倒进成片」。 */
+    var x2, y2;
+    if (B.waist) { x2 = B.waist.x; y2 = B.waist.y; }
+    else { x2 = B.cx - BOXW / 2; y2 = b0.y; }
         /* 沉到**所有列**的 lane 底下（再往下 20px）：只看首尾两列不够 —— 中间那列
            合成有 8 条 lane，比切脸/编码都深，旁路会从它最后两条中间穿过去。 */
         var bot = 0, i2, g2, l2;
