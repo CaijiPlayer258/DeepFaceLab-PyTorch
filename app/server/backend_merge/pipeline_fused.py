@@ -102,6 +102,39 @@ _FUSED_BATCH_TARGET = max(1, min(int(_PRED_BATCH_CAP), _env_int("DFL_FUSED_BATCH
 # dfm 每张贵 3~4ms，但整条线多 10%。**所以「攒到 8」是上限，不是目标**：
 # 上游真能喂满（>400 张脸/秒）时它照样攒满 8；平时它就是一条不憋气的流水线。
 _FUSED_BATCH_WAIT_MS = max(0, _env_int("DFL_FUSED_BATCH_WAIT_MS", 20))
+# 攒批超时改「自适应」：DFL_FUSED_BATCH_ADAPT（**默认 0 = 关，就是上面那版「一律等满超时」**；
+# =1 打开下面这套规则。为什么默认关见本段末尾那组实测）。
+# 为什么：20ms 超时是**延迟税**，不是攒批收益 —— 单脸/帧时下一张脸要 59ms 才来
+# （17.06 帧/秒），等满 20ms 手里还是 1 张。416 单张 dfm 39.9ms + xseg，每张 41ms 干活
+# + 20ms 空等 = 61ms/张 → 16.4 帧/秒，正好压在生产的 17.06 上；GPU 那 27~31% 的空闲
+# 就是它（profile 里 gpu_wait/段空闲 11~16% 只是其中一段，其余摊在"批没到"上）。
+# 规则（**只在 q_gpu 已经空了那一拍判**，绝不从队列里抢批，否则一批会被拆成两批）：
+#   ① 投影攒不满：现有张数 + 到达率 × 剩余等待时间 < 目标 → 立刻送（why=starve）
+#   ② GPU 段本来就空着（空闲 >20%，且已跑满 0.5s / 4 次调用）→ 立刻送（why=idle）
+#   ③ 到点（why=timeout）—— 只有「看起来真能攒满」的时候才会等到这里
+# 投影的到达率是**定窗**的（最近 1 秒来了几张），不是「张数/跨度」：一帧带 3 张脸时
+# 跨度会被压成 0，算出来的到达率是假的。上游真能喂满（≥ 目标/窗口）时它照样会等满。
+#
+# ★ 默认 **0（关）** —— 实测在真素材上收益 ≈0，见下面这组数（150 帧 · 1080x1920 · 416 · tinymog，
+#   4 配置 × 4 轮交错，中位）：
+#     base (固定20ms)      18.62 帧/秒 · compose 107.3ms/帧 · 平均等批 1.2~3.2ms · 送出 {full 16, timeout 1}
+#     adapt                18.58 帧/秒 · compose 109.2ms/帧 · 平均等批 0.5~1.0ms · 送出 {full 16, starve 1}
+#   为什么这条在真素材上不成立：**q_gpu（深度 64）本身就是攒批器**。GPU 忙的时候脸在队列里
+#   排着，pend 一取就是 7~8 张（实测批均值 7.4/8），根本走不到「等超时」那条路；走到的只有
+#   17~19 批里的 1 批。而 GPU 段的空闲 30% 里，真正「等脸」只有 6%（profile 的 gpu_wait 3ms/帧），
+#   剩下是 numpy 打包/量化（3.35ms/张 = 6.2% 帧预算，实测见 _cv2batch_ab/gpu_pack_cost.py）
+#   和 _put 的开销 —— 那些不在这 20ms 里。
+#   所以：留着实现与开关（want=1 时规则见下），**默认关**；要开就 DFL_FUSED_BATCH_ADAPT=1。
+_FUSED_ENV_ADAPT = "DFL_FUSED_BATCH_ADAPT"
+_FUSED_BATCH_ADAPT = str(os.environ.get(_FUSED_ENV_ADAPT) or "0").strip().lower() \
+    not in ("0", "off", "false", "no")
+_FUSED_ADAPT_IDLE_PCT = 20.0        # ② 的门槛：GPU 段空闲超过这个百分比就不再攒批
+# cv2 内部线程数（进程级）：DFL_CV2_THREADS。**默认 0 = 这一单不去动它的设置**（OpenCV 自己的默认）。
+# 0/1/4 三档都量过（孤立 compose 基准 vs 整条线，见 _fused_run 里 cv2_threads 那一段）：
+# 孤立基准上「少给 cv2 线程」确实更好（4 → 1：容量 22.7 → 25.3，核 8.03 → 7.45；不设=26.6/7.38），
+# 但**整条线**上 4 和 1 打平（18.62 vs 18.18，噪声内）—— 局部更快 ≠ 整条更快，所以默认不动。
+_FUSED_ENV_CV2 = "DFL_CV2_THREADS"
+_FUSED_CV2_DEFAULT = 0
 # 对齐/预处理线程 与 合成线程（B 配置：4 / 8）。以前对齐是 min(4, cpu//3) —— 核少的机器
 # 会自己掉到 1~2，同一个产品在两台机器上跑出两种口径。现在钉成常量，要改走环境变量。
 _FUSED_PREP_DEFAULT = max(1, min(16, _env_int("DFL_FUSED_PREP", 4)))
@@ -283,6 +316,43 @@ def _fused_cfg(body: dict) -> dict:
         "chain": True, "force": True, "keep_cache": False, "range_changed": False,
     }
     return cfg
+
+
+def _fused_cv2_threads(cfg: dict) -> int:
+    """fused 这条线给 OpenCV 留几条内部线程（**0 = 这一单不去动它**，用 OpenCV 自己的默认）。
+
+    优先级：body.merge_cv2_threads / DFL_MERGE_CV2_THREADS（显式给了就用，还是那个老旋钮）
+    → DFL_CV2_THREADS → 不动（默认）。
+
+    默认为什么是「不动」而不是某个数字：三档都在真机上量过，**孤立基准和整条线给出
+    相反的答案**（下面两组数是同一台机、同一份素材）：
+      · 孤立 compose 基准（8 线程打满 · 真实 1080p 帧 · mask_mode8/seamless/mt · 5 轮中位）：
+          cv2=4  22.7 帧/秒容量 · 8.03 核      cv2=1  25.3 帧/秒 · 7.45 核
+          cv2=0（不动/OpenCV 默认 32） 26.6 帧/秒 · 7.38 核
+        → 「少给 cv2 线程 = 同样的活少烧核、容量更高」在打满时成立。
+      · 整条 fused（150 帧 416 tinymog，4 配置 × 4 轮交错中位）：
+          cv2=4  18.62 帧/秒 · compose 107.3ms/帧
+          cv2=1  18.18 帧/秒 · compose 125.8ms/帧   ← 整条**更慢**，compose 墙钟 +18ms
+        → 生产 compose 只用到 ~25%，那 12% 容量换不成帧/秒；而 cv2 池退出并行会让
+          每个合成任务变长（seamlessClone 300px 15.0 → 15.6ms、warp 0.94 → 3.04ms 这些
+          单项差异在 25% 占用下被分摊掉，收益收不出来）。
+    **结论：局部更快 ≠ 整条更快。** 默认保持「不动」（= 谁都不设时 OpenCV 自己的默认），
+    要 A/B 就显式 DFL_CV2_THREADS=1 / 4。
+    """
+    raw = cfg.get("merge_cv2_threads")
+    try:
+        want = int(raw or 0)
+    except (TypeError, ValueError):
+        want = 0
+    if want > 0:
+        return min(32, want)
+    env = str(os.environ.get(_FUSED_ENV_CV2) or "").strip()
+    if env:
+        try:
+            return max(0, min(32, int(env, 10)))
+        except ValueError:
+            pass
+    return max(0, min(32, int(_FUSED_CV2_DEFAULT)))
 
 
 _PNG_SIG = b"\x89PNG\r\n\x1a\n"
@@ -581,13 +651,13 @@ def _fused_run(cfg: dict) -> dict:
         _wait_ms = _FUSED_BATCH_WAIT_MS
     batch_wait = max(0.0, float(_wait_ms) / 1000.0)
     qd = int(_FUSED_QDEPTH)
-    # cv2 的内部线程数（进程级）：合成阶段的口径是「worker 多了就别让 cv2 自己摊线程」，
-    # 但这条链的**硬底是检测**（retinaface_10g 整段 52.8ms/帧）。合成那 8 个 worker 实测
-    # 有 76% 是空等（见 profile 的 cmp_wait），所以这里反过来：给 cv2 留几条线程，让检测的
-    # 预处理能并行起来。实测把它钉成 1 时 detect 从 52.8 涨到 65.8 ms/帧、整条线 12.1 帧/秒。
-    # ★ 这 52.8ms 里 letterbox 只占 0.7~0.9ms（见 _det_quick_profile 的实测），大头是前向
-    #   在等 GPU。cv2 线程数仍然值得留，但别指望靠它把检测段砍下来。
-    cv2_threads = max(2, min(8, int(os.cpu_count() or 8) // max(1, n_cmp)))
+    # cv2 的内部线程数（进程级）—— **默认 0 = 不动**（DFL_CV2_THREADS 可显式给；见
+    # _fused_cv2_threads 的实测表）。老版本按 cpu//n_cmp 给 4 条，理由是「让检测的预处理
+    # 并行起来」；现在检测是 tinymog 3.2ms/帧、letterbox 已经搬到 decode 线程，那条理由
+    # 早就不成立，而 cv2=4 在孤立基准里确实比 1 差（容量 22.7 vs 25.3、核 8.03 vs 7.45）——
+    # 但**整条线**上两者一样（18.62 vs 18.18，都在噪声里，见报告的表），所以默认回到
+    # 「不设」（= OpenCV 自己的默认），谁也不改谁的池。
+    cv2_threads = _fused_cv2_threads(cfg)
 
     cache_dir = Path(str(video.parent / (video.stem + "_cache")))
     cache_pre = cache_dir.is_dir()
@@ -702,17 +772,22 @@ def _fused_run(cfg: dict) -> dict:
     cfg["frames_dir"] = str(frames_dir)
     # 线程数一律把**实际生效的值**和它是从哪来的打出来：用户改过环境变量/请求体时，
     # 「日志里明明是 8，为什么只有 4」这种事不该再发生（这条日志是唯一能复盘的地方）。
-    _vid_log("快速导出：线程 检测1/解码1/对齐%d/GPU1/合成%d/编码%d · 队列 %d · cv2 %d 线程 · "
+    _vid_log("快速导出：线程 检测1/解码1/对齐%d/GPU1/合成%d/编码%d · 队列 %d · cv2 %s · "
              "检测预处理在解码线程 %s"
-             % (n_prep, n_cmp, n_enc, qd, cv2_threads, "开" if det_prep_on else "关"))
+             % (n_prep, n_cmp, n_enc, qd,
+                ("%d 线程（DFL_CV2_THREADS）" % cv2_threads) if cv2_threads
+                else "不动（OpenCV 默认）", "开" if det_prep_on else "关"))
     _vid_log("快速导出：线程来源 对齐=%s 合成=%s（B 配置默认 4/8；DFL_FUSED_PREP / "
              "DFL_FUSED_CMP / body.pred_readers / body.merge_workers 可覆盖 · cpu %d 线程）"
              % (_src_of(cfg, ("pred_readers",), _FUSED_PREP_DEFAULT, "DFL_FUSED_PREP"),
                 _src_of(cfg, ("merge_workers", "merge_threads", "threads"),
                         _FUSED_CMP_DEFAULT, "DFL_FUSED_CMP"),
                 int(os.cpu_count() or 0)))
-    _vid_log("快速导出：攒批 目标 %d 张 / 超时 %dms（0=不超时，攒满或 END 才送）"
-             % (batch_target, int(round(batch_wait * 1000.0))))
+    _vid_log("快速导出：攒批 目标 %d 张 / 超时 %dms / 模式 %s（%s · %s=0 可回滚）"
+             % (batch_target, int(round(batch_wait * 1000.0)),
+                "自适应" if _FUSED_BATCH_ADAPT else "固定超时",
+                ("攒不满就立刻送、GPU 空着也立刻送，超时只当上限" if _FUSED_BATCH_ADAPT
+                 else "一律等满超时（老口径）"), _FUSED_ENV_ADAPT))
     _vid_log("快速导出：临时帧目录 %s（成功/取消都删；<视频>_cache/ 一个都不建）" % frames_dir)
 
     END = object()
@@ -1113,6 +1188,59 @@ def _fused_run(cfg: dict) -> dict:
         pend = {}
         pend_frames = {}
         born = {}                       # dfm_path -> 「这一批第一张脸」进来的时刻
+        arrive = []                     # 最近若干张脸的到达时刻（≈ 到达率，见 _due）
+        t_gpu0 = time.perf_counter()    # GPU 段起点：「这一路空着多少」的分子
+
+        def _arrival_rate(now) -> float:
+            """最近 1 秒里来了几张脸（**定窗**，不用「张数/跨度」）。
+
+            为什么不用跨度：一帧带 3 张脸时那 3 张的跨度接近 0，除出来的到达率是假的；
+            定窗口径只会**低估**高速率（样本上限 96 张），估低了就早送 —— 早送永远不亏。
+            """
+            n = 0
+            for t in reversed(arrive):
+                if now - t > 1.0:
+                    break
+                n += 1
+            return float(n)
+
+        def _idle_pct(now) -> float:
+            """GPU 段到现在空着的比例（%）：dfm/xseg 之外的时间都算空着。"""
+            el = now - t_gpu0
+            if el <= 0.0:
+                return 0.0
+            busy = float(ticks.raw("dfm")) + float(ticks.raw("xseg"))
+            return max(0.0, 100.0 * (1.0 - busy / el))
+
+        def _due(now):
+            """q_gpu 已经空了的这一拍：哪几路该现在送、为什么（见 _FUSED_BATCH_ADAPT）。
+
+            只在「队列空」时调用 —— 队列里还有脸时它们下一拍就进来，从队列里抢批会把
+            一批拆成两批。手里有脸、外面一张都没有，等下去只有两种结果：真能攒满（等）
+            或者攒不满（那 20ms 就是纯延迟税）。
+            """
+            out = []
+            if not pend:
+                return out
+            rate = _arrival_rate(now)
+            idle_pct = _idle_pct(now)
+            idle_ok = bool(bstat["calls"] >= 4 and (now - t_gpu0) >= 0.5)
+            for p in list(pend):
+                part = pend.get(p) or []
+                if not part:
+                    continue
+                tgt = _target_for(p)
+                waited = now - float(born.get(p, now))
+                left = max(0.0, batch_wait - waited)
+                if len(part) + rate * left < tgt:
+                    # ① 剩下的窗口里最多再来 rate*left 张，凑不满 → 现在送
+                    out.append((p, "starve"))
+                elif idle_ok and idle_pct >= _FUSED_ADAPT_IDLE_PCT:
+                    # ② GPU 段本来就空着：攒批换不来吞吐，只是在给每张脸加延迟
+                    out.append((p, "idle"))
+                elif waited >= batch_wait:
+                    out.append((p, "timeout"))
+            return out
 
         def flush(only=None, why="full"):
             for dfm_path in (list(pend) if only is None else [only]):
@@ -1120,7 +1248,12 @@ def _fused_run(cfg: dict) -> dict:
                 if not part:
                     continue
                 del pend[dfm_path]
-                born.pop(dfm_path, None)
+                t_born = born.pop(dfm_path, None)
+                if t_born is not None:
+                    # 「这一批从第一张脸进来等到现在」= 这一批交的延迟税。自适应打开后
+                    # 它应该只剩上游自己的流水线延迟，不再是那条 20ms 的超时。
+                    bstat["wait_ms"] = float(bstat.get("wait_ms") or 0.0) + \
+                        max(0.0, time.perf_counter() - float(t_born)) * 1000.0
                 bstat["why"][why] = int(bstat["why"].get(why) or 0) + 1
                 # 攒批目标同时决定「什么时候送」和「一次塞几张」：攒到 8 就一次前向 8 张
                 # （这正是 B 配置要的东西）。显存不够时的退档走 oom_cap，优先级最高。
@@ -1210,16 +1343,24 @@ def _fused_run(cfg: dict) -> dict:
                         _put(q_cmp, END)
                     break
                 if item is None:
-                    # 这一拍没有新脸进来：看看哪一路已经攒到超时了，先把它送出去。
-                    # 这是「尾部/断流」的保险 —— 正常出片时到脸间隔 30~80ms，
-                    # 超时 20ms 是量出来的最优（默认值见 _FUSED_BATCH_WAIT_MS 的实测表）。
-                    if batch_wait > 0.0 and pend:
-                        now = time.perf_counter()
+                    # 这一拍没有新脸进来：手里这些要不要现在送出去？
+                    #   · 自适应（默认）：投影攒不满 / GPU 本来就空着 → 立刻送，不等超时
+                    #   · DFL_FUSED_BATCH_ADAPT=0 或超时=0：老口径，只在到点时才送
+                    if not pend or batch_wait <= 0.0:
+                        continue
+                    now = time.perf_counter()
+                    if _FUSED_BATCH_ADAPT:
+                        for _p, _why in _due(now):
+                            flush(_p, why=_why)
+                    else:
                         for _p in list(pend):
                             if now - float(born.get(_p, now)) >= batch_wait:
                                 flush(_p, why="timeout")
                     continue
                 job, f, nf = item
+                arrive.append(time.perf_counter())
+                if len(arrive) > 192:
+                    del arrive[:-96]
                 if id(job) not in pend_frames:
                     # 生产者给的「这一帧一共几张脸」：收到的回填进度按它算（见 _prep 的说明）
                     pend_frames[id(job)] = [int(nf)]
@@ -1492,10 +1633,13 @@ def _fused_run(cfg: dict) -> dict:
              % (bstat["calls"], bstat["faces"],
                 bstat["faces"] / max(1, bstat["calls"]), bstat["max"],
                 dict(sorted(bstat["hist"].items(), key=lambda kv: int(kv[0])))))
-    _vid_log("快速导出 dfm 攒批：目标 %d 张 / 超时 %dms · 送出原因 %s（full=攒满 · "
-             "timeout=超时 · end=收尾）"
+    _vid_log("快速导出 dfm 攒批：目标 %d 张 / 超时 %dms / 模式 %s · 送出原因 %s"
+             "（full=攒满 · starve=攒不满 · idle=GPU 空着 · timeout=到点 · end=收尾）"
+             " · 平均等批 %.1f ms（这一批第一张脸进来 → 送出）"
              % (batch_target, int(round(batch_wait * 1000.0)),
-                dict(sorted((bstat.get("why") or {}).items()))))
+                "自适应" if _FUSED_BATCH_ADAPT else "固定超时",
+                dict(sorted((bstat.get("why") or {}).items())),
+                float(bstat.get("wait_ms") or 0.0) / max(1, int(bstat["calls"]))))
     mem1 = _proc_mem_mb()
     _vid_log("快速导出 内存（本进程）：流水线前 RSS %s / 提交 %s MB → 流水线后 RSS %s / 提交 %s MB"
              " · 峰值 RSS %s MB（帧缓冲 %d 帧 × %.2f MB = %.0f MB 是设计内的常驻，"
@@ -1551,6 +1695,9 @@ def _fused_run(cfg: dict) -> dict:
                                           _FUSED_CMP_DEFAULT, "DFL_FUSED_CMP")},
                    "batch_target": int(batch_target),
                    "batch_wait_ms": int(round(batch_wait * 1000.0)),
+                   "batch_adapt": bool(_FUSED_BATCH_ADAPT),
+                   "batch_wait_mean_ms": round(
+                       float(bstat.get("wait_ms") or 0.0) / max(1, int(bstat["calls"])), 1),
                    "decode_mode": dec_mode,
                    "queue_depth": qd, "budget": budget, "cv2_threads": cv2_threads})
     _stage_progress("fused", _VID_PCT_SWAP,
