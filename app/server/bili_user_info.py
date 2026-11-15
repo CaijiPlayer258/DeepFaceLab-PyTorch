@@ -1,28 +1,25 @@
+"""兼容层（DEPRECATED）：真身已搬到 app/server/backend_bili/user.py。
+
+PEP 562 惰性代理：本模块自己不 import 真身，属性访问时才转发。为什么不用
+`from .backend_bili.user import *`：星号只复制当下的绑定（本模块没有可变态，代理只为统一写法）
+会分成两份，一边改了另一边看不见；走代理则属性、异常类、模块状态全是同一个对象，
+isinstance 与 is 判定都还成立。
+
+注意：转发名没有静态绑定，**对这个旧路径星号 import 拿不到东西** —— 请写
+`from .bili_user_info import 具体名字` 或 `from . import bili_user_info` 再用属性。
+
+_real() 对空 __package__ 有兜底：`import server.bili_user_info`（serve.py 那种根）和
+`import bili_user_info`（app/server 直接在 sys.path 上）两种取法都能落到真身。
 """
-Fetch Bilibili user info (uid, name, avatar) using the login cookie.
+import importlib as _importlib
 
-2026-05 修：以前所有异常都吞成 {}，前端只能显示「未登录」。现在走 bili_http，
-失败抛 BiliError（401 未登录 / 502 网络 / 412 风控），由路由层转成明确状态码。
-"""
-
-from . import bili_http
-from .bili_http import BiliError
-
-_NAV_URL = 'https://api.bilibili.com/x/web-interface/nav'
+_TARGET = "backend_bili.user"
 
 
-def fetch_user_info(cookie_str: str) -> dict:
-    """Return {uid, name, avatar, avatar_url, level}. Raises BiliError on failure."""
-    j = bili_http.get_json(_NAV_URL, headers={'Cookie': cookie_str}, timeout=10,
-                           what='nav（用户信息）')
-    data = j.get('data') or {}
-    if not data.get('isLogin', True) or not data.get('mid'):
-        raise BiliError('账号未登录（nav 返回空用户）', kind='not_logged_in',
-                        code=j.get('code'))
-    return {
-        'uid': data.get('mid', 0),
-        'name': data.get('uname', ''),
-        'avatar': data.get('face', ''),
-        'avatar_url': data.get('face', ''),   # 两个键都留着，调用方读哪个都不会丢
-        'level': (data.get('level_info') or {}).get('current_level', 0),
-    }
+def _real():
+    pkg = __package__ or ""
+    return _importlib.import_module(pkg + "." + _TARGET if pkg else _TARGET)
+
+
+def __getattr__(name):
+    return getattr(_real(), name)

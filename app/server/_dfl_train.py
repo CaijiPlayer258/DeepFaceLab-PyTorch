@@ -1,80 +1,55 @@
-"""训练入口包装：跑 4.0 的 main.py train，摘掉它自动弹浏览器的行为。
+# -*- coding: utf-8 -*-
+"""兼容层（DEPRECATED）：真身已搬到 app/server/backend_train/dfl_train.py。
 
-4.0 的 Trainer 在模型加载完之后无条件做两件事：
-  1. 起一个自己的 HTTP WebUI（默认 6789）
-  2. 用 webbrowser 打开它
-4.0 的 Trainer 在模型加载完之后会：
-  1. 起一个 HTTP WebUI（127.0.0.1:6789）—— 【保留】，4.1 的预览图从这里拉
-  2. 用 webbrowser 打开它 —— 【禁掉】，界面已经有 4.1 自己了
+**惰性转发**：本模块自己不 import 真身。它还被人当**脚本**跑（见下），import 期又会立刻给 multiprocessing / webbrowser 打补丁；
+惰性代理能保证「谁 import 谁才吃补丁」。改成 PEP 562 代理后，属性访问/赋值都落到真身
+模块上，所以模块级状态、猴子补丁、私有名都不分叉。
 
-4.0 目录是只读的，改不了它的源码，所以在这里做猴补丁。
+等价写法：from app.server.backend_train/dfl_train.py import *。后端以 app/ 为 import 根
+（serve.py 把 app/ 插进 sys.path[0]，包名是 server.*），绝对形式在那里取不到；相对写法在
+server.* 与 app.server.* 两种根下都成立。
 """
-from __future__ import annotations
+import importlib as _importlib
+import sys as _sys
+import types as _types
 
-# 4.0 的 main.py 第一件事就是 set_start_method("spawn")。
-# 而我们为了打补丁要先 import torch（经 WebUI.page_trainer），
-# torch 会抢先设成别的 context，之后 4.0 那句就抛 "context has already been set"。
-# 所以这里在最开头先替它设好。
-import multiprocessing as _mp
-
-# 先装上"子进程一律不新建控制台窗口"的补丁：4.0 的 Trainer 会 spawn 预取进程、
-# 合成管线会 spawn ffmpeg，没有这个补丁用户会看到黑框一闪一闪。
-try:
-    from ._nowin import install as _install_nowin
-except ImportError:
-    from _nowin import install as _install_nowin
-_install_nowin()
-
-try:
-    _mp.set_start_method("spawn", force=True)
-except Exception:
-    pass
-# 4.0 的 main.py 还会再调一次（不带 force），那时会抛 "context has already been set"。
-# 把函数换成空操作，让它的那句变成无害的重复调用。
-_mp.set_start_method = lambda *a, **k: None
-
-import runpy
-import sys
-import webbrowser
-from pathlib import Path
-
-# 4.0 根目录统一从 _paths 解析（env DFL_ENGINE_ROOT > engine.txt > 同级目录 > 旧路径）。
-# 这个文件既可能被当模块跑（server._dfl_train），也可能被当脚本跑，所以两种导入都留。
-try:
-    from ._paths import engine_root, engine_missing_hint
-except ImportError:  # 直接 python _dfl_train.py 时没有包上下文
-    from _paths import engine_root, engine_missing_hint
-
-DFL_ROOT = engine_root()
+_TARGET = "backend_train.dfl_train"
 
 
-def main() -> int:
-    if not (DFL_ROOT / "main.py").is_file():
-        print(engine_missing_hint(), flush=True)
-        return 2
-    if str(DFL_ROOT) not in sys.path:
-        sys.path.insert(0, str(DFL_ROOT))
+class _LazyModule(_types.ModuleType):
+    """转发到真身模块：取属性 / 设属性 / dir() 全走真身。"""
 
-    # 1. 别弹浏览器
-    for name in ("open", "open_new", "open_new_tab"):
-        setattr(webbrowser, name, lambda *a, **k: False)
-    try:
-        import webbrowser as _wb
-        _wb.get = lambda *a, **k: None
-    except Exception:
-        pass
+    @staticmethod
+    def _real():
+        return _importlib.import_module(__package__ + "." + _TARGET)
 
-    # 2. WebUI 服务【保留】——4.1 的训练页靠它拿实时预览图。
-    #    它只监听 127.0.0.1，用户看不到那个界面；被禁掉的只有"自动打开浏览器"。
-    #    （见上面 webbrowser 的补丁）
-    # 3. 照常跑 4.0 的 main.py
-    sys.argv = ["main.py"] + sys.argv[1:]
-    try:
-        runpy.run_path(str(DFL_ROOT / "main.py"), run_name="__main__")
-    except SystemExit as e:
-        return int(e.code or 0)
-    return 0
+    def __getattr__(self, name):
+        return getattr(self._real(), name)
+
+    def __setattr__(self, name, value):
+        if name.startswith("__") and name.endswith("__"):
+            return _types.ModuleType.__setattr__(self, name, value)
+        setattr(self._real(), name, value)
+
+    def __dir__(self):
+        return dir(self._real())
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # ⚠ 本文件是**可执行入口**，不能只做代理：app.py 有两处硬编码指着它 ——
+    #   · _train_worker(): boot = Path(__file__).parent / "_dfl_train.py"，有就拿来当
+    #     `python <boot> train --...` 跑（走不通会退化成裸跑 4.0 main.py，WebUI 端口不同）；
+    #   · _sweep_orphan_trainers(): 按命令行里含 "_dfl_train.py" 认遗留训练进程。
+    # 所以被当脚本跑时转给真身的 main()，被 import 时才是惰性代理。
+    # sys.path **追加** app/（不插前面）：只为让 `server` 这个包名可导入，
+    # 不抢 4.0 引擎里同名的模块（engine / tools / web）。
+    import os as _os
+
+    _PKG_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    if _PKG_ROOT not in _sys.path:
+        _sys.path.append(_PKG_ROOT)
+    from server.backend_train.dfl_train import main as _real_main
+
+    raise SystemExit(_real_main())
+else:
+    _sys.modules[__name__].__class__ = _LazyModule

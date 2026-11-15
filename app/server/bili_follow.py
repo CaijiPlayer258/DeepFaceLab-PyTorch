@@ -1,76 +1,25 @@
+"""兼容层（DEPRECATED）：真身已搬到 app/server/backend_bili/follow.py。
+
+PEP 562 惰性代理：本模块自己不 import 真身，属性访问时才转发。为什么不用
+`from .backend_bili.follow import *`：星号只复制当下的绑定（本模块没有可变态，代理只为统一写法）
+会分成两份，一边改了另一边看不见；走代理则属性、异常类、模块状态全是同一个对象，
+isinstance 与 is 判定都还成立。
+
+注意：转发名没有静态绑定，**对这个旧路径星号 import 拿不到东西** —— 请写
+`from .bili_follow import 具体名字` 或 `from . import bili_follow` 再用属性。
+
+_real() 对空 __package__ 有兜底：`import server.bili_follow`（serve.py 那种根）和
+`import bili_follow`（app/server 直接在 sys.path 上）两种取法都能落到真身。
 """
-Silently follow a Bilibili user by UID using the login cookie.
-"""
+import importlib as _importlib
 
-import re
-import time
-import hashlib
-import requests
-from functools import reduce
-from urllib.parse import quote
-
-_FOLLOW_URL = "https://api.bilibili.com/x/relation/modify"
-_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-                  '(KHTML, like Gecko) Chrome/120.0 Safari/537.36',
-    'Referer': 'https://www.bilibili.com/',
-    'Content-Type': 'application/x-www-form-urlencoded',
-}
-
-# WBI signing (same as qrcode_gen.py)
-_mixinKeyEncTab = [
-    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
-    33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
-    61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11,
-    36, 20, 34, 44, 52
-]
+_TARGET = "backend_bili.follow"
 
 
-def _getMixinKey(orig: str):
-    return reduce(lambda s, i: s + orig[i], _mixinKeyEncTab, '')[:32]
+def _real():
+    pkg = __package__ or ""
+    return _importlib.import_module(pkg + "." + _TARGET if pkg else _TARGET)
 
 
-def _encWbi(params: dict, img_key: str, sub_key: str):
-    mixin_key = _getMixinKey(img_key + sub_key)
-    params['wts'] = round(time.time())
-    params = dict(sorted(params.items()))
-    params = {k: ''.join(filter(lambda c: c not in "!'()*", str(v))) for k, v in params.items()}
-    query = '&'.join(f'{k}={quote(str(v))}' for k, v in params.items())
-    params['w_rid'] = hashlib.md5((query + mixin_key).encode()).hexdigest()
-    return params
-
-
-def _getWbiKeys(cookie_str: str):
-    resp = requests.get(
-        'https://api.bilibili.com/x/web-interface/nav',
-        headers={**_HEADERS, 'Cookie': cookie_str},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    j = resp.json()
-    img_url = j['data']['wbi_img']['img_url']
-    sub_url = j['data']['wbi_img']['sub_url']
-    return (img_url.rsplit('/', 1)[1].split('.')[0],
-            sub_url.rsplit('/', 1)[1].split('.')[0])
-
-
-def follow_user(target_uid: int, cookie_str: str) -> bool:
-    """
-    Silently follow a Bilibili user by UID. Returns True on success.
-    Uses the login cookie for authentication; no user interaction.
-    """
-    # Extract CSRF token from cookie
-    m = re.search(r'bili_jct=([^;]+)', cookie_str)
-    if not m:
-        return False
-    csrf = m.group(1)
-
-    try:
-        img_key, sub_key = _getWbiKeys(cookie_str)
-        params = _encWbi({'fid': target_uid, 'act': 1, 're_src': 11, 'csrf': csrf}, img_key, sub_key)
-        data = {k: str(v) for k, v in params.items()}
-        resp = requests.post(_FOLLOW_URL, headers={**_HEADERS, 'Cookie': cookie_str}, data=data, timeout=10)
-        resp.raise_for_status()
-        return resp.json().get('code') == 0
-    except Exception:
-        return False
+def __getattr__(name):
+    return getattr(_real(), name)

@@ -389,6 +389,10 @@ runtime\server\Scripts\python.exe app\tools\accept\compose_gpu_accept.py --cases
 runtime\server\Scripts\python.exe app\tools\accept\compose_gpu_accept.py --cases perf --reps 3
 runtime\server\Scripts\python.exe app\tools\accept\compose_gpu_accept.py --cases seamless,switch
 
+# 端到端 A/B（同一段跑 CPU / GPU 两单、采 GPU 利用率与进程树核数）：仓库根放一个
+# _probe_export.py（这次量的就是它，参数 --settings-file / --env DFL_COMPOSE_GPU=0|1），
+# 它会把 per_stage_ms 与 nvidia-smi 采样一起写进 JSON。
+
 # 真素材夹具怎么来：跑一次 fused 导出并让合成前的输入落盘
 DFL_FUSED_DUMP=30,31,...,69  +  POST /api/merge/export（见 app/tools/bench/fused_gpu_util.py）
 ~~~

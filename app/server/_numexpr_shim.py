@@ -1,38 +1,37 @@
-# -*- coding: utf-8 -*-
-"""numexpr 的极简 numpy 替身（只覆盖 4.0 色彩迁移真正用到的那一点）。
+"""兼容层（DEPRECATED）：真身已搬到 app/server/backend_models/shim.py。
 
-为什么要这个：4.0 的 core/imagelib/color_transfer.py 顶上就 `import numexpr as ne`，
-而 4.1 的 server python（runtime/server/Scripts/python.exe）里没装 numexpr —— 整个
-模块 import 不进来，rct（reinhard）这条色彩迁移就直接没了。numexpr 在那边只出现在
-reinhard_color_transfer 的三行：
-
-    target_l = ne.evaluate('(target_l - target_l_mean) * source_l_std / target_l_std + target_l_mean')
-
-都是单层四则运算，numpy 逐元素算出来是同一个结果（float32 输入，numpy 会按 float32
-算；numexpr 内部用 double，末位可能差 1 LSB —— 远小于验收的 mean ≤ 2）。
-
-只实现 evaluate()：其它属性访问一律 AttributeError，免得有人以为这里有全套 numexpr。
+**这个被当模块对象用**：backend_merge/compose.py 拿它 `sys.modules["numexpr"] = _numexpr_shim` 顶替真的
+numexpr。转发类照样成立 —— ne.evaluate / ne.set_num_threads 都落到真身上。
 """
-from __future__ import annotations
 
-import numpy as np  # noqa: F401  （表达式里会用到的名字由 local_dict 给）
+import importlib as _importlib
+import sys as _sys
+import types as _types
 
-
-def evaluate(expr, local_dict=None, global_dict=None, **kwargs):
-    """把表达式按 numpy 求值。只支持纯算术（color_transfer 那三行的形状）。"""
-    env = dict(local_dict or {})
-    if global_dict:
-        env.update(global_dict)
-    return eval(str(expr), {"__builtins__": {}}, env)      # noqa: S307 - 表达式是内部写死的
+_TARGET = "backend_models.shim"
 
 
-def set_num_threads(n):                                     # 兼容调用方
-    return None
+def _real():
+    return _importlib.import_module(__package__ + "." + _TARGET)
 
 
-def get_num_threads():
-    return 1
+class _LazyModule(_types.ModuleType):
+    """转发到真身模块：取属性 / 设属性 / dir() 全走真身。"""
+
+    @staticmethod
+    def _real():
+        return _real()
+
+    def __getattr__(self, name):
+        return getattr(self._real(), name)
+
+    def __setattr__(self, name, value):
+        if name.startswith("__") and name.endswith("__"):
+            return _types.ModuleType.__setattr__(self, name, value)
+        setattr(self._real(), name, value)
+
+    def __dir__(self):
+        return dir(self._real())
 
 
-def __getattr__(name):                                       # pragma: no cover
-    raise AttributeError("numexpr shim 只实现 evaluate(): %r" % (name,))
+_sys.modules[__name__].__class__ = _LazyModule

@@ -1,54 +1,38 @@
 # -*- coding: utf-8 -*-
-"""错脸检测（ErrFaceFilter / xgboost 68 点几何）路由。"""
-from __future__ import annotations
+"""兼容层（DEPRECATED）：真身已搬到 app/server/backend_train/errface_routes.py。
 
-from fastapi import APIRouter, HTTPException
+**惰性转发**：本模块自己不 import 真身。app.py 在顶层 `from .routes_errface import router`，真身 import 时要把 backend_train.errface
+一起拉起来（能力探测 + 模型路径解析）。改成 PEP 562 代理后，属性访问/赋值都落到真身
+模块上，所以模块级状态、猴子补丁、私有名都不分叉。
 
-from . import _errface
+等价写法：from app.server.backend_train/errface_routes.py import *。后端以 app/ 为 import 根
+（serve.py 把 app/ 插进 sys.path[0]，包名是 server.*），绝对形式在那里取不到；相对写法在
+server.* 与 app.server.* 两种根下都成立。
+"""
+import importlib as _importlib
+import sys as _sys
+import types as _types
 
-router = APIRouter()
-
-
-def _status(force: bool = False) -> dict:
-    try:
-        return _errface.status(force=force)
-    except Exception as e:                      # 探测自己炸了也不能 500：能力状态照回
-        return {"capability": "errface", "available": False,
-                "model": _errface.model_path().name,
-                "reason": "能力探测失败：%s" % str(e)[:200], "reason_en": "",
-                "install": "", "install_en": "", "deps": {}}
+_TARGET = "backend_train.errface_routes"
 
 
-@router.get("/api/errface/info")
-def errface_info(refresh: str = ""):
-    """能力状态。available=false 时 reason/install 直接用给人看的中英文。
+class _LazyModule(_types.ModuleType):
+    """转发到真身模块：取属性 / 设属性 / dir() 全走真身。"""
 
-    以前只有 available 一个布尔 —— 前端只能等用户点了 /api/dataset/scan 再吃 409。
-    """
-    st = _status(force=str(refresh or "").strip().lower() in ("1", "true", "yes", "on"))
-    return dict({"ok": True}, **st)
+    @staticmethod
+    def _real():
+        return _importlib.import_module(__package__ + "." + _TARGET)
+
+    def __getattr__(self, name):
+        return getattr(self._real(), name)
+
+    def __setattr__(self, name, value):
+        if name.startswith("__") and name.endswith("__"):
+            return _types.ModuleType.__setattr__(self, name, value)
+        setattr(self._real(), name, value)
+
+    def __dir__(self):
+        return dir(self._real())
 
 
-@router.post("/api/errface/scan")
-def errface_scan(body: dict):
-    body = body or {}
-    d = str(body.get("dir") or "").strip()
-    if not d:
-        raise HTTPException(400, "缺少目录")
-    st = _status()
-    if not st.get("available"):
-        # 能力没装 = 状态，不是故障：200 + 说清怎么装，别抛 409/500
-        return {"ok": False, "unavailable": True, "capability": "errface",
-                "reason": st.get("reason") or "", "install": st.get("install") or "",
-                "status": st}
-    try:
-        res = _errface.scan(d, threshold=float(body.get("threshold") or 0.5),
-                            limit=int(body.get("limit") or 0),
-                            percent=float(body.get("percent") or 0))
-    except Exception as e:
-        raise HTTPException(500, str(e)[:300])
-    if not res.get("ok") and res.get("unavailable"):
-        return {"ok": False, "unavailable": True, "capability": "errface",
-                "reason": res.get("reason") or "", "install": res.get("install") or "",
-                "status": res.get("status") or st}
-    return res
+_sys.modules[__name__].__class__ = _LazyModule

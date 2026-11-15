@@ -1,84 +1,24 @@
-# -*- coding: utf-8 -*-
-"""账号（从 app.py 拆出）。"""
-from __future__ import annotations
+"""兼容层（DEPRECATED）：真身已搬到 app/server/backend_bili/account.py。
 
-import asyncio
-import base64
-import io
-import json
-import os
-import re
-import subprocess as _sp
-import threading
-import time
-from pathlib import Path
+PEP 562 惰性代理：本模块自己不 import 真身，属性访问时才转发。这里必须惰性 ——
+真身要 `from ..app import (WORKSPACE, app)`，而 app.py 在模块末尾才 include 本路由；
+静态 re-export 会在 app 半初始化时就把 router 取走并炸在 import 期。
 
-from fastapi import APIRouter, HTTPException, Response
-from fastapi.responses import FileResponse, StreamingResponse
+注意：转发名没有静态绑定，**对这个旧路径星号 import 拿不到东西** —— 请写
+`from .routes_account import 具体名字` 或 `from . import routes_account` 再用属性。
 
-from .app import (WORKSPACE, app)
+_real() 对空 __package__ 有兜底：`import server.routes_account`（app.py 的取法）和
+`import routes_account`（app/server 直接在 sys.path 上）两种根都能落到真身。
+"""
+import importlib as _importlib
 
-router = APIRouter()
-
-# ---------------- 账号（B 站） ----------------
-AUTH_FILE = None      # 运行时按工作区解析
+_TARGET = "backend_bili.account"
 
 
-def _auth_path() -> Path:
-    global AUTH_FILE
-    if AUTH_FILE is None:
-        AUTH_FILE = WORKSPACE / "auth.json"
-    return AUTH_FILE
+def _real():
+    pkg = __package__ or ""
+    return _importlib.import_module(pkg + "." + _TARGET if pkg else _TARGET)
 
 
-def _auth_read() -> dict:
-    try:
-        return json.loads(_auth_path().read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-@router.get("/api/auth")
-def auth_state():
-    a = _auth_read()
-    return {
-        "logged_in": bool(a.get("uid")),
-        "uid": a.get("uid", 0),
-        "name": a.get("name", ""),
-        "avatar": a.get("avatar", ""),
-        "since": a.get("since", 0),
-        "onboarded": bool(a.get("onboarded")),
-    }
-
-
-@router.post("/api/auth/login")
-def auth_login(payload: dict):
-    """真正的扫码流程接上之前，先用它写入一次登录态。"""
-    WORKSPACE.mkdir(parents=True, exist_ok=True)
-    data = {
-        "uid": int(payload.get("uid") or 0),
-        "name": payload.get("name") or "",
-        "avatar": payload.get("avatar") or "",
-        "since": int(__import__("time").time()),
-        "onboarded": True,
-    }
-    _auth_path().write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"ok": True, **data}
-
-
-@router.post("/api/auth/skip")
-def auth_skip():
-    WORKSPACE.mkdir(parents=True, exist_ok=True)
-    a = _auth_read()
-    a["onboarded"] = True
-    _auth_path().write_text(json.dumps(a, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"ok": True}
-
-
-@router.post("/api/auth/logout")
-def auth_logout():
-    try:
-        _auth_path().unlink()
-    except Exception:
-        pass
-    return {"ok": True}
+def __getattr__(name):
+    return getattr(_real(), name)
