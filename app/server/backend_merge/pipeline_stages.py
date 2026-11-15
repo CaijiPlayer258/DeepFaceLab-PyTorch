@@ -1440,13 +1440,18 @@ def _dfm_session(dfm: str):
             try:
                 from ..backend_models import dfm_torch as _DFMT
                 sess = _DFMT.load(key, dtype=_bdtype)
-                backend = "torch-" + sess.dtype
+                # 图重放（DFL_DFM_GRAPH）必须能从日志一眼看出来 —— 开关开了但没捕上，
+                # 等于「以为改了、其实没改」，所以 backend 这串里带上它。
+                backend = "torch-" + sess.dtype + (
+                    "+graph%s" % (sorted(sess.g_batches) if sess.graph_on else "")
+                    if getattr(sess, "graph_on", False) else "")
                 shape = list(sess.get_inputs()[0].shape)
                 name = sess.input_name
                 provs = list(sess.get_providers())
                 _v = sess.vram_mb()
                 _stage_log("换脸：dfm 走 torch(%s) · 精度=%s（allow_tf32=%s）· %d×%d · %s ·"
                            " 权重 %d 张量/%s · 预热单张 %.2f ms · 卡上 %s MB · %s · 请求=%s"
+                           " · CUDA Graph=%s"
                            % (sess.device, sess.dtype,
                               "开" if _bdtype != "fp32" else "关",
                               int(sess.size), int(sess.size),
@@ -1454,7 +1459,10 @@ def _dfm_session(dfm: str):
                               len(sess.store._buffers),
                               "%dMB" % int(sess.graph.weights_mb),
                               float(getattr(sess, "one_ms", 0.0)),
-                              _v.get("alloc_mb", "?"), _bwhy, _bdtype))
+                              _v.get("alloc_mb", "?"), _bwhy, _bdtype,
+                              ("开 b%s" % (sorted(k for k, g in sess._gs.items()
+                                                  if g is not False) or "未捕"))
+                              if getattr(sess, "graph_on", False) else "关"))
             except Exception as _e:                     # noqa: BLE001
                 # 起不来就明确回落到 onnx —— 但**必须喊出来**，不许静默换后端
                 _stage_log("换脸：torch 后端起不来（%s: %s）→ 回落到 onnxruntime CUDA"

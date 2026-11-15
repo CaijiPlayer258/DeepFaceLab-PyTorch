@@ -27,6 +27,16 @@ torch eager + TF32 比 ONNX 快 3~13%，而 bf16 是**这台 5070 Laptop 唯一�
     DFL_DFM_CL=1                            权重转 channels_last（384 那份 B8 快 13%）
     DFL_DFM_MB=8                            预编译的 batch 上限（超过就分块跑）
     DFL_DFM_PIN=0                           关掉 pinned 出参缓冲（默认开）
+    DFL_DFM_GRAPH=1                         **CUDA Graph 重放**（默认 0 = 现状 eager）
+        一次 dfm 前向是 156 个 aten 算子提交（416 那张图）+ 1 次流同步。静默态那 156 次
+        提交只花 ~5ms，但在生产的 15 条 CPU 车道（cv2/numpy + Python 胶水）旁边抢 GIL，
+        它变成 20.3~22.6ms —— 帧被压在 ≥20.3ms。图重放把「156 次提交」换成「1 次
+        cudaGraphLaunch」，提交环的 Python 开销直接消失（数值逐位不变：同一份权重、
+        同一串算子、同一 device 输入）。
+        形状必须固定：按 batch 1/2/4/8 各捕一份（DFL_DFM_GRAPH_B 可改），在 dfm 自己的
+        流（self.gstream）上捕获。捕获失败/形状不匹配 → 回退 eager 并打日志（不静默）。
+    DFL_DFM_GRAPH_B=1,2,4,8                要捕获的 batch 档（其余档回退 eager）
+    DFL_DFM_GRAPH_WARM=3                    捕获前在捕获流上热几次（cuDNN 选算法会变）
 
 数值关系（本机实测，见 DFM_TORCH_BF16_REPORT.md）：torch fp32 与 ONNX fp32 的
 max|diff| 是 1e-3 量级 —— 与 ORT 自己换 provider（CUDA vs CPU）的差同量级，
@@ -69,6 +79,45 @@ def env_backend(default="torch") -> str:
     return "torch" if v in ("torch", "pt", "pytorch", "eager") else "onnx"
 
 
+def _flag(name, default="0"):
+    return str(_env(name, default)).lower() in ("1", "true", "yes", "on")
+
+
+def _env_batches(name, default="1,2,4,8"):
+    """"1,2,4,8" -> {1,2,4,8}；空/写错都退回默认（图只按这些 batch 捕）。"""
+    out = set()
+    for tok in str(_env(name, default)).replace(";", ",").split(","):
+        tok = tok.strip()
+        if tok.isdigit() and int(tok) > 0:
+            out.add(int(tok))
+    return out or {1}
+
+
+class _GraphRun:
+    """一个 batch 档的捕获结果：静态入参 + 静态出参 + 图本身。
+
+    三个字段就是「图重放」的全部约定：
+      · stat_in  固定的 device 入参（形状 = (b,S,S,3) fp32 NHWC）。每帧只有一次 memcpy 进来。
+      · graph    捕获好的图。replay() = **1 次** cudaGraphLaunch，替代 156 次 aten 提交。
+      · sout     捕获那一拍分到的出参（来自图的私有显存池）。**每次 replay 都会被覆写**，
+                 所以调用方必须在这一拍内取走（_outs 会立刻 D2H 到 pinned）。
+      · pin      主机侧 pinned 舞台（np.copyto 进它，再异步 H2D）—— 少一次 pageable 拷贝。
+    """
+
+    __slots__ = ("batch", "graph", "stat_in", "sout", "pin", "pin_np",
+                 "cap_ms", "vram_mb")
+
+    def __init__(self, batch, graph, stat_in, sout, pin, cap_ms, vram_mb):
+        self.batch = int(batch)
+        self.graph = graph
+        self.stat_in = stat_in
+        self.sout = tuple(sout)
+        self.pin = pin
+        self.pin_np = pin.numpy()
+        self.cap_ms = float(cap_ms)
+        self.vram_mb = float(vram_mb)
+
+
 class _Inp:
     """ORT get_inputs() 的替身：_sess_batch_cap 会读 .shape[0]。"""
     __slots__ = ("name", "shape", "type")
@@ -101,12 +150,25 @@ class DfmTorch:
         self._pins = {}
         self.lock = threading.RLock()
         self.nets = {}
+        # ---- CUDA Graph（DFL_DFM_GRAPH；默认关）----
+        # graph_on 可以在运行时用 set_graph() 翻 —— A/B 台架就是靠它在**同一份会话**上交替
+        # （不重载模型 = 不改 cuDNN 状态 = 两个臂比的是同一个计算）。
+        self.graph_on = _flag("DFL_DFM_GRAPH", "0")
+        self.g_batches = _env_batches("DFL_DFM_GRAPH_B", "1,2,4,8")
+        try:
+            self.g_warm = max(1, int(_env("DFL_DFM_GRAPH_WARM", "3") or 3))
+        except (TypeError, ValueError):
+            self.g_warm = 3
+        self.gstream = None            # dfm 自己的流（懒建：CPU 会话不该碰 CUDA）
+        self._gs = {}                  # batch -> _GraphRun | False（False = 捕过了、失败）
+        self.g_fail = {}               # batch -> 失败原因（给日志/诊断）
+        self._g_warned = set()         # 只喊一次的「这个 batch 不走图」
         # t_in / t_fwd / t_out 是墙钟三段；t_gpu 是 CUDA event 量的**前向真忙**；
         # t_pin / t_copy / t_dsync 把出参段再拆成「分配 + 拷贝入队 + 等同步」。
         self.stats = {"calls": 0, "faces": 0, "ms": 0.0, "last_ms": 0.0,
                       "compile_ms": 0.0, "t_in": 0.0, "t_fwd": 0.0, "t_out": 0.0,
                       "t_gpu": 0.0, "t_pin": 0.0, "t_copy": 0.0, "t_dsync": 0.0,
-                      "t_np": 0.0}
+                      "t_np": 0.0, "g_calls": 0.0, "g_cap_ms": 0.0}
         self.log = []
 
         t0 = time.perf_counter()
@@ -257,7 +319,14 @@ class DfmTorch:
                   % (sorted(per), one, per.get(1, 0.0), self.warm_s * 1000.0))
         self.stats.update({"calls": 0, "faces": 0, "ms": 0.0, "last_ms": 0.0,
                            "t_in": 0.0, "t_fwd": 0.0, "t_out": 0.0, "t_gpu": 0.0,
-                           "t_pin": 0.0, "t_copy": 0.0, "t_dsync": 0.0, "t_np": 0.0})
+                           "t_pin": 0.0, "t_copy": 0.0, "t_dsync": 0.0, "t_np": 0.0,
+                           "g_calls": 0.0})
+        if self.graph_on and self.device.type == "cuda":
+            # 图必须在**生产第一帧之前**捕好：cuDNN 选算法/私有显存池落地都是毫秒级，
+            # 落在流水线里就是第一帧的时间。这里顺手把每一档都捕一遍（失败会打日志回退）。
+            for _b in sorted(self.g_batches):
+                if _b in self.nets:
+                    self._graph_for(_b)
 
     # ------------------------------------------------------------ 前向
     def _to_device(self, x):
@@ -279,6 +348,188 @@ class DfmTorch:
         if self.nchw and t.dim() == 4 and t.shape[-1] == 3:
             t = t.permute(0, 3, 1, 2)
         return t
+
+    # ------------------------------------------------------------ CUDA Graph
+    def _run_net(self, net, xd):
+        """eager / 捕获 / 对拍**共用**的一串算子。
+
+        为什么必须共用：图里录下来的算子序列要和 eager 那条**一模一样**（同一份权重、
+        同一 device 输入、同一个 cast 位置），对拍才可能是逐位 0 差。任何「图里多一步」
+        「图里少一步」都会让对拍变成两个不同的计算。
+        """
+        if self.dtype == "bf16":
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                return net(xd)
+        if self.dtype == "bf16w":
+            return net(xd.to(torch.bfloat16))
+        return net(xd)
+
+    def set_graph(self, on=True, batches=None):
+        """运行时开关（A/B 台架靠它在同一份会话上交替，不重载模型 = 不改 cuDNN 状态）。
+
+        注意：**捕获要求此刻没有别的 CUDA 工作在飞**（cudaStreamCapture 的硬约束）。
+        生产里在加载期捕（单线程），A/B 台架在两轮之间翻，都不碰这条线；
+        别在流水线跑着的时候调 set_graph(True)。
+        """
+        self.graph_on = bool(on)
+        if batches is not None:
+            self.g_batches = set(int(b) for b in batches)
+        if not self.graph_on:
+            return False
+        for _b in sorted(self.g_batches):
+            if _b in self.nets:
+                self._graph_for(_b)          # 预捕（失败会打日志 + 回退 eager）
+        return True
+
+    def graph_status(self) -> dict:
+        return {"on": bool(self.graph_on),
+                "buckets": sorted(self.g_batches),
+                "captured": {b: round(g.cap_ms, 1) for b, g in sorted(self._gs.items())
+                             if isinstance(g, _GraphRun)},
+                "failed": dict(self.g_fail),
+                "calls": int(self.stats.get("g_calls") or 0),
+                "cap_ms": round(float(self.stats.get("g_cap_ms") or 0.0), 1)}
+
+    def _graph_for(self, b):
+        """这一档能不能走图；不能就返回 None（调用方走 eager）。
+
+        「不能」的三种情况都会**喊一次**：非 CUDA / NCHW（布局不同就不是同一个计算）、
+        batch 不在捕获档里、捕获失败（以后不再重试，避免每帧一次异常）。
+        """
+        if not self.graph_on:
+            return None
+        b = int(b)
+        if self.device.type != "cuda" or self.nchw:
+            key = "nchw" if self.nchw else "cpu"
+            if key not in self._g_warned:
+                self._g_warned.add(key)
+                self._log("CUDA Graph 不适用于这个会话（%s）—— 全部走 eager"
+                          % ("NCHW 布局" if self.nchw else "非 CUDA device"))
+            return None
+        g = self._gs.get(b)
+        if isinstance(g, _GraphRun):
+            return g
+        if g is False:                       # 捕过了、失败过
+            return None
+        if b not in self.g_batches:
+            if b not in self._g_warned:
+                self._g_warned.add(b)
+                self._log("CUDA Graph：batch=%d 不在 DFL_DFM_GRAPH_B=%s 里 → 这一档走 eager"
+                          % (b, ",".join(str(x) for x in sorted(self.g_batches))))
+            return None
+        try:
+            g = self._capture(b)
+        except Exception as e:                             # noqa: BLE001
+            self._gs[b] = False
+            self.g_fail[b] = "%s: %s" % (type(e).__name__, str(e)[:300])
+            self._log("★ CUDA Graph 捕获失败 batch=%d（%s）→ 回退 eager（这一档不再试）"
+                      % (b, self.g_fail[b]))
+            return None
+        self._gs[b] = g
+        return g
+
+    def _capture(self, b):
+        """在 dfm 自己的流上捕一份 b 张的图。返回 _GraphRun（失败抛异常，由 _graph_for 兜）。"""
+        if self.gstream is None:
+            self.gstream = torch.cuda.Stream(device=self.device)
+        net = self._net(int(b))
+        s = self.gstream
+        cur = torch.cuda.current_stream()
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        alloc0 = torch.cuda.memory_allocated()
+        stat_in = torch.zeros((int(b), self.size, self.size, 3),
+                              dtype=torch.float32, device=self.device)
+        pin = torch.empty((int(b), self.size, self.size, 3), dtype=torch.float32,
+                          pin_memory=True)
+        # 捕获前热几次：**同一形状第一次进 cuDNN 会挑算法**（实测 batch=3 首帧 947ms），
+        # 在捕获流上热，才让图里录的是稳态那套 kernel。
+        s.wait_stream(cur)
+        with torch.cuda.stream(s), torch.no_grad():
+            ys = None
+            for _ in range(self.g_warm):
+                ys = self._run_net(net, stat_in)
+            del ys
+        torch.cuda.synchronize()
+        cap = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(cap, stream=s):
+            with torch.no_grad():
+                _ys = self._run_net(net, stat_in)
+                # 出参的 bf16→fp32 也录进图里：_outs 每帧原本要再提交 3 个 cast kernel
+                # （+3 次分配）。放进图 = 每次 replay 少 3 次提交，且逐位不变
+                # （同一个 aten cast、同一份 bf16 输入）。
+                sout = tuple(y if y.dtype == torch.float32 else y.float() for y in _ys)
+        torch.cuda.synchronize()
+        dt = (time.perf_counter() - t0) * 1000.0
+        vram = (torch.cuda.memory_allocated() - alloc0) / 1048576.0
+        gr = _GraphRun(int(b), cap, stat_in, sout, pin, dt, vram)
+        self.stats["g_cap_ms"] += dt
+        self._log("CUDA Graph 捕获 batch=%d %.0fms（热 %d 次）· 静态入参 %s · 出参 %s ·"
+                  " 设备显存 +%.0fMB"
+                  % (int(b), dt, self.g_warm, tuple(stat_in.shape),
+                     [tuple(t.shape) for t in gr.sout], vram))
+        return gr
+
+    def _forward_graph(self, x, gr):
+        """图重放一次：主机舞台 memcpy → 1 次 H2D → **1 次** cudaGraphLaunch → D2H。
+
+        提交环上只剩 5~6 次 CUDA API（原来是 156 次 aten 提交 + 1 次流同步）—— 这才是
+        「生产态 20.3ms 的墙」的来源（静默态那 156 次只要 5ms，抢的是 GIL 不是驱动）。
+        """
+        b = gr.batch
+        t0 = time.perf_counter()
+        want = tuple(gr.stat_in.shape)
+        if isinstance(x, torch.Tensor):
+            if tuple(x.shape) != want:
+                raise ValueError("图入参形状不匹配: %s vs %s" % (tuple(x.shape), want))
+            if x.is_cuda:
+                src = x
+            else:
+                gr.pin.copy_(x)                  # CPU 张量：dtype 转换落进 pinned 舞台
+                if x.dtype == torch.uint8:       # 和 _to_device 同一口径：0..255 → 0..1
+                    gr.pin.mul_(1.0 / 255.0)
+                src = gr.pin
+        else:
+            a = x
+            if tuple(a.shape) != want:
+                raise ValueError("图入参形状不匹配: %s vs %s" % (tuple(a.shape), want))
+            if a.dtype == np.uint8:
+                # 乘 1/255（不是除 255）：_to_device 那条路就是 mul_(1/255)，逐位同口径
+                np.multiply(a, np.float32(1.0 / 255.0), out=gr.pin_np, casting="unsafe")
+            else:
+                np.copyto(gr.pin_np, a, casting="unsafe")
+            src = gr.pin
+        t1 = time.perf_counter()
+        ev0 = ev1 = None
+        if self.device.type == "cuda":
+            ev0, ev1 = torch.cuda.Event(True), torch.cuda.Event(True)
+        if isinstance(src, torch.Tensor) and src.is_cuda:
+            # 入参若是别的流上算出来的，图流要等它（否则读到没写完的 buffer）
+            self.gstream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(self.gstream):
+            gr.stat_in.copy_(src, non_blocking=True)
+            if ev0 is not None:
+                ev0.record()                     # 事件夹住**只有图**那段（不含 H2D）
+            gr.graph.replay()
+            t2 = time.perf_counter()
+            if ev1 is not None:
+                ev1.record()
+            outs = self._outs(gr.sout)
+        t3 = time.perf_counter()
+        if ev0 is not None:
+            try:
+                self.stats["t_gpu"] += float(ev0.elapsed_time(ev1))
+            except Exception:                              # noqa: BLE001
+                pass
+        self.stats["calls"] += 1
+        self.stats["g_calls"] += 1
+        self.stats["faces"] += b
+        self.stats["last_ms"] = (t3 - t0) * 1000.0
+        self.stats["ms"] += self.stats["last_ms"]
+        self.stats["t_in"] += (t1 - t0) * 1000.0
+        self.stats["t_fwd"] += (t2 - t1) * 1000.0
+        self.stats["t_out"] += (t3 - t2) * 1000.0
+        return outs
 
     def _out(self, t):
         """单个张量 → numpy（旧口径：自己的 pinned + 自己的同步）。_outs 的兼容入口。"""
@@ -398,6 +649,13 @@ class DfmTorch:
         return [np.concatenate([o[k] for o in outs], 0) for k in range(len(outs[0]))]
 
     def _forward_one(self, x):
+        # 图这一档在**搬上卡之前**分流：省的正是「156 次 aten 提交」那段主机时间。
+        # 形状不匹配/没捕/捕失败 → _graph_for 返回 None，下面原样走 eager（绝不静默换算法）。
+        _b0 = int(x.shape[0]) if isinstance(x, torch.Tensor) else int(np.shape(x)[0])
+        if self.graph_on and _b0 and _b0 in self.g_batches:
+            _gr = self._graph_for(_b0)
+            if _gr is not None and _gr.batch == _b0:
+                return self._forward_graph(x, _gr)
         t0 = time.perf_counter()
         xd = self._to_device(x)
         b = int(xd.shape[0])
@@ -410,13 +668,7 @@ class DfmTorch:
             ev0.record()
         t1 = time.perf_counter()
         with torch.no_grad():
-            if self.dtype == "bf16":
-                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    ys = net(xd)
-            elif self.dtype == "bf16w":
-                ys = net(xd.to(torch.bfloat16))
-            else:
-                ys = net(xd)
+            ys = self._run_net(net, xd)
         t2 = time.perf_counter()
         if ev1 is not None:
             ev1.record()
@@ -469,10 +721,13 @@ class DfmTorch:
         return (self.stats["ms"] / self.stats["faces"]) if self.stats["faces"] else 0.0
 
     def describe(self) -> str:
-        return "torch-%s/%s/b%d" % (self.device.type, self.dtype, self.mb)
+        return "torch-%s/%s/b%d%s" % (self.device.type, self.dtype, self.mb,
+                                      "+graph" if (self.graph_on and self._gs) else "")
 
     def close(self):
         with self.lock:
+            self._gs.clear()
+            self.gstream = None
             self.nets.clear()
             try:
                 self.store._buffers.clear()
