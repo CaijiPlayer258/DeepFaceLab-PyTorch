@@ -351,7 +351,8 @@ def pick(log, tag):
 def det_rounds(clip, quality, tag, out_path, rounds=DET_ROUNDS):
     """同一个检测档真跑 rounds 次，返回 (detect ms 列表, 检测器名列表, fps 列表)。
 
-    quality=None 表示不带这个键（走后端默认档 = retinaface_10g）。
+    quality=None 表示不带这个键（走后端默认档；#4 之后「两个都没给」= tinymog，
+    不再是静默的 retinaface_10g —— 要 retina 档就把 quality="high" 写出来）。
     每轮都换一个输出文件、并清掉旧的：同一个 out 被复用时 <成片>.log 会被覆盖，
     而「检测器是谁」正是从那份日志里抠的 —— 不清理就会把上一轮的字读到这一轮头上。
     """
@@ -487,7 +488,7 @@ def case_a(clip, src_info):
     fps = float(stats.get("fps") or 0.0)
     check(fps >= 8.0, "a 吞吐 ≥ 8 帧/秒（分段实测 7.20）", "%.2f 帧/秒" % fps)
 
-    # 追加一个「换快档检测器」的数据点：默认档（quality=high → retinaface_10g）单帧检测
+    # 追加一个「换快档检测器」的数据点：quality=high 档（→ retinaface_10g）单帧检测
     # 52~55ms，换 fast（tinymog，有 TRT 引擎 16~30ms）能看出瓶颈到底在流水线还是在检测模型。
     # 这是**同一份** fused 代码，只改检测档。
     #
@@ -526,13 +527,11 @@ def case_a(clip, src_info):
     det_f, key_f, fps_f = [], [], []
     fps2 = 0.0
     try:
-        # 默认档第 1 轮直接复用 case a 已经跑完的那一单，不再多烧一次导出
-        det_h.append(float((vf.get("per_stage_ms") or {}).get("detect") or 0.0))
-        key_h.append(det_key_of_log(log_of(out)))
-        fps_h.append(float(fps or 0.0))
-        say("默认档 第 1/%d 轮（复用 case a）：detect %.1f ms/帧 · %.2f 帧/秒 · 检测器 %s"
-            % (DET_ROUNDS, det_h[0], fps_h[0], key_h[0] or "?"))
-        d, k, f = det_rounds(clip, None, "默认档", OUT / "a_det_high.mp4", DET_ROUNDS - 1)
+        # ★ 两臂都把档位**显式**写出来（2026-11 改，别改回去）：
+        #   以前「retina 档」是复用 case a 那一单（不带 quality）。后端 #4 修好之后，
+        #   「既没 detector 也没 quality」= 默认 tinymog —— 复用 case a 就成了拿 tinymog
+        #   比 tinymog，这条断言会假红。要测的是「换档 → 换模型」，档位就得写在请求体里。
+        d, k, f = det_rounds(clip, "high", "high 档", OUT / "a_det_high.mp4", DET_ROUNDS)
         det_h += d
         key_h += k
         fps_h += f
@@ -544,7 +543,7 @@ def case_a(clip, src_info):
         check(det1 > 0.0 and det2 > 0.0, "a 两档的 detect 都量到了（%d 轮中位）" % DET_ROUNDS,
               "%.1f vs %.1f ms/帧" % (det1, det2))
         check(key_h and all(x == "retinaface_10g" for x in key_h),
-              "a 默认档真的用 retinaface_10g（日志为证）", str(key_h))
+              "a quality=high 档真的用 retinaface_10g（日志为证）", str(key_h))
         check(key_f and all(x == "tinymog" for x in key_f),
               "a 快档真的换成 tinymog（日志为证）", str(key_f))
         check(det2 < det1 * 0.85,

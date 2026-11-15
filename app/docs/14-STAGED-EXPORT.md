@@ -31,7 +31,7 @@
      "model": "阿証...-416",            // 或 "dfm": "D:/.../x.dfm"；merge 必须有
      "models": [{"name": "...", "faces": []}],   // 多模型时用它，给了就不看 model
      "faces_project": "",              // 人脸库目录；空 = <工作区>/merge
-     "detector": "", "quality": "high", "thresh": 0.5, "align_thresh": 0.5,
+     "detector": "", "thresh": 0.5, "align_thresh": 0.5,   // quality 只在老脚本里出现
      "settings": {...}, "output_dir": "", "force": false}
 
 - `detector`：**切脸/对齐真正用的检测器**（界面「检测器」下拉发的就是它）。
@@ -39,8 +39,9 @@
   `cfg["det_align"]` 只从 `quality` 推，而界面根本不发 `quality`（`payload.align_quality || "high"`），
   于是「检测器」下拉无论选什么都落成 retinaface_10g —— 界面写 TinyMog、日志里 45~49ms/帧。
   现在 fused 与切脸两处日志都会写「检测器 X（来源）」，见下面「检测器从哪来」。
-- `quality`：切脸档的**兜底**，`high` = RetinaFace(det_10g)，`fast` = TinyMog。
-  只在请求体没给 `detector` 时生效（老脚本 / 验收工具 `quality=fast` 走的就是这条）。
+- `quality` / `align_quality`：切脸档的兜底，`high` = RetinaFace(det_10g)，`fast` = TinyMog。
+  **只有请求体里显式给了**才生效（老脚本 / 验收工具 `quality=fast` 走的就是这条）；
+  两个都没给 = `_DEFAULT_DETECTOR`（tinymog），**不再**静默落 retinaface_10g（2026-11 修）。
 - `force`：重做这一阶段。切帧比较特殊：`frames` 已被合成结果覆盖时必须 `force=true`
   才会重切，否则 409 —— 那把原帧盖回来、却留下「已合成」的标记。
 - 幂等：已完成的阶段再点一次 -> `{"ok":true,"started":false,"skipped":true,"reason":"already-done"}`。
@@ -84,7 +85,11 @@ meta.json 的 `stages.frames.jpeg_quality` 也是 100。**PNG 路径不受这个
 |---|---|---|
 | `detector="tinymog"` | tinymog | `检测器 tinymog（界面/请求体 detector=tinymog）` |
 | `detector=""`、`quality="fast"` | tinymog | `…（请求体没给 detector → 按 quality=fast 推）` |
-| 都没给 | retinaface_10g（老行为） | `… 按 quality=high 推` |
+| 都没给 | **tinymog**（`_DEFAULT_DETECTOR`） | `… 既没 detector 也没 quality → 默认 tinymog` |
+
+`cfg["det_align"]` 缺失时的兜底也从写死的 `"retinaface_10g"` 改成 `_DEFAULT_DETECTOR`，
+并且**明写一行日志**（「cfg 里没有 det_align，用了默认检测器 tinymog」）—— 静默换重档那一次
+让 detect 段多花 40ms/帧而日志里看不出来，就是这次要治的东西。
 
 fused 与分段两条链共用这一个函数：`cfg["detector"]`（预览 / 人脸库 embedding 用的那个）
 与 `cfg["det_align"]` 从此是同一个值 —— 以前 boxes 来自 retinaface、embedding 那条路却按

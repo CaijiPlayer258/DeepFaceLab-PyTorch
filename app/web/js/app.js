@@ -3417,6 +3417,26 @@
   }
   window.mgDetectorName = mgDetectorName;
 
+  /* 检测器进请求体：**要么不带这个键，要么带一个真值**。
+     以前四条导出路径都写 `detector: payload.detector || ""`：导出设置页没这个元素时
+     发出去的是空串，后端 _detector_val("") 把它当成「谁都没说」→ 落进默认档。
+     界面选什么都白选，日志里也看不出「前端根本没发」。
+     现在：payload 里有就用；没有就直接读 #mgDetector 的 value；连元素都没有 →
+     **不发这个键**（返回 ""），并 console.warn 一句（这不是错误，是「认不出界面」）。 */
+  function mgDetectorBody(payload) {
+    var v = String((payload && payload.detector) || "").trim();
+    if (v) return v;
+    var sel = document.getElementById("mgDetector");
+    v = String((sel && sel.value) || "").trim();
+    if (v) return v;
+    if (window.console && console.warn) {
+      console.warn("[merge] #mgDetector 不在页面上（或没有值）：这次不传 detector，"
+                   + "后端将用默认检测器（tinymog）");
+    }
+    return "";
+  }
+  window.mgDetectorBody = mgDetectorBody;
+
   /* 检测：**一回来就画框 + chip**，绝不和合成串在一起。
      返回 Promise<{ok, boxes, width, height, frame}>
         · 调用方（mgFrameChange）用它决定「有人脸才发合成」；
@@ -6445,10 +6465,12 @@ function mgStageEmpty(on) {
         project_dir: projectDir,
         models: mgFaceModelsPayload(),
         model: (document.querySelector("#mgModels .mgitem.on .nm") || {}).textContent || "",
-        detector: p.detector || "",
         thresh: 0.5,
         settings: mgMergeSettings(p)
       };
+      /* 检测器：p.detector 有就直接用（调用方点名的），否则读 #mgDetector；都没有就不发。 */
+      var detP = window.mgDetectorBody ? window.mgDetectorBody(p) : "";
+      if (detP) body.detector = detP;
       /* 输出路径：填的是 .mp4 就当文件名；填的是目录就放 <项目名>_merged.mp4 */
       var outRaw = String(p.output_path || "").trim();
       if (/^[A-Za-z]:[\\/]/.test(outRaw)) {
@@ -8025,12 +8047,17 @@ function mgStageEmpty(on) {
         models: (window.mgExportModelsPayload ? window.mgExportModelsPayload() : mgModelsPayload()),
         /* cache 默认不保留（后端成功导出后会删掉 <名字>_cache/）；导出设置页勾「保留」才拦住 */
         keep_cache: !!payload.keep_cache,
-        detector: payload.detector || "",
         thresh: 0.5,
         settings: mgMergeSettings(payload),
-        quality: payload.align_quality || "high",
         force: false
       };
+      /* 检测器：缺省**不发这个键**（发空串会被后端当成"没人说过"，正是老的静默回落）。 */
+      var det = window.mgDetectorBody ? window.mgDetectorBody(payload) : "";
+      if (det) body.detector = det;
+      /* quality/align_quality：页面上早就没有这个控件了。以前这里硬写 "high"，
+         等于每次都替用户表态「要 retinaface_10g」—— 后端 #4 修好之后，只有**真给了**
+         才按档推。没人给就不发，让后端按 detector / 默认档走。 */
+      if (payload.align_quality) body.quality = payload.align_quality;
       if (payload.output_path && /^[A-Za-z]:[\\/]/.test(payload.output_path)) {
         body.output_dir = payload.output_path;
       }
@@ -8218,11 +8245,13 @@ function mgStageEmpty(on) {
         model: payload.model ||
                (document.querySelector("#mgModels .mgitem.on .nm") || {}).textContent || "",
         models: (window.mgExportModelsPayload ? window.mgExportModelsPayload() : mgModelsPayload()),
-        detector: payload.detector || "",
         thresh: 0.5,
-        settings: mgMergeSettings(payload),
-        quality: payload.align_quality || "high"
+        settings: mgMergeSettings(payload)
       };
+      /* 同上：检测器有真值才发；quality 没有就不发（别再替用户写死 "high"）。 */
+      var detF = window.mgDetectorBody ? window.mgDetectorBody(payload) : "";
+      if (detF) body.detector = detF;
+      if (payload.align_quality) body.quality = payload.align_quality;
       if (payload.output_path && /^[A-Za-z]:[\\/]/.test(payload.output_path)) {
         body.output_dir = payload.output_path;
       }
@@ -8436,13 +8465,14 @@ function mgStageEmpty(on) {
         keep_cache: !!payload.keep_cache,
         /* 检测器：这条（项目模式，走 4.0 子进程）以前**根本不发**，后端也不读，
            等于界面选什么都不算数、引擎按自己的默认 YOLOv8 跑，抽屉却写 tinymog。
-           现在和视频/分段两条路一样，把下拉的值发出去。 */
-        detector: payload.detector || "",
+           现在和视频/分段两条路一样，把下拉的值发出去；读不到就**不发**（不塞空串）。 */
         workers: parseInt(payload.num_workers, 10) || 0,
         encoder: payload.encoder || "h264_nvenc",
         hwaccel: payload.hwaccel === "" ? "off" : (payload.hwaccel || "auto"),
         settings: mgMergeSettings(payload)
       };
+      var detE = window.mgDetectorBody ? window.mgDetectorBody(payload) : "";
+      if (detE) body.detector = detE;
       if (payload.output_path) {
         if (/^[A-Za-z]:[\\/]/.test(payload.output_path)) {
           body.output_dir = payload.output_path;

@@ -532,14 +532,20 @@ def _fused_cfg(body: dict) -> dict:
     want = body.get("frame_budget")
     if want is None:
         want = _env_int(_FUSED_ENV_BUDGET, 0)
+    _det_align, _det_align_src = _align_detector(body)   # 算一次，两个字段共用
     cfg = {
         "video": str(video), "out": str(out), "fps": float(fps or probe.get("fps") or 0.0),
         "probe": probe, "total": int(probe.get("frames") or 0),
         "range": rng, "range_key": str(rng["key"]), "range_total": int(rng["total"]),
         "range_full": bool(rng["full"]), "settings": dict(settings),
-        "detector": _detector_val(body.get("detector")),
-        "det_align": _align_detector(body)[0],
-        "det_align_src": _align_detector(body)[1],
+        # ★ 两个字段**永不打架**：都取 _align_detector(body)[0]。
+        #   以前 cfg["detector"] = _detector_val(body["detector"])（只看 detector 键），
+        #   cfg["det_align"] = _align_detector(body)（detector→quality 两级）——
+        #   请求体只带 quality=high 时两者是 tinymog / retinaface_10g：回显一个、
+        #   实际跑另一个，正是「界面写着 A，日志里是 B」的同一个形状。
+        "detector": _det_align,
+        "det_align": _det_align,
+        "det_align_src": _det_align_src,
         "thresh": _float_val("thresh", body.get("thresh"), 0.0, 1.0, 0.5),
         "align_thresh": _float_val("align_thresh", body.get("align_thresh"), 0.0, 1.0, 0.5),
         "dfm": str(dfm), "model": str(model_name), "xseg": str(xseg),
@@ -952,7 +958,13 @@ def _fused_run(cfg: dict) -> dict:
     comp_cfg["mask_mode"] = int((cfg.get("settings") or {}).get("mask_mode", 6) or 0)
     need_xseg = str(mask_src.get("source") or "").lower() == "xseg"
     need_dst = bool(need_xseg and int(comp_cfg["mask_mode"]) in (7, 8, 9))
-    det_name = str(cfg.get("det_align") or "retinaface_10g")
+    # 兜底不再写死 "retinaface_10g"（重档、静默）：没有 det_align 就用 _DEFAULT_DETECTOR，
+    # 而且**把这一跳写进 <成片>.log** —— 用户排障时看得到「为什么是 tinymog」。
+    det_name = str(cfg.get("det_align") or "").strip()
+    if not det_name:
+        det_name = _DEFAULT_DETECTOR
+        _vid_log("快速导出：cfg 里没有 det_align，用了默认检测器 %s（%s）"
+                 % (det_name, _DEFAULT_DETECTOR))
     det_src = str(cfg.get("det_align_src") or "cfg.det_align")
     det_thresh = float(cfg.get("align_thresh") or 0.5)
     # 检测的 letterbox 在**哪儿**做 —— 三档，像素完全一样（同一个 _prep_ctx，同一张 canvas 的
@@ -2573,6 +2585,8 @@ from ..app import (
 )
 
 from .._face_group import clear_face_group_cache
+
+from ._shared import _DEFAULT_DETECTOR
 
 from .compose import (
     _cache_snap, _detect_boxes, _detector, _detector_val, _landmarks_model,

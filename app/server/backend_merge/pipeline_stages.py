@@ -561,9 +561,17 @@ def _align_detector(body: dict):
     raw = str((body or {}).get("detector") or "").strip()
     if raw:
         return _detector_val(raw), "界面/请求体 detector=%s" % raw
-    q = str((body or {}).get("quality") or (body or {}).get("align_quality") or "high")
-    return (_stage_quality_detector(q),
-            "请求体没给 detector → 按 quality=%s 推" % q.strip().lower())
+    # ★ 只有**请求体里显式给了** quality / align_quality 才按档推。
+    #   以前这里是 body.get("quality") or body.get("align_quality") or "high" ——
+    #   一个没人传的 "high" 冒充成「用户要的档」，于是「两个都没给」静默落成
+    #   retinaface_10g（detect 段 40~55ms/帧，还跟 dfm 抢 GPU），日志却写「按 quality 推」。
+    #   现在两者都没有 → _DEFAULT_DETECTOR（tinymog），和 _detector_val 同一个口径。
+    q = str((body or {}).get("quality") or (body or {}).get("align_quality") or "").strip()
+    if q:
+        return (_stage_quality_detector(q),
+                "请求体没给 detector → 按 quality=%s 推" % q.lower())
+    return (_DEFAULT_DETECTOR,
+            "请求体既没 detector 也没 quality → 默认 %s" % _DEFAULT_DETECTOR)
 
 
 def _stage_brief(res: dict) -> str:
@@ -916,7 +924,12 @@ def _stage_do_faces(cfg: dict) -> dict:
         _stage_log("切脸：force=true，清掉旧的 %d 张对齐脸" % n)
     aligned_dir.mkdir(parents=True, exist_ok=True)
 
-    det_name = str(cfg.get("det_align") or "retinaface_10g")
+    # 以前兜底写死 "retinaface_10g"：cfg 里没有 det_align 时静默换成一个**重档**检测器，
+    # 日志里看不出这一跳。现在兜底 = _DEFAULT_DETECTOR，并且**明写一行**。
+    det_name = str(cfg.get("det_align") or "").strip()
+    if not det_name:
+        det_name = _DEFAULT_DETECTOR
+        _stage_log("切脸：cfg 里没有 det_align，用了默认检测器 %s" % det_name)
     thresh = float(cfg.get("align_thresh") or 0.5)
     lm = _landmarks_model()          # 和预览/合成同款：纯 CPU onnxruntime 的 2D106
     if lm is None:
@@ -3574,6 +3587,7 @@ def _stage_cfg(body: dict, stage: str, chain: bool = False) -> dict:
     if not model_name:
         model_name = str(models[0].get("name") or "")
 
+    _stage_det, _stage_det_src = _align_detector(body)   # 算一次，两个字段共用
     cfg = {
         "video": str(video), "cache": str(cache), "out": str(out),
         "total": int(probe.get("frames") or 0),
@@ -3584,9 +3598,12 @@ def _stage_cfg(body: dict, stage: str, chain: bool = False) -> dict:
         "probe": probe, "settings": dict(settings), "meta": meta,
         "force": bool(_bool_val(body.get("force"), False)),
         "keep_cache": bool(_STAGE_KEEP or _bool_val(body.get("keep_cache"), False)),
-        "detector": _detector_val(body.get("detector")),
-        "det_align": _align_detector(body)[0],
-        "det_align_src": _align_detector(body)[1],
+        # 和 _fused_cfg 同一条口径（#7）：两字段都取 _align_detector(body)[0]。
+        # 分段链里 cfg["detector"] 是回显用的（status 的 detector 字段），
+        # 只带 quality 时它会回一个跟实际不符的值 —— 同一处静默，一起收掉。
+        "detector": _stage_det,
+        "det_align": _stage_det,
+        "det_align_src": _stage_det_src,
         "thresh": _float_val("thresh", body.get("thresh"), 0.0, 1.0, 0.5),
         "align_thresh": _float_val("align_thresh", body.get("align_thresh"), 0.0, 1.0, 0.5),
         "dfm": str(dfm), "model": str(model_name), "xseg": str(xseg),
@@ -4077,6 +4094,8 @@ from ..app import (
 )
 
 from .._face_group import clear_face_group_cache
+
+from ._shared import _DEFAULT_DETECTOR
 
 from .compose import (
     _AUTO_EMB_LIMIT, _auto_library, _cache_snap, _det_run_lock, _detector, _detector_val,
