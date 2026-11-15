@@ -180,6 +180,239 @@ def _fused_q_u8(x, fast: int, clip: bool = True):
     return buf.astype(np.uint8)
 
 
+# ============================================================
+# 成片怎么出去：rawvideo 管道（默认）还是 PNG 落盘
+# ------------------------------------------------------------
+# 老路径（DFL_FUSED_RAWPIPE=0）：编码 3 线程 cv2.imencode(level1+RLE) + 写 %TEMP%/*.png，
+#   流水线跑完再让 ffmpeg 读这串 PNG 编成 mp4。实测（150 帧 · 1080×1920 · 416）：
+#   imencode 92.3ms/帧（车道 CPU，65.7% 占用）+ 写盘 7.45，尾部 stage7 再串行 1.68s（11.2ms/帧）。
+# 管道（默认）：每帧不做编码、也不落盘，单写者按帧号把 memoryview 塞进 ffmpeg stdin，
+#   生产端 4.6ms/帧（tobytes 1.15 + write 3.42），车道占用掉到 ~3%，尾部只剩 x264 排空
+#   0.76s（5.0ms/帧）—— 因为 x264 单独跑 22.2ms/帧 < 47ms 的生产节拍，它整个被流水线盖住了。
+# 端到端：7.04s → 6.12s（21.3 → 24.5 帧/秒）。成片**逐位相同**（md5 相同，见 _fused_pipe_cmd）。
+_FUSED_ENV_RAW = "DFL_FUSED_RAWPIPE"
+
+
+def _fused_rawpipe_on() -> bool:
+    """这一单走不走 raw 管道。默认走；=0 回老 PNG 落盘路（排障/A-B 用，两条都要能跑通）。"""
+    return str(os.environ.get(_FUSED_ENV_RAW) or "1").strip().lower() \
+        not in ("0", "off", "false", "no")
+
+
+def _fused_pipe_cmd(part, video, fps, w, h, audio_ss=None, audio_t=None, limit=None) -> list:
+    """rawvideo 版 _vid_cmd：同一个滤镜、同一个编码器、同一段音轨，只是帧从 pipe:0 来。
+
+    三条口径必须和 _vid_cmd（app/server/_media/encoder.py）**一字不差**，否则成片就和老路径
+    不一样了：crf16 + yuv420p + scale=out_range=tv；音轨 -c:a copy、**不带 -shortest**
+    （带上会按较短的一边截断，帧范围的片子就少一截音）；奇数宽高先 pad 一像素。
+    这里复制一份而不是参数化 _vid_cmd，是因为那个吃的是「帧序列文件模式」；改它的时候两边一起看，
+    有 _accept 的成片 md5 对拍兜着。
+
+    **format=rgb24 不能省**：rawvideo 声明 bgr24，而 scale 在 bgr24 输入下出来的像素和 PNG
+    路径（png 解码器出的是 rgb24）**不是**逐位相同 —— 实测 12/12 帧 md5 全不同。中间插一层
+    format=rgb24（ffmpeg 自己换通道，在它自己的线程里，约 1ms/帧）之后，成片文件 md5 与老路径
+    **完全相同**（150 帧实测 8af9c0e8f81c / 321466B）。
+
+    也**不给 -progress pipe:1**：那条进度走 stdout，没人读就会把 ffmpeg 堵在管道上；
+    进度由写者线程逐帧上报（比解析 ffmpeg 的 frame= 更准，而且它本来就知道写到了第几帧）。
+
+    **limit（-frames:v N）必须和 _vid_cmd 一样给**——这一条不是洁癖：实测（30 帧范围导出）
+    不加它时音轨会多出**一个** AAC 包（43 → 44，成片 md5 因此不同、时长 1.00 → 1.02s）。
+    原因：老路径有 -frames:v，视频一满 30 帧输出就收尾，那个还没来得及 mux 的音频包被丢掉；
+    管道这条路没有 -frames:v，输出要等到 stdin EOF，音频已经把第 44 包 mux 进去了。
+    加上之后两条路的包序列**逐字节相同**（30 视频包 + 43 音频包，包 md5 全等）。
+    """
+    pre_aud = []
+    if audio_ss is not None:
+        pre_aud += ["-ss", "%.6f" % float(audio_ss)]
+    if audio_t is not None:
+        pre_aud += ["-t", "%.6f" % float(audio_t)]
+    cmd = [str(_app_mod._ffmpeg_exe()), "-y", "-hide_banner", "-loglevel", "error",
+           "-nostats", "-nostdin",
+           "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", "%dx%d" % (int(w), int(h)),
+           "-framerate", "%.6g" % float(fps), "-i", "pipe:0"] + pre_aud + \
+          ["-i", str(video),
+           "-map", "0:v:0", "-map", "1:a?",
+           "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2,format=rgb24,scale=out_range=tv",
+           "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p",
+           "-c:a", "copy"]
+    if Path(str(part)).suffix.lower() in (".mp4", ".mov", ".m4v"):
+        cmd += ["-movflags", "+faststart"]
+    if limit:
+        cmd += ["-frames:v", str(int(limit))]
+    cmd += [str(part)]
+    return cmd
+
+
+class _FusedRawWriter(threading.Thread):
+    """rawvideo 管道的**唯一写者**：按帧号严格递增把帧塞进 ffmpeg 的 stdin。
+
+    为什么必须单写者：编码有 3 条线程（乱序完成），而管道是**有序流** —— 谁先干完谁写，
+    成片就串帧，而串帧肉眼几乎看不出来（几十毫秒的错位在 30fps 里像「抖了一下」），
+    所以这里宁可断言也不静默：拿到的不是「下一个该写的帧号」就整单失败。
+
+    为什么必须有一条 stderr 排空线程：ffmpeg 的 stderr 是管道，我们不读、它写满就**阻塞**；
+    它一阻塞就不读 stdin，于是我们 write 也阻塞 —— 整条流水线抱死在两个管道上（很好复现）。
+
+    背压：write 阻塞 = ffmpeg 比我们慢，那就是真的慢，等它，绝不丢帧（丢帧 = 成片少帧）。
+    ffmpeg 提前退出（-vf 写坏 / 编码器不可用 / 磁盘满）：write 抛 BrokenPipeError →
+    立刻停整条线，并把 stderr 尾巴交给调用方 → 用户拿到的是「为什么没出来」，不是一句「0 帧」。
+    """
+
+    def __init__(self, proc, total, sem, live, live_lock, ticks, stop, on_frame, on_progress):
+        super().__init__(name="fused-raw", daemon=True)
+        self.proc = proc
+        self.total = int(total)
+        self.sem = sem
+        self.live = live
+        self.live_lock = live_lock
+        self.ticks = ticks
+        self.stop = stop                 # 只用来让「上游」别再喂；写者自己照常把手里写完
+        self.on_frame = on_frame
+        self.on_progress = on_progress
+        self.cv = threading.Condition()
+        self.store = {}
+        self.expect = 1
+        self.closing = False             # 上游说「不会再有帧了」
+        # ★ 乱序缓冲**不设上限**：整条流水线的在飞帧数已经被帧预算（sem，默认 30）卡住了，
+        #   这里再压一层「只看当前手里有多少帧」的小上限会**死锁**（实测：全片导出跑到第 140 帧
+        #   时 store 里是 141..148、而 140 还排在 FIFO 的 q_enc 里，3 条编码线程全卡在 put 上，
+        #   谁也取不到 140 → 整条线不动、主线程等线程退出等到天荒地老）。
+        #   上界由 sem 保证：一帧从解码进来到写进管道才 release，所以 store ≤ 预算帧数（30×6.2MB）。
+        self.depth = 0
+        self.n = 0                       # 已写帧数
+        self.tail = []
+        self.rc = None
+        self.err = ""
+        self.seconds = 0.0
+        self.write_max = 0.0
+        self._dead = False
+
+    # 上游：编码线程（可并发）
+    def put(self, job, buf) -> bool:
+        seq = int(job.n)
+        with self.cv:
+            while (self.depth > 0 and len(self.store) >= self.depth
+                   and not self._dead and not self.closing):
+                if self.stop.is_set():
+                    return False
+                self.cv.wait(0.05)
+            if self._dead or self.stop.is_set():
+                return False
+            if seq in self.store:
+                self.err = "同一帧被写了两遍（第 %d 帧）—— 帧号重复" % seq
+                self._dead = True
+                self.stop.set()
+                return False
+            if seq < self.expect:
+                self.err = "第 %d 帧已经写出去了，又收到一次（帧号回退）" % seq
+                self._dead = True
+                self.stop.set()
+                return False
+            self.store[seq] = (job, buf)
+            self.cv.notify_all()
+            return True
+
+    def start(self):                     # noqa: D102 - 先起 stderr 排空线程，再起写者
+        threading.Thread(target=self._drain, name="fused-raw-err", daemon=True).start()
+        super().start()
+
+    def _drain(self):
+        try:
+            for ln in iter(self.proc.stderr.readline, b""):
+                s = ln.decode("utf-8", "replace").rstrip()
+                if s:
+                    self.tail.append(s)
+                    if len(self.tail) > 60:
+                        del self.tail[:20]
+        except Exception:                                  # noqa: BLE001
+            pass
+
+    def run(self):
+        t0 = time.perf_counter()
+        try:
+            while True:
+                with self.cv:
+                    while self.expect not in self.store and not self.closing:
+                        self.cv.wait(0.1)
+                    item = self.store.pop(self.expect, None)
+                    if item is None:
+                        # closing 且下一帧不在手里：收尾（正常 = 全写完；异常 = 中间有洞）
+                        if not self.store:
+                            return
+                        self.err = self.err or (
+                            "帧序有洞：等第 %d 帧，手里最小的是第 %d 帧"
+                            % (self.expect, min(self.store)))
+                        self._dead = True
+                        return
+                job, buf = item
+                if int(job.n) != self.expect:              # 双保险：写之前断言 seq 递增
+                    self.err = "帧序错位：期望第 %d 帧，拿到第 %d 帧" % (self.expect, int(job.n))
+                    self._dead = True
+                    self.stop.set()
+                    return
+                t = time.perf_counter()
+                try:
+                    self.proc.stdin.write(buf)
+                except (BrokenPipeError, ConnectionResetError, ValueError, OSError) as e:
+                    self.err = ("ffmpeg 提前退出（第 %d 帧写不进去）：%s"
+                                % (self.expect, str(e)[:160]))
+                    self._dead = True
+                    self.stop.set()
+                    return
+                dt = time.perf_counter() - t
+                self.write_max = max(self.write_max, dt)
+                self.ticks.add("write", dt)
+                self.expect += 1
+                self.n += 1
+                try:
+                    self.sem.release()
+                except ValueError:
+                    pass
+                with self.live_lock:
+                    self.live["n"] -= 1
+                self.on_frame(job)
+                self.on_progress(self.n)
+        finally:
+            self.seconds = time.perf_counter() - t0
+            self._dead = True
+
+    def finish(self, force: bool = False):
+        """收尾：让写者把手里写完 → 关 stdin（ffmpeg 见 EOF 才会把最后一批编完）→ 等它退出。
+
+        force=True（失败/取消）：不再等它排空，直接杀掉 —— 半截成片由调用方删。
+        """
+        with self.cv:
+            self.closing = True
+            self.cv.notify_all()
+        self.join(timeout=5.0 if force else 300.0)
+        stuck = self.is_alive()
+        # 关 stdin = 给 ffmpeg 一个 EOF：它才会把 lookahead 里剩下的帧编完（排空）。
+        # 写者要是还卡在 write 里，这一下会让它拿到「write to closed file」并退出 ——
+        # 比在这里干等一个可能永远不来的帧安全。
+        try:
+            self.proc.stdin.close()
+        except Exception:                                  # noqa: BLE001
+            pass
+        if force or stuck:
+            try:
+                _kill_proc_tree(self.proc)
+            except Exception:                              # noqa: BLE001
+                pass
+        try:
+            self.rc = int(self.proc.wait(timeout=30 if (force or stuck) else 600))
+        except Exception:                                  # noqa: BLE001
+            try:
+                _kill_proc_tree(self.proc)
+            except Exception:                              # noqa: BLE001
+                pass
+            self.rc = -1
+        return self.rc
+
+    def tail_text(self, n: int = 12) -> str:
+        return "\n".join((self.tail or [])[-int(n):])
+
+
 def _fused_det_plan(det_name, w, h, over=None) -> dict:
     """检测池的配比：探测 → 微基准 → derive → EP 政策。over = 请求体覆盖（sess_gpu/sess_cpu/…）。"""
     b = _detect_bench(det_name, w, h)
@@ -674,6 +907,7 @@ def _fused_run(cfg: dict) -> dict:
     probe = cfg.get("probe") or {}
     fps = float(cfg.get("fps") or probe.get("fps") or 30.0)
     full = bool(rng["full"])
+    rawpipe = _fused_rawpipe_on()      # 成片走 rawvideo 管道（默认）还是 PNG 落盘，见 _FUSED_ENV_RAW
     mask_src = _mask_src(cfg.get("settings"), cfg.get("mask_mode"))
     comp_cfg = dict(cfg.get("config") or {})
     comp_cfg["mask_mode"] = int((cfg.get("settings") or {}).get("mask_mode", 6) or 0)
@@ -886,8 +1120,11 @@ def _fused_run(cfg: dict) -> dict:
         _vid_log("快速导出：★ 当前在 CPU 上跑 ★（显存装不下 + %s=1）—— 预计比 GPU 慢约 %.0f 倍"
                  % (_VRAM_ENV_CPU, _VRAM_CPU_SLOW))
 
-    frames_dir = Path(tempfile.mkdtemp(prefix="dfl_fused_"))
-    cfg["frames_dir"] = str(frames_dir)
+    # raw 管道这条路**一个中间文件都不写**（连临时目录都不建）：帧从内存直接进 ffmpeg 的 stdin。
+    # 只有老路（DFL_FUSED_RAWPIPE=0）才需要 %TEMP%/dfl_fused_* 那串 PNG。
+    frames_dir = None if rawpipe else Path(tempfile.mkdtemp(prefix="dfl_fused_"))
+    if frames_dir is not None:
+        cfg["frames_dir"] = str(frames_dir)
     # 线程数一律把**实际生效的值**和它是从哪来的打出来：用户改过环境变量/请求体时，
     # 「日志里明明是 8，为什么只有 4」这种事不该再发生（这条日志是唯一能复盘的地方）。
     _vid_log("快速导出：线程 检测1/解码1/对齐%d/GPU1/合成%d/编码%d · 队列 %d · cv2 %s · "
@@ -919,7 +1156,11 @@ def _fused_run(cfg: dict) -> dict:
     _vid_log("快速导出：u8 量化 %s（%s）"
              % ("复用 float 暂存 + astype" if _u8_fast else "老口径 np.clip(x*255).astype",
                 "%s=%d" % (_FUSED_ENV_U8, _u8_fast)))
-    _vid_log("快速导出：临时帧目录 %s（成功/取消都删；<视频>_cache/ 一个都不建）" % frames_dir)
+    _vid_log("快速导出：成片出口 %s（%s=%d；<视频>_cache/ 一个都不建）"
+             % ("rawvideo 管道（不落中间帧）" if rawpipe else "PNG 落盘 → ffmpeg 读帧序列",
+                _FUSED_ENV_RAW, 0 if rawpipe is False else 1))
+    if frames_dir is not None:
+        _vid_log("快速导出：临时帧目录 %s（成功/取消都删）" % frames_dir)
 
     END = object()
     ticks = _FusedTicks()
@@ -1000,6 +1241,24 @@ def _fused_run(cfg: dict) -> dict:
                 {"dfm": int(batch_of.get(str(cfg["dfm"])) or batch_target)})
         except Exception:                                  # noqa: BLE001
             pass
+
+    def _frame_done(job):
+        """一帧「出去了」：老路 = PNG 已落盘，raw 路 = 已交给 ffmpeg。计数与上报只此一处。
+
+        两条路抽成同一个函数是因为**它写在谁身上会变**：老路在编码线程里（3 条并发），
+        raw 路在唯一写者里（按帧序）。数字必须还是同一口径，否则 status 里的帧速会一半大。
+        """
+        with stat_lock:
+            got["frames"] += 1
+            if job.rec.get("no_face"):
+                got["copied"] += 1
+                got["no_face"] += 1
+            else:
+                got["swapped"] += 1
+            got["faces"] += int(job.rec.get("faces") or 0)
+            done = got["frames"]
+        _vid_record(job.rec)
+        _report(done)
 
     # ---- 显存保护：dfm 批大小按 session 实测阶梯选（每个 dfm 一次）----
     batch_of = {}
@@ -1605,6 +1864,18 @@ def _fused_run(cfg: dict) -> dict:
                 if item is END:
                     return
                 job, img = item
+                if raw_w is not None:
+                    # raw 管道：这里**不编码、不落盘**，只把这一帧交给唯一写者。
+                    # 仍然留 3 条线程：memoryview/连续性这步可以并行（1.15ms/帧），
+                    # 而 pipe.write 只有写者线程做（帧序不能乱，见 _FusedRawWriter）。
+                    # sem/计数/进度都由写者那一侧收（帧真正出去的时刻才算出去）。
+                    t = time.perf_counter()
+                    buf = memoryview(img) if img.flags["C_CONTIGUOUS"] else                         memoryview(np.ascontiguousarray(img))
+                    ticks.add("encode", time.perf_counter() - t)
+                    _stage_tick("encode")        # 交接点：合成 → 排队等写管道
+                    if not raw_w.put(job, buf.cast("B")):
+                        return
+                    continue
                 t = time.perf_counter()
                 data = _stage_imencode_png(img, png_level)
                 ticks.add("encode", time.perf_counter() - t)
@@ -1618,17 +1889,7 @@ def _fused_run(cfg: dict) -> dict:
                     sem.release()
                 except ValueError:
                     pass
-                with stat_lock:
-                    got["frames"] += 1
-                    if job.rec.get("no_face"):
-                        got["copied"] += 1
-                        got["no_face"] += 1
-                    else:
-                        got["swapped"] += 1
-                    got["faces"] += int(job.rec.get("faces") or 0)
-                    done = got["frames"]
-                _vid_record(job.rec)
-                _report(done)
+                _frame_done(job)
         except BaseException as e:                             # noqa: BLE001
             _fail("encode", e)
 
@@ -1698,6 +1959,48 @@ def _fused_run(cfg: dict) -> dict:
     _STAGE_METER.bind({"frames": q_dec, "det": q_det, "dfm": q_gpu,
                        "xseg": q_cmp, "compose": q_enc})
 
+    # ---- 成片出口：raw 管道要先起 ffmpeg，再起唯一写者 ----
+    # 顺序要紧：ffmpeg 必须在**第一帧之前**就位（管道是阻塞流，写者一上来就写），
+    # 而写者必须比编码线程先从下游起（和队列那条规则一样：先有消费者）。
+    out.parent.mkdir(parents=True, exist_ok=True)
+    part = out.with_name(out.stem + ".part" + out.suffix)
+    raw_w = None
+    raw_proc = None
+    raw_cmd = None
+    t_raw0 = time.perf_counter()
+    if rawpipe:
+        _pw, _ph = int(probe.get("w") or 0), int(probe.get("h") or 0)
+        if not _pw or not _ph:
+            raise _BadInput("raw 管道要知道源视频宽高，但探测结果里没有（probe=%r）"
+                            % (probe,), 500)
+        plan_frames = max(1, int(end_i) - int(start_i) + 1)
+        t_audio = ((start_i - 1) / fps) if fps > 0 else 0.0
+        plan_dur = (plan_frames / fps) if fps > 0 else 0.0
+        raw_cmd = _fused_pipe_cmd(part, video, fps, _pw, _ph,
+                                  audio_ss=(None if full else t_audio),
+                                  audio_t=(None if full else plan_dur),
+                                  limit=(None if full else int(plan_frames)))
+        _vid_log("快速导出：raw 管道 %dx%d @ %.6g 帧/秒 · %d 帧 · 音轨 %s"
+                 % (_pw, _ph, fps, plan_frames,
+                    "整段 copy" if full else "-ss %.4f -t %.4f" % (t_audio, plan_dur)))
+        _vid_log("快速导出 管道命令：%s"
+                 % " ".join('"%s"' % a if " " in str(a) else str(a) for a in raw_cmd))
+        # ★ ffmpeg 必须**让路**：它在流水线跑的同时编（老路是跑完再编），默认优先级会跟检测、
+        # 合成、dfm 抢同一批核。实测（150 帧 · 同进程交替 · 没让路那组）：raw 的 pipeline 比
+        # png 慢 5~8%（中位 22.1 → 20.4 帧/秒 那条曲线），让路之后两者持平（5.87 vs 5.76 s）。
+        # BELOW_NORMAL 只改调度、**不改码流**：x264 的输出跟线程数有关（实测 -threads 8 就换成
+        # 另一份 md5），所以这里宁可用优先级换核，也不动 -threads —— 成片逐字节相同是硬约束。
+        _prio = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0) \
+            if str(os.environ.get("DFL_FUSED_PIPE_PRIO") or "1").strip().lower() \
+            not in ("0", "off", "false", "no") else 0
+        raw_proc = subprocess.Popen(
+            raw_cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            creationflags=getattr(_app_mod, "_NO_WINDOW", 0) | _prio)
+        raw_w = _FusedRawWriter(raw_proc, plan_frames, sem, live, live_lock, ticks, stop,
+                                _frame_done, _report)
+        raw_w.start()
+
     ths = {}
     t_all = time.time()
     try:
@@ -1754,6 +2057,15 @@ def _fused_run(cfg: dict) -> dict:
                 cv2.setNumThreads(cv2_prev)
             except Exception:                                  # noqa: BLE001
                 pass
+        # raw 管道：成功、失败、取消**都要收**（绝不留一个在跑的 ffmpeg 进程）。
+        # 正常收尾 = 等写者把手里写完 → 关 stdin（EOF）→ 等 x264 排空；失败/取消 = 直接杀。
+        if raw_w is not None:
+            _force = bool(errors) or bool(alive) or _fused_cancelled()
+            try:
+                raw_w.finish(force=_force)
+            except Exception as e:                             # noqa: BLE001
+                if not errors:
+                    errors.append("raw 管道收尾: %r" % (e,))
 
     written = int(got["frames"] or 0)
     if _fused_cancelled():
@@ -1866,44 +2178,77 @@ def _fused_run(cfg: dict) -> dict:
                    "compose_backend": ("gpu" if gpu_cmp["on"] else "cpu"),
                    "queue_depth": qd, "budget": budget, "cv2_threads": cv2_threads})
     _stage_progress("fused", _VID_PCT_SWAP,
-                    "快速导出：%d 帧跑完，开始编码（%d 帧 @ %.6g fps）"
-                    % (written, written, fps),
+                    ("快速导出：%d 帧跑完（x264 已同步编完），正在排空" if raw_w is not None
+                     else "快速导出：%d 帧跑完，开始编码（%d 帧 @ %.6g fps）")
+                    % ((written,) if raw_w is not None else (written, written, fps)),
                     frames_done=written, frames_total=written,
                     frame_fps=round(rate, 2))
 
-    # ---- ⑦ 编码：和 ⑥ 导出**同一个函数**（crf16 / yuv420p / tv-range / 音轨 copy）----
-    out.parent.mkdir(parents=True, exist_ok=True)
-    part = out.with_name(out.stem + ".part" + out.suffix)
+    # ---- ⑦ 编码 ----
+    # raw 管道：x264 在流水线跑的时候就已经把片子编完了，这里只剩「排空 + 判退出码」；
+    # 老路：此刻才串行跑 ffmpeg 读那串 PNG（实测 1.68s / 150 帧 = 11.2ms/帧，管道把这段省掉）。
     dur = (written / fps) if fps > 0 else 0.0
     t_audio = ((start_i - 1) / fps) if fps > 0 else 0.0
-    cmd = _vid_cmd(str(frames_dir / "%06d.png"), part, video, fps, img_start=1,
-                   audio_ss=(None if full else t_audio),
-                   audio_t=(None if full else dur),
-                   limit=(None if full else int(written)))
+    if raw_w is not None:
+        # ffmpeg 的退出码只能在**上面那几条 errors 之后**判：真正的根因（合成崩了、没解出帧）
+        # 优先级更高，先报那个；这里再兜「ffmpeg 自己死了」这种情况，并且要带 stderr 尾巴 ——
+        # 「成片没了，但日志里一句话都没有」是这个项目最不该再出现的排障体验。
+        if int(raw_w.rc or 0) != 0:
+            try:
+                if part.is_file():
+                    part.unlink()
+            except OSError:
+                pass
+            # Windows 上 rc 是 DWORD：-22 (EINVAL) 会显示成 4294967274，读起来像另一个东西
+            _rc = int(raw_w.rc or 0)
+            _rc = _rc - 2 ** 32 if _rc > 2 ** 31 else _rc
+            raise _BadInput(
+                "成片编码失败（ffmpeg 退出码 %s，已写进管道 %d 帧）：%s"
+                % (_rc, int(raw_w.n),
+                   (raw_w.tail_text() or raw_w.err or "ffmpeg 没有输出")[-800:]), 500)
+        if raw_w.err:
+            raise _BadInput("raw 管道异常（成片作废）：%s" % str(raw_w.err)[:400], 500)
+        _pipe_s = time.perf_counter() - t_raw0
+        _drain = max(0.0, _pipe_s - raw_w.seconds)
+        # encode_seconds 报的是**这一单为「编码」多花的墙钟** = 排空时间（x264 那部分是并发跑的，
+        # 没有多花墙钟）。写者在线时长单独放在 res["pipe"]，日志两个都写出来，谁也不糊弄谁。
+        enc = {"code": 0, "tail": raw_w.tail_text(), "seconds": round(_drain, 2),
+               "part": str(part), "cmd": list(raw_cmd or [])}
+        _vid_log("快速导出：raw 管道收尾 —— 写 %d 帧 · x264 与流水线并发（写者在线 %.2fs，"
+                 "单次写最长 %.1f ms）· 收尾排空 %.2fs · 管道全程 %.2fs"
+                 % (int(raw_w.n), raw_w.seconds, 1000.0 * raw_w.write_max, _drain, _pipe_s))
+        if int(raw_w.n) != int(plan_frames):
+            _vid_log("快速导出：★ 计划 %d 帧、实际写进管道 %d 帧（源比请求的少？）—— 成片按实际帧数收"
+                     % (int(plan_frames), int(raw_w.n)))
+    else:
+        cmd = _vid_cmd(str(frames_dir / "%06d.png"), part, video, fps, img_start=1,
+                       audio_ss=(None if full else t_audio),
+                       audio_t=(None if full else dur),
+                       limit=(None if full else int(written)))
 
-    def _on_prog(done):
-        pct = _VID_PCT_SWAP + (100 - _VID_PCT_SWAP) * min(1.0, done / max(1, written))
-        _stage_progress("encode", pct, "编码 %d/%d 帧" % (done, written),
-                        frames_done=min(done, written), frames_total=written)
+        def _on_prog(done):
+            pct = _VID_PCT_SWAP + (100 - _VID_PCT_SWAP) * min(1.0, done / max(1, written))
+            _stage_progress("encode", pct, "编码 %d/%d 帧" % (done, written),
+                            frames_done=min(done, written), frames_total=written)
 
-    enc = _vid_encode(cmd, part, written, on_progress=_on_prog,
-                      cancelled=_fused_cancelled)
-    if enc["code"] != 0:
-        try:
-            if part.is_file():
-                part.unlink()
-        except OSError:
-            pass
-        raise _BadInput("编码失败（ffmpeg 退出码 %s）：%s"
-                        % (enc["code"], (enc["tail"] or "")[-600:]), 500)
+        enc = _vid_encode(cmd, part, written, on_progress=_on_prog,
+                          cancelled=_fused_cancelled)
+        if enc["code"] != 0:
+            try:
+                if part.is_file():
+                    part.unlink()
+            except OSError:
+                pass
+            raise _BadInput("编码失败（ffmpeg 退出码 %s）：%s"
+                            % (enc["code"], (enc["tail"] or "")[-600:]), 500)
+        _vid_log("快速导出 编码命令：%s"
+                 % " ".join('"%s"' % a if " " in str(a) else str(a) for a in cmd))
     if not part.is_file() or part.stat().st_size <= 0:
         raise _BadInput("编码跑完了却没有产物：%s" % part, 500)
     os.replace(str(part), str(out))
     mb = round(out.stat().st_size / 1048576.0, 2)
     _vid_log("快速导出：编码完成 %s（%.2f MB · %d 帧 · %.3f s · %.4f s 墙钟）"
              % (out.name, mb, written, dur, enc["seconds"]))
-    _vid_log("快速导出 编码命令：%s"
-             % " ".join('"%s"' % a if " " in str(a) else str(a) for a in cmd))
 
     # ---- 断言：全程没碰 <视频>_cache/（这是 fused 和分段的关键区别）----
     if (not cache_pre) and cache_dir.exists():
@@ -1920,7 +2265,12 @@ def _fused_run(cfg: dict) -> dict:
             "cache_dir": str(cache_dir), "cache_created": False,
             "audio_ss": (None if full else round(t_audio, 6)),
             "range": {"start": start_i, "end": end_i, "total": total, "full": full},
-            "frames_dir": str(frames_dir),
+            "frames_dir": ("" if frames_dir is None else str(frames_dir)),
+            "sink": ("rawpipe" if raw_w is not None else "png"),
+            "pipe": (None if raw_w is None else
+                     {"frames": int(raw_w.n), "writer_seconds": round(raw_w.seconds, 2),
+                      "write_max_ms": round(1000.0 * raw_w.write_max, 1),
+                      "rc": int(raw_w.rc or 0), "cmd": list(raw_cmd or [])}),
             "threads": {"prep": n_prep, "compose": n_cmp, "encode": n_enc},
             "threads_src": {
                 "prep": _src_of(cfg, ("pred_readers",), _FUSED_PREP_DEFAULT,
