@@ -80,8 +80,21 @@ def _get_detector(name=None):
         from .._detect import TinyMogDet
         det = TinyMogDet(str(p), workspace=WORKSPACE, engine_name="tinymog")
     else:
+        # retinaface_10g：以前这里**不传 workspace / engine_name**，于是 self.sess 永远是
+        # None → 直接 ort.InferenceSession(CUDAExecutionProvider) fp32；而
+        # workspace/_engines/retinaface_10g_<md5>_sm<SM>_trt<ver>.bf16.engine 躺在磁盘上
+        # 没人用（同一份 onnx，md5/SM/TRT 版本都对得上）。这和「遮罩来源/检测档位」那类
+        # 事故同形：配置看起来生效了，实际没接上。
+        # 本机同帧同权重实测（640 canvas，纯 sess.run，3 轮）：ORT-CUDA fp32 8.86ms →
+        # TRT bf16 3.81ms。检测结果只差 bf16 舍入（见 app/tools/accept/det_trt_parity.py）。
+        # 引擎缺失时 try_engine 会打一行 [TRT] "没有 md5=... 的 bf16 引擎 ... → 回退
+        # onnxruntime"，行为和以前完全一致；DFL_DET_TRT=0 可以强制回到「不碰引擎」（A/B 用）。
         from .._detect import RetinaFaceDet
-        det = RetinaFaceDet(p, 640)
+        _trt = str(__import__("os").environ.get("DFL_DET_TRT") or "1").strip().lower()
+        _trt_on = _trt not in ("0", "off", "no", "false")
+        det = RetinaFaceDet(p, 640,
+                            workspace=(WORKSPACE if _trt_on else None),
+                            engine_name="retinaface_10g")
     _det_cache[canon] = det
     return det
 

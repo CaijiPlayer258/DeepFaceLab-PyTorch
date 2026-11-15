@@ -2595,7 +2595,14 @@ def _detect_for(name, ep="gpu"):
             if canon == "tinymog":
                 det = TinyMogDet(str(p), workspace=WORKSPACE, providers=list(_prov()))
             else:
-                det = RetinaFaceDet(p, 640)          # 自带 CUDA providers
+                # 和 app._get_detector 同一个口径：传 workspace/engine_name 才会命中
+                # workspace/_engines 里的 bf16 引擎；不传就静默走 ORT-CUDA fp32
+                # （以前这里就是那个状态）。DFL_DET_TRT=0 强制回到 ORT（A/B 用）。
+                _trt = str(__import__("os").environ.get("DFL_DET_TRT") or "1").strip().lower()
+                det = RetinaFaceDet(p, 640,
+                                    workspace=(WORKSPACE if _trt not in ("0", "off", "no", "false")
+                                               else None),
+                                    engine_name="retinaface_10g")
         except Exception as e:                              # noqa: BLE001
             _stage_log("异构池：第二份 GPU 检测器起不来（%s）" % str(e)[:160])
             return None
