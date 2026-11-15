@@ -665,6 +665,10 @@ def _fused_run(cfg: dict) -> dict:
         n_cmp = _n_gpu
     else:
         n_cmp = max(1, int(_merge_worker_count(cfg)))
+    # 回显给 status / 日志：这一单的合成到底在哪算的（用户/排障一眼看出 CPU 还是 GPU）
+    cfg["_compose_backend"] = "gpu" if gpu_cmp["on"] else "cpu"
+    cfg["_compose_threads"] = int(n_cmp)
+    cfg["_compose_why"] = str(gpu_cmp.get("why") or "")
     # PNG 编码是这一条链上最贵的纯 CPU 活（1080p 实测 94ms/帧，cv2.imencode 会放 GIL，
     # 多线程是真并行：2 线程 ≈2 倍、4 线程 ≈3.6 倍）。默认 3：detect（52.8ms/帧）才是硬底，
     # 再往上加只会跟检测抢 CPU。
@@ -825,6 +829,9 @@ def _fused_run(cfg: dict) -> dict:
                  ("DFL_COMPOSE_GPU=1 但%s" % gpu_cmp["why"] if gpu_cmp["why"]
                   else "默认（DFL_COMPOSE_GPU=1 可切 GPU）")),
                 n_cmp))
+    _vid_log("快速导出：合成后端回显 compose_backend=%s · 线程 %d%s"
+             % (cfg["_compose_backend"], cfg["_compose_threads"],
+                ("（%s）" % cfg["_compose_why"]) if cfg["_compose_why"] else ""))
     _vid_log("快速导出：临时帧目录 %s（成功/取消都删；<视频>_cache/ 一个都不建）" % frames_dir)
 
     END = object()
@@ -1762,6 +1769,7 @@ def _fused_run(cfg: dict) -> dict:
                    "batch_wait_mean_ms": round(
                        float(bstat.get("wait_ms") or 0.0) / max(1, int(bstat["calls"])), 1),
                    "decode_mode": dec_mode,
+                   "compose_backend": ("gpu" if gpu_cmp["on"] else "cpu"),
                    "queue_depth": qd, "budget": budget, "cv2_threads": cv2_threads})
     _stage_progress("fused", _VID_PCT_SWAP,
                     "快速导出：%d 帧跑完，开始编码（%d 帧 @ %.6g fps）"
@@ -1915,6 +1923,11 @@ def _fused_worker(cfg: dict):
             vplan["forced_failed"] = True
         if vplan:
             vplan["cpu"] = bool(_vram_cpu_on())
+            # 合成后端回显：前端 / 日志能直接看出这一单是 CPU 还是 GPU 合成的
+            vplan["compose_backend"] = str(cfg.get("_compose_backend") or "cpu")
+            vplan["compose_threads"] = int(cfg.get("_compose_threads") or 0)
+            if cfg.get("_compose_why"):
+                vplan["compose_why"] = str(cfg.get("_compose_why"))
         with _STAGE_LOCK:
             _STAGE_JOB.update({
                 "running": False, "ok": bool(ok), "cancelled": bool(cancelled),
@@ -1936,6 +1949,8 @@ def _fused_worker(cfg: dict):
                 "counts": {"frames": int(res.get("frames") or 0), "faces": 0,
                            "pred": 0, "masks": 0},
                 "meta": {}, "vram_plan": vplan, "on_cpu": bool(_vram_cpu_on()),
+                "compose_backend": str(cfg.get("_compose_backend") or "cpu"),
+                "compose_threads": int(cfg.get("_compose_threads") or 0),
             })
         with _merge_job_lock:
             _merge_job.update({
@@ -1951,6 +1966,8 @@ def _fused_worker(cfg: dict):
                     list(_merge_job.get("log") or []), 30))[:4000]),
                 "cache": cache_state, "frame_budget": bud, "active": False,
                 "vram_plan": vplan, "on_cpu": bool(_vram_cpu_on()),
+                "compose_backend": str(cfg.get("_compose_backend") or "cpu"),
+                "compose_threads": int(cfg.get("_compose_threads") or 0),
                 "vram_oom": (_oom or None),
             })
         _vid_log("快速导出结束：%s · %.2f s%s"
