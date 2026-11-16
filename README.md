@@ -83,6 +83,9 @@ runtime\server\Scripts\python.exe app\serve.py
 - 原帧**不落盘**：ffmpeg 解一帧 → 检测 → 对齐 → 编码，三级流水线同时跑，稳态吞吐取三者最大值。
 - `quality` 只决定检测器（`high`=RetinaFace，`fast`=TinyMog）；`skip` 按**源视频真实帧率**换算抽帧率，不是假设 24fps。
 - 对齐闸门：5 点退化到离谱的脸默认只**记账**（`_bad_frames.txt`），不会静默丢掉 —— 想真拒就开 strict。
+- 跑起来之后是六段流水线视图（解码 / 检测 / 对齐 / dfm / 遮罩 / 编码），每段一条 lane，实时读数：
+
+  ![提取进度](app/docs/readme/14-extract-run.png)
 
 ### 2 · Processor｜数据集
 
@@ -98,7 +101,12 @@ runtime\server\Scripts\python.exe app\serve.py
 
 - 新建模型时给**显卡探测 + 档位推荐**，点一次直接进训练。
 - 训练本体是 4.0 引擎在跑（`engine/main.py train`），界面通过 `:6789` 的预览口看实时样本。
-- 参数页有搜索框（不折叠，只过滤）；训练页有「继续训练」置顶卡。
+- 参数页有搜索框（不折叠，只过滤），每项参数带一句说明（如 batch / target batch / precision），
+  底部常驻「预计显存 6.1 GB」——那是按当前档位算的，不是估计值：
+
+  ![训练参数](app/docs/readme/13-train-cfg.png)
+
+- 训练页有「继续训练」置顶卡。
 - 8 GB 显存实测：128 分辨率 + batch 8，峰值 5.7 GB，约 6.5 it/s。
 
 ### 4 · Merger｜合成器
@@ -118,6 +126,11 @@ runtime\server\Scripts\python.exe app\serve.py
 
 语言（中/英）、主题（浅色/深色/跟随系统）、端口、工作区路径、许可与免责声明。
 
+About 页把「版本 / UI / 推理后端 / 已装模型 / 后端进程与端口 / 作者 / 仓库 / 许可证」一次列全，
+排障时先看这一页就能确认自己跑的是哪份代码：
+
+![关于](app/docs/readme/09-about.png)
+
 ---
 
 ## 工具
@@ -126,9 +139,9 @@ runtime\server\Scripts\python.exe app\serve.py
 |---|---|---|
 | **Mask editor** | 逐张画遮罩：笔刷 / 橡皮 / SAM 点选 / Grounded SAM2 文本 / BiSeNet 解析 | ![](app/docs/readme/07-mask.png) |
 | **Engine build** | TensorRT 引擎的编译与状态（MD5 / 原始大小 / 引擎大小 / Ready） | ![](app/docs/readme/06-engine.png) |
-| **Bilibili** | 扫码登录、视频列表、下载队列（下载来的片子可直接进 Extractor） | — |
-| **Colour transfer** | 换脸前后色调对齐的调参预览 | — |
-| **Angle view** | 数据集的角度分布（坐标轴 + 散点 / 格子图） | — |
+| **Bilibili** | 扫码登录、视频列表、下载队列（下载来的片子可直接进 Extractor） | ![](app/docs/readme/10-bili.png) |
+| **Colour transfer** | 换脸前后色调对齐的调参预览 | ![](app/docs/readme/11-color.png) |
+| **Angle view** | 数据集的角度分布（坐标轴 + 散点 / 格子图），900 点实时算 | ![](app/docs/readme/12-angle.png) |
 
 **Engine build 不是必需的**：没有引擎时走 onnxruntime 一样能跑；编译引擎只是把检测 / 特征点 / xseg
 换成 TensorRT（本机 retinaface 12.9ms → 8.5ms）。换显卡或换 TensorRT 版本时要重编一次，平时直接加载。

@@ -37,6 +37,13 @@ PAGES = [
     ("06-engine", "tool-engine", "工具 · 引擎编译（TensorRT）"),
     ("07-mask", "tool-mask", "工具 · 遮罩绘制"),
     ("08-settings", "settings", "设置"),
+    # 下面这些是旧 README 里"没截图"的页面，补齐
+    ("09-about", "about", "关于：版本 / 许可 / 免责声明"),
+    ("10-bili", "tool-bili", "工具 · B 站下载"),
+    ("11-color", "tool-color", "工具 · 色彩迁移"),
+    ("12-angle", "tool-angle", "工具 · 角度视图"),
+    ("13-train-cfg", "train-cfg", "训练参数（含搜索框）"),
+    ("14-extract-run", "extract-run", "提取进度（六阶段 / 实时读数）"),
 ]
 
 
@@ -129,6 +136,7 @@ def edge(port):
 
 
 def main():
+    only = [a for a in sys.argv[1:] if not a.startswith("-")]
     OUT.mkdir(parents=True, exist_ok=True)
     srv, port = start_server()
     brow, cm, call, ev = None, None, None, None
@@ -146,14 +154,20 @@ def main():
            "document.documentElement.setAttribute('data-theme','light');return 1;})()")
         time.sleep(1.5)
         for name, key, desc in PAGES:
+            if only and not any(name.startswith(o) for o in only):
+                continue
             ok = ev("(function(){try{window.go('%s');return 1;}catch(e){return String(e);}})()" % key)
             time.sleep(2.2)
+            ev("(function(){try{window.scrollTo(0,0);}catch(e){}"
+               "document.documentElement.style.scrollBehavior='auto';"
+               "return 1;})()")
             # 关掉可能挡住的欢迎/教程层
             ev("(function(){['welcome','tutMask','onboard'].forEach(function(id){"
                "var el=document.getElementById(id); if(el){el.style.display='none';}});return 1;})()")
             time.sleep(0.4)
+            time.sleep(0.6)
             res = {}
-            for _try in range(2):
+            for _try in range(3):
                 try:
                     res = call("Page.captureScreenshot", {"format": "png"}, timeout=45)
                     if res.get("data"):
