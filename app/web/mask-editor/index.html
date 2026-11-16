@@ -345,7 +345,7 @@
         app.canvas.setMask(null);
         try {
           app.canvas.setLoading(40, 'XSeg...');
-          var result = await API.xsegPredict(app.currentIndex);
+          var result = await API.xsegPredict(app.currentIndex, 'xseg', getXSegRes());
           app.canvas.clearLoading();
           if (result.mask) app._applyMaskB64(result.mask);
         } catch (err) {
@@ -383,7 +383,7 @@
         app.canvas.setMask(null);
         try {
           app.canvas.setLoading(40, 'XSegLite...');
-          var result = await API.xseglitePredict(app.currentIndex);
+          var result = await API.xsegPredict(app.currentIndex, 'lite', getXSegRes());
           app.canvas.clearLoading();
           if (result.mask) mergeMaskB64(result.mask);
         } catch (err) {

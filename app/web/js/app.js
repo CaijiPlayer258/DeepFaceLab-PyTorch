@@ -8985,14 +8985,26 @@ function mgStageEmpty(on) {
     FACE_PTS = L68.map(function (p) { return [p[0], p[1], p[2]]; });
     return FACE_PTS;
   }
-  /* 保存在工作区里（face68.json），换端口、换机器都还在 */
+  /* 保存在工作区里（face68.json），换端口、换机器都还在。
+     判据是 r.ok：后端没有这份数据时回 404 + detail（以前是 200 + points:null，
+     只能靠 d.points == null 猜），这里把 detail 摆到界面上，别让它静默回内置坐标。 */
   function loadFace() {
-    return fetch("/api/face").then(function (r) { return r.json(); }).then(function (d) {
-      if (d && d.points && d.points.length === 68) {
+    return fetch("/api/face").then(function (r) {
+      if (!r.ok) {
+        return r.json().catch(function () { return {}; }).then(function (d) {
+          toast("这一帧没有关键点",
+                String((d && (d.detail || d.error)) || ("HTTP " + r.status)).slice(0, 120),
+                "info");
+          return null;
+        });
+      }
+      return r.json();
+    }).then(function (d) {
+      if (d && d.ok !== false && d.points && d.points.length === 68) {
         FACE_PTS = d.points;
         HEAD = null;
       }
-    }).catch(function () {});
+    }).catch(function (e) { console.warn("face load failed", e); });
   }
   window.loadFace = loadFace;
   window.facePts = facePts;

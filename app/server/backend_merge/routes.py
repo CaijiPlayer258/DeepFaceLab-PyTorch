@@ -475,8 +475,11 @@ def merge_export(body: dict):
                            mask_onnx, fps, workers, encoder, hwaccel),
                      kwargs={"detector": det_name},
                      daemon=True, name="merge-export").start()
+    # output 是**文件**（mp4 全路径）。以前这里还多给一个 output_dir=同一个值，
+    # 键名撒谎（它指向文件、不是目录），全仓没有一处读它 —— 前端读的是 d.output
+    # （app.js:8528）。删掉，别让下一个照键名猜语义。
     return _ok(input_dir=str(ip), aligned_dir=str(aligned), output=str(out_mp4),
-               output_dir=str(out_mp4), dfm=str(dfm), model=model_name,
+               dfm=str(dfm), model=model_name,
                settings=settings, fps=fps, workers=workers, encoder=encoder,
                hwaccel=hwaccel, mask_onnx=mask_onnx,
                detector=det_name, detector_engine=_det_names.engine(det_name))
