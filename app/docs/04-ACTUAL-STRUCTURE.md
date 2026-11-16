@@ -21,35 +21,41 @@ Electron (desktop/main.js)
 ```
 app/
 ├── serve.py            后端独立入口（Electron fork 的就是它）
-├── server/             FastAPI 业务
-│   ├── app.py          单文件 70KB —— 所有路由 + 业务都在这
-│   ├── _vision/        检测/对齐/XSeg 的实身（detect.py = RetinaFace ONNX）
-│   ├── _dfl_train.py   训练包装：跑 4.0 的 main.py，禁掉自动弹浏览器
-│   ├── backend_bili/   B 站扫码登录 / 投稿 / 下载（placeholder.py 是 DFL_BILI_MOCK 那套假数据）
-│   └── backend_*/      其余业务按域分包（顶层 _xxx.py 都是 PEP 562 转发壳）
+├── server/             FastAPI 业务（按域分包，顶层 _xxx.py 是 PEP 562 转发壳）
+│   ├── app.py          组装（~300 行）：路由表 + 静态挂载 + PEP 562 转发，业务不在这里
+│   ├── _common/        env / http / proc / paths / jobs / session / device / encoder_sel …
+│   ├── _vision/        detect.py（RetinaFace/TinyMog）· align.py（5点→2D106→68→芯片）· xseg.py
+│   ├── _media/         编码器选择 · 帧读取
+│   ├── backend_merge/  合成器：pipeline_fused（融合导出）· stage_{faces,pred,mask,merge} · fused_io
+│   │                   · pipeline_project（项目导出）· vram · preview · compose · knobs · frames_prep
+│   ├── backend_extract/ 提取页：align_stream（唯一会写 DFLJPG 的路径）· resume · frames · media · pipeline
+│   ├── backend_models/ dfm torch/ORT、TRT 引擎、模型元信息（/api/extract/start 暂时也在这里）
+│   ├── backend_{faces,mask,bili,train,dataset,oneshot}/
+│   └── routes_*.py     跨域路由（merge / 训练 / B 站）
 ├── web/                前端（StaticFiles 挂这里）
-│   ├── index.html      53KB 单页
-│   ├── js/app.js       190KB 单文件
-│   ├── js/i18n.js      中英词典 + 正则模板
+│   ├── index.html      单页多视图
+│   ├── js/app/         **23 个分片**，后端拼成 /static/js/app.js（逐字节等价）
+│   │                   00-core · 01-dataset · 02-merge-preview · 10-merge-settings · 20-progress-fused …
+│   ├── js/i18n.js      中英词典 + 正则模板 · js/face_db.js 人脸库弹层
 │   ├── css/            app.css / shadcn.css
-│   ├── mask-editor/    遮罩绘制（copied from 4.0，独立子应用）
-├── core/               （已删：Qt 时代规划的空目录树，0 文件）
-├── engine/             4.1 引擎（xlib / core / models / MergeStudio / facelib / modelhub …）
-├── tools/              验收与迁移脚本（accept / bench / migrate）
-└── docs/               设计文档（01/02/05 已移入 docs/archive/4.0/）
+│   └── mask-editor/    遮罩绘制（独立子应用）
+├── engine/             4.0 引擎（vendored：xlib / core / models / MergeStudio / facelib / modelhub …）
+├── tools/              验收与工具（accept / bench / migrate / audit / js / parts→docs）
+└── docs/               设计文档 00~35（编号递增）· legacy-reference/ 归档区 · notes/ 实验记录
 
 desktop/                Electron 壳
 workspace/              用户数据
 ```
 
-## 已知的结构债
+## 已知的结构债（2026-11 复核后更新）
 
-1. `app/server/app.py` 70KB 单文件，2000 行，路由和业务混在一起
-2. `app/web/js/app.js` 190KB 单文件，4898 行，靠 `window.*` 互相挂钩
-3. ~~`app/core/` 整棵树是空的~~ —— 已删（8 个空目录，0 文件，从未被 import）
-4. `app/tools/parts/` 里 11 个早期拆分稿（3 js + 5 css + 3 html）：8 个已逐字内联进
-   `app.js` / `app.css`，`mask-draw.html` / `mask-draw.js` 两份还没有逐字副本、
-   `merge-*.html` 只内联了一部分，删之前要逐个确认（清单在 `app/docs/notes/README.md`）
-5. 4.0 那套 Qt 界面 `legacy/qt-ui/` 已归档到 `app/docs/legacy-reference/qt-ui/`
-   （58 个跟踪文件，从未被 import；pywebview 时代的 `app/main.py` 早年就删了）
-6. `archive/4.0/02-STRUCTURE.md` 描述的 Qt 方案与代码完全不符
+1. ~~`app/server/app.py` 2000 行单文件~~ —— 已拆成组装层 + `_common/` + `backend_*/`；现在 ~300 行。
+2. ~~`app/web/js/app.js` 单文件~~ —— 已按主题切成 `app/web/js/app/` 下 23 个分片（最大 2041 行），
+   后端 `GET /static/js/app.js` 按文件名顺序拼接（逐字节等价）；改完跑 `node app/tools/js/check_bundle.js`。
+3. `_fused_run` 仍是 1697 行 / 25 个闭包：拆它=改写成 ctx 对象（重写），且它是性能改动的落点，
+   需要先钉 fps/帧号/钉批 md5 基线。周围可搬的 I/O 侧已搬到 `fused_io.py`。见 docs/35。
+4. `backend_extract/routes.py` 只有一条 deprecated 的 `/api/extract/status`；真正常用的
+   `/api/extract/{start,cancel,progress}` 还住在 `backend_models/trt.py`（功能性没问题，位置错）。
+5. `app/docs/legacy-reference/` 是归档区（qt-ui / MaskProcessor / MergeStudio / parts / Extractor 等），
+   不在运行路径上；其中 `parts/mask-draw.*` 是唯一副本，只移不删。
+6. 4.0 的 `engine/Extractor/` 只剩 `_compat.py`（landmark106to68 的转发），其余已归档。
