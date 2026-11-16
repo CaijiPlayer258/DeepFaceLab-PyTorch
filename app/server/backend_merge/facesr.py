@@ -33,7 +33,7 @@ from pathlib import Path
 _PREF = {"off": 0.0, "low": 0.35, "mid": 0.6, "high": 1.0}
 _LOCK = threading.Lock()
 _SESS = {"obj": None, "why": "", "backend": "", "name": ""}
-_SIZE = 512
+_SIZE_DEFAULT = 256          # 256 版单次约 1/4 成本；512 版质量更好但本机吃不下
 
 
 def _log(msg: str) -> None:
@@ -58,11 +58,20 @@ def _weights_dir() -> Path:
     return Path(weights_dir())
 
 
+def size() -> int:
+    """工作分辨率：256（默认，快）或 512（质量档）。DFL_SR_SIZE 覆盖。"""
+    try:
+        v = int(str(os.environ.get("DFL_SR_SIZE") or _SIZE_DEFAULT).strip())
+    except (TypeError, ValueError):
+        v = _SIZE_DEFAULT
+    return 512 if v >= 384 else 256
+
+
 def _model_path() -> Path:
     p = str(os.environ.get("DFL_SR_MODEL") or "").strip()
     if p:
         return Path(p)
-    return _weights_dir() / "gpen_bfr_512.onnx"
+    return _weights_dir() / ("gpen_bfr_%d.onnx" % size())
 
 
 def _engine_path() -> Path | None:
@@ -80,10 +89,10 @@ def _engine_path() -> Path | None:
         if not root.is_dir():
             continue
         for suf in (".bf16.engine", ".fp32.engine", ".engine"):
-            cand = root / ("gpen_bfr_512.%d%s" % (sm, suf))
+            cand = root / ("gpen_bfr_%d.%d%s" % (size(), sm, suf))
             if cand.is_file():
                 return cand
-        hits = sorted(root.glob("gpen_bfr_512*.engine"))
+        hits = sorted(root.glob("gpen_bfr_%d*.engine" % size()))
         if hits:
             return hits[0]
     return None
@@ -137,7 +146,7 @@ def session():
 
 def info() -> dict:
     """给 [eff] / status 用的回显。"""
-    return {"mode": mode(), "strength": round(strength(), 2),
+    return {"mode": mode(), "strength": round(strength(), 2), "size": size(),
             "backend": _SESS.get("backend") or "", "model": _SESS.get("name") or "",
             "why": _SESS.get("why") or ""}
 
@@ -187,7 +196,8 @@ def apply_roi(roi_u8, mask_f, alpha: float, timings: dict | None = None):
     crop = roi_u8[y0:y1, x0:x1]
 
     t0 = time.time()
-    big = cv2.resize(crop, (_SIZE, _SIZE), interpolation=cv2.INTER_LINEAR)
+    sz = size()
+    big = cv2.resize(crop, (sz, sz), interpolation=cv2.INTER_LINEAR)
     x = big.astype(np.float32) / 255.0
     x = (x - 0.5) / 0.5
     nchw = np.transpose(x, (2, 0, 1))[None, ...].astype(np.float32)
