@@ -88,3 +88,10 @@ app/engine/ui/user/
 # B վ WBI ǩ������
 .wbi_cache.json
 **/.wbi_cache.json
+
+# ── 台架/探针产物（只在本地，不进仓）────────────────────────────
+_enc4k_bench/
+experiments/
+app/engine/assets/screenshots/
+app/engine/ui/
+app/engine/MergeStudio/workspace/
