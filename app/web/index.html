@@ -1118,13 +1118,6 @@
 
               <!-- 一行结论：完成路径 = 成片/取消说明；被拒路径 = 「显存不足：需要 X GB，可用 Y GB」 -->
               <div class="mgprog-res-txt" id="mgpResultText"></div>
-              <div class="mgprog-res-acts">
-                <button class="btn" id="mgpToSettings" type="button">返回导出设置</button>
-                <!-- 次要出口：用户明确说「不理解为什么被拒」，那他更想**试**一次 ——
-                     点了带 force=1 放行 _vram_guard（按最小档真跑）；真 OOM 会自动
-                     回滚到这一页并写明「确实不够、已回滚」，不会把后端搞坏。 -->
-                <button class="btn" id="mgpForceTry" type="button" hidden>仍然尝试（可能 OOM）</button>
-              </div>
             </div>
 
             <!-- 生效配置不一致横幅：后端把 [eff-warn] 塞进 status.eff_warnings[]，
@@ -1184,6 +1177,15 @@
               </div>
             </div>
 
+
+            <!-- 终态的两个出口放在**页面底部**（用户：按钮放下面）。文本仍在标题下面，按钮在最后。 -->
+              <div class="mgprog-res-acts" id="mgpResultActs" hidden>
+                <button class="btn" id="mgpToSettings" type="button">返回导出设置</button>
+                <!-- 次要出口：用户明确说「不理解为什么被拒」，那他更想**试**一次 ——
+                     点了带 force=1 放行 _vram_guard（按最小档真跑）；真 OOM 会自动
+                     回滚到这一页并写明「确实不够、已回滚」，不会把后端搞坏。 -->
+                <button class="btn" id="mgpForceTry" type="button" hidden>仍然尝试（可能 OOM）</button>
+              </div>
 
             <div class="mgprog-foot" id="mgpFoot">
               <button class="btn" id="mgpCancel">取消导出</button>

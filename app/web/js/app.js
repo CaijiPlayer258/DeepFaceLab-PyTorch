@@ -7412,6 +7412,8 @@ function mgStageEmpty(on) {
     function mgpRejectShow(d, onForce) {
       d = d || {};
       var box = $("mgpResult");
+      /* 底部那排出口：终态才出现（文本在标题下、按钮在页面底部） */
+      var actsBox = $("mgpResultActs"); if (actsBox) actsBox.hidden = false;
       var txt = $("mgpResultText");
       var cb = $("mgpCancel");
       if (cb) cb.hidden = true;
@@ -7871,6 +7873,8 @@ function mgStageEmpty(on) {
     function mgpResultHide() {
       var box = $("mgpResult");
       if (box) box.hidden = true;
+      /* 底部那排出口单独成块（用户：按钮放页面下面），一起藏 */
+      var acts = $("mgpResultActs"); if (acts) acts.hidden = true;
       var cb = $("mgpCancel");
       if (cb) cb.hidden = false;
       return box;
@@ -7881,6 +7885,8 @@ function mgStageEmpty(on) {
       var rz = $("mgpResult"); if (rz) rz.classList.remove("is-rej"); })();
       d = d || {};
       var box = $("mgpResult");
+      /* 底部那排出口：终态才出现（文本在标题下、按钮在页面底部） */
+      var actsBox = $("mgpResultActs"); if (actsBox) actsBox.hidden = false;
       var txt = $("mgpResultText");
       /* 上一轮可能是「被拒绝」态（六步/进度条收起来了）：这里要恢复回来，
          否则一次拒绝之后再跑成功，进度页还是只剩一行字。 */
