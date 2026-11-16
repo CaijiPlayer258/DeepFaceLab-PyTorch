@@ -144,7 +144,7 @@ _FUSED_CMP_DEFAULT = max(1, min(32, _env_int("DFL_FUSED_CMP", 8)))
 #   0 = 老口径 np.clip(x * 255.0, 0, 255).astype(np.uint8)，每张脸连着开三个 float32 临时量
 #       （416×416×3 = 2MB 一个），全是刚 mmap 出来的新页 —— 第一次写就缺页，这部分比算术本身贵；
 #   1 = 复用一条 float32 暂存（out= 原位三连）+ astype，只有最后的 uint8 是新的（1/4 体量）。
-# 逐位相同（对拍见 experiments/enc_quant_diag/bench_quant.py：真实帧分布 + k/255 边界 + 越界样本，
+# 逐位相同（对拍台架：真实帧分布 + k/255 边界 + 越界样本，
 # max=0），因为乘的是同一个 255.0、clip 只截两端、astype 就是 C 的截断。0 留着是为了随时退回老口径对照。
 _FUSED_ENV_U8 = "DFL_FUSED_U8"
 _FUSED_U8_DEFAULT = 1
@@ -894,11 +894,11 @@ _FUSED_ENV_DET_PREP = "DFL_FUSED_DET_PREP"
 # 解码线程只做 read() + ndarray：DFL_FUSED_READINTO=0 退回「read() 出 bytes 再 .copy()」。
 # 1（默认）时 read 直接落进一个预分配环形缓冲（池 = 帧预算 + 4，见 _fused_budget/sem），
 # 省掉每帧一次 6.2MB 的 bytes 分配 + 一次 6.2MB memcpy。像素不受影响（同一份字节、同一个
-# ndarray 形状），实测 25.2→ 见 experiments/dec_lane/REPORT.md：隔离台架 101→119 帧/秒。
+# ndarray 形状），实测 25.2→ 见 app/docs/notes/experiments/dec_lane.md：隔离台架 101→119 帧/秒。
 _FUSED_ENV_READINTO = "DFL_FUSED_READINTO"
 # 解码那条 ffmpeg 的 -threads（-i 之前）。0/空 = auto（现状，= 逻辑核数）。
 # 为什么可以动：解码是确定性的，-threads 1/2/4/8/16/auto 输出的 rawvideo 逐帧 sha1 完全相同
-# （experiments/dec_lane/control.py），和 x264 那边「改 -threads 会换 md5」不是一回事。
+# （见 app/docs/notes/experiments/dec_lane.md），和 x264 那边「改 -threads 会换 md5」不是一回事。
 # 为什么要动：auto 在 32 逻辑核上开一整池解码线程，和 x264/合成抢核；见同一份 REPORT 的核数列。
 _FUSED_ENV_DEC_THREADS = "DFL_FUSED_DEC_THREADS"
 _FUSED_RAW_MODES = ("raw", "rawvideo", "bgr24", "bgr48le")
@@ -1213,7 +1213,7 @@ def _fused_run(cfg: dict) -> dict:
     #   detect（=0）        detect 线程：老口径，两段分在两处
     #   pool（=detect）     detect 线程 + 复用本线程画布（省每帧 1.2MB 的 np.full）
     # 三档逐位一致，回归见 app/tools/accept/det_prep_parity.py；A/B 的账见
-    # experiments/dec_lane/REPORT.md（同进程交替、3 轮、探针/无探针两套）。
+    # app/docs/notes/experiments/dec_lane.md（同进程交替、3 轮、探针/无探针两套）。
     _dp_raw = str(os.environ.get(_FUSED_ENV_DET_PREP) or "1").strip().lower()
     det_prep_on = _dp_raw not in ("0", "off", "false", "no")
     det_prep_pool = _dp_raw in ("detect", "pool", "detect_pool")
@@ -1480,7 +1480,7 @@ def _fused_run(cfg: dict) -> dict:
 
     # ---- 坏帧降级（DFL_FUSED_SKIP_BAD，**默认关**）----
     # skip=None = 关：合成腿、写者腿、上报腿各多一次 `is None` 判断，别的什么都不变
-    # （「默认关逐字节相同」的证据见 experiments/skip_bad/：同一单两次成片 md5 相同）。
+    # （「默认关逐字节相同」的证据见 app/docs/notes/experiments/skip_bad.md：同一单两次成片 md5 相同）。
     _cap_streak, _cap_total = _fused_skip_caps(int(end_i) - int(start_i) + 1)
     skip = _FusedSkipBad(_cap_streak, _cap_total) if _fused_skip_on() else None
     fault_frames = _fused_fault_frames() if skip is not None else set()
@@ -2731,7 +2731,7 @@ def _fused_run(cfg: dict) -> dict:
             "batch_target": int(batch_target),
             "batch_wait_ms": int(round(batch_wait * 1000.0)),
             "decode_mode": dec_mode,
-            # 解码腿的三个旋钮（见 _FUSED_ENV_* 的注释与 experiments/dec_lane/REPORT.md）
+            # 解码腿的三个旋钮（见 _FUSED_ENV_* 的注释与 app/docs/notes/experiments/dec_lane.md）
             "decode_threads": int(dec_threads or 0),
             "readinto": bool(readinto_on),
             "det_prep_where": ("decode" if det_prep_on

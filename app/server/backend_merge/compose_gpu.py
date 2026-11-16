@@ -461,28 +461,37 @@ def hist_match(c, src, tpl, thr=255):
 
 
 # ============================================================
-# seamless（cv2.seamlessClone 的 torch 版）—— 用 experiments/seamless 那一份
+# seamless（cv2.seamlessClone 的 torch 版）—— 同目录的 torch_seamless.py
 # ============================================================
 _SEAM = {"mod": None, "err": "", "lock": threading.Lock()}
 
 
 def seamless_mod():
-    """按路径加载 experiments/seamless/torch_seamless.py（那份是独立验收过的实现）。
+    """按路径加载同目录的 torch_seamless.py（独立验收过的实现，含 DST/FFT/CG 三种解法）。
 
-    不复制一份进 app/ 的原因：那份还在演进（DST-matmul / FFT / CG 三种解法），
-    复制就会分叉。加载失败不抛 —— 调用方按「这一脸回退 CPU seamless」处理。
+    以前放在 experiments/seamless/ 下（"还在演进，复制一份进 app/ 会分叉"，所以按路径加载）；
+    实验目录清掉之后只剩这一份，收进 backend_merge/ 与调用点同目录，老路径留作兜底候选。
+    加载失败不抛 —— 调用方按「这一脸回退 CPU seamless」处理。
     """
     with _SEAM["lock"]:            # 合成可能有多条线程（DFL_COMPOSE_GPU_THREADS）
         if _SEAM["mod"] is not None or _SEAM["err"]:
             return _SEAM["mod"]
         try:
             import importlib.util
+            here = Path(__file__).resolve().parent
             root = Path(__file__).resolve().parents[3]
-            path = root / "experiments" / "seamless" / "torch_seamless.py"
-            spec = importlib.util.spec_from_file_location("_dfl_torch_seamless", str(path))
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            _SEAM["mod"] = mod
+            cands = [here / "torch_seamless.py",                      # 现在的位置
+                     root / "experiments" / "seamless" / "torch_seamless.py"]   # 老位置（已清）
+            for path in cands:
+                if not path.is_file():
+                    continue
+                spec = importlib.util.spec_from_file_location("_dfl_torch_seamless", str(path))
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                _SEAM["mod"] = mod
+                break
+            else:
+                raise FileNotFoundError("torch_seamless.py not found: %s" % (cands,))
         except Exception as e:                                 # noqa: BLE001
             _SEAM["err"] = "%s: %s" % (type(e).__name__, str(e)[:200])
         return _SEAM["mod"]

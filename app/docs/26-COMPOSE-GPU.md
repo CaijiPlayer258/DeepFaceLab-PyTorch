@@ -1,14 +1,15 @@
 # 26 · 合成搬到 GPU（overlay / hist-match，torch 逐段复刻 cv2）
 
 一句话：**⑤ 合成的每一段都用 torch 重写了一遍（overlay / hist-match；seamless 用
-experiments/seamless 那份 torch 解），成片与 CPU 版逐帧 max = 1 LSB、差异像素 ~0.001%，
+backend_merge/torch_seamless.py 那份 torch 解），成片与 CPU 版逐帧 max = 1 LSB、差异像素 ~0.001%，
 端到端 150 帧从 12.32 涨到 14.72 帧/秒（+19.5%），同时把 8 条合成线程的 CPU 占用整个
 还了回去。**
 
 - 代码：app/server/backend_merge/compose_gpu.py
-- **运行期依赖：experiments/seamless/torch_seamless.py** —— compose_gpu 在 seamless 分支上
-  按路径 import 它（不复制一份，避免两份实现分叉）。**这个文件不是实验脚手架，别在清理
-  experiments/ 的时候删掉**；删了之后 seamless 会回退 CPU（日志里有一行），overlay 不受影响。
+- **运行期依赖：app/server/backend_merge/torch_seamless.py** —— compose_gpu 在 seamless 分支上
+  按路径 import 它（原先在 `experiments/seamless/`，实验目录清掉后收进 backend_merge 同目录，
+  老路径仍作兜底候选）。**这个文件不是实验脚手架，别当成台架删掉**；删了之后 seamless 会
+  回退 CPU（日志里有一行），overlay 不受影响。
 - 开关：**DFL_COMPOSE_GPU=1**（默认 0，CPU 路径一行没动）
 - 子开关：**DFL_COMPOSE_GPU_SEAMLESS**（默认跟随总开关；=0 时 seamless 仍走 CPU）
 - 排障断言：**DFL_COMPOSE_GPU_ASSERT=1**（锁「传进无缝的遮罩没被就地改写」）
@@ -184,7 +185,7 @@ CPU compose_frame(seamless) vs GPU compose_frame_gpu(seamless)，6 帧真素材�
 | 遮罩就地改写断言 | 通过（DFL_COMPOSE_GPU_ASSERT=1 全程开） |
 
 机制已经查清，不是解算器的锅：把**同一份 u8 输入**喂给
-experiments/seamless 那份实现，它与 cv2 差 ≤1 LSB（sibling 的验收结论）。差的是**输入**：
+backend_merge/torch_seamless.py 那份实现，它与 cv2 差 ≤1 LSB（sibling 的验收结论）。差的是**输入**：
 我们这条链的 u8 遮罩/源片来自「GPU 的三次插值」，与 cv2 的 float32 结果差 1e-5 量级，
 落到 u8 上有 246~595 个边缘像素（0.4~0.8%）「0 还是 1」翻了；而 **Poisson 解是积分** ——
 边界上 1 个单位的梯度差会沿边界累加成一条几十 LSB 的窄带（实测 51）。
@@ -288,7 +289,7 @@ stream 上，所以「compose 墙钟 54ms」里绝大部分是在排队。真实
   （DFL_COMPOSE_GPU_THREADS 可压；1 条会被「等整条 CUDA stream」串住，实测 1→4 线程
   13.4~16.7 → 19.0~21.8 帧/秒）。
 - **seamless 默认仍走 CPU**（DFL_COMPOSE_GPU_SEAMLESS 默认 0）。=1 时才用 GPU 的
-  poisson_blend_roi（DST 对角化解，experiments/seamless/torch_seamless.py）。
+  poisson_blend_roi（DST 对角化解，backend_merge/torch_seamless.py）。
   关着的时候 compose_gpu 对 seamless 直接 raise，fused 在选路时就按 mode 跳过 GPU
   （不是每帧 try/except）。为什么默认关：§5.1 那两行 —— GPU 版让整条线慢 13.6%
   （Poisson 和 detect 抢卡），而且像素差到 51 LSB（§4.5）。
@@ -372,7 +373,7 @@ mode = str(cfg.get("mode") or "overlay")                    # -> 永远是 overl
 3. **两个 ROI 原点不能混**：dw（帧 ROI→画布）的源是并集那块，用并集原点；反贴（画布→帧框）
    的 dst 是这张脸自己的框，用它自己的原点。混用只影响多脸，实测双脸 max **15 LSB**；
    单脸时两个原点恰好重合，所以单脸一路都是绿的 —— 这类 bug 只有多脸夹具能抓出来。
-4. **cv2.seamlessClone 会就地改写 mask**（见 experiments/seamless/REPORT.md）。我们的调用点
+4. **cv2.seamlessClone 会就地改写 mask**（见 app/docs/notes/experiments/seamless.md）。我们的调用点
    每次都是新 np.clip(...).astype() 建的 mw_bin，没被影响；接 GPU 版时别复用同一块 mask。
 
 ---

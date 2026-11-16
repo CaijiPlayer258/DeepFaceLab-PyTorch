@@ -626,7 +626,7 @@ def case_seamless(frames, n=6):
     """seamless：CPU 的 cv2.seamlessClone vs GPU 的 torch DST 解。
 
     验收按 <=1 LSB 定，**不追求 0**：cv2 那边自己就是 float32 + DST 的舍入，
-    见 experiments/seamless/REPORT.md（97.14% 逐位相同、2.53% 差 1 LSB）。
+    见 app/docs/notes/experiments/seamless.md（97.14% 逐位相同、2.53% 差 1 LSB）。
     这里额外把「传进无缝的遮罩没被改写」钉死（cv2.seamlessClone 有就地改写的坑）。
     """
     head("5 · seamless：CPU compose(seamless) vs GPU compose(seamless)")

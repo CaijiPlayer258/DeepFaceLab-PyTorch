@@ -90,8 +90,10 @@ app/engine/ui/user/
 **/.wbi_cache.json
 
 # ── 台架/探针产物（只在本地，不进仓）────────────────────────────
-_enc4k_bench/
-experiments/
+# 只挡仓库根的那两个 scratch 目录；写成 _enc4k_bench/ 这种无前导斜杠的模式会连
+# app/docs/notes/experiments/ 一起吞掉（gitignore 的目录模式在任意深度都匹配）。
+/_enc4k_bench/
+/experiments/
 app/engine/assets/screenshots/
 app/engine/ui/
 app/engine/MergeStudio/workspace/

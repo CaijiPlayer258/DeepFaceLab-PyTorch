@@ -201,7 +201,7 @@ def _prep_ctx(img_bgr, input_size, pad, reuse=False):
     reuse=True 时画布**按线程复用**（填边只做第一次）：调用方必须保证「同一线程里上一张
     canvas 已经用完、并且不会再被别处引用」—— 融合流水线的 detect 线程就是这样（prep →
     前向 → 立刻 drop），省掉每帧一次 640²×3 = 1.2MB 的 np.full（实测 0.72 → 0.33 ms/帧，
-    experiments/dec_lane/prep.py）。默认 False：老调用方（切脸等）照旧拿独立画布。
+    见 app/docs/notes/experiments/dec_lane.md）。默认 False：老调用方（切脸等）照旧拿独立画布。
 
     另外记一笔**没采用**的路子：cv2 的 INTER_LINEAR 在奇数整数倍下采样（1080x1920→360x640，
     k=3）上恰好等于步长采样 frame[(k-1)//2::k, (k-1)//2::k]（0 像素不同，control.py 量的），
