@@ -1389,68 +1389,35 @@ def _fused_run(cfg: dict) -> dict:
                 "decode 线程" if det_prep_on else "detect 线程"))
 
     def _decode():
-        proc = None
-        # readinto 的环形缓冲：槽数 = 帧预算 + 4。为什么不担心被覆盖：在飞帧由 sem 卡在
-        # budget 帧（decode 这里是「先读、后 acquire」，所以最多 budget+1 块同时活着），
-        # 而 frame 引用在合成之后就放了（_compose 里 job.frame = None）。
-        pool = []
-        if readinto_on:
-            try:
-                _pw, _ph = int(probe.get("w") or 0), int(probe.get("h") or 0)
-                if _pw > 0 and _ph > 0:
-                    pool = [np.empty((_ph, _pw, 3), np.uint8)
-                            for _ in range(int(budget) + 4)]
-            except Exception:                                  # noqa: BLE001
-                pool = []
-        pi = 0
-        try:
-            proc, next_frame = _fused_open_frames(video, start_i,
-                                                 size=(probe.get("w"), probe.get("h")),
-                                                 mode=dec_mode, bits=(src_bits or None),
-                                                 threads=dec_threads)
-            gen["proc"] = proc
-            n = start_i - 1
-            while not stop.is_set():
-                if n >= end_i:
-                    break
-                t_rd = time.perf_counter()
-                if pool:
-                    frame = next_frame(pool[pi])
-                    if frame is not None:
-                        pi = (pi + 1) % len(pool)
-                else:
-                    frame = next_frame()
-                ticks.add("decode", time.perf_counter() - t_rd)
-                if frame is None:
-                    break
-                n += 1
-                t_wait = time.perf_counter()
-                while not stop.is_set():
-                    if sem.acquire(timeout=0.2):
-                        break
-                ticks.add("dec_wait", time.perf_counter() - t_wait)
-                if stop.is_set():
-                    break
-                with live_lock:
-                    live["n"] += 1
-                    if live["n"] > live["peak"]:
-                        live["peak"] = live["n"]
-                job = _FusedFrame(n, n - start_i + 1, frame)
-                if det_prep_on:
-                    # 检测的 letterbox 在这条线程做：它只忙 15ms/帧（30%），有富余；
-                    # 检测线程是硬底，把 0.7ms 的 resize + 填边搬走就是净赚。
-                    # 逐位一致由「同一个 prep()」保证（见 _detect.py 的 _prep_ctx）。
-                    t_prep = time.perf_counter()
-                    job.det_ctx = _det_prep(det, frame)
-                    if job.det_ctx is not None:
-                        ticks.add("det_prep", time.perf_counter() - t_prep)
-                _stage_tick("frames")            # 交接点：解码 → 检测队列
-                if not _put(q_dec, job):
-                    break
-        except BaseException as e:                             # noqa: BLE001
-            _fail("decode", e)
-        finally:
-            _put(q_dec, END)
+        # ① 解码车道的实现已搬到 fused_lanes.decode_lane（体逐字未改，参数同名）。
+        return decode_lane(
+            readinto_on=readinto_on,
+            probe=probe,
+            budget=budget,
+            video=video,
+            start_i=start_i,
+            dec_mode=dec_mode,
+            src_bits=src_bits,
+            dec_threads=dec_threads,
+            gen=gen,
+            stop=stop,
+            end_i=end_i,
+            ticks=ticks,
+            sem=sem,
+            live_lock=live_lock,
+            live=live,
+            det_prep_on=det_prep_on,
+            _det_prep=_det_prep,
+            det=det,
+            q_dec=q_dec,
+            _fail=_fail,
+            _put=_put,
+            _stage_tick=_stage_tick,
+            _FusedFrame=_FusedFrame,
+            np=np,
+            time=time,
+            _fused_open_frames=_fused_open_frames,
+        )
 
     # ---- ② 检测：默认 1 路（检测器是共享对象，本来就不能并发）；异构池时 N 路 ----
     # 多路的由来：检测是这条链的硬底（实测 48.9 ms/帧 = 20.4 帧/秒，占用 96~98%），
@@ -2787,6 +2754,7 @@ from .vram import (
 
 
 # I/O 侧已搬到 fused_io.py（跳过账本 / raw 写者 / ffmpeg 命令 / cv2 线程）；这里转发，调用点不变。
+from .fused_lanes import decode_lane
 from .fused_io import (  # noqa: E402,F401
     _FusedRawWriter, _FusedSkipBad, _fused_cv2_threads, _fused_pipe_cmd,
 )

@@ -31,7 +31,7 @@
 | 2408 | ⑦ 编码 |
 | 2480 | 断言：全程没碰 <视频>_cache/（这是 fused 和分段的关键区别） |
 
-## 闭包（行号 = 定义行）
+## 闭包（行号 = 定义行；decode 已搬出，见上）
 
 | 闭包 | 行 | 长度 | 干什么 |
 |---|---|---|---|
@@ -72,3 +72,15 @@ PNG 落盘 + 编码 + 写管道         _encode           2026
 
 - `runtime\server\Scripts\python.exe app\tools\accept\fused_export_accept.py --cases a` → **PASS 20 · FAIL 0**；
 - 三轮中位 fps ≥ 基线的 85%（基线 21.31，见 `fused-baseline.md`）。
+
+## 第一代拆分（2026-11，已完成）
+
+| 步骤 | 结果 |
+|---|---|
+| 把 `_decode`（63 行）搬到 `fused_lanes.decode_lane` | 函数体**逐字未改**，闭包捕获的 26 个名字改成同名关键字参数 |
+| 像素判据 | `--modes B` 跑一遍，**30 / 30 帧 md5 与基线逐行相同** |
+| 功能判据 | `fused_export_accept --cases a` 待复跑（上一轮工具超时） |
+
+**为什么能这样搬**：`_decode` 里没有 `nonlocal`/`global` —— 只读外部变量、改的是共享 dict/list，
+所以"闭包 → 显式参数"是等价的。带 `nonlocal` 的闭包（`_prep`/`_gpu` 里可能有）不能这么搬，
+要改成往 ctx 对象里写字段。
