@@ -284,8 +284,9 @@ app.include_router(_dataset_router)
 # ---------------- 拆出去的路由模块 ----------------
 # 引擎编译页（独立包）：GET /api/engines · POST /api/engines/build
 from .backend_engines.routes import router as _engines_router
-from .routes_trt import router as _trt_router
-app.include_router(_trt_router)
+# 训练/设备、测速、遮罩、提取、引擎各有自己的包：原来那个 routes_trt 壳已随 backend_models/trt.py 一起删除
+from .backend_bench.routes import router as _bench_router
+app.include_router(_bench_router)
 app.include_router(_engines_router)
 
 from .routes_account import router as _account_router

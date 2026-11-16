@@ -29,7 +29,8 @@ app/
 │   ├── backend_merge/  合成器：pipeline_fused（融合导出）· stage_{faces,pred,mask,merge} · fused_io
 │   │                   · pipeline_project（项目导出）· vram · preview · compose · knobs · frames_prep
 │   ├── backend_extract/ 提取页：align_stream（唯一会写 DFLJPG 的路径）· resume · frames · media · pipeline
-│   ├── backend_models/ dfm torch/ORT、模型元信息、/api/devices 与 /api/perf/bench
+│   ├── backend_models/ dfm torch/ORT、模型元信息（**没有路由**了：原来的 trt.py 已拆空删除）
+│   ├── backend_bench/  速度测试页：POST /api/perf/bench（只读）
 │   ├── backend_engines/ 引擎编译页：/api/engines（状态）+ /api/engines/build（TRT 编译）
 │   ├── backend_{faces,mask,bili,train,dataset,oneshot}/
 │   └── routes_*.py     跨域路由（merge / 训练 / B 站）

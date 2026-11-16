@@ -348,3 +348,34 @@ def train_status():
                 # 设备回显：device=<值> → CUDA_VISIBLE_DEVICES=<env> 由 _train_worker
                 # 算好存在 _train_job 里。老前端不读这个字段也不受影响。
                 "device": j.get("device")}
+
+
+@router.get("/api/devices")
+def api_devices():
+    """可用训练设备：GPU 的真实名字 + 显存。
+
+    界面上的"设备"下拉以前只有 0 / 1 / 0,1 这种序号 —— 用户得自己开命令行
+    跑 nvidia-smi 才知道 0 是哪张卡。这里直接把型号返给前端。
+    """
+    gpus = []
+    try:
+        import subprocess as _sp
+        r = _sp.run(["nvidia-smi", "--query-gpu=index,name,memory.total",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=6,
+                    creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
+        for line in (r.stdout or "").strip().splitlines():
+            parts = [x.strip() for x in line.split(",")]
+            if len(parts) >= 3 and parts[0].isdigit():
+                gpus.append({"idx": int(parts[0]), "name": parts[1],
+                             "mem_mb": int(float(parts[2])) if parts[2].replace(".", "").isdigit() else 0})
+    except Exception:
+        pass
+    cpu = os.environ.get("PROCESSOR_IDENTIFIER") or "CPU"
+    try:
+        cpu = (os.cpu_count() or 0) and ("CPU (%d 线程)" % (os.cpu_count() or 0)) or "CPU"
+    except Exception:
+        pass
+    return {"gpus": gpus, "cpu": cpu}
+
+
