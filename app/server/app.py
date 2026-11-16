@@ -282,8 +282,11 @@ def remote_set(body: dict):
 app.include_router(_dataset_router)
 
 # ---------------- 拆出去的路由模块 ----------------
+# 引擎编译页（独立包）：GET /api/engines · POST /api/engines/build
+from .backend_engines.routes import router as _engines_router
 from .routes_trt import router as _trt_router
 app.include_router(_trt_router)
+app.include_router(_engines_router)
 
 from .routes_account import router as _account_router
 app.include_router(_account_router)

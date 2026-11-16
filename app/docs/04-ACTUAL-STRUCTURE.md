@@ -30,6 +30,7 @@ app/
 │   │                   · pipeline_project（项目导出）· vram · preview · compose · knobs · frames_prep
 │   ├── backend_extract/ 提取页：align_stream（唯一会写 DFLJPG 的路径）· resume · frames · media · pipeline
 │   ├── backend_models/ dfm torch/ORT、TRT 引擎、模型元信息（/api/extract/start 暂时也在这里）
+│   ├── backend_engines/ 引擎编译页：/api/engines（状态）+ /api/engines/build（TRT 编译）
 │   ├── backend_{faces,mask,bili,train,dataset,oneshot}/
 │   └── routes_*.py     跨域路由（merge / 训练 / B 站）
 ├── web/                前端（StaticFiles 挂这里）
