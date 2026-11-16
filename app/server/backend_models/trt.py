@@ -327,6 +327,10 @@ def extract_start(payload: dict | None = None):
     quality = str(payload.get("quality") or "high")
     align = bool(payload.get("align", True))
     size = int(payload.get("size") or 0)   # 0 = 不限制；分辨率跟着源图和检测框走
+    # 5 点退化闸门：None = 跟 DFL_ALIGN_GATE（默认 warn，只记 _bad_frames.txt）；
+    # True = strict（--strict-align，真拒并计进 rejected）；False = 强制 warn。
+    _sa = payload.get("strict_align", None)
+    strict_align = None if _sa is None else bool(_sa)
 
     if not src:
         raise HTTPException(400, "缺少输入视频路径")
@@ -344,12 +348,14 @@ def extract_start(payload: dict | None = None):
         JOB.running = True
         JOB.msg = "启动抽帧…"
     threading.Thread(target=_frames_worker,
-                     args=(str(p), dst, fps, rotate, align, quality, size, skip),
+                     args=(str(p), dst, fps, rotate, align, quality, size, skip,
+                           strict_align),
                      daemon=True).start()
     return {"ok": True, "src": str(p), "dst": dst,
             "frames": str(face_dir.parent / (face_dir.name + "_frames")),
             "fps": fps, "skip": skip,
-            "rotate": rotate, "align": align, "quality": quality, "size": size}
+            "rotate": rotate, "align": align, "quality": quality, "size": size,
+            "strict_align": strict_align}
 
 
 @router.post("/api/extract/cancel")

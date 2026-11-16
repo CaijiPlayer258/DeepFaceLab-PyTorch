@@ -391,6 +391,132 @@ def outlier_rel_limit():
         return float(OUTLIER_REL)
 
 
+# ---------------- 5 点退化：脸在芯片里塌成一团（记录型闸门） ----------------
+#
+# 现有两道外点检查（OUTLIER_FRACTION / OUTLIER_REL）量的是「68 个点自己的残差」，
+# 它们看不见另一种失败：5 点把粗裁视野拖偏 → 2D106 在一个错视野里出点 → 33 点拟合
+# 出一个错的尺度 → 芯片里那张脸只占画布四成，68 个点却**自洽地**糊在肩膀/背景上。
+# 这种帧 resid 一点都不大：实测已知坏帧 resid_rel 3.0~4.4，比正常脸的 4.4~8.1 还小
+# （退化是「整张脸均匀地错」，相对比值反而更漂亮），两道闸一起放行、图照样落盘。
+# 实测与判据见 docs/30-align-gate.md。
+#
+# 判据只用**芯片空间的几何量**，两个都要塌才判坏：
+#   span = 68 点包围盒长边 / 芯片边长   —— 脸在画布里有多大
+#   iod  = 双眼中心距   / 芯片边长     —— 眼距在画布里有多大
+# 单独用一个都会误杀（45535 张真实对齐脸实测）：
+#   span 单用 <0.50 拒 1.55%，其中 549/708 是「点对、脸也认识，只是偏出画布」的合法脸；
+#   iod  单用 <0.12 拒 6.18%，其中 2672/2813 是侧脸（眼距本来就被透视压短）。
+# 两个一起 = 0.31%，其中已知坏 37/37 抓到、已知好 54 张一张不误杀。
+# 为什么不用「眼距/框宽」（原帧那个）：它与 |yaw| 相关 −0.82，本质是偏航探测器，
+# 0.22 的阈值会拒掉 8.9%，其中 85% 是侧脸。
+GATE_SPAN = 0.50
+GATE_IOD = 0.12
+
+
+def _num_env(name, default):
+    raw = (os.environ.get(name) or "auto").strip().lower()
+    if raw in ("0", "off", "none", "no", "false", "disable"):
+        return 0.0
+    if raw in ("", "auto", "default", "on", "true"):
+        return float(default)
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return float(default)
+
+
+def gate_limits():
+    """(span, iod) 阈值；0 = 关闭。DFL_ALIGN_GATE_SPAN / DFL_ALIGN_GATE_IOD。"""
+    return (_num_env("DFL_ALIGN_GATE_SPAN", GATE_SPAN),
+            _num_env("DFL_ALIGN_GATE_IOD", GATE_IOD))
+
+
+def gate_mode() -> str:
+    """off | warn（默认） | strict。DFL_ALIGN_GATE。
+
+    warn   = 只记录：图照写，坏脸进 <dir>/_bad_frames.txt（默认，不改任何既有行为）；
+    strict = 真拒：不写文件，计进 rejected（stats["rejected"]），日志留一行。
+    """
+    v = (os.environ.get("DFL_ALIGN_GATE") or "warn").strip().lower()
+    if v in ("off", "0", "none", "no", "false", "disable"):
+        return "off"
+    if v in ("strict", "1", "on", "true", "yes"):
+        return "strict"
+    return "warn"
+
+
+def chip_geometry(landmarks_chip, size=SIZE):
+    """芯片里 68 点的 (span, iod)，都除以芯片边长 —— 与芯片尺寸/项目无关。"""
+    lm = np.asarray(landmarks_chip, dtype=np.float64)
+    side = float(size or SIZE)
+    if lm.ndim != 2 or lm.shape != (68, 2) or side <= 0 or not np.all(np.isfinite(lm)):
+        return None
+    span = float(max(lm[:, 0].max() - lm[:, 0].min(),
+                     lm[:, 1].max() - lm[:, 1].min()) / side)
+    iod = float(np.linalg.norm(lm[36:42].mean(0) - lm[42:48].mean(0)) / side)
+    return span, iod
+
+
+def align_gate(landmarks_chip, size=SIZE):
+    """→ {"bad","span","iod","reason"}；判据被关掉/点数不合法返回 None。
+
+    只算「是不是坏脸」，不决定写不写：warn / strict 由调用方看 gate_mode()。
+    两个阈值之间是 **且** —— 少用一个就会误杀侧脸，或误杀「点对但脸偏出画布」。
+    """
+    lim_span, lim_iod = gate_limits()
+    if lim_span <= 0 or lim_iod <= 0:
+        return None
+    geo = chip_geometry(landmarks_chip, size)
+    if geo is None:
+        return None
+    span, iod = geo
+    bad = (span < lim_span) and (iod < lim_iod)
+    reason = ""
+    if bad:
+        reason = ("5 点退化：脸只占芯片 %.1f%%（<%.0f%%）且眼距 %.1f%%（<%.0f%%）"
+                  % (100.0 * span, 100.0 * lim_span, 100.0 * iod, 100.0 * lim_iod))
+    return {"bad": bad, "span": round(span, 4), "iod": round(iod, 4), "reason": reason}
+
+
+_BAD_FRAME_LOCK = threading.Lock()
+
+
+def bad_frame_header():
+    """_bad_frames.txt 的文件头（判据随 env 变，所以每次现算）。"""
+    lim_span, lim_iod = gate_limits()
+    return ("# 5 点退化闸门（只记录，不拒收、不删文件）\n"
+            "# 判据：face_span < %.2f（68 点包围盒长边/芯片边） 且 "
+            "iod_chip < %.2f（双眼中心距/芯片边）\n"
+            "# 文件名\tface_span\tiod_chip\t原因\n") % (lim_span, lim_iod)
+
+
+def bad_frame_line(filename, gate):
+    """_bad_frames.txt 的一行：文件名 · span · iod · 原因。"""
+    return "%s\t%.4f\t%.4f\t%s\n" % (filename, gate["span"], gate["iod"],
+                                        gate.get("reason") or "")
+
+
+def append_bad_frame(dir_path, filename, gate):
+    """把一张坏脸追加进 <dir>/_bad_frames.txt（只记录，不拒、不删、不改像素）。
+
+    为什么默认就写：0.3% 的坏脸对训练没影响，但「哪几张是坏的」这个信息现在没人有；
+    一份清单几乎零成本，做数据体检时能直接看见。写失败也绝不能弄挂抽取。
+    """
+    if not gate or not gate.get("bad"):
+        return False
+    try:
+        p = Path(dir_path) / "_bad_frames.txt"
+        with _BAD_FRAME_LOCK:
+            new = not p.exists()
+            with open(p, "a", encoding="utf-8", newline="\n") as f:
+                if new:
+                    f.write(bad_frame_header())
+                f.write(bad_frame_line(filename, gate))
+        return True
+    except Exception:                                   # noqa: BLE001
+        return False
+
+
 def align_fit(kps68, output_size=SIZE, padding=PADDING,
               whole_face_shift=WHOLE_FACE_SHIFT):
     """68 点 → (mat, T, resid_px, px_per_unit)；算不出来返回 (None, None, None, None)。
@@ -446,7 +572,8 @@ def align_mat_from_68(kps68, output_size=SIZE, padding=PADDING,
     return mat
 
 
-def align_face_68(img_bgr, kps68, box=None, size=SIZE, interpolation=None):
+def align_face_68(img_bgr, kps68, box=None, size=SIZE, interpolation=None,
+                  gate=None):
     """68 点仿射裁一张对齐脸。返回 (对齐图, 元数据 dict)；失败返回 (None, meta)。
 
     人脸库（extract / add 两条路）统一走这里：插值默认 INTER_CUBIC —— 和合成链路
@@ -457,6 +584,10 @@ def align_face_68(img_bgr, kps68, box=None, size=SIZE, interpolation=None):
     空间与 UNIT_68 比残差。max 残差超过 outlier_limit(size) 就判这张脸检测异常：
     不返回图，返回的 meta 里 rejected=True + reject_reason + align_resid_px，
     调用方据此跳过并记账（不进 aligned）。阈值可用 DFL_ALIGN_OUTLIER_PX 调。
+
+    **5 点退化闸门**（另一件事，见 align_gate）：外点检查量的是点的残差，看不见
+    「脸在芯片里塌成一团」—— 那种帧 resid 反而更小。默认 warn = 图照写、meta 里
+    留 align_gate 证据、调用方记 _bad_frames.txt；DFL_ALIGN_GATE=strict 才真拒。
     """
     import cv2
     size = int(size)
@@ -489,14 +620,34 @@ def align_face_68(img_bgr, kps68, box=None, size=SIZE, interpolation=None):
             "align_resid_limit_rel": round(limit_rel, 3),
         }
 
+    pts = np.asarray(kps68, dtype=np.float64).round(4)
+    lm_aligned = transform_points(pts, mat).astype(np.float64)
+
+    # 5 点退化闸门：判据只看芯片空间的两个几何量（O(1)，矩阵和点都已经在手），
+    # 放在 warp 之前 —— strict 模式下连这张画都不用画。
+    # warn（默认）：图照写，只在 meta 里留证据，清单由调用方记进 _bad_frames.txt。
+    # gate 参数 = 调用方已经定好的模式（抽取流水线把 --strict-align 传进来）；
+    # 不传就跟 DFL_ALIGN_GATE 走。显式传，别在库里去读/改环境变量。
+    _gm = gate or gate_mode()
+    _gate = align_gate(lm_aligned, size) if _gm != "off" else None
+    if _gate and _gate["bad"] and _gm == "strict":
+        _say("[align] rejected：%s" % _gate["reason"])
+        return None, {
+            "face_type": "whole_face",
+            "align": "68",
+            "landmarks_source": "none",
+            "rejected": True,
+            "reject_reason": _gate["reason"],
+            "align_gate": dict(_gate),
+            "align_resid_px": round(resid_max, 3),
+            "align_resid_rel": round(resid_rel, 3),
+        }
+
     aligned = cv2.warpAffine(img_bgr, mat, (size, size),
                              flags=int(interpolation),
                              borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
     if aligned is None:
         return None, None
-
-    pts = np.asarray(kps68, dtype=np.float64).round(4)
-    lm_aligned = transform_points(pts, mat).astype(np.float64)
 
     h, w = img_bgr.shape[:2]
     if box is None:
@@ -517,6 +668,10 @@ def align_face_68(img_bgr, kps68, box=None, size=SIZE, interpolation=None):
         "align_resid_px": round(resid_max, 3),
         "align_resid_rel": round(resid_rel, 3),
     }
+    if _gate and _gate["bad"]:
+        # 只在这 0.3% 的坏脸上加字段：正常脸的 DFLJPG 仍然逐字节不变。
+        meta["align_gate"] = dict(_gate)
+        meta["align_gate_limit"] = [gate_limits()[0], gate_limits()[1]]
     return aligned, meta
 
 

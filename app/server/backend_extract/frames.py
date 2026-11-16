@@ -174,21 +174,22 @@ def _merge_frame_image(idx: int):
 
 def _frames_worker(src: str, dst: str, fps: float = 2.0, rotate: int = 0,
                    align: bool = True, quality: str = "high", size: int = 512,
-                   skip: int = 0):
+                   skip: int = 0, strict_align: "bool | None" = None):
     """线程入口（routes_trt.extract_start 的 target）：异常一律落成失败态。
 
     这里必须是**唯一**的收口：worker 线程里抛出去的异常没人接，Python 只把它
     打到 stderr，JOB 还停在半吊子的 pct 上 —— 界面就成了「完成 0 帧」。
     """
     try:
-        return _frames_run(src, dst, fps, rotate, align, quality, size, skip)
+        return _frames_run(src, dst, fps, rotate, align, quality, size, skip,
+                           strict_align)
     except BaseException as e:                 # noqa: BLE001 —— 线程顶层，SystemExit 也收
         _job_fail("_frames_worker", e)
         raise
 
 def _frames_run(src: str, dst: str, fps: float = 2.0, rotate: int = 0,
                 align: bool = True, quality: str = "high", size: int = 512,
-                skip: int = 0):
+                skip: int = 0, strict_align: "bool | None" = None):
     """用 ffmpeg 抽帧到 dst，然后（可选）对齐成人脸。
 
     这一版修了三处：
@@ -218,7 +219,8 @@ def _frames_run(src: str, dst: str, fps: float = 2.0, rotate: int = 0,
         except Exception:
             pass
         # 异常不在这里收：_frames_worker 是唯一收口（ok=False + error + traceback）。
-        return _align_stream(str(src), out_dir, fps, rotate, quality, skip, src_fps)
+        return _align_stream(str(src), out_dir, fps, rotate, quality, skip, src_fps,
+                             strict_align)
 
     # 不对齐：保留原来的"抽成 jpg"路径（给只想拆帧的场景用）
     exe = imageio_ffmpeg.get_ffmpeg_exe()
@@ -307,7 +309,8 @@ def _frames_run(src: str, dst: str, fps: float = 2.0, rotate: int = 0,
     return made
 
 def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
-                  quality: str = "high", skip: int = 0, src_fps: float = 0.0) -> int:
+                  quality: str = "high", skip: int = 0, src_fps: float = 0.0,
+                  strict_align: "bool | None" = None) -> int:
     """ffmpeg 边解码边对齐：原帧只在内存里走一趟，不落盘。
 
     三级流水线（每级一个线程，实测瓶颈在 H.264 解码 + 管道传输）：
@@ -320,14 +323,19 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     质量档只决定检测器：high=RetinaFace(det_10g)，fast=TinyMog。
     谁的档位谁负责 —— 不做跨检测器兜底（那会让 0 脸的帧跑两遍推理，
     既慢又让人误判"两个检测器一样快"）。
+
+    strict_align（= --strict-align）：None 跟 DFL_ALIGN_GATE 走；True 强制 strict
+    （5 点退化的脸真拒、计进 rejected），False 强制 warn。**默认 warn**：图照写，
+    坏脸只记进 <face_dir>/_bad_frames.txt —— 既有行为一个字都不变。
     """
     import queue
     import threading
     import numpy as np
     import cv2
-    from .._align import (COARSE_SIZE, align_face, align_face_68, align_mode,
-                         coarse_align_from_5, landmarks68_in_source,
-                         pose_from_kps, write_dfljpg)
+    from .._align import (COARSE_SIZE, align_mode, align_face, align_face_68,
+                         append_bad_frame, coarse_align_from_5, gate_limits,
+                         gate_mode, landmarks68_in_source, pose_from_kps,
+                         write_dfljpg)
 
     # 谁的档位谁负责：high 只用 RetinaFace，fast 只用 TinyMog。
     # 以前会"0 脸就换另一个检测器兜底"，结果是同一批帧跑两次推理，
@@ -361,6 +369,17 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
             print(msg.encode(enc, "replace").decode(enc, "replace"), flush=True)
 
     _amode = align_mode()
+    # 5 点退化闸门：warn（默认，只记清单）/ strict（真拒）/ off
+    _gm = gate_mode()
+    if strict_align is not None:
+        _gm = "strict" if strict_align else "warn"
+    if _gm != "off" and _amode == "68":
+        _gs, _gi = gate_limits()
+        _log("[align] 5 点退化闸门：%s · face_span<%.2f 且 iod_chip<%.2f"
+             "（%s）"
+             % (_gm, _gs, _gi,
+                "真拒，计进 rejected" if _gm == "strict"
+                else "只记录到 _bad_frames.txt，图照写"))
     if _amode == "5":
         _log("[align] 警告：DFL_ALIGN=5，走 5 点仿射（旧路径，仅供回退/对照）。"
               "这条路上的输出没有 68 点关键点（landmarks_source=none），"
@@ -445,7 +464,8 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     q_detect: "queue.Queue" = queue.Queue(maxsize=q_cap)
     stop = threading.Event()
     # rejected = 68 点外点检查判「检测异常」的张数（在 skipped 里再细分一项）
-    stats = {"seen": 0, "made": 0, "fallback": 0, "skipped": 0, "rejected": 0}
+    # gate    = 5 点退化闸门判坏脸的张数（warn 下照样落盘，strict 下同一张也算 rejected）
+    stats = {"seen": 0, "made": 0, "fallback": 0, "skipped": 0, "rejected": 0, "gate": 0}
     # 帧速度（JOB.fps = 解到第几帧 / el）与 SSE 的 elapsed 共用 JOB.t0：
     # 前端算「张/秒」用的是 elapsed，两边各用各的 t0 会让两个速度一快一慢。
     t0 = JOB.t0 or time.time()
@@ -479,6 +499,21 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
         if _skip_dbg["n"] < 20 or n % 200 == 0:
             _log("[align] 跳过：%s（第 %d 帧）" % (why, idx))
         _skip_dbg["n"] += 1
+
+    _gate_dbg = {"n": 0}
+
+    def _note_gate(idx, path, g):
+        """5 点退化：把这张脸记进 <face_dir>/_bad_frames.txt（只记录，不拒、不删）。
+
+        这笔账和外点检查分开记（stats["gate"]）：一个量「点跑飞」，一个量「脸在芯片里
+        塌成一团」，两者互不包含 —— 已知坏帧恰恰是外点检查全放行的那批。
+        """
+        _name = Path(path).name if path else ("%06d" % idx)
+        append_bad_frame(face_dir, _name, g)
+        n = _gate_dbg["n"]
+        if n < 20 or (n + 1) % 200 == 0:
+            _log("[align] 5 点退化：%s（第 %d 帧）%s" % (_name, idx, g.get("reason") or ""))
+        _gate_dbg["n"] = n + 1
 
     def _flush():
         """把攒下的脸一次性做 2D106，再统一落盘。
@@ -517,11 +552,19 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
                 try:
                     _tf = _t()
                     pts = landmarks68_in_source(lm68, it["mat"])
-                    crop, meta_f = align_face_68(it["img"], pts, box=it["box"], size=it["size"])
+                    crop, meta_f = align_face_68(it["img"], pts, box=it["box"],
+                                                 size=it["size"], gate=_gm)
                     cost["final"] += _t() - _tf
                 except Exception as e:      # noqa: BLE001
                     _skip(it["idx"], "68 点反变换/仿射失败：%s" % e)
                     continue
+                # 5 点退化闸门：判据在 align_face_68 里算完（O(1)），这里只记账/记账单。
+                # strict 模式下面 crop 已经是 None，走下面那条 rejected 分支真拒掉。
+                _g = (meta_f or {}).get("align_gate") if isinstance(meta_f, dict) else None
+                if _g and _g.get("bad"):
+                    with lock:
+                        stats["gate"] += 1
+                    _note_gate(it["idx"], it["path"], _g)
                 it["img"] = None            # 别把整帧攥在 _pending 里
                 if crop is None:
                     # meta_f 此时是「拒收记录」：reject_reason / align_resid_px
@@ -843,6 +886,7 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
         "align": _amode, "lm106": lm106 is not None,
         "mode": mode, "frames": stats["seen"], "faces": stats["made"],
         "skipped": stats["skipped"], "rejected": stats["rejected"],
+        "gate": stats["gate"], "gate_mode": _gm,
         "wall": wall, "fps": stats["seen"] / wall,
         "cost": {k: cost[k] for k in ("read", "put1", "get1", "det", "put2", "get2", "emit",
                                       "coarse", "lm106", "final", "jpeg")},
@@ -852,9 +896,12 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
         "hwaccel": _hwaccel.current(),
     }
     # 一行结论：模式 / 帧 / 脸 / 跳过 / 墙钟。自检脚本和人都直接看这行。
-    _log("[align] 完成：DFL_ALIGN=%s 帧=%d 脸=%d 跳过=%d%s 墙钟=%.2fs (%.1f 帧/秒)"
+    _log("[align] 完成：DFL_ALIGN=%s 帧=%d 脸=%d 跳过=%d%s%s 墙钟=%.2fs (%.1f 帧/秒)"
          % (_amode, stats["seen"], stats["made"], stats["skipped"],
             ("（其中外点判异常 %d）" % stats["rejected"]) if stats["rejected"] else "",
+            (("（其中 5 点退化 %d）" % stats["gate"]) if _gm == "strict"
+             else ("（5 点退化 %d 张已记入 _bad_frames.txt，图仍写盘）" % stats["gate"]))
+            if stats["gate"] else "",
             wall, stats["seen"] / wall))
     if _amode == "68" and stats["made"] == 0 and stats["skipped"]:
         _log("[align] 一张都没写出来：%d 张脸全部拿不到 68 点。"
