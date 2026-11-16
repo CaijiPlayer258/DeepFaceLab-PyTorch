@@ -122,7 +122,6 @@ grep -o 'DFL_[A-Z0-9_]*' app/server/backend_merge/*.py | cut -d: -f2 | sort -u |
 
 | 变量 | 默认 | 作用 | 该不该暴露给用户 |
 |---|---|---|---|
-| `DFL_PROJ_PIPELINE` | `1` | 是否走新流水线实现（`0` = 老的顺序版，对照用） | 不暴露 |
 | `DFL_PROJ_WORKERS` | 按模型体量 | 项目模式并行度（几帧同时在飞） | 不暴露 |
 | `DFL_PROJ_READ` | `3` | 读帧 / 对齐线程数 | 不暴露 |
 | `DFL_PROJ_SEND` | 空（= 裸 BGR） | 传帧格式：`jpg` 退回 q95 JPEG | 不暴露 |

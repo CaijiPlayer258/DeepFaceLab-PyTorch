@@ -84,7 +84,8 @@ B1 = 29.1 ms/张 · B4 = 28.7 · B8 = 31.0 —— 攒批 4 张每张省 ~0.4ms�
   看起来像单帧变慢）。
 * **取消/断点续跑**：取消后 merged/ 里留下的一定是**前缀**（提交严格按帧序）；
   续跑按「文件存在且非空」跳过 —— 和老路一个判据。
-* 开关：`DFL_PROJ_PIPELINE=legacy` 回到老路（worker 子进程 + MergeMaskedFace），
+* **老路已删除**（原 worker 子进程 + MergeMaskedFace，718 行）：留两套只会让排障先问「这单走哪套」。
+  要回退请 checkout 本次删除之前的提交。
   A/B 与排障用；`DFL_PROJ_READ / _ENC / _DFM_BATCH / _PNG_LEVEL` 调线程与攒批。
 * **画布**：`DFL_PROJ_COMPOSE=aligned|facelib`（默认 aligned，见 [23](23-ALIGNED-COMPOSE.md)）；
   合成线程数改成 `DFL_PROJ_COMPOSE_THREADS`（默认 4）；老写法 `DFL_PROJ_COMPOSE=8`

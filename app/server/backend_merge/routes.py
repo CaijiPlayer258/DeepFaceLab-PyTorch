@@ -1608,22 +1608,14 @@ def merge_export_project(body: dict):
     # ---- 降级要留痕：预算把 worker 数砍下来时，job.log 里必须有一句 [warn] ----
     # 顺序：先 eff（它会把 warnings 置成生效配置的那几条），再追加降级提示。
     if int(workers) < int(workers_req):
-        try:
-            from . import pipeline_project as _pp
-            _pipeline = bool(_pp.enabled())
-        except Exception:                                   # noqa: BLE001
-            _pipeline = False
+        # 老路（多 worker 子进程）已删除，只剩流水线实现 → 这句降级文案只有一种说法。
         _budget = ""
         if plan.get("avail_mb"):
             _budget = ("（可用 %.2fGB / 需要 %.2fGB）"
                        % (float(plan.get("avail_mb") or 0.0) / 1024.0,
                           float(plan.get("need_mb") or 0.0) / 1024.0))
-        if _pipeline:
-            _downgrade_msg = ("只有一份 dfm 会话（融合流水线）：请求 %d 个 worker，实际 1 份；"
-                              "worker 数只用于预算档位%s" % (int(workers_req), _budget))
-        else:
-            _downgrade_msg = ("只装得下 %d 个 worker（请求 %d）：显存预算不够，已减到 %d 份会话%s"
-                              % (int(workers), int(workers_req), int(workers), _budget))
+        _downgrade_msg = ("只有一份 dfm 会话（融合流水线）：请求 %d 个 worker，实际 1 份；"
+                          "worker 数只用于预算档位%s" % (int(workers_req), _budget))
         _proj_warn(_downgrade_msg)
         # /status 的 log 只回最后 12 行：开头这一句会被几十帧的进度冲掉。收尾再提一次，
         # 因为「用户会看的那一屏」就是最后 12 行（这也是这个任务要治的病：写了但看不见）。
