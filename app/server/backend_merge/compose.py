@@ -327,21 +327,6 @@ def _color_transfer(fo, dw, wrk_mask, code: int, timings: dict):
 
 
 # ---------------- 反贴 + 融合（4.0:937-966） ----------------
-def _paste_layer(fo, wrk_mask, fmat, frame_shape, mode: str):
-    """把脸和遮罩都反变换回原帧尺寸：返回 (fw, mw)。4.0:938-943。"""
-    import cv2
-    h, w = frame_shape[:2]
-    mw = cv2.warpAffine(wrk_mask, fmat, (w, h),
-                        flags=cv2.WARP_INVERSE_MAP | cv2.INTER_CUBIC)
-    mw = np.clip(mw, 0, 1)
-    if mw.ndim == 2:
-        mw = mw[..., None]
-    fw = cv2.warpAffine(fo, fmat, (w, h),
-                        flags=cv2.WARP_INVERSE_MAP | cv2.INTER_CUBIC)
-    fw = np.clip(fw, 0, 1)
-    return fw, mw
-
-
 def _roi_of_face(mat, size: int, frame_shape, margin: int = 8):
     """S×S 画布在原帧里的包围盒（外扩 margin，保证三次插值的取样全在 ROI 内）。
 
@@ -647,11 +632,6 @@ def compose_aligned_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
         out = np.clip(work * 255.0, 0, 255).astype(np.uint8)
     timings["blend_ms"] = timings.get("blend_ms", 0.0) + (time.time() - t_b) * 1000.0
     return out
-
-
-def compose_frame_frame_scope(frame_bgr, faces, cfg: dict, timings: dict = None):
-    """整帧版（DFL_MERGE_ROI=0 时用）：语义同 4.0，慢一个数量级，留作对拍基准。"""
-    return compose_frame(frame_bgr, faces, cfg, timings, roi=False)
 
 
 # ============================================================
