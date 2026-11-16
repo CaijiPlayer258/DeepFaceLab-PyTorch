@@ -1,14 +1,22 @@
 # -*- coding: utf-8 -*-
-"""提取器的 HTTP 薄层：进度轮询 /api/extract/status。
+"""提取器的 HTTP 层：起跑 / 取消 / 进度流（SSE）/ 一次性状态。
 
 路由函数体原样从 app/server/app.py 搬过来（只把 @app.get 换成 @router.get），
 app.py 那边改成 include_router(_extract_router)。
 """
 from __future__ import annotations
 
-from fastapi import APIRouter
+import asyncio
+import json
+import threading
+from pathlib import Path
 
-from .._common.jobs import _job_status
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
+
+from .._common.jobs import JOB, _job_status
+from .._common.paths import WORKSPACE, _APP_ROOT
+from .frames import _frames_worker
 
 router = APIRouter()
 
@@ -19,7 +27,7 @@ def extract_status():
 
     .. deprecated::
         **前端不用这条**，界面轮询的是 GET /api/extract/progress
-        （SSE，backend_models/trt.py）。这条只被验收脚本
+        （SSE，本文件下面那条）。这条只被验收脚本
         app/tools/accept/aligned444_accept.py 用来「拉一次看看」。
 
         留着不删是因为脚本依赖；但新代码别再调它 —— 两条读的是同一个
@@ -31,3 +39,103 @@ def extract_status():
         st = dict(st)
         st["deprecated"] = "改用 GET /api/extract/progress（SSE）；这条只给验收脚本"
     return st
+
+
+def _resolve_dir(dst: str) -> Path:
+    r"""把界面里填的目录解析成绝对路径。
+
+    界面上显示的是「workspace\data_src\aligned」这种带前缀的相对路径。
+    以前后端直接 Path(dst) —— 相对的是 serve.py 的当前目录（app/），
+    于是帧被写到 app\workspace\...，用户在自己的 workspace 里什么都看不到。
+    现在：绝对路径原样用；相对路径去掉开头的 workspace 段后挂到 WORKSPACE 下。
+    """
+    raw = str(dst or "").strip().strip('"')
+    if not raw:
+        return WORKSPACE
+    q = Path(raw)
+    if q.is_absolute():
+        return q
+    parts = [x for x in raw.replace("/", "\\").split("\\") if x and x != "."]
+    if not parts:
+        return WORKSPACE
+    # workspace\... 仍然指向真实工作区（4.0 那边），保持老行为不改
+    if parts[0].lower() == "workspace":
+        rest = parts[1:]
+        return WORKSPACE.joinpath(*rest) if rest else WORKSPACE
+    # 其余相对路径一律相对**本仓库根目录**：
+    #   abc\data_src\aligned → D:\MyProject\DeepFaceLab-PyTorch-4.1\abc\data_src\aligned
+    return _APP_ROOT.joinpath(*parts)
+
+
+@router.post("/api/extract/start")
+def extract_start(payload: dict | None = None):
+    """真抽帧：src = 视频文件，dst = 输出目录（默认 workspace/_frames），fps = 抽帧频率。"""
+    payload = payload or {}
+    src = (payload.get("src") or "").strip()
+    dst = (payload.get("dst") or "").strip()
+    fps = float(payload.get("fps") or 2)
+    skip = int(payload.get("skip") or 0)      # 每 N 帧取 1；给了就以源帧率为准换算 fps
+    rotate = int(payload.get("rotate") or 0)
+    quality = str(payload.get("quality") or "high")
+    align = bool(payload.get("align", True))
+    size = int(payload.get("size") or 0)   # 0 = 不限制；分辨率跟着源图和检测框走
+    # 5 点退化闸门：None = 跟 DFL_ALIGN_GATE（默认 warn，只记 _bad_frames.txt）；
+    # True = strict（--strict-align，真拒并计进 rejected）；False = 强制 warn。
+    _sa = payload.get("strict_align", None)
+    strict_align = None if _sa is None else bool(_sa)
+
+    if not src:
+        raise HTTPException(400, "缺少输入视频路径")
+    p = Path(src)
+    if not p.is_file():
+        raise HTTPException(404, "视频不存在: " + src)
+    face_dir = _resolve_dir(dst) if dst else (WORKSPACE / "_frames")
+    face_dir.mkdir(parents=True, exist_ok=True)
+    dst = str(face_dir)
+
+    JOB.reset()
+    # 起线程前就把 running 置上：前端拿到 ok 立刻订阅 SSE，
+    # 若这时还是 idle，收流逻辑会以为任务没起来（见 extract_progress 里的 idle 判定）。
+    with JOB.lock:
+        JOB.running = True
+        JOB.msg = "启动抽帧…"
+    threading.Thread(target=_frames_worker,
+                     args=(str(p), dst, fps, rotate, align, quality, size, skip,
+                           strict_align),
+                     daemon=True).start()
+    return {"ok": True, "src": str(p), "dst": dst,
+            "frames": str(face_dir.parent / (face_dir.name + "_frames")),
+            "fps": fps, "skip": skip,
+            "rotate": rotate, "align": align, "quality": quality, "size": size,
+            "strict_align": strict_align}
+
+
+@router.post("/api/extract/cancel")
+def extract_cancel():
+    JOB.running = False
+    return {"ok": True}
+
+
+@router.get("/api/extract/progress")
+async def extract_progress():
+    async def gen():
+        last = None
+        idle = 0.0
+        while True:
+            snap = JOB.snapshot()
+            if snap != last:
+                yield "data: " + json.dumps(snap, ensure_ascii=False) + "\n\n"
+                last = snap
+                idle = 0.0
+            if not snap["running"] and snap["pct"] >= 100:
+                return
+            if not snap["running"]:
+                # 任务没在跑、进度又没到 100：多半是"点了开始但工作线程还没起来"，
+                # 给 1 秒宽限；再没有动静就收流。否则这条 SSE 会一直挂着不返回
+                # （实测客户端等 60s 也拿不到响应）。
+                idle += 0.08
+                if idle > 1.0:
+                    return
+            await asyncio.sleep(0.08)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")

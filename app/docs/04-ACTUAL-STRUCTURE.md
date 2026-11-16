@@ -29,7 +29,7 @@ app/
 │   ├── backend_merge/  合成器：pipeline_fused（融合导出）· stage_{faces,pred,mask,merge} · fused_io
 │   │                   · pipeline_project（项目导出）· vram · preview · compose · knobs · frames_prep
 │   ├── backend_extract/ 提取页：align_stream（唯一会写 DFLJPG 的路径）· resume · frames · media · pipeline
-│   ├── backend_models/ dfm torch/ORT、TRT 引擎、模型元信息（/api/extract/start 暂时也在这里）
+│   ├── backend_models/ dfm torch/ORT、模型元信息、/api/devices 与 /api/perf/bench
 │   ├── backend_engines/ 引擎编译页：/api/engines（状态）+ /api/engines/build（TRT 编译）
 │   ├── backend_{faces,mask,bili,train,dataset,oneshot}/
 │   └── routes_*.py     跨域路由（merge / 训练 / B 站）
@@ -55,8 +55,8 @@ workspace/              用户数据
    后端 `GET /static/js/app.js` 按文件名顺序拼接（逐字节等价）；改完跑 `node app/tools/js/check_bundle.js`。
 3. `_fused_run` 仍是 1697 行 / 25 个闭包：拆它=改写成 ctx 对象（重写），且它是性能改动的落点，
    需要先钉 fps/帧号/钉批 md5 基线。周围可搬的 I/O 侧已搬到 `fused_io.py`。见 docs/35。
-4. `backend_extract/routes.py` 只有一条 deprecated 的 `/api/extract/status`；真正常用的
-   `/api/extract/{start,cancel,progress}` 还住在 `backend_models/trt.py`（功能性没问题，位置错）。
+4. ~~提取器的路由被劈成两半~~ —— 已合并：`/api/extract/{status,start,cancel,progress}` 全在
+   `backend_extract/routes.py`；引擎编译独立成 `backend_engines/`。
 5. `app/docs/legacy-reference/` 是归档区（qt-ui / MaskProcessor / MergeStudio / parts / Extractor 等），
    不在运行路径上；其中 `parts/mask-draw.*` 是唯一副本，只移不删。
 6. 4.0 的 `engine/Extractor/` 只剩 `_compat.py`（landmark106to68 的转发），其余已归档。
