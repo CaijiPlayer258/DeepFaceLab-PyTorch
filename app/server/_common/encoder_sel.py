@@ -138,7 +138,14 @@ def effective_mode(w=None, h=None) -> str:
     want = mode()
     if want != "auto":
         return want
-    if _px(w, h) >= NVENC_MIN_PX and auto4k_on():
+    # auto 的规则（2026-11 改）：**有 NVENC 就用 NVENC**，没有才落 x264。
+    # 依据（同一素材 150 帧、同进程交替）：
+    #   1080p：x264 20.22 帧/秒 → nvenc 23.44（+16%，且把 3.75 个核还给 decode/detect/compose）
+    #   4K   ：x264 17.0 → nvenc 48.1（2.8 倍，x264 会吃掉 15/16 核）
+    #   画质：vs 原始帧 PSNR x264 43.42 / h264-CQ19 43.67（NVENC 反而略高）；体积 CQ21 ≈ crf16（−5%）
+    # 代价：成片 md5 变（换编码器必然），所以拿 md5 当基线的验收都把 DFL_FUSED_ENCODER=x264 钉死了。
+    ok, _err = nvenc_probe("h264_nvenc")
+    if ok:
         return "nvenc-h264"
     return "x264"
 
@@ -170,12 +177,16 @@ def warn_text(w=None, h=None) -> str:
     代价多大、怎么改**（同 eff 那套 [eff-warn] 的口径，见 knobs.skip_text）。
     """
     px = _px(w, h)
-    if px < NVENC_MIN_PX or mode() != "auto" or auto4k_on():
+    if px < NVENC_MIN_PX or mode() != "auto":
         return ""
-    return ("4K 素材（%dx%d = %.1f MP）：当前用 libx264 crf16，实测 59 ms/帧、会吃掉整机 %s 核，"
-            "检测/dfm/合成只剩 1 核可用；可切 DFL_FUSED_ENCODER=nvenc-h264（约 3 倍，"
-            "体积 +6%%~36%%，需 NVENC 显卡；成片 md5 会变）"
-            % (int(w), int(h), px / 1e6, _CORES_X264_4K))
+    # 默认已经优先 NVENC；还落到 x264 只可能是这块卡没有 NVENC → 这才是要喊的情况。
+    ok, _err = nvenc_probe("h264_nvenc")
+    if ok:
+        return ""
+    return ("大分辨率素材（%dx%d = %.1f MP）但这块卡没有可用的 NVENC：退回 libx264 crf16，"
+            "实测 4K 下 59 ms/帧、吃掉整机 %s 核，检测/dfm/合成只剩 1 核可用；"
+            "换一块支持 NVENC 的卡或更新驱动可恢复（约 3 倍）"
+            % (int(w or 0), int(h or 0), px / 1e6, _CORES_X264_4K))
 
 
 def warn_patch(w=None, h=None):
