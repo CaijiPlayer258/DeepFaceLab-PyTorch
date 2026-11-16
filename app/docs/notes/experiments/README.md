@@ -12,6 +12,8 @@
 | `enc_unlock.md` | experiments/enc_unlock/ | 编码器解锁矩阵 |
 | `gpu_tl.md` / `gpu_tl.tables.md` / `gpu_tl.prose.md` | experiments/gpu_tl/ | GPU 时间线/并发实测（表格与正文分开存） |
 | `conc_bench.md` | experiments/conc_bench/ | 并发台架 |
+| `arm_ab.md` | app/tools/bench/arm_bench.py | 四臂（CPU/GPU 合成 × x264/NVENC）· 谁吃掉了省下的核 |
+| `gpu_lanes.md` | app/tools/bench/fused_lane_ab.py | GPU 车道 1 vs 2 vs 3：两条车道 −10%、三条显存翻页、SM「一半空」是均值的误读 |
 
 **没有进仓的东西**：这些实验的 `*.json` / `*.png` / `*.mp4` / `_debug/` / 一次性 `*.py` 探针
 （共约 70 MB）都在清理时删掉了 —— 它们只是生成上面这些结论的中间产物，结论与复现口径都在

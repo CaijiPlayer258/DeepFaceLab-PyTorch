@@ -140,6 +140,39 @@ _FUSED_CV2_DEFAULT = 0
 # 会自己掉到 1~2，同一个产品在两台机器上跑出两种口径。现在钉成常量，要改走环境变量。
 _FUSED_PREP_DEFAULT = max(1, min(16, _env_int("DFL_FUSED_PREP", 4)))
 _FUSED_CMP_DEFAULT = max(1, min(32, _env_int("DFL_FUSED_CMP", 8)))
+# ---- GPU 车道的条数（DFL_FUSED_GPU_LANES，**默认 1 = 现状**）----
+# 那个「GPU 段」原来是一条线程里的串行序列：攒批上卡 → dfm 前向 → D2H → u8 量化 → XSeg
+# → 再 u8。**GPU 算和 host 段严格交替**，所以每帧成本 = GPU + host（实测 416 · 150 帧：
+# 车道 34.4ms/帧，其中 dfm 26.3 + u8 4.3 + xseg 4.8，SM 只有 ~42% —— 一半时间卡在等 host）。
+# N 条车道 = N 条线程 + N 份 dfm 会话，竞争消费同一个 q_gpu（每张脸只走一条车道），
+# 于是车道 A 的 host 段能和车道 B 的 GPU 段重叠 —— 重叠的是 **host**，不是 GPU。
+# 注意这跟「同一条线程里连开两个会话」不是一回事（那种今天量过：GPU 已 ~95% busy，零收益）。
+# 像素：每条车道一份独立会话（权重/图/pinned 缓冲都不共享），每帧仍然只走一条；
+# 帧序由既有 q_cmp + 单写者重排保证，所以成片与车道数无关（证据见台架
+# app/tools/bench/fused_lane_ab.py 的 md5 与逐位对拍）。
+# 起不来（OOM / 非 torch 后端 / 会话创建失败）→ 回退到能起来的条数并打日志，绝不让整单失败。
+_FUSED_ENV_LANES = "DFL_FUSED_GPU_LANES"
+_FUSED_LANES_MAX = 3          # 实测上限：3 份会话在 8GB 卡上已经贴着降批线（见台架报告）
+
+
+def _fused_lane_count(cfg=None) -> int:
+    """这一单开几条 GPU 车道（1.._FUSED_LANES_MAX）。
+
+    取值顺序：cfg["gpu_lanes"]（内部/台架直接塞 cfg 时）→ 环境变量 DFL_FUSED_GPU_LANES → 1。
+    请求体不直接认这个键（_fused_cfg 不透传），免得界面还没做就先有了两套口径。
+    """
+    raw = None
+    if isinstance(cfg, dict) and cfg.get("gpu_lanes") not in (None, ""):
+        raw = cfg.get("gpu_lanes")
+    if raw is None:
+        raw = os.environ.get(_FUSED_ENV_LANES)
+    try:
+        n = int(str(raw).strip() or 1)
+    except (TypeError, ValueError):
+        n = 1
+    return max(1, min(int(_FUSED_LANES_MAX), int(n)))
+
+
 # u8 量化的写法（DFL_FUSED_U8，**默认 1**）：
 #   0 = 老口径 np.clip(x * 255.0, 0, 255).astype(np.uint8)，每张脸连着开三个 float32 临时量
 #       （416×416×3 = 2MB 一个），全是刚 mmap 出来的新页 —— 第一次写就缺页，这部分比算术本身贵；
@@ -153,7 +186,21 @@ _FUSED_U8_DEFAULT = 1
 # 不 clip）和 XSeg 输出想都别想，照旧 clip。
 
 
-_U8_SCRATCH = {}
+# 暂存按线程分开（threading.local），不是一张进程级 dict：
+# 多条 GPU 车道（DFL_FUSED_GPU_LANES > 1）时每条车道线程都有自己的量化循环，共用一张表
+# 就是同一块 float 缓冲被两条线程交错写 —— 算术没错，但 A 车道 mul 完、B 车道 mul 进来、
+# A 车道再 clip/astype，拿到的是 B 的数据（静默换像素，最难查的那一类）。一条车道时
+# 与以前逐位相同：每个线程第一次用到某形状才建一次缓冲。
+_U8_TLS = threading.local()
+
+
+def _u8_scratch(shape):
+    """本线程的 float32 暂存表（形状 -> buffer）。"""
+    d = getattr(_U8_TLS, "scratch", None)
+    if d is None:
+        d = {}
+        _U8_TLS.scratch = d
+    return d
 
 
 def _fused_q_u8(x, fast: int, clip: bool = True):
@@ -166,15 +213,16 @@ def _fused_q_u8(x, fast: int, clip: bool = True):
     clip=False 只对 **dfm 的 face 输出** 合法（见 _FUSED_U8_DEFAULT 上方那段）：
     _dfm_run_batch 已经 clip(0,1)，×255 上限正好 255.0 —— 恒等。别的地方传 False 就是改像素。
 
-    只给 GPU 那一个线程用（_gpu()），所以缓存不用加锁；返回的 uint8 是**新数组**，
-    不共享缓冲（这些数组要跟着 face 一路活到合成，共享会被下一张脸覆盖）。
+    暂存按线程分开（见 _U8_TLS），所以多条 GPU 车道同时量化不会互相踩；返回的 uint8 是
+    **新数组**，不共享缓冲（这些数组要跟着 face 一路活到合成，共享会被下一张脸覆盖）。
     """
     if not fast or x.dtype != np.float32:
         return np.clip(x * 255.0, 0, 255).astype(np.uint8)
-    buf = _U8_SCRATCH.get(x.shape)
+    _sc = _u8_scratch(x.shape)
+    buf = _sc.get(x.shape)
     if buf is None:
         buf = np.empty(x.shape, np.float32)
-        _U8_SCRATCH[x.shape] = buf
+        _sc[x.shape] = buf
     np.multiply(x, 255.0, out=buf)
     if clip:
         np.clip(buf, 0.0, 255.0, out=buf)
@@ -1405,6 +1453,73 @@ def _fused_run(cfg: dict) -> dict:
     _vid_log("快速导出：dfm %s · %dx%d · %s · 检测器 %s thresh=%.2f（%s）"
              % (Path(str(cfg["dfm"])).name, size_px, size_px,
                 (ent0[6] if len(ent0) > 6 else "?"), det_name, det_thresh, det_src))
+    # ---- GPU 车道：预检（DFL_FUSED_GPU_LANES，默认 1）----
+    # 顺序：**先把每条车道的会话建出来，再起线程**。会话建不起来（OOM / 非 torch 后端 /
+    # 引擎不可用）是最可能的失败点，它必须落在「还能干净退回 1 条」的位置上 —— 线程里
+    # 第一张脸才炸的话，流水线已经跑了一半，退回就不是回退了。
+    lane_sess = {}                  # (lane, dfm_path) -> ent
+    lane_lock = threading.Lock()
+    want_lanes = _fused_lane_count(cfg)
+    n_lanes = 1
+    if want_lanes > 1:
+        _lp = [str(cfg["dfm"])]
+        for _m in (cfg.get("single_models") or []):
+            _p = str(_m.get("dfm") or "")
+            if _p and _p not in _lp:
+                _lp.append(_p)
+        for _lane in range(1, want_lanes):
+            try:
+                for _p in _lp:
+                    lane_sess[(_lane, _p)] = _dfm_session(_p, lane=_lane)
+                n_lanes += 1
+            except Exception as _le:                    # noqa: BLE001
+                _vf = _vram_free_mb()
+                for _k in [k for k in list(lane_sess) if int(k[0]) >= int(_lane)]:
+                    lane_sess.pop(_k, None)
+                _vid_log("快速导出：第 %d 条 GPU 车道起不来（%s: %s）→ 车道数回退到 %d"
+                         "（空闲 %s MB · 每份会话约 %s MB）"
+                         % (_lane, type(_le).__name__, str(_le)[:180], n_lanes,
+                            ("%.0f" % _vf[0]) if _vf else "?",
+                            ("%.0f" % model_mb) if model_mb else "?"))
+                break
+    cfg["gpu_lanes"] = int(n_lanes)
+    # 遮罩：**一份会话、所有车道共用**（xseg 只占 GPU 时间，开第二份既不提速又白占显存）。
+    # 共用就要串行 —— TRT 的 execution context / ORT session 都不保证并发 run 正确，
+    # 所以 n_lanes>1 时加一把锁（一条车道时不加锁：那条路径与以前逐字节相同）。
+    xseg_lock = threading.Lock() if (need_xseg and n_lanes > 1) else None
+
+
+    def _lane_ent(lane: int, dfm_path):
+        """这条车道用哪份 dfm 会话（预检没覆盖到的模型在这里补建）。
+
+        补建失败 → 退回 #0 那份（同一份会话有 DfmTorch.lock 串行，慢但不坏）。
+        掉这条退路的意义：多模型单子里某一路 dfm 第一次出现时，宁可这一张脸慢一点，
+        也不能把这个车道线程炸掉（炸了就是整单失败）。
+        """
+        _k = (int(lane), str(dfm_path))
+        ent = lane_sess.get(_k)
+        if ent is not None:
+            return ent
+        with lane_lock:
+            ent = lane_sess.get(_k)
+            if ent is not None:
+                return ent
+            try:
+                ent = _dfm_session(str(dfm_path), lane=int(lane))
+            except Exception as e:                      # noqa: BLE001
+                _vid_log("快速导出：车道 #%d 的 dfm 会话建不起来（%s: %s）→ 这张脸退回车道 #0"
+                         % (int(lane), type(e).__name__, str(e)[:140]))
+                ent = _dfm_session(str(dfm_path))
+            lane_sess[_k] = ent
+            return ent
+
+
+    def _xseg_masks(imgs):
+        """车道共用的遮罩会话（锁只在多条车道时存在，见 xseg_lock）。"""
+        if xseg_lock is None:
+            return xseg.mask_batch(imgs, out_size=256) or []
+        with xseg_lock:
+            return xseg.mask_batch(imgs, out_size=256) or []
     _vid_log("快速导出：显存预算 → 帧缓冲 %d / dfm 批 %d（请求 %d 帧 / 批 %d%s）· "
              "预计峰值 %s MB / 可用 %.0f MB"
              % (budget, int(bud.get("batch") or 0), int(bud.get("requested") or 0),
@@ -1423,9 +1538,9 @@ def _fused_run(cfg: dict) -> dict:
         cfg["frames_dir"] = str(frames_dir)
     # 线程数一律把**实际生效的值**和它是从哪来的打出来：用户改过环境变量/请求体时，
     # 「日志里明明是 8，为什么只有 4」这种事不该再发生（这条日志是唯一能复盘的地方）。
-    _vid_log("快速导出：线程 检测1/解码1/对齐%d/GPU1/合成%d/编码%d · 队列 %d · cv2 %s · "
+    _vid_log("快速导出：线程 检测1/解码1/对齐%d/GPU%d/合成%d/编码%d · 队列 %d · cv2 %s · "
              "检测预处理在解码线程 %s"
-             % (n_prep, n_cmp, n_enc, qd,
+             % (n_prep, int(n_lanes), n_cmp, n_enc, qd,
                 ("%d 线程（DFL_CV2_THREADS）" % cv2_threads) if cv2_threads
                 else "不动（OpenCV 默认）", "开" if det_prep_on else "关"))
     _vid_log("快速导出：线程来源 对齐=%s 合成=%s（B 配置默认 4/8；DFL_FUSED_PREP / "
@@ -1434,6 +1549,11 @@ def _fused_run(cfg: dict) -> dict:
                 _src_of(cfg, ("merge_workers", "merge_threads", "threads"),
                         _FUSED_CMP_DEFAULT, "DFL_FUSED_CMP"),
                 int(os.cpu_count() or 0)))
+    _vid_log("快速导出：GPU 车道 %d 条（%s=%d，%s）—— %s"
+             % (int(n_lanes), _FUSED_ENV_LANES, int(want_lanes),
+                ("%d 份独立 dfm 会话" % int(n_lanes)) if n_lanes > 1 else "一份会话（现状）",
+                ("车道之间竞争 q_gpu，host 段与 GPU 段互相重叠" if n_lanes > 1
+                 else "GPU 段与 host 段串在同一条线程里（DFL_FUSED_GPU_LANES=2 可开第二条）")))
     _vid_log("快速导出：攒批 目标 %d 张 / 超时 %dms / 模式 %s（%s · %s=0 可回滚）"
              % (batch_target, int(round(batch_wait * 1000.0)),
                 "自适应" if _FUSED_BATCH_ADAPT else "固定超时",
@@ -1468,7 +1588,8 @@ def _fused_run(cfg: dict) -> dict:
     q_gpu = queue.Queue(maxsize=max(qd, 64))
     q_cmp = queue.Queue(maxsize=max(2, qd))
     q_enc = queue.Queue(maxsize=max(2, qd))
-    cnt = {"prep": n_prep, "compose": n_cmp, "encode": n_enc}
+    # cnt["gpu"] = GPU 车道数（每条车道收到 END 时自减，最后一条负责给合成发 END）
+    cnt = {"prep": n_prep, "compose": n_cmp, "encode": n_enc, "gpu": int(n_lanes)}
     cnt_lock = threading.Lock()
     live = {"n": 0, "peak": 0}
     live_lock = threading.Lock()
@@ -1909,7 +2030,9 @@ def _fused_run(cfg: dict) -> dict:
                 cnt["prep"] -= 1
                 last = cnt["prep"] == 0
             if last:
-                _put(q_gpu, END)
+                # 每条 GPU 车道各一个 END（车道数在起线程之前就定了，见 lanes 预检）
+                for _i in range(max(1, int(cnt["gpu"]))):
+                    _put(q_gpu, END)
 
     # ---- ④ dfm + ⑤ XSeg：按 dfm 攒批，一次前向；回填到各自的帧 ----
     oom_cap = {}                    # dfm_path -> OOM 退档后的硬上限（优先级最高）
@@ -1956,9 +2079,20 @@ def _fused_run(cfg: dict) -> dict:
                 tgt = b
         return max(1, min(int(_PRED_BATCH_CAP), cap_now, tgt))
 
-    def _gpu():
+    # 帧 → 「这一帧一共几张脸、还差几张回填」的账本：**跨车道共用**（同一帧的两张脸可能
+    # 被两条车道分别领走，谁最后交齐谁把这一帧交给合成）。一张 dict + 一把锁，临界区两行。
+    pend_frames = {}
+    pf_lock = threading.Lock()
+
+
+    def _gpu(lane: int = 0):
+        """一条 GPU 车道：从 q_gpu 抢脸 → 攒批 → dfm 前向 → u8 → XSeg → 交合成。
+
+        这条线程内的一切（pend / born / arrive / u8 暂存）都是**车道私有**的；共用的只有
+        队列、ticks（自带锁）、pend_frames（自带锁）和遮罩会话（n_lanes>1 时带锁）。
+        所以「开两条车道」= 两套独立状态 + 一份共享的卡 —— 没有隐式的跨车道顺序。
+        """
         pend = {}
-        pend_frames = {}
         born = {}                       # dfm_path -> 「这一批第一张脸」进来的时刻
         arrive = []                     # 最近若干张脸的到达时刻（≈ 到达率，见 _due）
         t_gpu0 = time.perf_counter()    # GPU 段起点：「这一路空着多少」的分子
@@ -2035,7 +2169,7 @@ def _fused_run(cfg: dict) -> dict:
                     chunk = part[i:i + step]
                     i += step
                     faces = [c[1] for c in chunk]
-                    sz = size_px_of(dfm_path)
+                    sz = int(_lane_ent(lane, dfm_path)[2])
                     arr = np.empty((len(faces), sz, sz, 3), np.float32)
                     for k, f in enumerate(faces):
                         if f.get("dfm_in") is None:
@@ -2046,7 +2180,7 @@ def _fused_run(cfg: dict) -> dict:
                         arr[k] = f["dfm_in"]
                     t = time.perf_counter()
                     try:
-                        outs = _dfm_run_batch(_dfm_session(dfm_path), arr)
+                        outs = _dfm_run_batch(_lane_ent(lane, dfm_path), arr)
                     except Exception as e:                     # noqa: BLE001
                         if not (_is_oom(e) and len(faces) > 1):
                             raise
@@ -2059,7 +2193,7 @@ def _fused_run(cfg: dict) -> dict:
                         oom_cap[dfm_path] = max(1, min(int(oom_cap.get(dfm_path) or _PRED_BATCH_CAP), h))
                         outs = []
                         for j in range(0, len(faces), h):
-                            outs.extend(_dfm_run_batch(_dfm_session(dfm_path),
+                            outs.extend(_dfm_run_batch(_lane_ent(lane, dfm_path),
                                                        arr[j:j + h]))
                     ticks.add("dfm", time.perf_counter() - t)
                     bstat["calls"] += 1
@@ -2086,7 +2220,7 @@ def _fused_run(cfg: dict) -> dict:
                             if f.get("dst_u8") is not None:
                                 imgs.append(f["dst_u8"])
                             try:
-                                masks = xseg.mask_batch(imgs, out_size=256) or []
+                                masks = _xseg_masks(imgs)
                             except Exception as e:             # noqa: BLE001
                                 raise _BadInput("遮罩推理失败：%s" % (str(e)[:160]), 500)
                             t_um = time.perf_counter()
@@ -2099,17 +2233,21 @@ def _fused_run(cfg: dict) -> dict:
                             ticks.add("u8_mask", time.perf_counter() - t_um)  # ⊂ xseg 那一笔
 
                     ticks.add("xseg", time.perf_counter() - t)
-                    for job, _f in chunk:
-                        rec = pend_frames.get(id(job))
-                        if rec is not None:
+                    # 这一批里每帧「还差几张脸」：账本跨车道共用，所以加减都在锁里。
+                    # 谁把最后一格减到 0 谁交帧（同一帧的两张脸可能分在两条车道上）。
+                    _ready = []
+                    with pf_lock:
+                        for job, _f in chunk:
+                            rec = pend_frames.get(id(job))
+                            if rec is None:
+                                continue
                             rec[0] -= 1
                             if rec[0] <= 0:
                                 pend_frames.pop(id(job), None)
-                                _stage_tick("xseg")      # 交接点：dfm/xseg → 合成
-                                _put(q_cmp, job)
-
-        def size_px_of(dfm_path):
-            return int(_dfm_session(dfm_path)[2])
+                                _ready.append(job)
+                    for _job in _ready:
+                        _stage_tick("xseg")          # 交接点：dfm/xseg → 合成
+                        _put(q_cmp, _job)
 
         try:
             while True:
@@ -2118,8 +2256,15 @@ def _fused_run(cfg: dict) -> dict:
                 ticks.add("gpu_wait", time.perf_counter() - t_wait)
                 if item is END:
                     flush(why="end")
-                    for _i in range(n_cmp):
-                        _put(q_cmp, END)
+                    # END 是「每条车道各收一个」（_prep 收尾时按车道数放进 q_gpu）。
+                    # 交合成的那 n_cmp 个 END 只许**最后一条**车道发 —— 早发一条，合成
+                    # 线程就会在别的车道还有脸没回填时提前退出（那几帧凭空消失）。
+                    with cnt_lock:
+                        cnt["gpu"] -= 1
+                        last_lane = cnt["gpu"] == 0
+                    if last_lane:
+                        for _i in range(n_cmp):
+                            _put(q_cmp, END)
                     break
                 if item is None:
                     # 这一拍没有新脸进来：手里这些要不要现在送出去？
@@ -2140,9 +2285,10 @@ def _fused_run(cfg: dict) -> dict:
                 arrive.append(time.perf_counter())
                 if len(arrive) > 192:
                     del arrive[:-96]
-                if id(job) not in pend_frames:
-                    # 生产者给的「这一帧一共几张脸」：收到的回填进度按它算（见 _prep 的说明）
-                    pend_frames[id(job)] = [int(nf)]
+                with pf_lock:
+                    if id(job) not in pend_frames:
+                        # 生产者给的「这一帧一共几张脸」：收到的回填进度按它算（见 _prep 的说明）
+                        pend_frames[id(job)] = [int(nf)]
                 if not pend.get(f["dfm"]):
                     born[f["dfm"]] = time.perf_counter()
                 pend.setdefault(f["dfm"], []).append((job, f))
@@ -2366,7 +2512,7 @@ def _fused_run(cfg: dict) -> dict:
     _STAGE_METER.reset(lanes={
         "frames": ["解码"],
         "det": ["det#%d" % _i for _i in range(n_det)],
-        "dfm": ["dfm#0"],
+        "dfm": ["dfm#%d" % _i for _i in range(int(n_lanes))],
         "xseg": (["xse#0"] if need_xseg else []),
         "compose": ["t%d" % _i for _i in range(n_cmp)],
         "encode": ["e%d" % _i for _i in range(n_enc)],
@@ -2441,7 +2587,11 @@ def _fused_run(cfg: dict) -> dict:
         for i in range(n_prep):
             ths["prep%d" % i] = threading.Thread(target=_prep, name="fused-prep%d" % i,
                                                  daemon=True)
-        ths["gpu"] = threading.Thread(target=_gpu, name="fused-gpu", daemon=True)
+        for _li in range(int(n_lanes)):
+            # 车道 #0 是原来那条线程（名字不变：老日志/验收脚本按 fused-gpu 找它）
+            ths["gpu" if _li == 0 else ("gpu%d" % _li)] = threading.Thread(
+                target=_gpu, args=(_li,),
+                name=("fused-gpu" if _li == 0 else "fused-gpu%d" % _li), daemon=True)
         for i in range(n_cmp):
             ths["cmp%d" % i] = threading.Thread(target=_compose, name="fused-cmp%d" % i,
                                                 daemon=True)
@@ -2451,10 +2601,19 @@ def _fused_run(cfg: dict) -> dict:
         # 从下游往上游起：先有消费者，生产者才不会一上来就撞满队列
         _det_keys = (["detect"] if n_det <= 1
                      else ["detect%d" % i for i in range(n_det)])
+        # 顺序照旧：先起下游消费者（编码/合成），再起 GPU 车道，最后起上游生产者。
+        # 车道 #0 的 key 仍是 "gpu"（老日志/验收按它找），#1 起是 gpu1、gpu2。
         for k in (["enc%d" % i for i in range(n_enc)]
                   + ["cmp%d" % i for i in range(n_cmp)] + ["gpu"]
+                  + ["gpu%d" % i for i in range(1, int(n_lanes))]
                   + ["prep%d" % i for i in range(n_prep)] + _det_keys + ["decode"]):
             ths[k].start()
+        # 建了却没起的线程 = 那条车道根本没跑，而 is_alive() 对未启动的线程是 False ——
+        # 表现就是「主循环看不见它，收尾也看不见它，于是合成线程永远等不到 END」（实测踩过）。
+        _miss = [k for k, th in ths.items() if th.ident is None]
+        if _miss:
+            raise _BadInput("内部错误：这些线程没被启动 %s —— 车道号与启动清单对不上"
+                            % "、".join(sorted(_miss)), 500)
         # 全部线程退出 = 全片跑完；中途取消就置 stop 让所有段退出
         while True:
             if _fused_cancelled():
@@ -2708,6 +2867,7 @@ def _fused_run(cfg: dict) -> dict:
     _vid_log("快速导出：<视频>_cache/ %s" % ("本来就在（没动它）" if cache_pre else "全程没建 ✔"))
 
     return {"frames": written, "seconds": sec, "fps": round(rate, 2),
+            "gpu_lanes": int(n_lanes), "gpu_lanes_want": int(want_lanes),
             "encode_seconds": enc["seconds"], "mb": mb, "duration": round(dur, 6),
             "out": str(out), "frame_budget": budget, "budget": bud,
             "per_stage_ms": per_stage, "stage_util_pct": util,

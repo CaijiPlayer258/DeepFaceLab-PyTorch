@@ -1357,7 +1357,7 @@ def _dfm_engines_on_disk(ws, name: str) -> list:
     return out
 
 
-def _dfm_session(dfm: str):
+def _dfm_session(dfm: str, lane: int = 0):
     """常驻的 dfm session。**默认 torch-CUDA + bf16**（2026-11 用户拍板）。
 
     判定顺序：
@@ -1381,8 +1381,16 @@ def _dfm_session(dfm: str):
     providers 拿出来核对、打醒目日志。
 
     session 按路径常驻，切模型才重建。
+
+    **lane**（0 起）只给「一条 GPU 车道一份会话」用（见 pipeline_fused._FUSED_ENV_LANES）：
+    lane=0 就是这份常驻会话本身（行为和以前一字不差）；lane>0 用 cache=False 另建一份**独立**
+    的 torch 会话 —— 独立的权重张量、独立的 CUDA Graph、独立的 pinned 出参缓冲，所以两条
+    车道同时前向不会互相踩（同一份会话靠 DfmTorch.lock 串行，那等于没开第二条车道）。
+    只有 torch 后端支持多份：onnxruntime/TRT 那几档共享同一个 session 是线程安全的，但
+    「第二份」要么白占显存、要么重载引擎，所以 lane>0 直接抛，调用方按「起不来 → 退回 1 条」处理。
     """
     key = str(dfm)
+    lane = max(0, int(lane or 0))
     if _vram_oom_inject_on():
         # 验收专用（DFL_ALLOW_TEST_HOOK=1 + DFL_VRAM_OOM_INJECT=1）：**在真的加载之前**
         # 抛一次「CUDA out of memory」，把「强制尝试撞 OOM → 回滚 → 还能再试」这条路
@@ -1400,6 +1408,11 @@ def _dfm_session(dfm: str):
         _stage_log("换脸：DFL_DFM_BACKEND=torch 但这条链已强制 CPU（DFL_ALLOW_CPU_FALLBACK=1）"
                    " → 仍走 onnxruntime CPU EP（torch 的 CPU 前向比 ORT CPU 更慢，没有意义）")
     ckey = key + ("|torch:" + _bdtype if use_torch else ("|cpu" if cpu else ""))
+    _lane_tag = ("|lane%d" % lane) if lane > 0 else ""
+    if lane > 0 and not use_torch:
+        raise RuntimeError("第 %d 条 GPU 车道要一份独立的 dfm 会话，但当前后端是 %s"
+                           "（只有 torch 后端能开多份）" % (lane, _bkind))
+    ckey += _lane_tag
     with _PRED_LOCK:
         hit = _DFM_SESS.get(ckey)
         if hit is not None:
@@ -1453,7 +1466,7 @@ def _dfm_session(dfm: str):
             # ---- torch 后端（见 backend_models/dfm_torch.py）----
             try:
                 from ..backend_models import dfm_torch as _DFMT
-                sess = _DFMT.load(key, dtype=_bdtype)
+                sess = _DFMT.load(key, dtype=_bdtype, cache=(lane == 0))
                 # 图重放（DFL_DFM_GRAPH）必须能从日志一眼看出来 —— 开关开了但没捕上，
                 # 等于「以为改了、其实没改」，所以 backend 这串里带上它。
                 backend = "torch-" + sess.dtype + (
@@ -1484,7 +1497,7 @@ def _dfm_session(dfm: str):
                 use_torch = False
                 sess = None
                 backend = "ort-cuda"
-                ckey = key + ("|cpu" if cpu else "")     # 别把 onnx 会话挂在 torch 的 key 上
+                ckey = key + ("|cpu" if cpu else "") + _lane_tag  # 别把 onnx 会话挂在 torch 的 key 上
                 if ort is None:
                     import onnxruntime as ort
                     try:
@@ -1543,9 +1556,10 @@ def _dfm_session(dfm: str):
         cap = _sess_batch_cap(sess)
         ent = (sess, name, size, nchw, provs, cap, backend)
         _DFM_SESS[ckey] = ent
-        _vram_measure_end("dfm:" + Path(key).name, _own_f0)
-        _stage_log("换脸：dfm 已加载 %s · %d×%d · %s · 单次最多 %d 张"
-                   % (Path(key).name, size, size, backend, cap))
+        _vram_measure_end("dfm:" + Path(key).name + _lane_tag, _own_f0)
+        _stage_log("换脸：dfm 已加载 %s · %d×%d · %s · 单次最多 %d 张%s"
+                   % (Path(key).name, size, size, backend, cap,
+                      ("　← GPU 车道 #%d（独立会话、独立权重）" % lane) if lane else ""))
         return ent
 
 

@@ -41,6 +41,8 @@
 | `bench/stage_perf_profile.py` | 六阶段逐段剖析 |
 | `bench/faces_profile.py` | 切脸/检测剖析 |
 | `bench/sess_bench.py` · `sess_sweep.py` · `sess_plan_probe.py` | session 池标定与策略扫描 |
+| `bench/arm_bench.py` | 四臂 A/B/C/D（合成在 CPU 还是 GPU × x264/NVENC）：12 次导出、NVML+psutil 外挂采样、四项 wait（结论见 `docs/notes/experiments/arm_ab.md`） |
+| `bench/fused_lane_ab.py` | GPU 车道数 A/B（`DFL_FUSED_GPU_LANES` 1/2/3）：一臂一子进程 + 轮次交替，含 SM%/显存采样与两份会话的逐位对拍（结论见 `docs/notes/experiments/gpu_lanes.md`） |
 | `bench/vram_probe.py` | 显存探测口径对照 |
 | `bench/vram_export_ab.py` | 帧预算降档 A/B：预览常驻 → 30 帧/批 8 vs 8 帧/批 1（带帧率）78s |
 
