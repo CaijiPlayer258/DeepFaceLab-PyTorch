@@ -171,8 +171,9 @@ app/docs/legacy-reference/   已归档的死代码（4.0 Qt 界面、MaskProcess
 
 训练器见 [app/docs/07-TRAINER.md](app/docs/07-TRAINER.md)，
 合成器见 [app/docs/06-MERGER.md](app/docs/06-MERGER.md)，
-结构说明 [app/docs/02-STRUCTURE.md](app/docs/02-STRUCTURE.md)，
-产品规划 [app/docs/01-PLAN.md](app/docs/01-PLAN.md)。
+结构说明 [app/docs/04-ACTUAL-STRUCTURE.md](app/docs/04-ACTUAL-STRUCTURE.md)（现状）；
+Qt 时代的旧规划（01-PLAN / 02-STRUCTURE / 05-RESTRUCTURE-PLAN）在
+[app/docs/archive/4.0/](app/docs/archive/4.0/)。
 
 ## 协议
 

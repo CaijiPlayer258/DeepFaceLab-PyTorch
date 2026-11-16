@@ -64,7 +64,8 @@ app/docs/legacy-reference/qt-ui/user/*.bak
 # GPU 实验目录：本地约 2 GB 的权重/引擎，纯实验，不进仓库
 app/DFL_GPU_LAB/
 
-# 预览原型的假数据截图（mock_dfl_preview.py 生成）
+# 预览原型的假数据截图（mock_dfl_preview.py 生成；原型已从 docs/preview/ 删掉，
+# 脚本重跑时会落在原地，这里保留拦截）
 docs/preview/**/mock_preview_shot*.png
 
 # 权重与代码分离：weights/ 只放模型二进制，manifest.json 入库

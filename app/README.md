@@ -49,7 +49,8 @@ python app\serve.py             :: 只起后端，浏览器开 http://127.0.0.1:
 
 ## 五、还没做完的整理
 
-`app/docs/05-RESTRUCTURE-PLAN.md` 是完整的重构方案（`app/server` → `backend/`、`app/web` → `frontend/`）。
+`app/docs/archive/4.0/05-RESTRUCTURE-PLAN.md` 是完整的重构方案（`app/server` → `backend/`、`app/web` → `frontend/`），
+已随 4.0 的规划稿一起归档（现状见 `app/docs/04-ACTUAL-STRUCTURE.md`）。
 骨架搬动（S3/S4）还没做，因为要同步改 `serve.py`、`desktop/main.js` 的路径，属于一次机械但面广的改动。
 
 ## 六、权重与代码是分开的

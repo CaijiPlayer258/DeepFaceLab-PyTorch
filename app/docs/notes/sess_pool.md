@@ -56,8 +56,8 @@ python 开销，以及被别段抢 CPU 之后的额外等待。** 这一段是�
 
     runtime\server\Scripts\python.exe app\tools\sess_sweep.py --tiers "mid,low" --reps 3 --seconds 6
 
-（表格见第 5 节；原始数据：`docs/sess_sweep_mid.json` / `sess_sweep_low.json` /
-`sess_sweep_strategy.json`。）
+（表格见第 5 节；原始数据与本文件同目录：`sess_sweep_mid.json` / `sess_sweep_low.json` /
+`sess_sweep_strategy.json`，配套脚本 `app/tools/bench/sess_sweep.py`。）
 
 ## 4. 调度怎么设计的（没有一条硬编码）
 
