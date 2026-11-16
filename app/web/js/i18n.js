@@ -268,6 +268,9 @@
     [/^(\d+)\s*天前$/, "$1d ago"],
     [/^(\d+)\s*\/\s*(\d+)\s*帧$/, "$1 / $2 frames"],
     [/^(\d+)\s*张人脸$/, "$1 faces"],
+    /* 人脸库拖拽浮层（face_db.js 运行时拼出来的句子） */
+    [/^移动 (\d+)\s*张到 (.+)$/, "Move $1 to $2"],
+    [/^移入回收站 · (\d+)\s*张$/, "Move to trash · $1"],
     [/^已建库\s*(\d+)\s*张人脸$/, "$1 faces built"],
     [/^(\d+)\s*个模型 · 最新 (\S+) · iter ([\d,]+)$/, "$1 models · latest $2 · iter $3"],
     [/^(\d+)\s*个已导出 DFM$/, "$1 DFM exported"],
@@ -285,7 +288,6 @@
     [/^(.+) · 客户端 (.+)$/, "$1 · client $2"],
     [/^已启用 · 端口 (\d+)$/, "Enabled · port $1"],
     [/^剪切 帧 (\d+) ~ (\d+)$/, "Cut frames $1 ~ $2"],
-    [/^人脸 (\d+)（占位）$/, "Face $1 (placeholder)"],
     [/^角度 ([\d,]+)$/, "Angles $1"],
     [/^帧 (\d+) ~ (\d+)$/, "Frames $1 ~ $2"],
     [/^人脸 帧 (\d+) ~ (\d+)$/, "Face frames $1 ~ $2"],
@@ -525,6 +527,8 @@
     "原图": "Source",
     "检测": "Detect",
     "选择视频后显示": "Shown after a video is chosen",
+    "还没有素材 —— 导入一段视频，或打开一个 DFL 项目": "No media yet — import a video, or open a DFL project",
+    "打开 DFL 项目": "Open DFL project",
     "高精度 · RetinaFace": "Accurate · RetinaFace",
   "高性能 · TinyMog": "Fast · TinyMog",
   "检测器": "Detector",
@@ -533,7 +537,9 @@
     "检测策略": "Detect policy",
     "总是重检": "Always re-detect",
     "沿用 DFL": "Reuse DFL",
-    "遮罩来源": "Mask from",
+    "换脸": "Swap",
+  "用模型遮罩": "Model mask",
+  "遮罩来源": "Mask from",
     "遮罩模式": "Mask mode",
     "遮罩腐蚀": "Mask erode",
     "遮罩羽化": "Mask blur",
@@ -548,6 +554,55 @@
     "导出设置": "Export settings",
     "输出 · 编码 · 性能": "Output · Codec · Performance",
     "开始导出": "Start export",
+  /* —— 导出：多选模型 + 导出设置页 + 结果面板（这一轮新增的文案） —— */
+  "先选一个模型": "Pick a model first",
+  "选中模型": "Selected models",
+  "还没选模型": "No model selected",
+  "输出目录": "Output folder",
+  "帧范围": "Frame range",
+  "全片": "Whole video",
+  "全片 · ": "Whole video · ",
+  "保留 cache": "Keep cache",
+  "不保留": "Discard",
+  "保留": "Keep",
+  /* —— 快速导出（融合流水线）：视频模式默认导出路径 —— */
+  "快速导出": "Fast export",
+  "六段并行 · 不建 cache · 不可续跑": "Six lanes in parallel · no cache · no resume",
+  "六段同时在内存里跑：不建 <名字>_cache/，快约 2.8 倍；取消即整段重跑": "Six lanes run in memory at once: no <name>_cache/, ~2.8x faster; cancel restarts the whole thing",
+  "回退六阶段分段链（切帧→切脸→换脸→遮罩→合成→导出）：每步独立产物、可续跑": "Fall back to the six-stage chain (frames → faces → swap → mask → merge → encode): separate artifacts per step, resumable",
+  "并行中": "running",
+  "融合流水线": "fused pipeline",
+  "六段同时在内存里跑，不建 <名字>_cache/；不支持续跑（取消即整段重跑）": "Six lanes run in memory at once, no <name>_cache/; no resume (cancel restarts from scratch)",
+  "快速导出不支持续跑，需整段重跑": "Fast export cannot resume — rerun the whole clip",
+  "已取消（不支持续跑）": "Cancelled (no resume)",
+  "快速导出（融合流水线）· 未建 cache": "Fast export (fused pipeline) · no cache written",
+  "这次导出": "This export",
+  "结果": "Result",
+  "返回导出设置": "Back to export settings",
+  "再次导出": "Export again",
+  /* —— 显存不足：强制尝试（force=1）那条路 —— */
+  "仍然尝试（可能 OOM）": "Try anyway (may OOM)",
+  "正在尝试…": "Trying…",
+  "导出未启动": "Export did not start",
+  "确实不够（已回滚）": "Not enough VRAM (rolled back)",
+  "确实不够，已回滚": "Not enough VRAM — rolled back",
+  "导出完成": "Export finished",
+  "cache 已清理": "cache cleaned up",
+  "已取消": "Cancelled",
+  "已完成的阶段留着，下次从这里接着跑": "Finished stages are kept — resume here next time",
+  "导出失败": "Export failed",
+  "默认输出位置（只读；要改在下面「输出路径」里填）": "Default output location (read-only; use Output path below to change)",
+  "默认输出位置（可编辑；也可以点右边图标选目录）": "Default output location (editable; or pick a folder with the icon on the right)",
+  "起始帧（0 = 从第一帧开始）": "Start frame (0 = first frame)",
+  "结束帧（留空 = 到最后一帧，即全片）": "End frame (empty = last frame, i.e. whole video)",
+  "恢复成整段视频（全片）": "Reset to the whole video",
+    "导出项目": "Export project",
+    "导出进度": "Export progress",
+    "逐帧合成到 <项目>/merged/ 再编码成片 · 可断点续跑": "Merge every frame into <project>/merged/, then encode · resumable",
+    "已处理 0 / 0 帧": "Processed 0 / 0 frames",
+    "失败帧": "Failed frames",
+    "打开所在目录": "Open containing folder",
+    "— 帧/秒": "— fps",
     "格式": "Format",
     "质量": "Quality",
     "输出路径": "Output path",
@@ -556,6 +611,22 @@
     "开": "On",
     "关": "Off",
     "性能": "Performance",
+    /* —— 设置页「性能」区：两个用户可调的旋钮（其余 DFL_* 不暴露，见 docs/27）—— */
+    "推理精度": "Inference precision",
+    "合成后端": "Merge backend",
+    "自动（推荐）": "Auto (recommended)",
+    "自动": "Auto",
+    "自动 = 不写死档位（后端默认 bf16w）": "Auto = no fixed tier (backend default bf16w)",
+    "自动 = 现在的 CPU 路径": "Auto = the current CPU path",
+    "DFL_DFM_DTYPE · 只影响 .dfm 推理": "DFL_DFM_DTYPE · affects .dfm inference only",
+    "DFL_COMPOSE_GPU · 合成放在哪算": "DFL_COMPOSE_GPU · where merging runs",
+    "自动：交给后端定档（默认 bf16w）；fp32 只用于与 onnx 对拍，比默认慢 2.4 倍": "Auto: let the backend choose the tier (default bf16w); fp32 is only for A/B against onnx and is 2.4x slower",
+    "自动：CPU 合成（默认）；gpu 走 torch CUDA，8GB 卡上 overlay 持平、seamless 更慢，所以不默认开": "Auto: CPU merging (default); gpu uses torch CUDA — on an 8GB card overlay ties and seamless gets slower, so it is off by default",
+    "严格 fp32（关 TF32）：对拍用，慢 2.4 倍": "Strict fp32 (TF32 off): for A/B, 2.4x slower",
+    "权重 fp32 + autocast(bf16)：精度更高的那一档": "fp32 weights + autocast(bf16): the more accurate tier",
+    "权重也压 bf16：更省显存（-250MB~-1.1GB）": "Weights in bf16 too: saves 250MB~1.1GB VRAM",
+    "compose_frame（OpenCV，CPU）": "compose_frame (OpenCV, CPU)",
+    "compose_frame_gpu（torch CUDA）：起不来会自动回退并告警": "compose_frame_gpu (torch CUDA): falls back with a warning if it cannot start",
     "并行进程": "Workers",
     "0 = 自动": "0 = auto",
     "正在导出": "Exporting",
@@ -563,6 +634,8 @@
     "封装": "Mux",
     "载入模型": "Loading model",
     "逐帧合成": "Frame merge",
+    "切帧": "Extract frames",
+    "切脸": "Extract faces",
     "完成": "Done",
     "夜深了": "It's late",
     "不限": "unlimited",
@@ -889,8 +962,21 @@
   /* 全站 i18n 审计补的一批：设置页、合成器、提取器统计、若干 tooltip */
   Object.assign(DICT, {
     "4.0 值 jpg（Cache Format，JPEG 100%）": "4.0 used jpg (Cache Format, JPEG 100%)",
+    /* 导出设置页重排成训练参数那套 .card + .cfgrow 之后新出现的说明文案 */
+    "改模型 / 参数请回合成器": "Change models / options back in the merger",
+    "随 models[] 一起发出去": "Sent along as models[]",
+    "留空 = 全片": "Empty = whole clip",
+    "恢复全片": "Whole clip",
+    "4.0 的 Cache Format": "4.0 Cache Format",
+    "NVENC 硬件编码 / x264 软件编码": "NVENC hardware / x264 software",
+    "hwaccel=auto，无 GPU 自动回退软解": "hwaccel=auto — falls back to software without a GPU",
+    "num_workers · 0 = 自动": "num_workers · 0 = auto",
+    "成功后 <名字>_cache/ 默认会被删掉": "<name>_cache/ is deleted after a successful export",
+    "默认全片。填了会随阶段请求带上 start_frame / end_frame。":
+      "Whole clip by default; when set, start_frame / end_frame go with the stage request.",
+    "末帧": "Last frame",
+    "帧范围": "Frame range",
     "4.0 值 png（PNG 帧缓存）": "4.0 used png (PNG frame cache)",
-    "4.0 固定 -q:v 2，无此参数": "4.0 hard-coded -q:v 2 — no such option",
     "留空 = 源视频名_result.mp4": "Empty = <source>_result.mp4",
     "选择输出目录": "Choose output folder",
     "NVENC 硬件编码（4.0 默认）": "NVENC hardware encoding (4.0 default)",
@@ -1529,10 +1615,10 @@
   /* 参数页顶部的 TF 时代 dat 迁移提示（js/legacy_notice.js）。
      带数字的副行不在这里 —— 那种整句对不上字典，留给中文原文。 */
   Object.assign(DICT, {
-  "该 dat 来自 TF 版本，需用 app/tools/import_legacy_dat.py --convert 转换权重":
-    "This dat is from the TF build — convert the weights with app/tools/import_legacy_dat.py --convert",
-  "这份 dat 是 4.1 格式，但目录里的权重还是 TF 的 *.npy，需用 app/tools/import_legacy_dat.py --convert 转换权重":
-    "The dat is 4.1 format, but the weights are still TF *.npy — convert them with app/tools/import_legacy_dat.py --convert",
+  "该 dat 来自 TF 版本，需用 app/tools/migrate/import_legacy_dat.py --convert 转换权重":
+    "This dat is from the TF build — convert the weights with app/tools/migrate/import_legacy_dat.py --convert",
+  "这份 dat 是 4.1 格式，但目录里的权重还是 TF 的 *.npy，需用 app/tools/migrate/import_legacy_dat.py --convert 转换权重":
+    "The dat is 4.1 format, but the weights are still TF *.npy — convert them with app/tools/migrate/import_legacy_dat.py --convert",
   "这份 dat 来自 TF 版本，参数已自动迁移": "This dat is from the TF build — parameters were migrated automatically",
   "判定依据": "Why it counts as legacy",
   "明细": "Details",
@@ -1542,6 +1628,204 @@
   "转权重：粘到 PowerShell 里跑": "Convert weights: paste into PowerShell"
   });
 
+
+  /* 合成器 · 人脸数据库（face_db.js）。静态骨架、空态、回收站和弹层文案都在这里；
+     运行时拼出来的「3 张」这类数字句不整句进词典，按「数词 + 单位」拆开显示。 */
+  Object.assign(DICT, {
+    "人脸数据库": "Face database",
+    "常规导出": "Standard export",
+    "项目导出": "Project export",
+    "按人脸判定分组": "Group by face embedding",
+    "从当前帧提取人脸": "Extract faces from current frame",
+    "拖动人脸可在组间移动；点选后可批量处理": "Drag faces between groups; select them for batch actions",
+    "当前帧 —": "Current frame —",
+    "已选": "Selected",
+    "张脸": "faces",
+    /* 跨组的「全选 / 清空选择」已经删了：批量只剩组内，全选那张勾选框在组卡片头上 */
+    "全选本组": "Select this group",
+    "清空选择（Esc）": "Clear selection (Esc)",
+    "移动到": "Move to",
+    "移动": "Move",
+    "移入回收站": "Move to trash",
+    "未分组": "Ungrouped",
+    "拖到这里移出分组": "Drop here to ungroup",
+    "拖到这里，或从当前帧提取": "Drop here, or extract from the current frame",
+    "拖动到此处可取消分组": "Drop here to ungroup",
+    "人脸库还是空的": "The face library is empty",
+    "点「从当前帧提取人脸」开始": "Start with “Extract faces from current frame”",
+    "在合成器的画面上点「＋」把这张脸加进来": "Click ＋ on the composer stage to add this face",
+    "已把 N 张同帧重复的脸移入回收站": "Moved N duplicate faces of the same frame to trash",
+    "正在读取人脸库…": "Loading face library…",
+    "人脸库读取失败": "Could not load the face library",
+    "重试": "Retry",
+    "回收站": "Trash",
+    "全部还原": "Restore all",
+    "清空": "Empty",
+    "回收站是空的": "Trash is empty",
+    "总脸数": "Total faces",
+    "已分组": "Grouped",
+    "键盘快捷键": "Keyboard shortcuts",
+    "Tab 聚焦": "Tab to focus",
+    "M 移动": "M to move",
+    "T 回收站": "T to trash",
+    "Esc 取消选择": "Esc to clear",
+    "取消选择": "clear selection",
+    "聚焦": "focus",
+    "就绪 · JPEG · h264_nvenc · 硬解 · 自动进程": "Ready · JPEG · h264_nvenc · HW decode · auto workers",
+    "负责哪张脸：点击切换 all → face 0 → face 1 → face 2": "Face assignment: click to cycle all → face 0 → face 1 → face 2",
+    "继续导出": "Continue export",
+    "已取消选择": "Deselected",
+    "DFM 输入尺寸": "DFM input size",
+    "缩略图": "Thumbnail",
+    "加载失败": "Failed to load",
+    "不指定（未分组）": "None (ungrouped)",
+    "提取中…": "Extracting…",
+    "选择提取结果": "Choose extraction results",
+    "取消勾选的脸会放进回收站（可还原），不会留在组里。": "Unchecked faces go to Trash (restorable) instead of the group.",
+    "加入": "Add to",
+    "加入人脸库": "Add to library",
+    "确认": "Confirm",
+    "取消": "Cancel",
+    "确定": "OK",
+    "还原": "Restore",
+    "彻底删除": "Delete permanently",
+    "彻底删除这张人脸？": "Delete this face permanently?",
+    "彻底删除 {n} 张人脸？": "Delete {n} faces permanently?",
+    "文件和缩略图都会被删除，不能还原。": "The image and thumbnail will be deleted. This cannot be undone.",
+    "返回会取消本次导出？": "Go back and cancel this export?",
+    "已经整理的人脸组会保留；这次不会开始导出。": "Your groups stay saved; the export will not start this time.",
+    "返回": "Back",
+    "选择目标分组；未分组 = 从当前组移出。": "Choose a target group; Ungrouped removes it from the current group.",
+    "移动人脸": "Move faces",
+    "缩略图加载失败": "Thumbnail failed to load",
+    "人脸记录还在，稍后刷新或重试即可": "The face record is safe; refresh or retry later",
+    "人脸库加载失败": "Could not load the face library",
+    "分组同步失败": "Could not sync groups",
+    "移动失败": "Move failed",
+    "移入回收站失败": "Could not move to trash",
+    "还原失败": "Restore failed",
+    "彻底删除失败": "Permanent delete failed",
+    "提取失败": "Extraction failed",
+    "提取结果处理失败": "Could not apply extraction results",
+    "没有选中人脸": "No faces selected",
+    "先点一张，或按住 Ctrl 多选": "Click one, or hold Ctrl to select more",
+    "先选一张再移入回收站": "Select a face first",
+    "没有当前帧": "No current frame",
+    "先在合成器里打开项目或视频": "Open a project or video in the merger first",
+    "没有检测到人脸": "No face detected",
+    "换一帧再试，或确认这一帧真的有脸": "Try another frame, or check that this frame contains a face",
+    "先选中人脸": "Select a face first",
+    "点一张，或用 Tab 聚焦后按 M": "Click one, or focus it with Tab and press M",
+    "点一张，或用 Tab 聚焦后按 T": "Click one, or focus it with Tab and press T",
+    "没有放到分组上": "Not dropped on a group",
+    "拖到组卡片或顶部「未分组」才会移动": "Drop on a group card or the Ungrouped lane to move it",
+    "已经在目标分组": "Already in that group",
+    "还在读取人脸库": "Still loading the face library",
+    "等列表出来再继续": "Wait for the list to appear",
+    "人脸库没有就绪": "Face library is not ready",
+    "先处理加载错误再继续": "Resolve the loading error first",
+    "还有操作在进行": "Another action is still running",
+    "等当前操作完成": "Wait for it to finish",
+    "没有导出动作": "No export action is wired",
+    "请从合成器的导出按钮进入": "Enter from the merger's Export button",
+    "还没有素材": "No source loaded",
+    "先导入一段视频（会自动抽帧 + 对齐）或打开 DFL 项目": "Import a video (frames and alignment are automatic) or open a DFL project",
+    "还没有项目": "No project yet",
+    "人脸库还在读取": "The face library is still loading",
+    "正在提取": "Extraction is running",
+    "目标：": "Target: ",
+    "可随时还原": "restorable at any time",
+    "已移入回收站": "Moved to Trash",
+    "已彻底删除": "Permanently deleted",
+    "已还原": "Restored",
+    "已加入": "Added",
+    "已移动": "Moved",
+    "已提取": "Extracted",
+    "没有检测到": "No faces detected",
+    "正在导出": "Exporting",
+    "人脸库": "Face library",
+    "先导入视频或打开 DFL 项目": "Import a video or open a DFL project first",
+    "回收站操作失败": "Trash operation failed",
+    "导出没有启动": "Export did not start",
+    "导出未启动": "Export not started",
+    "导出未启动（显存不足）": "Export not started (out of VRAM)",
+    "关掉占 GPU 的程序后重试": "Close GPU-hungry apps and try again",
+    "拖拽启动失败": "Could not start dragging",
+    "没有项目路径": "No project path",
+    "读取失败": "Load failed",
+    "返回的人脸库格式不对": "The face library response has an unexpected shape",
+    "还没有当前帧": "No current frame yet",
+    "（已取消选择）": " (deselected)",
+    "同步分组失败": "Could not sync groups"
+  });
+
+  /* 合成视图：检测框开关、每张脸的模型 chip、＋ 加进人脸库、实时预览提示。
+     第 1 条「原图」上面已有（Source），这里只补新增的文案，不覆盖旧值。 */
+  Object.assign(DICT, {
+    "框": "Boxes",
+    "显示检测框": "Show detection boxes",
+    "选择模型": "Choose model",
+    "不换脸": "No swap",
+    "给这张脸选一个模型": "Pick a model for this face",
+    "左栏还没选模型": "No model selected yet",
+    "融合方式": "Blending",
+    "叠加": "Overlay",
+    "无缝": "Seamless",
+    "正在合成…": "Composing…",
+    "正在合成…（旧接口）": "Composing… (legacy endpoint)",
+    "把当前人脸添加到人脸数据库": "Add this face to the face database",
+    "已加入人脸数据库": "Added to the face database",
+    "未指定模型": "No model specified",
+    "选模型后立刻重算这一帧": "Re-composes this frame as soon as a model is picked"
+  });
+
+  /* 合成器 · 画面右上角的**整帧视图**切换（合成 / 原图 / 调试）。
+     这一批和上面的「融合方式」分开记：视图不是融合方式，"合成/原图/调试" 这三个
+     之前只是散落在别处（合成 = Merge、原图 = Source、调试 = Debug），这里补的是
+     按钮上的 tooltip 和分组名；下拉里被拿掉的 original / raw-rgb / raw-predict /
+     debug 本来就没有词条（它们一直是英文枚举值，不是界面文案），不用删。 */
+  Object.assign(DICT, {
+    "视图": "View",
+    "正常换脸结果": "Normal merged result",
+    "调试画面：叠加遮罩、边界与检测框": "Debug view — masks, boundaries and boxes overlaid",
+    "融合方式（模式）": "Blending mode"
+  });
+
+  /* 导出进度页 · 生效配置抽屉（14 字段不再常驻版面，只留右下角一个文字入口 + 抽屉）。
+     横幅（#mgpEffWarn）的标题带「（N 项）」是运行时拼的整句，对不上字典；这里只收
+     固定文案，带数字的那句留给中文原文（和别处带数字的句子同一个口径）。
+     「界面 / 推断 / 默认」是字段后面那枚来源小标签。 */
+  Object.assign(DICT, {
+    "查看生效配置": "View effective config",
+    "当前生效（后端回显）": "Effective config (backend echo)",
+    "生效配置与界面可能不一致": "Effective config may differ from the UI",
+    "界面": "UI",
+    "推断": "Inferred",
+    "默认": "Default",
+    "已取消": "Cancelled",
+    "并行中": "running"
+  });
+
+  /* 导出进度页 · 流水线实况（6 列 lane + 曲线 + 光点）。
+     只收**固定**文案：图里的「N 帧」「在飞 N」「12.4 帧/秒」都是运行时拼的整句，
+     对不上字典（和别处带数字的句子同一个口径）；lane 名（t0 / e3 / det#0）是标识符，
+     本来就不翻。列标题（切帧/切脸/换脸/遮罩/合成/缓存帧）上面已经有词条，复用
+     ——「缓存帧」是这一轮从「导出」改过来的名字（后端内部仍叫 encode）。 */
+  Object.assign(DICT, {
+    "流水线": "Pipeline",
+    "六段并行 · 每格一条 lane": "Six lanes in parallel · one lane per cell",
+    "六段全部完成": "All six stages done",
+    /* 最后一列改名：后端内部仍叫 encode，界面叫「缓存帧」（英文留 cache） */
+    "缓存帧": "Cache",
+    /* 六列之后那格水位杯：把缓存里的帧倒进成片 */
+    "成片": "Video",
+    /* 导出进度页的水位（标题区那颗小杯子的读屏文案） */
+    "水位：已完成帧占总帧数的比例": "Water level: finished frames over total frames"
+  });
+
+  /* 带数字的整句只能走模式表（上面那条 DICT 只管逐字命中的固定文案）：
+     「无脸 235 帧」是导出进度页旁路线上那句话，数目每次都不同。 */
+  PATTERNS.push([/^无脸 (\d+) 帧$/, "No face · $1 frames"]);
 
   window.I18N = {
     apply: apply,

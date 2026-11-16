@@ -23,6 +23,9 @@ venv/
 dist/
 build/
 node_modules/
+.idea/
+*.iml
+
 
 # ── 杂项 ─────────────────────────────────────────────────────
 .DS_Store
@@ -44,18 +47,25 @@ lab/**/*.npy
 _electron_tmp*/
 _ref/
 _serve*.log
+*.tmp
+# 子任务/调试留下的临时产物（不命名为 _xxx.log 也要挡）
+_*.log
+_probe_*.py
+_splice.py
 bg_*.png
 f_*.png
 
 # 登录凭证 / 用户信息：只留本机，不进仓库
-legacy/qt-ui/user/bilibili_cookie.txt
-legacy/qt-ui/user/user_info.json
-legacy/qt-ui/user/*.bak
+app/docs/legacy-reference/qt-ui/user/bilibili_cookie.txt
+app/docs/legacy-reference/qt-ui/user/user_info.json
+app/docs/legacy-reference/qt-ui/user/*.bak
+# 归档后 4.0 界面那份登录凭证的落点（**/ 通配已覆盖，这两行是显式说明）
 
 # GPU 实验目录：本地约 2 GB 的权重/引擎，纯实验，不进仓库
 app/DFL_GPU_LAB/
 
-# 预览原型的假数据截图（mock_dfl_preview.py 生成）
+# 预览原型的假数据截图（mock_dfl_preview.py 生成；原型已从 docs/preview/ 删掉，
+# 脚本重跑时会落在原地，这里保留拦截）
 docs/preview/**/mock_preview_shot*.png
 
 # 权重与代码分离：weights/ 只放模型二进制，manifest.json 入库
@@ -77,6 +87,18 @@ app/engine/ui/user/
 /_*.txt
 /_*.json
 
-# B վ WBI ǩ������
+# B վ WBI ǩ������
 .wbi_cache.json
 **/.wbi_cache.json
+
+# ── 台架/探针产物（只在本地，不进仓）────────────────────────────
+# 只挡仓库根的那两个 scratch 目录；写成 _enc4k_bench/ 这种无前导斜杠的模式会连
+# app/docs/notes/experiments/ 一起吞掉（gitignore 的目录模式在任意深度都匹配）。
+/_enc4k_bench/
+/experiments/
+app/engine/assets/screenshots/
+app/engine/ui/
+app/engine/MergeStudio/workspace/
+
+# 验收脚本自己生成的调试产物（截图 / 对齐队列 dump）—— 不入库，每次跑自动重建
+/app/tools/accept/_probe/

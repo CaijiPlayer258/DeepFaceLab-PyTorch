@@ -9,6 +9,7 @@ import numpy as np
 
 from core.interact import interact as io
 from core.leras import nn
+from facelib._runtime import fit_square, init_leras, pick_device, to_nchw
 
 
 class XSegNet(object):
@@ -39,10 +40,9 @@ class XSegNet(object):
         self.training = bool(training)
 
         # Ensure leras main env is initialized.
-        nn.initialize_main_env()
-
-        # XSeg PyTorch implementation assumes NCHW in places (cat/reshape). Enforce it.
-        nn.set_data_format("NCHW")
+        # probe_devices=False：这里只定数据布局，不重挑设备（用户可能已经在别处
+        # 选过卡，再 initialize 一次会被 BestGPU 覆盖）。
+        init_leras("NCHW", probe_devices=False)
 
         torch = nn.torch
 
@@ -50,10 +50,7 @@ class XSegNet(object):
         self.model_filename_list = []
 
         # Choose device.
-        if run_on_cpu or place_model_on_cpu:
-            model_device = torch.device("cpu")
-        else:
-            model_device = nn.device
+        model_device = pick_device(place_model_on_cpu, run_on_cpu)
 
         # Build model on the chosen device.
         prev_nn_device = nn.device
@@ -127,10 +124,7 @@ class XSegNet(object):
             return 0.5 * np.ones((self.resolution, self.resolution, 1), dtype=np.float32)
 
         # 缩放输入图片到模型所需分辨率
-        h, w = input_image.shape[:2]
-        if h != self.resolution or w != self.resolution:
-            input_image = cv2.resize(input_image, (self.resolution, self.resolution),
-                                     interpolation=cv2.INTER_LINEAR)
+        input_image = fit_square(input_image, self.resolution, cv2.INTER_LINEAR)
 
         input_shape_len = len(input_image.shape)
         if input_shape_len == 3:
@@ -149,20 +143,12 @@ class XSegNet(object):
         return result
 
     def _np_to_torch_nchw(self, arr: np.ndarray, device):
-        """Accept HWC or NHWC (float 0..1) and return torch NCHW."""
-        torch = nn.torch
-        if arr.ndim == 3:
-            arr = arr[None, ...]
+        """Accept HWC or NHWC (float 0..1) and return torch NCHW.
 
-        # Heuristic: if last dim is 1/3 treat as NHWC, else assume already NCHW.
-        if arr.ndim != 4:
-            raise ValueError(f"expected 3D/4D image array, got shape {arr.shape}")
-
-        if arr.shape[-1] in (1, 3):
-            arr = np.transpose(arr, (0, 3, 1, 2))
-
-        x = torch.from_numpy(arr).to(device=device, dtype=torch.float32)
-        return x
+        实现在 facelib._runtime.to_nchw（四个提取器共用同一份「末维 1/3 即 NHWC」
+        的判定），这里只把 dtype 钉死在 float32。
+        """
+        return to_nchw(arr, device=device, dtype=nn.torch.float32)
 
     def _load_model_weights_compat(self, filename: Path) -> bool:
         """Load weights from .pth (PyTorch state_dict) or .npy (TF named keys).

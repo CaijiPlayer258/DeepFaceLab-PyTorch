@@ -141,15 +141,24 @@ workspace/model/
 desktop/          Electron 外壳（窗口、菜单、无控制台启动）
 app/
 ├─ serve.py       FastAPI 入口
-├─ server/        后端：提取 / 对齐 / 训练 / 合成 / 工具
+├─ server/        后端，**一个界面一个包**（12 个）
+│  ├─ _common/  _media/  _vision/        基础设施：env/路径/作业/设备 · 编码器 · 检测/对齐/遮罩几何
+│  ├─ backend_merge/      合成器：pipeline_fused（融合导出）· stage_*（六阶段）· pipeline_project
+│  ├─ backend_extract/    提取页：align_stream（唯一写 DFLJPG 的路径）· resume · frames · media
+│  ├─ backend_engines/    引擎编译页：/api/engines · /api/engines/build
+│  ├─ backend_bench/      速度测试页：/api/perf/bench
+│  ├─ backend_models/     dfm 的 torch/ORT 实现、模型元信息（**没有路由**）
+│  └─ backend_{faces,mask,bili,train,dataset,oneshot}/
+│  app.py 只有 ~300 行：路由表 + 静态挂载 + PEP 562 转发
 ├─ web/           静态前端（原生 JS + CSS，无构建步骤）
-├─ engine/        4.1 引擎（PyTorch 训练 + 合成管线 + modelhub）
-├─ tools/         迁移、测试、性能脚本
-└─ docs/          规划、结构说明、界面讨论稿
+│  ├─ index.html  单页多视图
+│  └─ js/app/     **23 个分片**，后端按文件名顺序拼成 /static/js/app.js（逐字节等价）
+├─ engine/        4.0 引擎（vendored：PyTorch 训练 + 合成管线 + modelhub）
+├─ tools/         验收与工具：accept / bench / migrate / audit / js
+└─ docs/          设计文档 00~35（编号递增）· legacy-reference/ 归档 · notes/ 实验记录
 weights/          推理权重（平铺，见上）—— 不入库
 workspace/        用户数据：数据集 / 模型 / 输出 —— 不入库
 runtime/          Python 运行时（server / engine 两个 venv）—— 不入库
-legacy/           4.0 Qt 界面与素材（仅供对照）
 ```
 
 界面是 Web 技术栈，跑在 Electron 里；后端是本地 FastAPI，不依赖前端框架，改完刷新即可。
@@ -165,14 +174,70 @@ legacy/           4.0 Qt 界面与素材（仅供对照）
 
 显卡：8 GB 显存可跑 128 分辨率 + batch 8（实测峰值 5.7 GB，约 6.5 it/s）。
 
+显卡：8 GB 显存可跑 128 分辨率 + batch 8（实测峰值 5.7 GB，约 6.5 it/s）。
+
+## 性能（本机实测，1080×1920 · 单脸 · 1439 帧）
+
+| 项 | 数 | 说明 |
+|---|---|---|
+| 融合导出 | **23.6 帧/秒** | 解码→检测→对齐→dfm→XSeg→合成→编码 全在内存里串起来 |
+| GPU 段 | 32.3 ms/帧 | 其中 dfm 20.6、xseg 9.5、等上游 6.8 |
+| 编码 | NVENC（auto 默认） | 1080p 20.2→23.4 帧/秒；4K 17→48 帧/秒 |
+| dfm | torch bf16w + CUDA Graph | 提交环 23.5→1.06 ms；b8 39.5→20.0 ms/张 |
+
+- 默认值：`DFL_DFM_BACKEND=torch`、`DFL_DFM_DTYPE=bf16w`、`DFL_DFM_GRAPH=1`、`DFL_DFM_GRAPH_U8=1`、
+  `DFL_FUSED_ENCODER=auto`（有 NVENC 就 NVENC，没有自动落回 x264）。
+- **dfm 不做 fp16 / TRT**（实测没收益，还要编译）。全部开关见 [app/docs/27-ENV-KNOBS.md](app/docs/27-ENV-KNOBS.md)。
+- 这台笔记本的 GPU 功耗墙是 60 W（上限 115 W），dfm 期 SM 只有 2.15~2.28 GHz（boost 3.09）——
+  **剩下的空间主要在硬件，不在代码**。
+
+## 改了代码怎么验
+
+```bat
+:: 1. 语法/导入
+runtime\server\Scripts\python.exe -m compileall -q app\server
+runtime\server\Scripts\python.exe -c "import sys;sys.path.insert(0,'app');import server.app"
+node app\tools\js\check_bundle.js                 :: 前端分片拼起来是否仍是合法 JS
+
+:: 2. 验收（真跑；按改动挑）
+runtime\server\Scripts\python.exe app\tools\accept\fused_export_accept.py        :: 融合导出 67 项
+runtime\server\Scripts\python.exe app\tools\accept\stage6_accept.py             :: 六阶段 64 项
+runtime\server\Scripts\python.exe app\tools\accept\progress_lit_accept.py --shots-only   :: 进度页 79 项
+runtime\server\Scripts\python.exe app\tools\accept\merge_ui_accept.py           :: 合成器界面 33 项
+runtime\server\Scripts\python.exe app\tools\audit\api_contract_audit.py         :: 前后端协议对账（A/C 非空=失败）
+
+:: 3. 像素与性能基线（改动合成/推理时）
+runtime\server\Scripts\python.exe app\tools\bench\fused_pipeline_bench.py --frames 30 --modes B
+::   30 个 PNG 的 md5 必须与 app/docs/notes/fused-baseline-hashes.txt 逐行相同
+```
+
+口径与原因写在 [app/docs/28-PIXEL-PARITY.md](app/docs/28-PIXEL-PARITY.md)：
+**整片 fused 不是确定性函数**（攒批时序变→bf16 归约顺序变，同代码两遍 150 帧只有 62 帧相同），
+所以判像素用 mode B（串行、固定批），判速度用多轮中位。
+
 ## 设计约定
 
 配色、间距、圆角、字号收敛在 [UI设计规范.md](UI设计规范.md)；主题色只用于主按钮和进度条。
 
-训练器见 [app/docs/07-TRAINER.md](app/docs/07-TRAINER.md)，
-合成器见 [app/docs/06-MERGER.md](app/docs/06-MERGER.md)，
-结构说明 [app/docs/02-STRUCTURE.md](app/docs/02-STRUCTURE.md)，
-产品规划 [app/docs/01-PLAN.md](app/docs/01-PLAN.md)。
+主要文档（都在 [app/docs/](app/docs/)）：
+
+| 文档 | 内容 |
+|---|---|
+| [04-ACTUAL-STRUCTURE](app/docs/04-ACTUAL-STRUCTURE.md) | 现状目录树与已知结构债 |
+| [06-MERGER](app/docs/06-MERGER.md) / [07-TRAINER](app/docs/07-TRAINER.md) | 合成器 / 训练器 |
+| [21-PROJ-PIPELINE](app/docs/21-PROJ-PIPELINE.md) | 项目导出流水线 |
+| [27-ENV-KNOBS](app/docs/27-ENV-KNOBS.md) | 全部环境开关（含默认值） |
+| [28-PIXEL-PARITY](app/docs/28-PIXEL-PARITY.md) | 像素对拍口径：什么能比、什么不能比 |
+| [33-API-CONTRACT](app/docs/33-API-CONTRACT.md) | 前后端协议对账（132 operation / 124 path） |
+| [34-EXTRACT-THREE-PATHS](app/docs/34-EXTRACT-THREE-PATHS.md) | 三条「提取」链路各在哪、共用什么 |
+| [35-LARGE-FILES-AUDIT](app/docs/35-LARGE-FILES-AUDIT.md) | 大文件审查与处置进展 |
+| [notes/](app/docs/notes/) | 实验记录 · fused 基线与地图 · 清理记录 |
+
+设计决策里最该先读的一条：**「效果优先于速度，但速度不许靠静默回落换」**——
+任何“界面写一套、实际跑另一套”都要在日志和 [eff] 回显里喊出来，这条在 32 篇文档里反复出现。
+
+Qt 时代的旧规划（01-PLAN / 02-STRUCTURE / 05-RESTRUCTURE-PLAN）在
+[app/docs/archive/4.0/](app/docs/archive/4.0/)。
 
 ## 协议
 

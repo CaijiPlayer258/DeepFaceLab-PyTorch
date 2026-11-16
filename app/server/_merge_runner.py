@@ -1463,6 +1463,10 @@ def main(argv=None):
     ap.add_argument("--encoder", default="h264_nvenc")
     ap.add_argument("--hwaccel", default="auto")
     ap.add_argument("--image-format", default="jpg")
+    # 检测器：**4.0 引擎名**（TinyMog / RetinaFace_10g / YOLOv8）—— 4.1 那边
+    # 用 app/server/_common/det_names.py 转好名再传过来。空 = 老调用点没给，
+    # 保持 4.0 引擎自己的默认（YOLOv8），但会打一行说明，别让人以为它跟着界面走了。
+    ap.add_argument("--detector", default="")
     ap.add_argument("--fps", type=float, default=25.0)
     ap.add_argument("--crf", type=int, default=17)
     ap.add_argument("--bitrate", default="")
@@ -1707,6 +1711,15 @@ def main(argv=None):
         stop_event=stop_event,
         num_workers=workers,
     )
+    # 检测器：只在真的传了值时才覆盖 —— run_export_pipeline 的默认是 "YOLOv8"，
+    # 我们不改它的默认值，只是把 4.1 的决定显式送到。
+    _det = str(getattr(args, "detector", "") or "").strip()
+    if _det:
+        _pipe_kwargs["detector"] = _det
+        _say("[merge] 检测器 = %s（4.1 下发）" % _det)
+    else:
+        _say("[merge] 检测器 = 未指定 → 沿用 4.0 引擎默认 YOLOv8"
+             "（4.1 没传；这条日志是为了不让「界面上选的」和「实际跑的」又错位）")
     # 引擎将来要是认 models=（契约里的 name/dfm/faces），就顺手一并给它；
     # 现在的 export_pipeline 只吃 face_model_map，别硬塞不认识的键。
     try:

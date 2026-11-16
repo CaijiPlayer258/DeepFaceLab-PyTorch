@@ -1,62 +1,38 @@
-"""XSeg 遮罩推理（4.1 侧，纯 onnxruntime）。
+"""兼容层（DEPRECATED）：真身已搬到 app/server/_vision/xseg.py。
 
-对齐时顺手生成 xseg_mask 写进 DFLJPG —— 真 DFL 提取的每张脸都带 (256,256,1) 遮罩，
-而 4.1 之前写出去的 DFLJPG 没有，训练端要么退化到用 landmarks 算 hull（而 4.1 的
-68 点是从 5 点刚体投影出来的，形状是死的），要么根本没有遮罩。
+**惰性转发**：本模块自己不 import 真身 —— app.py ↔ routes_merge ↔ backend_merge.* 那条链
+会立刻成环（实测：pipeline_project -> _projplan -> backend_merge.vram -> app -> routes_merge
+-> backend_merge.vram 半初始化）。改成 PEP 562 代理后，属性访问/赋值都落到真身模块上，
+所以模块级状态、猴子补丁、私有名（_face_path / _read_gray / _model_path）都不分叉。
 
-预处理与 MergeStudio 的 _phase_mask_worker 完全一致：
-  BGR → 256×256 → RGB → /255 → CHW → [1,3,256,256]；输出 0..1，按需缩放回原尺寸。
+等价写法：from app.server._vision.xseg import *。后端以 app/ 为 import 根
+（serve.py 把 app/ 插进 sys.path[0]，包名是 server.*），绝对形式在那里取不到；相对写法在
+server.* 与 app.server.* 两种根下都成立。
 """
-from __future__ import annotations
+import importlib as _importlib
+import sys as _sys
+import types as _types
 
-from pathlib import Path
-
-import numpy as np
+_TARGET = "_vision.xseg"
 
 
-class XSegMasker:
-    def __init__(self, model_path, providers=None, threads: int = 2, workspace=None,
-                 engine_name: str | None = None):
-        # 先看有没有编译好的 TensorRT 引擎（MD5 + SM 都对才算数）
-        self.sess = None
-        if workspace is not None:
-            try:
-                from ._engines import try_engine
-                # 遮罩优先 INT8（实测 2.0ms → 0.75ms），没有 INT8 引擎就退 bf16
-                self.sess = try_engine(workspace, engine_name or Path(model_path).stem,
-                                       model_path, precision=("int8", "bf16"), use_graph=False)
-            except Exception:
-                self.sess = None
-        if self.sess is not None:
-            self.input_name = self.sess.get_inputs()[0].name
-            return
-        import onnxruntime as ort
+class _LazyModule(_types.ModuleType):
+    """转发到真身模块：取属性 / 设属性 / dir() 全走真身。"""
 
-        if providers is None:
-            from ._ortcuda import providers as _prov
-            providers = _prov()          # 有 CUDA 走 CUDA，否则 CPU
-        self.sess = ort.InferenceSession(str(model_path), providers=list(providers))
-        self.input_name = self.sess.get_inputs()[0].name
-        try:
-            self.sess.set_providers(list(providers), [{}] * len(providers))
-        except Exception:
-            pass
+    @staticmethod
+    def _real():
+        return _importlib.import_module(__package__ + "." + _TARGET)
 
-    def mask(self, face_bgr, out_size: int = 256):
-        """ face_bgr: 任意尺寸的 BGR 对齐脸；返回 (out_size, out_size) float32，0..1。"""
-        import cv2
+    def __getattr__(self, name):
+        return getattr(self._real(), name)
 
-        if face_bgr is None:
-            return None
-        x = face_bgr
-        if x.shape[0] != 256 or x.shape[1] != 256:
-            x = cv2.resize(x, (256, 256), interpolation=cv2.INTER_LINEAR)
-        # 用 OpenCV 的 blobFromImage：resize + BGR→RGB + /255 + HWC→CHW 全在 C 里完成，
-        # 比 numpy 的切片转置快 ~0.4ms/张（实测 300 张的平均值）
-        inp = cv2.dnn.blobFromImage(x, 1.0 / 255.0, (256, 256), swapRB=True, crop=False)
-        out = self.sess.run(None, {self.input_name: inp})[0]
-        m = np.squeeze(out).astype(np.float32)
-        m = np.clip(m, 0.0, 1.0)
-        if m.shape[0] != out_size or m.shape[1] != out_size:
-            m = cv2.resize(m, (out_size, out_size), interpolation=cv2.INTER_LINEAR)
-        return m
+    def __setattr__(self, name, value):
+        if name.startswith("__") and name.endswith("__"):
+            return _types.ModuleType.__setattr__(self, name, value)
+        setattr(self._real(), name, value)
+
+    def __dir__(self):
+        return dir(self._real())
+
+
+_sys.modules[__name__].__class__ = _LazyModule

@@ -145,11 +145,17 @@
     },
 
     // ---- XSeg / XSegLite ---------------------------------------------------
-    xsegPredict: function (index) {
-      return post('/xseg/predict', { image_index: index });
-    },
-    xseglitePredict: function (index) {
-      return post('/xseglite/predict', { image_index: index });
+    /* 4.1 把 XSeg 并进了 POST /api/mask/predict（后端现在还没接模型，
+       一律 501 + "要加载 AI 模型"）。4.0 那份 api.js 里的
+       /api/xseg/predict、/api/xseglite/predict **后端从来没移植过来**，
+       调了就是 404 —— 别再照着 4.0 加回去。
+       variant: 'xseg' | 'lite'（index.html 的两个按钮各给一个）。 */
+    xsegPredict: function (index, variant, res) {
+      return post('/mask/predict', {
+        image_index: index,
+        variant: variant || 'xseg',
+        res: res || 256
+      });
     },
 
     // ---- Load existing mask from DFLJPG ------------------------------------
@@ -157,16 +163,12 @@
       return get('/image/' + index + '/mask');
     },
 
-    // ---- Mask commit / save / undo -----------------------------------------
-    commitMask: function (index, fgB64, bgB64) {
-      return post('/mask/commit', { image_index: index, foreground: fgB64, background: bgB64 || '' });
-    },
+    // ---- Mask save ---------------------------------------------------------
+    /* 只有 save 一条路：4.0 的 /api/mask/commit（前景/背景两半）和
+       /api/mask/undo 后端都没移植，这里也一起删了 —— 留着就是给下一个人
+       照着写按钮、然后 404。撤销在前端做（canvas history）。 */
     saveMask: function (index, maskB64) {
       return post('/mask/save', { index: index, image_index: index, mask: maskB64 });
-    },
-
-    undoMask: function (index) {
-      return post('/mask/undo', { image_index: index });
     },
 
     // ---- Progress persistence ------------------------------------------------
