@@ -7015,10 +7015,11 @@ function mgStageEmpty(on) {
         var p = mk("path", { d: bg.d });        /* 颜色/虚线/透明度全在 CSS 里 */
         p.setAttribute("data-bypass", "no-face");
         g.appendChild(p);
-        bLabel = mk("text", { x: bg.label.x, y: bg.label.y, "text-anchor": "middle",
-                              "class": "t-bypass" });
-        bLabel.textContent = "无脸 " + bypassN + " 帧";
-        g.appendChild(bLabel);
+        /* 「无脸 N 帧」这句**不画在图上**了（用户：流水线本身已经说明了这件事）。
+           但信息不丢：挂成虚线的 <title>，鼠标停在旁路线上才显示帧数。 */
+        bLabel = mk("title", {});
+        bLabel.textContent = "无脸 " + bypassN + " 帧（这些帧直接进缓存，不经过换脸/遮罩/合成）";
+        p.appendChild(bLabel);
       }
       function setBypass(n) {
         n = Math.max(0, Math.floor(Number(n) || 0));
@@ -7030,8 +7031,8 @@ function mgStageEmpty(on) {
            杯子位置全换了，旁路的 d 也冻在旧坐标上（用户改了两版都「没被画出来」，
            另一半原因就是它）。bypassDrawnGen !== bypassGen 就说明坐标已经作废。 */
         if (n > 0 && shown && bypassDrawnGen === bypassGen) {
-          if (bLabel && bLabel.textContent !== ("无脸 " + n + " 帧")) {
-            bLabel.textContent = "无脸 " + n + " 帧";
+          if (bLabel && bLabel.textContent.indexOf("无脸 " + n + " 帧") !== 0) {
+            bLabel.textContent = "无脸 " + n + " 帧（这些帧直接进缓存，不经过换脸/遮罩/合成）";
           }
           return;
         }
@@ -7896,7 +7897,7 @@ function mgStageEmpty(on) {
       if (txt) {
         var bits = [];
         if (okAll) {
-          bits.push("导出完成");
+          /* 页标题已经写着「导出完成」，结果行不再重复这三个字（用户：省下一点文字） */
           if (d.out_video || d.out) bits.push(String(d.out_video || d.out));
           if (d.cache_removed) bits.push("cache 已清理");
           if (d.fused) bits.push("快速导出（融合流水线）· 未建 cache");

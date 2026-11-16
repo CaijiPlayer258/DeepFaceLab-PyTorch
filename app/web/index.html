@@ -1109,6 +1109,24 @@
               <span class="mgprog-file" id="mgpFile" hidden></span>
             </div>
 
+            <!-- 终态结果：完成/失败/取消都在这里收口。
+                 导出中 hidden（这时只有下面那颗「取消导出」）；终态一出来就顶上来，
+                 给「返回导出设置」和「再次导出」两个出口，参数一个都不丢。 -->
+            <div class="mgprog-res" id="mgpResult" hidden>
+              <!-- 「结果」这行小标题删掉了：成功/失败/取消三种终态下面那行字已经说清楚了，
+                   它只是又一个噪音标签。 -->
+
+              <!-- 一行结论：完成路径 = 成片/取消说明；被拒路径 = 「显存不足：需要 X GB，可用 Y GB」 -->
+              <div class="mgprog-res-txt" id="mgpResultText"></div>
+              <div class="mgprog-res-acts">
+                <button class="btn" id="mgpToSettings" type="button">返回导出设置</button>
+                <!-- 次要出口：用户明确说「不理解为什么被拒」，那他更想**试**一次 ——
+                     点了带 force=1 放行 _vram_guard（按最小档真跑）；真 OOM 会自动
+                     回滚到这一页并写明「确实不够、已回滚」，不会把后端搞坏。 -->
+                <button class="btn" id="mgpForceTry" type="button" hidden>仍然尝试（可能 OOM）</button>
+              </div>
+            </div>
+
             <!-- 生效配置不一致横幅：后端把 [eff-warn] 塞进 status.eff_warnings[]，
                  这里只负责显示（可关闭，换一单就重新出现）。复用 .alert.warn/.loadbanner
                  那一套（左侧强调条 + 图标 + 标题），和训练页的模块加载横幅同一种东西。 -->
@@ -1166,23 +1184,6 @@
               </div>
             </div>
 
-            <!-- 终态结果：完成/失败/取消都在这里收口。
-                 导出中 hidden（这时只有下面那颗「取消导出」）；终态一出来就顶上来，
-                 给「返回导出设置」和「再次导出」两个出口，参数一个都不丢。 -->
-            <div class="mgprog-res" id="mgpResult" hidden>
-              <!-- 「结果」这行小标题删掉了：成功/失败/取消三种终态下面那行字已经说清楚了，
-                   它只是又一个噪音标签。 -->
-
-              <!-- 一行结论：完成路径 = 成片/取消说明；被拒路径 = 「显存不足：需要 X GB，可用 Y GB」 -->
-              <div class="mgprog-res-txt" id="mgpResultText"></div>
-              <div class="mgprog-res-acts">
-                <button class="btn" id="mgpToSettings" type="button">返回导出设置</button>
-                <!-- 次要出口：用户明确说「不理解为什么被拒」，那他更想**试**一次 ——
-                     点了带 force=1 放行 _vram_guard（按最小档真跑）；真 OOM 会自动
-                     回滚到这一页并写明「确实不够、已回滚」，不会把后端搞坏。 -->
-                <button class="btn" id="mgpForceTry" type="button" hidden>仍然尝试（可能 OOM）</button>
-              </div>
-            </div>
 
             <div class="mgprog-foot" id="mgpFoot">
               <button class="btn" id="mgpCancel">取消导出</button>

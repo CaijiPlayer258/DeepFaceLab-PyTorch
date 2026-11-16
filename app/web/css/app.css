@@ -5837,7 +5837,10 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 }
 
 /* ---------- 抽屉：右侧滑出，遮罩沿用 .modal 那一套（同一档 z-index / 同一层灰） ---------- */
-.mgeff-drawer { position: fixed; inset: 0; z-index: 260; display: flex; justify-content: flex-end; }
+/* z-index 380：必须**高于窗口控制按钮**（.wctl 是 300）。以前是 260，于是最小化/最大化/关闭
+   那三颗会画在抽屉标题行上面，把「当前生效（后端回显） /api/...」压住（用户截图里的层级问题）。
+   抽屉是模态层，盖住 chrome 是对的：关它用抽屉自己的 ×，或 Esc。 */
+.mgeff-drawer { position: fixed; inset: 0; z-index: 380; display: flex; justify-content: flex-end; }
 .mgeff-drawer[hidden] { display: none !important; }
 .mgeff-mask {
   position: absolute;
@@ -6165,20 +6168,15 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 }
 
 /* ---------- 无脸旁路：切脸之后直接汇入缓存帧，绕开 换脸/遮罩/合成 ----------
-   det#0 右侧 → 沉到所有 lane 底下 → 升到 e0 左边。颜色比主路淡（同一条 --line-strong、
-   更低的 opacity），虚线 = 「这不是主路」。只有本单真的有无脸帧（no_face_ticks>0）才出现，
-   线上带一句「无脸 N 帧」—— 不然「切脸 1439 / 换脸 1204」这 235 帧看着像丢了。 */
+   det#0 右侧 → 沉到所有 lane 底下 → 升到腰点 → 与主路同一段进杯。颜色比主路淡（同一条
+   --line-strong、更低 opacity），虚线 = 「这不是主路」。只有本单真的有无脸帧（no_face_ticks>0）才出现。
+   帧数**不画在图上**（用户：流水线本身说明了这件事）—— 挂在 path 的 <title> 里，悬停才显示。 */
 #p-merge .mgpipe .bypass path {
   fill: none;
   stroke: var(--line-strong);
   stroke-width: 1;
   stroke-dasharray: 5 5;
   opacity: .5;
-}
-#p-merge .mgpipe .bypass .t-bypass {
-  font-size: 10px;
-  fill: var(--ink-2);
-  font-variant-numeric: tabular-nums;
 }
 #p-merge .mgpipe .bypass[hidden] { display: none; }
 

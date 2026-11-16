@@ -1229,7 +1229,9 @@ def main(argv=None):
               var svg = document.getElementById('mgPipeSvg');
               var g = svg.querySelector('g.bypass');
               var p = g ? g.querySelector('path') : null;
-              var t = g ? g.querySelector('text') : null;
+              /* 帧数不画在图上（用户要求）：现在挂在 path 的 <title> 里，悬停才显示。
+                 text 那条留着兜底，老版本/若有人又画回文字也不会误报。 */
+              var t = g ? (g.querySelector('title') || g.querySelector('text')) : null;
               var main = svg.querySelector('g.edges path');
               var cs = p ? getComputedStyle(p) : null;
               var mcs = main ? getComputedStyle(main) : null;
@@ -1271,7 +1273,7 @@ def main(argv=None):
         check(int(by.get("paths") or 0) == 1,
               "C31 有 %d 帧无脸 → 图上多一条旁路线" % nf_live, str(by.get("paths")))
         check("无脸" in str(by.get("txt")) and str(nf_live) in str(by.get("txt")),
-              "C32 旁路线上标着无脸帧数（「无脸 N 帧」）", str(by.get("txt")))
+              "C32 旁路线上挂着无脸帧数（悬停提示「无脸 N 帧」，不再画在图上）", str(by.get("txt")))
         check(0 <= float(by.get("op") or -1) < float(by.get("mainop") or 9),
               "C33 旁路比主路淡（opacity 更低、同一条 --line-strong）",
               "旁路 %s / 主路 %s · stroke %s vs %s"

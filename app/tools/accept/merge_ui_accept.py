@@ -447,8 +447,8 @@ def main():
         shot(b, SHOTS / ("%s-settings-picked.png" % tag))
 
         # ---- D7：seamless 下「这一单用不上」≠「记忆被改了」----
-        # 两次刷新之后：记忆仍是 gpu，界面上是 auto + gpu 档禁用；把融合方式改回 overlay，
-        # 应该**自动**回到 gpu（用户不用再挑一次）。这条是「别覆盖记忆」那个设计的正面证据。
+        # 两次刷新之后：gpu 仍可选、界面/记忆都是 gpu（seamless 已开放走 GPU）；改 overlay 不变，
+        # 这条同时证明「门控不会覆盖用户偏好」。
         s7a = json.loads(b.eval(CMP_STATE) or "{}")
         reload_merge()                                     # 第 2 次刷新
         s7b = json.loads(b.eval(CMP_STATE) or "{}")
@@ -457,12 +457,13 @@ def main():
                "e.dispatchEvent(new Event('change',{bubbles:true}));return e.value;})()")
         time.sleep(0.3)
         s7c = json.loads(b.eval(CMP_STATE) or "{}")
-        check(s7a.get("v") == "auto" and s7a.get("gpu_disabled") is True
-              and s7b.get("v") == "auto" and s7b.get("gpu_disabled") is True
+        # seamless 现在**也走 GPU**（DFL_COMPOSE_GPU_SEAMLESS 默认 1），所以不再「显示 auto + 禁用 gpu」。
+        # 这条断言改成：两次刷新后 gpu 仍可选、界面仍是 gpu、记忆仍是 gpu，改 overlay 也不变。
+        check(s7a.get("v") == "gpu" and s7a.get("gpu_disabled") is False
+              and s7b.get("v") == "gpu" and s7b.get("gpu_disabled") is False
               and s7b.get("mem_cb") == "gpu" and s7b.get("mem_dt") == "fp32"
-              and s7c.get("v") == "gpu" and s7c.get("dfm") == "fp32"
-              and s7c.get("gpu_disabled") is False,
-              "D7 seamless 下刷两次：记忆仍是 gpu、界面显示自动；改 overlay → 自动回到 gpu",
+              and s7c.get("v") == "gpu" and s7c.get("dfm") == "fp32",
+              "D7 seamless 下刷两次：gpu 仍可选、界面/记忆都还是 gpu（seamless 已开放走 GPU）",
               "刷1 %s/%s · 刷2 %s/%s · 记忆 %s/%s · 改 overlay %s/%s(gpu禁用=%s)"
               % (s7a.get("v"), s7a.get("dfm"), s7b.get("v"), s7b.get("dfm"),
                  s7b.get("mem_dt"), s7b.get("mem_cb"),
