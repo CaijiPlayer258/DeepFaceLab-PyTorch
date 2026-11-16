@@ -167,10 +167,13 @@
 
 ## 8. 复现三臂表
 
-测量脚本在 `_enc4k_bench/`（仓库根的 scratch 目录，可删）：`build_fixture.py` 造 raw 帧、
-`bench4k.py` 跑三臂矩阵（同进程按轮交替 ×2）、`quality.py` 算逐像素/PSNR/SSIM/抠图、
-`decode_cost.py` 量软解、`summarize.py` 出中位表。整份报告：
-`_enc4k_bench/REPORT_4K_encoder.md`。
+测量脚本在 `app/tools/bench/enc4k/`：`build_fixture.py` 造 raw 帧、
+`bench4k.py` 跑三臂矩阵（同进程按轮交替 ×2）、`bench_cq21_clean.py` 跑默认档干净计时、
+`quality.py` 算逐像素/PSNR/SSIM/抠图、`decode_cost.py` 量软解、`summarize.py` 出中位表。
+整份报告：`app/tools/bench/enc4k/REPORT_4K_encoder.md`；开关设计：
+`app/tools/bench/enc4k/DESIGN_DFL_FUSED_ENCODER.md`。
+
+素材与产物写在仓库根的 scratch 目录 `_enc4k_bench/`（脚本按 `__file__` 定位，不进仓、量完即删，约 4.3 GB）。
 
 **4K 素材别跑整片**：一次 60~80 帧就够（x264 4K 是 17 fps，80 帧 ≈ 4.8 s；NVENC ≈ 1.7 s），
 跑整片只会把机器烤一遍、数字还是一样的。
