@@ -49,6 +49,14 @@ class Job:
             self.t0 = 0.0
             self.ok = None          # None=没跑/在跑 · True=成功结束 · False=失败
             self.error = ""         # 失败原因（ok=False 时必定非空），前端据此出红条
+            # 5 点退化闸门：档位与「本次判坏几张」。以前这两个数只活在 _LAST_EXTRACT
+            # 与日志里，界面（/api/extract/status）看不到 —— 用户只能自己去翻
+            # aligned/_bad_frames.txt。gate 在 warn 下是「记了几张」，strict 下是「拒了几张」。
+            self.gate = 0
+            self.gate_mode = ""
+            # 状态型告警（不是一次性事件）：warnings[] 由进度页/横幅消费，
+            # 与合成链路 status.eff_warnings[] 同一套读法。不改变 ok。
+            self.warnings = []
 
     def fail(self, exc, where: str = "") -> str:
         """把异常落成「失败」态 —— 不许表现成「完成」。
@@ -81,6 +89,18 @@ class Job:
         print("[extract] %s%s" % (text, ("  @ " + where) if where else ""), flush=True)
         return text
 
+    def warn(self, code: str, text: str):
+        """记一条状态型告警：进 snapshot().warnings + 一行日志。
+
+        与 fail 的区别：告警不改变 ok，任务照样跑完；但必须能被界面看见 ——
+        以前这类「值得提醒但不算失败」的事只能 print，GUI 起来后没人看得到。
+        """
+        item = {"code": str(code), "text": str(text)}
+        with self.lock:
+            self.warnings.append(item)
+        print("[extract-warn] %s: %s" % (item["code"], item["text"]), flush=True)
+        return item
+
     def begin(self, stage: int, total: int, msg: str = ""):
         """进入一个新阶段：重置计时与计数，前端据此算速度和剩余时间。"""
         with self.lock:
@@ -110,6 +130,9 @@ class Job:
                 "done": self.done, "total": self.total,
                 "msg": self.msg, "stage": self.stage,
                 "ok": self.ok, "error": self.error,
+                # 闸门：档位 + 计数（warn 记清单 / strict 真拒），以及状态型告警
+                "gate": self.gate, "gate_mode": self.gate_mode,
+                "warnings": list(self.warnings),
                 "rate": round(rate, 2), "eta": round(eta, 1), "elapsed": round(el, 1),
             }
 JOB = Job()

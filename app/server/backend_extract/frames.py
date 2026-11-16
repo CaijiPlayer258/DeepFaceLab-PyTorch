@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 from pathlib import Path
@@ -22,6 +23,80 @@ from .._common.bootstrap import _NO_WINDOW
 from .._common.jobs import JOB, _job_fail, _merge_cache, _merge_prep, _merge_prep_lock
 from .detectors import _get_fast_detector, _get_heavy_detector, _get_landmarks106
 from .media import _dfl_project_scan, _extract_frames, _imread_any, _open_video
+
+
+# ---------------- 续跑指纹：同一项目换了源素材 ----------------
+# 完成判据是按**帧号**做的（done_idx，见 _align_stream）：换一段素材时帧号从 0 重排，
+# 旧帧就会被当成「已完成」整段跳过 —— 静默少抽，且一个字节的日志都不留。
+# 判定逻辑不动（改它风险大：它同时管着真正的「断点续跑」），只把事实说出来。
+SRC_FP_NAME = "_extract_src.json"
+
+
+def _src_fingerprint(src, w, h, dur):
+    """源素材指纹：文件名 / 分辨率 / 时长（+ size、mtime 留作排查线索）。
+
+    只取这三项做判定是有意的：它们与「换了一段素材」强相关，又不会被重编码、
+    重新下载造成的字节差异误报。size/mtime 只记录、不参与比较。
+    """
+    p = Path(str(src))
+    try:
+        st = p.stat()
+        size, mtime = int(st.st_size), round(float(st.st_mtime), 1)
+    except OSError:
+        size, mtime = 0, 0.0
+    return {"video": str(p), "name": p.name, "w": int(w or 0), "h": int(h or 0),
+            "duration": round(float(dur or 0), 3), "size": size, "mtime": mtime}
+
+
+def _fp_diff(old, cur):
+    """两份指纹的人话差异；完全一致返回 ""。"""
+    if not isinstance(old, dict) or not isinstance(cur, dict):
+        return ""
+    bad = []
+    if (old.get("name") or "") != (cur.get("name") or ""):
+        bad.append("文件名 %s → %s" % (old.get("name") or "?", cur.get("name") or "?"))
+    if (old.get("w"), old.get("h")) != (cur.get("w"), cur.get("h")):
+        bad.append("分辨率 %sx%s → %sx%s"
+                   % (old.get("w"), old.get("h"), cur.get("w"), cur.get("h")))
+    od, cd = float(old.get("duration") or 0), float(cur.get("duration") or 0)
+    if od > 0 and cd > 0 and abs(od - cd) > max(0.5, 0.02 * od):
+        bad.append("时长 %.2fs → %.2fs" % (od, cd))
+    return "；".join(bad)
+
+
+def _read_src_fp(face_dir):
+    """读上次的源指纹；没有/读坏都返回 None（读坏不阻断抽取）。"""
+    try:
+        p = Path(face_dir) / SRC_FP_NAME
+        if not p.is_file():
+            return None
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:                                   # noqa: BLE001
+        return None
+
+
+def _note_resume_src(face_dir, src, w, h, dur, done_n):
+    """续跑命中时核对源素材；换过素材就往 JOB 告警 + 日志留一行。返回差异串。"""
+    cur = _src_fingerprint(src, w, h, dur)
+    old = _read_src_fp(face_dir)
+    diff = _fp_diff(old, cur)
+    if done_n > 0:
+        if old is None:
+            JOB.warn("extract-resume-src-unknown",
+                     "续跑命中 %d 帧（aligned/ 里已有同号文件），但本项目没有源素材指纹"
+                     "（4.0/旧版本留下的目录，或第一次由旧版写入）—— 无法确认这批帧与本次"
+                     "素材是同一段；若刚换了素材，建议换项目或清空 aligned/。" % done_n)
+        elif diff:
+            JOB.warn("extract-resume-src-changed",
+                     "续跑命中 %d 帧（aligned/ 里已有同号文件），但源视频与上次不同（%s）："
+                     "这些帧可能来自另一段素材，本次会跳过所有「同号」帧 —— "
+                     "换素材请换项目或清空 aligned/。" % (done_n, diff))
+    try:
+        (Path(face_dir) / SRC_FP_NAME).write_text(
+            json.dumps(cur, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception:                                   # noqa: BLE001 —— 写不了指纹不能弄挂抽取
+        pass
+    return diff
 
 
 def _video_frame_jpeg(path, idx, maxw=900):
@@ -325,7 +400,8 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     既慢又让人误判"两个检测器一样快"）。
 
     strict_align（= --strict-align）：None 跟 DFL_ALIGN_GATE 走；True 强制 strict
-    （5 点退化的脸真拒、计进 rejected），False 强制 warn。**默认 warn**：图照写，
+    （5 点退化的脸真拒、计进 rejected_gate；rejected 仍是「外点 + 闸门」的总数），
+    False 强制 warn。**默认 warn**：图照写，
     坏脸只记进 <face_dir>/_bad_frames.txt —— 既有行为一个字都不变。
     """
     import queue
@@ -373,12 +449,17 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     _gm = gate_mode()
     if strict_align is not None:
         _gm = "strict" if strict_align else "warn"
+    # 本次运行的闸门档位与计数落进 JOB：/api/extract/status 要能读到，
+    # 不然界面只有日志和清单两条路（自检脚本读 _LAST_EXTRACT，人只能翻文件）。
+    with JOB.lock:
+        JOB.gate = 0
+        JOB.gate_mode = _gm if _amode == "68" else "off"
     if _gm != "off" and _amode == "68":
         _gs, _gi = gate_limits()
         _log("[align] 5 点退化闸门：%s · face_span<%.2f 且 iod_chip<%.2f"
              "（%s）"
              % (_gm, _gs, _gi,
-                "真拒，计进 rejected" if _gm == "strict"
+                "真拒，计进 rejected_gate" if _gm == "strict"
                 else "只记录到 _bad_frames.txt，图照写"))
     if _amode == "5":
         _log("[align] 警告：DFL_ALIGN=5，走 5 点仿射（旧路径，仅供回退/对照）。"
@@ -431,6 +512,14 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     dur = float(meta.get("duration") or 0)
     total_est = max(1, int(dur * max(0.01, float(fps)))) if dur else 1
 
+    # 续跑指纹：核对 + **每次跑完都刷新**（首跑也得写，否则下一次没得比）。
+    # 告警只在「目录里已有同号帧」时才发 —— 首跑没有续跑可言。
+    _resume_n = len(done_idx)
+    _diff = _note_resume_src(face_dir, src, W, H, dur, _resume_n)
+    if _resume_n and _diff:
+        _log("[align] 续跑命中 %d 帧，源素材与上次不同（%s）—— 这些帧号可能属于另一段素材"
+             % (_resume_n, _diff))
+
     S = 640
     JOB.begin(0, total_est, "边解码边对齐（%dx%d · %.2f fps · 不落盘）" % (W, H, fps))
     # JOB.begin 不会把 running 置 True，而 reader 线程用 JOB.running 判断是否继续。
@@ -463,9 +552,14 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     q_frames: "queue.Queue" = queue.Queue(maxsize=q_cap)
     q_detect: "queue.Queue" = queue.Queue(maxsize=q_cap)
     stop = threading.Event()
-    # rejected = 68 点外点检查判「检测异常」的张数（在 skipped 里再细分一项）
-    # gate    = 5 点退化闸门判坏脸的张数（warn 下照样落盘，strict 下同一张也算 rejected）
-    stats = {"seen": 0, "made": 0, "fallback": 0, "skipped": 0, "rejected": 0, "gate": 0}
+    # rejected        = 拒收总数（外点 + 闸门，保持老读法兼容）
+    # rejected_outlier= 68 点外点检查判「检测异常」的张数
+    # rejected_gate   = 闸门判坏且被 strict 真拒的张数
+    # gate            = 5 点退化闸门判坏脸的张数（warn 下照样落盘，strict 下同一张也算 rejected_gate）
+    # 为什么要拆：完成行原来把两笔账写成同一句「其中外点判异常 N」，而闸门拒收的
+    # 恰恰是 resid 最小的那批（见 docs/30 §2）—— 混着写等于告诉人「是残差判的」。
+    stats = {"seen": 0, "made": 0, "fallback": 0, "skipped": 0,
+             "rejected": 0, "rejected_outlier": 0, "rejected_gate": 0, "gate": 0}
     # 帧速度（JOB.fps = 解到第几帧 / el）与 SSE 的 elapsed 共用 JOB.t0：
     # 前端算「张/秒」用的是 elapsed，两边各用各的 t0 会让两个速度一快一慢。
     t0 = JOB.t0 or time.time()
@@ -564,7 +658,10 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
                 if _g and _g.get("bad"):
                     with lock:
                         stats["gate"] += 1
+                        _n_gate = stats["gate"]
                     _note_gate(it["idx"], it["path"], _g)
+                    with JOB.lock:              # 锁序：先放 lock 再拿 JOB.lock
+                        JOB.gate = _n_gate
                 it["img"] = None            # 别把整帧攥在 _pending 里
                 if crop is None:
                     # meta_f 此时是「拒收记录」：reject_reason / align_resid_px
@@ -572,6 +669,10 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
                     if _why:
                         with lock:
                             stats["rejected"] += 1
+                            if _g and _g.get("bad"):
+                                stats["rejected_gate"] += 1
+                            else:
+                                stats["rejected_outlier"] += 1
                     _skip(it["idx"], _why or "68 点仿射失败（点数/数值不合法）")
                     continue
             else:
@@ -886,6 +987,8 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
         "align": _amode, "lm106": lm106 is not None,
         "mode": mode, "frames": stats["seen"], "faces": stats["made"],
         "skipped": stats["skipped"], "rejected": stats["rejected"],
+        "rejected_outlier": stats["rejected_outlier"],
+        "rejected_gate": stats["rejected_gate"],
         "gate": stats["gate"], "gate_mode": _gm,
         "wall": wall, "fps": stats["seen"] / wall,
         "cost": {k: cost[k] for k in ("read", "put1", "get1", "det", "put2", "get2", "emit",
@@ -898,8 +1001,9 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     # 一行结论：模式 / 帧 / 脸 / 跳过 / 墙钟。自检脚本和人都直接看这行。
     _log("[align] 完成：DFL_ALIGN=%s 帧=%d 脸=%d 跳过=%d%s%s 墙钟=%.2fs (%.1f 帧/秒)"
          % (_amode, stats["seen"], stats["made"], stats["skipped"],
-            ("（其中外点判异常 %d）" % stats["rejected"]) if stats["rejected"] else "",
-            (("（其中 5 点退化 %d）" % stats["gate"]) if _gm == "strict"
+            ("（其中外点判异常 %d）" % stats["rejected_outlier"])
+            if stats["rejected_outlier"] else "",
+            (("（其中 5 点退化 %d）" % stats["rejected_gate"]) if _gm == "strict"
              else ("（5 点退化 %d 张已记入 _bad_frames.txt，图仍写盘）" % stats["gate"]))
             if stats["gate"] else "",
             wall, stats["seen"] / wall))

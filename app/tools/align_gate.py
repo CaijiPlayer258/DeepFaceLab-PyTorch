@@ -173,7 +173,8 @@ def main(argv=None):
                     help="预演 --strict-align：按「真拒」口径报告（本工具从不移动/删除）")
     ap.add_argument("--no-write", action="store_true", help="不写 _bad_frames.txt")
     ap.add_argument("--assert-labeled", action="store_true",
-                    help="断言 4.1 素材 29..80 全拒、81..134 全放（就是已知集）")
+                    help="断言 workspace/data_src/aligned（4.0 产物的已知集）29..80 全拒、"
+                         "81..134 全放；4.1 链路复测见 docs/30 §5.2")
     ap.add_argument("--json", default=None)
     a = ap.parse_args(argv)
 
