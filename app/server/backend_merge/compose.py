@@ -405,6 +405,30 @@ def _blend_layer(src, fw, mw, mode: str, dst_u8=None):
     return out
 
 
+
+def _apply_sr_layers(out, layers, timings):
+    """合成完成之后，在**帧空间**逐脸跑一次超分（GFPEN/GPEN 那类盲修复）。
+
+    为什么在帧空间：芯片 224~416，模型 512 → 在芯片上做等于多一次重采样（先糊再加锐）。
+    这里拿的是 ROI 的原生像素，只重采样一次；混回权重 = 该脸的遮罩 × 档位强度。
+
+    DFL_SR=off（默认）时一个像素都不碰 —— 这条必须保证，mode B 的 md5 基线靠它。
+    """
+    try:
+        from . import facesr
+        if not facesr.enabled():
+            return out
+        a = facesr.strength()
+        t0 = time.time()
+        for fw, mw, roi_f, roi_u8, (x0, y0, x1, y1) in layers:
+            roi = out[y0:y1, x0:x1]
+            out[y0:y1, x0:x1] = facesr.apply_roi(roi, mw, a, timings)
+        timings["sr_ms"] = timings.get("sr_ms", 0.0) + (time.time() - t0) * 1000.0
+    except Exception as e:                                  # noqa: BLE001
+        # 超分失败不该把整单合成带崩：告警一次，本帧按原样走
+        print("[sr] 跳过（%s: %s）" % (e.__class__.__name__, str(e)[:160]), flush=True)
+    return out
+
 def compose_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
                   roi: bool = True) -> np.ndarray:
     """一帧的合成（纯 CPU）：遮罩准备 → 色彩迁移 → 融合 → 反贴回原帧。
@@ -502,6 +526,7 @@ def compose_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
             work[y0:y1, x0:x1] = blended
         out = np.clip(work * 255.0, 0, 255).astype(np.uint8)
     timings["blend_ms"] = timings.get("blend_ms", 0.0) + (time.time() - t_b) * 1000.0
+    out = _apply_sr_layers(out, layers, timings)
     return out
 
 
@@ -631,6 +656,7 @@ def compose_aligned_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
             work[y0:y1, x0:x1] = blended
         out = np.clip(work * 255.0, 0, 255).astype(np.uint8)
     timings["blend_ms"] = timings.get("blend_ms", 0.0) + (time.time() - t_b) * 1000.0
+    out = _apply_sr_layers(out, layers, timings)
     return out
 
 

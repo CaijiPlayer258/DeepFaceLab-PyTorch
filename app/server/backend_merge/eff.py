@@ -639,6 +639,20 @@ def _eff_publish(route: str, kind: str, body: dict, cfg: dict,
     # 那套「请求体缺字段」的自检，直接挂到 [eff] 那一行的末尾。用户要能一眼看到
     # 「我这单的 dfm 到底跑在 onnx 还是 torch、fp32 还是 bf16」——这一栏就是那个答案。
     eff["dfm"] = _dfm_eff_text(cfg)
+    # 人脸超分（GPEN）也是**进程级 env**，不是 cfg 字段 —— 同样直接挂到 [eff] 上。
+    # 开着就必须留痕：它按帧吃 GPU，不看这一栏会以为"只是稍微慢一点"。
+    try:
+        from . import facesr as _sr
+        if _sr.enabled() or _sr.mode() != "off":
+            eff["sr"] = _sr.info()
+            if _sr.enabled() and _sr.session()[0] is None:
+                eff.setdefault("warnings", []).append({
+                    "code": "eff-sr-missing", "field": "sr", "level": "warn",
+                    "text": "人脸超分选了 %s，但后端没起来（%s）——这一单按原样输出"
+                            % (_sr.mode(), (_sr.info().get("why") or "未知原因")),
+                })
+    except Exception as _e:                                  # noqa: BLE001
+        eff["sr"] = {"error": "%s: %s" % (_e.__class__.__name__, str(_e)[:120])}
     # knobs 自带的告警（env 覆盖了请求体 / 选了 gpu 但这单上不了 GPU）也要进横幅。
     # 这些在「值已经确定」的时刻就算得出来，不用等流水线开跑。
     for _code, _field, _text in (kn.get("warnings") or []):

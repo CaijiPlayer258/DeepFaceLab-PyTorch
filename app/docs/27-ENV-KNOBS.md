@@ -157,6 +157,9 @@ grep -o 'DFL_[A-Z0-9_]*' app/server/backend_merge/*.py | cut -d: -f2 | sort -u |
 | `DFL_DET_EP_THREADS` | 无效 | 旧版「检测 EP 的线程数」想法，**没有任何读取点** | 不暴露（写了也不生效） |
 | `DFL_SESS_PLAN` | 无效 | 旧版「按档位写死会话配比」想法，已被 `DFL_SESS_LEVEL` 取代 | 不暴露（写了也不生效） |
 | `DFL_SESS_THREADS` | 无效 | 旧版「会话线程数」想法，已被自动推导取代 | 不暴露（写了也不生效） |
+| `DFL_SR` | `off` | 人脸超分档位：`off` / `low`(0.35) / `mid`(0.6) / `high`(1.0)；见 [36-FACE-SR](36-FACE-SR.md) | 暴露 |
+| `DFL_SR_BACKEND` | `auto` | `auto`（有 engine 用 engine）/ `trt` / `onnx` | 不暴露 |
+| `DFL_SR_MODEL` | `weights/gpen_bfr_512.onnx` | 超分模型路径 | 不暴露 |
 
 这三个只在注释 / 旧文档里被提到，代码里**没有任何读取点**。写它们不会报错，也不会生效；
 名字留着是为了让人搜到「这条已经废弃」。
