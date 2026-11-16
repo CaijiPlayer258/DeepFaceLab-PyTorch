@@ -24,7 +24,8 @@ def _candidate_roots():
             continue
         yield base
         yield base / "DeepFaceLab-PyTorch"
-    yield Path(r"D:\MyProject\DeepFaceLab-PyTorch")
+    # 以前这里 yield 开发者本机路径；它只在那一台机器命中，换机器就是死候选。
+    # 上面 parents[3]/[4] 与兄弟目录 DeepFaceLab-PyTorch 已覆盖同一位置。
 
 
 def _local_torch_lib():

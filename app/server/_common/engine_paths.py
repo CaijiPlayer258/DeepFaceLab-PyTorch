@@ -23,7 +23,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]          # _common/engine_paths.py -> 仓库根（多一层目录）
 
-_LEGACY = Path("D:/MyProject/DeepFaceLab-PyTorch")
+# 4.0 根目录不再写死（以前是开发者本机路径）。candidates() 已含「同级 DeepFaceLab-PyTorch」+ env + engine.txt。
 _cache: dict = {"root": None}
 
 
@@ -57,7 +57,6 @@ def candidates():
         except Exception:
             pass
     out.append(ROOT.parent / "DeepFaceLab-PyTorch")
-    out.append(_LEGACY)
     return out
 
 
@@ -70,7 +69,7 @@ def engine_root() -> Path:
         if _looks_like_engine(p):
             _cache["root"] = p
             return p
-    _cache["root"] = cands[-1] if cands else _LEGACY
+    _cache["root"] = cands[-1] if cands else ROOT
     return _cache["root"]
 
 
