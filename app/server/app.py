@@ -106,11 +106,39 @@ def index():
         try:
             v = int((WEB / sub / name).stat().st_mtime)
         except OSError:
+            # app.js 已经没有实体文件了（由 js/app/*.js 拼接返回）：取这些分片的**最大** mtime，
+            # 改了任何一个分片，index.html 里的 ?v= 都会变，Chromium 不会复用旧脚本。
             v = 0
+            if sub == "js" and name == "app.js":
+                try:
+                    v = int(max(q.stat().st_mtime for q in _APP_JS_DIR.glob("*.js")))
+                except Exception:                       # noqa: BLE001
+                    v = 0
         return "/static/%s/%s?v=%d" % (sub, name, v)
 
     html = _re.sub(r"/static/(js|css)/([\w.\-]+)\?v=\d+", _bust, html)
     return Response(html, media_type="text/html", headers={"Cache-Control": "no-store"})
+
+
+# ============================================================
+# /static/js/app.js —— 由 js/app/*.js 按文件名顺序**拼接**后返回（前端源码已按页拆成 15 个文件）。
+#
+# 为什么要拼接而不是 <script> 引 15 个文件：整个 app.js 外面是一层 IIFE，
+# 594 个函数靠同一个作用域互相调用；拆成多个 <script> 就得先做命名空间重写。
+# 拼接保持了「一个作用域、一个文件」的运行语义（逐字节等价，拆分时校验过 roundtrip），
+# 同时让改代码的人只在几百行的文件里找。
+#
+# 这条路由必须注册在 app.mount("/static", ...) **之前**，否则 StaticFiles 先接管路径。
+# ============================================================
+_APP_JS_DIR = WEB / "js" / "app"
+
+
+@app.get("/static/js/app.js", include_in_schema=False)
+def _app_js_bundle():
+    parts = sorted(_APP_JS_DIR.glob("*.js"))
+    body = "\n".join(p.read_text(encoding="utf-8") for p in parts)
+    return Response(body, media_type="application/javascript",
+                    headers={"Cache-Control": "no-store"})
 
 
 app.mount("/static", StaticFiles(directory=WEB), name="static")
