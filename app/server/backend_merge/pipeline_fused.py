@@ -1427,56 +1427,29 @@ def _fused_run(cfg: dict) -> dict:
     # 搬家只在「检测是瓶颈」时才值钱（retinaface：detect 占用 88%）；tinymog 下瓶颈
     # 已经移到 dfm/编码，端到端 0 收益 —— 别把它当提速手段。
     def _detect(k=0, det_obj=None, n_workers=1):
-        try:
-            while True:
-                t_wait = time.perf_counter()
-                job = _get(q_dec)
-                ticks.add("det_wait", time.perf_counter() - t_wait)
-                if job is END:
-                    # 毒丸只放了一颗：谁吃到谁负责传下去（n_workers-1 颗），
-                    # 最后各自退出 —— 不然其余几路会在 _get 里等到天荒地老。
-                    for _i in range(max(0, int(n_workers) - 1)):
-                        _put(q_dec, END)
-                    for _i in range(n_prep):
-                        _put(q_det, END)
-                    break
-                t = time.perf_counter()
-                try:
-                    if job.det_ctx is None and det_prep_pool and not det_prep_on:
-                        # pool 档：letterbox 在本线程做，并复用本线程那张画布
-                        # （prep → 前向 → 立刻 drop，所以复用安全；见 _prep_ctx 的注释）
-                        tq = time.perf_counter()
-                        _ctx = _det_prep(det if det_obj is None else det_obj, job.frame,
-                                         reuse=True)
-                        if _ctx is not None:
-                            ticks.add("det_prep", time.perf_counter() - tq)
-                            job.det_ctx = _ctx
-                    if job.det_ctx is not None:
-                        # 主路径：canvas 已经在 decode 线程做好，这里只剩前向 + NMS
-                        boxes = (_detect_on_ctx(det_obj, job.det_ctx, det_thresh)
-                                 if det_obj is not None
-                                 else _detect_boxes_ctx(job.det_ctx, det_name, det_thresh))
-                        job.det_ctx = None       # 1.2MB/帧：用完就放，别带到合成再扔
-                    else:
-                        boxes = (_detect_on(det_obj, job.frame, det_thresh)
-                                 if det_obj is not None
-                                 else _detect_boxes(job.frame, det_name, det_thresh))
-                except Exception as e:                         # noqa: BLE001
-                    _fail("detect", e)
-                    for _i in range(n_prep):
-                        _put(q_det, END)
-                    break
-                ticks.add("detect", time.perf_counter() - t)
-                # 和 ② 切脸同一个次序（按 x1 排）：脸序号 = 这个顺序，compose 也按它贴
-                job.boxes = sorted(list(boxes or []),
-                                   key=lambda b: float((b.get("box") or [0, 0, 0, 0])[0]))
-                job.rec["detected"] = len(job.boxes)
-                _stage_tick("det")               # 交接点：检测 → 对齐/预处理
-                _put(q_det, job)
-        except BaseException as e:                             # noqa: BLE001
-            _fail("detect", e)
-
-    # ---- ③ 对齐/预处理 + 归组：68 点、dfm 输入、xseg 的 dst 画布、这一帧用哪个 dfm ----
+        # ② 检测车道已搬到 fused_lanes.detect_lane（体逐字未改，捕获名成为同名关键字参数）。
+        return detect_lane(k=k, det_obj=det_obj, n_workers=n_workers,
+                           time=time,
+                           _get=_get,
+                           q_dec=q_dec,
+                           ticks=ticks,
+                           END=END,
+                           _put=_put,
+                           n_prep=n_prep,
+                           q_det=q_det,
+                           det_prep_pool=det_prep_pool,
+                           det_prep_on=det_prep_on,
+                           _det_prep=_det_prep,
+                           det=det,
+                           _detect_on_ctx=_detect_on_ctx,
+                           det_thresh=det_thresh,
+                           det_name=det_name,
+                           _detect_boxes_ctx=_detect_boxes_ctx,
+                           _detect_on=_detect_on,
+                           _detect_boxes=_detect_boxes,
+                           _fail=_fail,
+                           _stage_tick=_stage_tick,
+                           )
     def _prep():
         try:
             while True:
