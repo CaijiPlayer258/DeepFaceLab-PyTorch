@@ -1048,7 +1048,7 @@
                             title="自动：CPU 合成（默认）；gpu 走 torch CUDA，8GB 卡上 overlay 持平、seamless 更慢，所以不默认开">
                       <option value="auto" selected>自动（推荐）</option>
                       <option value="cpu" title="compose_frame（OpenCV，CPU）">cpu</option>
-                      <option value="gpu" title="compose_frame_gpu（torch CUDA）：起不来会自动回退并告警">gpu</option>
+                      <option value="gpu" title="compose_frame_gpu（torch CUDA）：seamless 也走 GPU（Poisson/DST）；1080p 单脸下可能比 CPU 慢，起不来会自动回退并告警">gpu</option>
                     </select>
                   </span>
                 </div>

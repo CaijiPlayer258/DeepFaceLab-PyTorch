@@ -498,21 +498,23 @@ def seamless_mod():
 
 
 def seamless_on() -> bool:
-    """DFL_COMPOSE_GPU_SEAMLESS：**默认 0（seamless 仍走 CPU）**。
+    """DFL_COMPOSE_GPU_SEAMLESS：**默认 1（seamless 也走 GPU，跟随合成总开关）**。
 
-    本来是「默认跟随总开关」，实测后改掉：seamless 的 Poisson 解（DST matmul）和 detect
-    抢同一块 GPU，150 帧同段 2 轮交替实测：
+    历史：一开始默认 0，理由是 150 帧同段实测 seamless 走 GPU 会倒退 13.6%
+    （seamless CPU 21.48 帧/秒 · 8.95 核 · det_wait 3%  vs  seamless GPU 18.55 · 14.12 核 · det_wait 43%），
+    因为 Poisson 解（DST matmul）和 detect 抢同一块卡。所以曾经「选了 gpu 也会退回 cpu + 弹告警」。
 
-        seamless CPU：21.48 帧/秒 · 8.95 核 · det_wait 3%
-        seamless GPU：18.55 帧/秒 · 14.12 核 · det_wait 43%   <- 整条线倒退 13.6%
-
-    compose 段本身是快的（107.87ms → 47.62ms），但把 GPU 让给 detect 更划算。
-    overlay 那档不受影响（那档 fps 持平）。
-    DFL_COMPOSE_GPU_SEAMLESS=1 可显式打开（比如整机没有别的 GPU 活时）。
+    现在改成默认**允许**：让用户在界面上选 gpu + seamless 就真的跑 GPU（他们要看的是结果与手感，
+    而不是我们替他们决定）。代价写在这里、也写进 docs/26：
+      · 合成段本身快一倍多（107.87 → 47.62ms），但 detect 的 det_wait 会从 3% 涨到 ~43%，
+        整条线在「1080p 单脸 + 我们这套流水线」下可能倒退十几个百分点；
+      · GPU seamless 与 cv2 不是逐位一致（97.14% 逐位相同、2.53% 差 1 LSB、0.0038% 在 ROI 外框 ≤19px
+        的窄带里 >16 LSB，见 docs/26）——画质取舍由用户自己判断。
+    想要旧行为：DFL_COMPOSE_GPU_SEAMLESS=0（一行回退）。
     """
     v = str(os.environ.get("DFL_COMPOSE_GPU_SEAMLESS") or "").strip().lower()
     if v in ("", "auto"):
-        return False
+        return True
     return v not in ("0", "off", "false", "no", "none")
 
 

@@ -13223,39 +13223,24 @@ function mgStageEmpty(on) {
   window.__mgCmpPref = mgCmpPref;       /* 验收读快照用（只读） */
   function mgGateCmpBackend() {
     var sel = document.getElementById('mgCmpBackend');
-    var modeEl = document.getElementById('mgMode');
-    if (!sel || !modeEl) return;
-    var seamless = String(modeEl.value || '').indexOf('seamless') >= 0;
-    var pref = mgCmpPref();
+    if (!sel) return;
     var gpuOpt = null, i;
     for (i = 0; i < sel.options.length; i++) {
       if (sel.options[i].value === 'gpu') { gpuOpt = sel.options[i]; break; }
     }
     if (!gpuOpt) return;
-    /* 控件的原始 title（index.html 里那句「自动：CPU 合成…」）留一份，恢复时原样写回 */
     if (!sel.dataset.cmpTitle0) sel.dataset.cmpTitle0 = String(sel.title || '');
-    gpuOpt.disabled = seamless;
-    gpuOpt.title = seamless
-      ? '融合方式是 seamless：GPU 合成只实现了 overlay，选 gpu 也会被退回 CPU（先把融合方式改成 overlay 再试）'
-      : 'compose_frame_gpu（torch CUDA）：起不来会自动回退并告警';
-    if (seamless) {
-      /* 界面显示「自动」（这单确实用不上 gpu），**记忆和偏好一个字都不动** */
-      if (String(sel.value) === 'gpu') {
-        sel.value = 'auto';
-        /* 只在真发生过「显示被改成自动」时打一行，不然每开一次页面刷一遍日志 */
-        if (window.console) {
-          console.warn('[导出] 融合方式=seamless，合成后端 gpu 这单用不上 → 界面先显示「自动」'
-            + '（记忆仍是 gpu，改回 overlay 自动恢复）');
-        }
-      }
-      sel.title = '融合方式=seamless：这单用不上 GPU 合成，先显示「自动」；'
-        + (pref === 'gpu' ? '记忆里仍是 gpu，改回 overlay 会自动恢复' : '改回 overlay 才启用 gpu');
-      return;
-    }
-    sel.title = sel.dataset.cmpTitle0;
-    /* 不再是 seamless：偏好是 gpu 就直接恢复（用户在界面上挑过的那个值不该被门控吃掉） */
+    /* seamless 现在**默认也走 GPU**（compose_gpu.seamless_on 默认 1），所以不再因为融合方式
+       禁用 gpu 档。代价写进 option 的 title 里：Poisson 解会和 detect 抢卡，1080p 单脸下整条线
+       可能比 CPU 慢；想要旧行为设 DFL_COMPOSE_GPU_SEAMLESS=0。 */
+    gpuOpt.disabled = false;
+    gpuOpt.title = 'compose_frame_gpu（torch CUDA）。seamless 也走 GPU（Poisson / DST）；'
+      + '实测 1080p 单脸下 detect 会被挤、整条线可能比 CPU 慢，起不来会自动回退并告警';
+    sel.title = sel.dataset.cmpTitle0 || sel.title;
+    /* 用户在界面上挑过的值不该被程序改掉：偏好是 gpu 就回到 gpu */
+    var pref = mgCmpPref();
     if (pref === 'gpu') sel.value = 'gpu';
-    else if (String(sel.value) === 'gpu') sel.value = pref;   /* 偏好是 cpu/auto：别留在 gpu */
+    else if (String(sel.value) === 'gpu') sel.value = pref;
   }
   window.mgGateCmpBackend = mgGateCmpBackend;
   /* 只有用户**在界面上主动改**这个下拉，才算「他的选择」：更新偏好 + 写记忆。

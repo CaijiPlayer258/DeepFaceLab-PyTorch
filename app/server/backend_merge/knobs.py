@@ -182,13 +182,15 @@ def refine_compose(kn: dict, mode: str = "", fused: bool = True) -> dict:
             kn["compose_backend"] = "cpu"
             why = "分段链的合成只有 CPU 实现（GPU 合成只在快速导出里）"
         elif "seamless" in str(mode or "").strip().lower():
+            # seamless 现在默认也走 GPU（compose_gpu.seamless_on 默认 True）；只有当用户显式
+            # 设了 DFL_COMPOSE_GPU_SEAMLESS=0 时，才把这一单退回 CPU 并说明。
             try:
                 from .compose_gpu import seamless_on as _seamless_on
             except Exception:                               # noqa: BLE001
                 _seamless_on = None
             if _seamless_on is not None and not _seamless_on():
                 kn["compose_backend"] = "cpu"
-                why = "seamless 不进 GPU（DFL_COMPOSE_GPU_SEAMLESS=0）"
+                why = "seamless 被 DFL_COMPOSE_GPU_SEAMLESS=0 显式关掉了 GPU 版"
     if why:
         kn["compose_why"] = why
         # 已经确定上不了 GPU 了：env 也写 0。不然流水线会白初始化一次 CUDA
