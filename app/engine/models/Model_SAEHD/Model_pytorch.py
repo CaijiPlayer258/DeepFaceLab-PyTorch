@@ -34,6 +34,7 @@ except ImportError:
 
 from core.interact import interact as io
 from core.leras import nn
+from core.leras import module_loader
 from core.leras.archis.archi_parse import parse_archi_string, build_archi_classes, archi_is_lite
 from facelib import FaceType
 from models import ModelBase
@@ -1116,42 +1117,80 @@ class SAEHDModel(ModelBase):
 
         # Load/init weights
         self._module_info_list = []
+        # 结构化的"模块加载失败"事件（供界面渲染常驻横幅，见 /api/train/status 的 warnings[]）
+        self.load_events = []
+        self._load_events_by_module = {}
         # 这个模型以前有没有权重文件？没有 = 全新模型（4.1 新建的），
         # 此时"加载失败改随机初始化"是预期行为，不该报噪声告警。
         _had_weights = bool(list(self.saved_models_path.glob(self.get_model_name() + '_*.pth')))
 
-        for model, filename in io.progress_bar_generator(self.model_filename_list, 'Initializing models'):
-            if getattr(self, 'pretrain_just_disabled', False):
-                do_init = False
+        # 优化器集合：权重模块失败时据此找出"与它共享参数"的优化器，
+        # 让两者的状态一起清空（按 Parameter 身份判断，不维护手工映射表）。
+        _optimizers = [getattr(self, _on, None)
+                       for _on in ('src_dst_opt', 'D_code_opt', 'D_src_dst_opt')]
+        _optimizers = [o for o in _optimizers if o is not None]
+        _load_iter = int(getattr(self, 'iter', 0) or 0)
+        try:
+            _model_prefix = self.get_model_name()
+        except Exception:
+            _model_prefix = None
+        # 导出（合成/DFM）时不往 stdout 抛事件：那些进程没有界面消费它
+        _emit_events = not getattr(self, 'is_exporting', False)
+        _pretrain_just_disabled = getattr(self, 'pretrain_just_disabled', False)
+
+        def _do_init_of(model, filename):
+            """这次该不该读存档（True = 不读，直接初始化）。逻辑与改动前完全一致。"""
+            if _pretrain_just_disabled:
                 if 'df' in archi_type:
-                    if model is getattr(self, 'inter', None):
-                        do_init = True
-                elif 'liae' in archi_type:
-                    if model is getattr(self, 'inter_AB', None) or model is getattr(self, 'inter_B', None):
-                        do_init = True
-            else:
-                do_init = self.is_first_run()
-                if self.is_training and gan_power != 0.0 and model is getattr(self, 'D_src', None):
-                    if getattr(self, 'gan_model_changed', False):
-                        do_init = True
+                    return model is getattr(self, 'inter', None)
+                if 'liae' in archi_type:
+                    return (model is getattr(self, 'inter_AB', None)
+                            or model is getattr(self, 'inter_B', None))
+                return False
+            if self.is_first_run():
+                return True
+            if (self.is_training and gan_power != 0.0
+                    and model is getattr(self, 'D_src', None)
+                    and getattr(self, 'gan_model_changed', False)):
+                return True
+            return False
 
-            if not do_init:
-                load_ok = model.load_weights(self.get_strpath_storage_for_file(filename))
-                do_init = not load_ok
-            else:
-                load_ok = False
+        # 加载循环（权重模块 + 优化器）：
+        #   任何一个模块加载失败 → 该模块权重重置 + 绑定的优化器状态清空 + 一条结构化事件。
+        # 三件事在 module_loader.load_or_init_phase 里是一次原子动作，
+        # 不会再出现"权重随机化了、Adam 动量还在"的半重置。
+        _phase = module_loader.load_or_init_phase(
+            self.model_filename_list,
+            path_of=self.get_strpath_storage_for_file,
+            do_init_of=_do_init_of,
+            optimizers=_optimizers,
+            iter_=_load_iter,
+            model_prefix=_model_prefix,
+            emit=_emit_events)
 
-            if do_init:
+        for _res in io.progress_bar_generator(_phase, 'Initializing models'):
+            model = _res['module']
+            filename = _res['filename']
+            _event = _res['event']
+            if _event is not None:
+                # 一条模块失败 = 一条事件（权重已重置 + 绑定的优化器已清空）
+                self.load_events.append(_event)
+                self._load_events_by_module[_event.get('module')] = _event
+
+            if _res['needs_init']:
                 model.init_weights()
-                if (not self.is_first_run()
+                if (_event is not None
+                        and not self.is_first_run()
                         and _had_weights          # 全新模型（目录里一个 .pth 都没有）不算"加载失败"
-                        and not getattr(self, 'pretrain_just_disabled', False)
-                        and not getattr(self, 'is_exporting', False)):
-                    # A failed load silently becomes a random re-init, which
-                    # exports as a solid-colour / noise model. Say so loudly.
-                    print(f"[WARN] {filename}: 权重加载失败，已改为随机初始化（该模块输出将是噪声）。")
-                    print(f"       若源为 DFL 的 .npy，请先运行 "
-                          f"python tools/convert_dfl_tf_to_torch.py --strict 核对转换报告后再重试。")
+                        and not _pretrain_just_disabled
+                        and _emit_events):
+                    # 加载失败会静默变成随机初始化，导出时就是纯色/噪声模型。
+                    # 结构化事件已经打了（界面横幅用它），这里只补一句"接下来怎么办"。
+                    print(f"[WARN] {filename}: 权重已重置为随机初始化（该模块输出将是噪声），"
+                          f"事件见上方 [DFL-LOAD-EVENT] 行。")
+                    if _event.get('reason') in ('corrupt', 'shape'):
+                        print(f"       若源为 DFL 的 .npy，请先运行 "
+                              f"python tools/migrate/convert_dfl_tf_to_torch.py --strict 核对转换报告后再重试。")
                 status = '已重置'
             else:
                 status = '已加载'

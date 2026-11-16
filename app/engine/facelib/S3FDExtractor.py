@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from core.leras import nn
+from facelib._runtime import forward, init_leras, pick_device, to_nchw
 
 
 class _L2Norm(torch.nn.Module):
@@ -204,10 +205,8 @@ def _load_s3fd_npy(model: _S3FD, npy_path: Path):
 
 class S3FDExtractor(object):
     def __init__(self, place_model_on_cpu: bool = False):
-        nn.initialize_main_env()
-        nn.initialize(data_format='NCHW')
-
-        self._device = torch.device('cpu') if place_model_on_cpu else nn.device
+        init_leras('NCHW')
+        self._device = pick_device(place_model_on_cpu)
 
         model_path = Path(__file__).resolve().parents[1] / 'DeepFaceLab-master' / 'facelib' / 'S3FD.npy'
         if not model_path.exists():
@@ -241,11 +240,8 @@ class S3FDExtractor(object):
         input_image = cv2.resize(input_image, (int(w / input_scale), int(h / input_scale)), interpolation=cv2.INTER_LINEAR)
 
         # NCHW, RGB, float32
-        img = input_image.astype(np.float32)
-        x = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to(self._device)
-
-        with torch.no_grad():
-            outs = self.model(x)
+        x = to_nchw(input_image.astype(np.float32), device=self._device)
+        outs = forward(self.model, x)
 
         # Convert to NHWC numpy arrays without batch dim, matching original refine()
         olist = []

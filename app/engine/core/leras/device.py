@@ -154,7 +154,14 @@ class Devices(object):
         if int(os.environ.get("NN_DEVICES_INITIALIZED", 0)) != 0:
             return
             
-        if 'CUDA_VISIBLE_DEVICES' in os.environ.keys():
+        # 以前这里无条件 pop 掉 CUDA_VISIBLE_DEVICES（它假定那是父进程留下的脏值）。
+        # 后果：训练页「设备」下拉选出来的卡根本管不住 —— pop 发生在 torch 首次
+        # 初始化之前，CUDA 于是又看得见全部卡（实测 CUDA_VISIBLE_DEVICES="" 时
+        # device_count 从 0 变回 1）。
+        # 现在只有父进程显式声明「这个值是我算的，别动」（DFL_KEEP_CUDA_VISIBLE_DEVICES=1）
+        # 才保留；其它情况照旧 pop，老行为不变。
+        if 'CUDA_VISIBLE_DEVICES' in os.environ.keys() \
+                and os.environ.get('DFL_KEEP_CUDA_VISIBLE_DEVICES') != '1':
             os.environ.pop('CUDA_VISIBLE_DEVICES')
         
         os.environ['CUDA_​CACHE_​MAXSIZE'] = '2147483647'

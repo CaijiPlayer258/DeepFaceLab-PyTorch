@@ -1,50 +1,24 @@
-"""让 4.1 拉起的整棵进程树都不弹控制台窗口。
+"""兼容层（DEPRECATED）：真身已搬到 app/server/_common/nowin.py。
 
-背景：4.1 是 GUI（Electron 壳，父进程没有控制台）。Windows 上从"没有控制台"的
-进程里 CreateProcess 一个控制台程序（python.exe / ffmpeg.exe），系统会给它**新建**
-一个黑框 —— 用户看到的就是一闪而过的 cmd。
-
-我们的直接子进程都加了 CREATE_NO_WINDOW，但再往下一层就管不到了：
-  · SampleLoaderV4 的预取进程（multiprocessing spawn）
-  · 合成管线里的 ffmpeg
-它们由 CPython 自己 CreateProcess，不看我们的参数。
-
-这里直接包住 _winapi.CreateProcess（subprocess 和 multiprocessing/popen_spawn_win32
-都走它），给所有子进程补上 CREATE_NO_WINDOW。父进程已有的控制台照用，所以
-"在终端里直接跑"不受影响 —— 只是不再**新建**窗口。
-
-install() 幂等；非 Windows 直接返回 False。
+**不能惰性**：_merge_runner.py 是**被当脚本跑**的（4.0 python 直接执行），它那行是
+`from _nowin import install as _install_nowin` —— 没有包上下文，惰性代理拼不出口号。
+所以这里直接把真身的名字搬进来（真身只用 sys，没有相对 import），再把 sys.modules
+指到真身，包内 import 拿到的仍是同一个模块对象。
 """
-from __future__ import annotations
-
-import sys
-
-CREATE_NO_WINDOW = 0x08000000
+import importlib as _importlib
+import sys as _sys
 
 
-def install() -> bool:
-    if sys.platform != "win32":
-        return False
-    try:
-        import _winapi
-    except Exception:
-        return False
-    if getattr(_winapi, "_dfl_nowin", False):
-        return True
+def _load_real():
+    if __package__:                                           # 包内：server._nowin
+        return _importlib.import_module(__package__ + "._common.nowin")
+    from pathlib import Path                                  # 脚本方式：app/server 在 sys.path
+    app_dir = str(Path(__file__).resolve().parents[1])        # app/
+    if app_dir not in _sys.path:
+        _sys.path.append(app_dir)
+    return _importlib.import_module("server._common.nowin")
 
-    _orig = _winapi.CreateProcess
 
-    def _patched(app_name, cmd_line, proc_attrs=None, thread_attrs=None,
-                 inherit_handles=False, creation_flags=0, env=None,
-                 current_directory=None, startup_info=None):
-        try:
-            creation_flags = int(creation_flags) | CREATE_NO_WINDOW
-        except Exception:
-            creation_flags = CREATE_NO_WINDOW
-        return _orig(app_name, cmd_line, proc_attrs, thread_attrs,
-                     inherit_handles, creation_flags, env,
-                     current_directory, startup_info)
-
-    _winapi.CreateProcess = _patched
-    _winapi._dfl_nowin = True
-    return True
+_impl = _load_real()
+globals().update({k: v for k, v in vars(_impl).items() if not k.startswith("__")})
+_sys.modules[__name__] = _impl

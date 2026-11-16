@@ -1,33 +1,37 @@
-# -*- coding: utf-8 -*-
-"""模型转换（.npy -> .pth）路由。"""
-from __future__ import annotations
+"""兼容层（DEPRECATED）：真身已搬到 app/server/backend_oneshot/routes_convert.py。
 
-from fastapi import APIRouter, HTTPException
+三条 `/api/convert/*`（npy -> pth 迁移）路由在真身里，它调的是同包的 backend_oneshot/convert.py。
+router 就在真身模块里定义：app.py 末尾那串 from .routes_convert import router 仍然拿得到。
+"""
 
-from . import _convert
+import importlib as _importlib
+import sys as _sys
+import types as _types
 
-router = APIRouter()
-
-
-@router.get("/api/convert/list")
-def convert_list():
-    return {"ok": True, "items": _convert.scan()}
+_TARGET = "backend_oneshot.routes_convert"
 
 
-@router.post("/api/convert/start")
-def convert_start(body: dict):
-    body = body or {}
-    name = str(body.get("name") or "").strip()
-    if not name:
-        raise HTTPException(400, "缺少模型名")
-    try:
-        return _convert.start(name)
-    except FileNotFoundError as e:
-        raise HTTPException(404, "找不到源文件或转换脚本：%s" % str(e)[:200])
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+def _real():
+    return _importlib.import_module(__package__ + "." + _TARGET)
 
 
-@router.get("/api/convert/status")
-def convert_status():
-    return _convert.status()
+class _LazyModule(_types.ModuleType):
+    """转发到真身模块：取属性 / 设属性 / dir() 全走真身。"""
+
+    @staticmethod
+    def _real():
+        return _real()
+
+    def __getattr__(self, name):
+        return getattr(self._real(), name)
+
+    def __setattr__(self, name, value):
+        if name.startswith("__") and name.endswith("__"):
+            return _types.ModuleType.__setattr__(self, name, value)
+        setattr(self._real(), name, value)
+
+    def __dir__(self):
+        return dir(self._real())
+
+
+_sys.modules[__name__].__class__ = _LazyModule

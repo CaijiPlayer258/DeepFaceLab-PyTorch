@@ -149,7 +149,7 @@ app/
 weights/          推理权重（平铺，见上）—— 不入库
 workspace/        用户数据：数据集 / 模型 / 输出 —— 不入库
 runtime/          Python 运行时（server / engine 两个 venv）—— 不入库
-legacy/           4.0 Qt 界面与素材（仅供对照）
+app/docs/legacy-reference/   已归档的死代码（4.0 Qt 界面、MaskProcessor 等，仅供对照）
 ```
 
 界面是 Web 技术栈，跑在 Electron 里；后端是本地 FastAPI，不依赖前端框架，改完刷新即可。
@@ -171,8 +171,9 @@ legacy/           4.0 Qt 界面与素材（仅供对照）
 
 训练器见 [app/docs/07-TRAINER.md](app/docs/07-TRAINER.md)，
 合成器见 [app/docs/06-MERGER.md](app/docs/06-MERGER.md)，
-结构说明 [app/docs/02-STRUCTURE.md](app/docs/02-STRUCTURE.md)，
-产品规划 [app/docs/01-PLAN.md](app/docs/01-PLAN.md)。
+结构说明 [app/docs/04-ACTUAL-STRUCTURE.md](app/docs/04-ACTUAL-STRUCTURE.md)（现状）；
+Qt 时代的旧规划（01-PLAN / 02-STRUCTURE / 05-RESTRUCTURE-PLAN）在
+[app/docs/archive/4.0/](app/docs/archive/4.0/)。
 
 ## 协议
 

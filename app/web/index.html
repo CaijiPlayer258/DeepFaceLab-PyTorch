@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>DeepFaceLab-PyTorch</title>
 <link rel="stylesheet" href="/static/css/noto.css?v=3">
-  <link rel="stylesheet" href="/static/css/app.css?v=109">
+  <link rel="stylesheet" href="/static/css/app.css?v=112">
   <link rel="stylesheet" href="/static/css/shadcn.css?v=98">
 </head>
 <body>
@@ -119,14 +119,26 @@
         <div class="card" style="margin-bottom:14px">
           <div class="hd"><b>参数</b></div>
 
-          <div class="paths">
-            <div class="inp mono pathinp">
-              <span class="lb">输入</span>
+          <!-- 路径行：训练器「参数设置 → 数据集参数」里 src / dst / 预训练集 那三行的同一套
+               DOM（app.js:9092 renderCfg 的 t==="path" 分支，逐节点照抄）：
+                 .cfgrow.cfgpathrow
+                   > .inp.mono.pathinp.cfgpath[style=flex:1 1 auto;width:auto;min-width:0]
+                       > span.lb（框内标签，浅字 + 右侧 1px 分割线）
+                       > input.pathval（等宽路径，可直接改字）
+                       > span.pill.iconpill > svg.ic > use#i-folder（点一下走 pickFolderFor）
+               行里没有外层 .cl / .cc —— 标签在框内，整行就是这一个编辑框。
+               样式全部来自 app.css 的 .inp.mono.pathinp / .cfgrow.cfgpathrow / .inp.pathinp .lb，
+               本页不再有自己的覆盖（那是上一版「标签在框外」的残留）。 -->
+          <div class="cfgrow cfgpathrow">
+            <div class="inp mono pathinp cfgpath" style="flex:1 1 auto;width:auto;min-width:0">
+              <span class="lb" title="源视频文件或源图片目录">输入</span>
               <input class="pathval" id="exSrc" value="D:&#92;media&#92;raw&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
               <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span>
             </div>
-            <div class="inp mono pathinp">
-              <span class="lb">输出</span>
+          </div>
+          <div class="cfgrow cfgpathrow">
+            <div class="inp mono pathinp cfgpath" style="flex:1 1 auto;width:auto;min-width:0">
+              <span class="lb" title="对齐后的帧 / 人脸输出目录">输出</span>
               <input class="pathval" id="exDst" value="workspace&#92;_frames&#92;" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off">
               <span class="pill iconpill" title="选择目录"><svg class="ic"><use href="#i-folder"/></svg></span>
             </div>
@@ -144,15 +156,11 @@
 
           <div class="cfgrow">
             <span class="cl">帧跳跃</span><span class="cd">每 N 帧取一张</span>
+            <!-- 与导出设置页「质量 / 并行进程」同一套：.inp.rng 数字框 + .unit 单位 -->
             <span class="cc">
-              <div style="display:flex;align-items:center;gap:8px">
-                <div class="num">
-                  <button class="nb" data-d="-1" title="少一帧">−</button>
-                  <input id="exSkip" value="1" inputmode="numeric" min="1" max="120" title="每 N 帧取一张">
-                  <button class="nb" data-d="1" title="多一帧">+</button>
-                </div>
-                <span style="font-size:12px;color:var(--ink-3)">帧</span>
-              </div>
+              <input class="inp rng" id="exSkip" type="number" min="1" max="120" value="1"
+                     title="每 N 帧取一张（1~120）">
+              <span class="unit">帧</span>
             </span>
           </div>
 
@@ -554,6 +562,20 @@
           <button class="mini" id="runStop" style="color:var(--bad)">停止</button>
         </div>
 
+        <!-- 模块加载失败横幅：**常驻**，直到用户点 × / 离开训练页 / 训练结束。
+             文案与是否出现完全由后端决定（/api/train/status 的 warnings[]），
+             这样刷新页面后只要训练还在跑，它就重新出现 —— 因为它描述的是状态，
+             不是"刚才发生了一件事"。逻辑见 js/loadbanner.js。 -->
+        <div class="alert warn loadbanner hide" id="loadBanner" hidden aria-live="polite">
+          <div class="alhd">
+            <span class="lbico" aria-hidden="true">!</span>
+            <b id="loadBannerTitle">模块未能加载</b>
+            <button class="alx" id="loadBannerX" title="关闭" aria-label="关闭">×</button>
+          </div>
+          <div class="albd" id="loadBannerBody"></div>
+          <div class="lblist" id="loadBannerList"></div>
+        </div>
+
         <!-- 训练失败横幅：常驻，直到用户关掉。OOM 这类"必须改配置"的错误不能用右下角 toast。 -->
         <div class="alert danger hide" id="runAlert">
           <div class="alhd"><b id="runAlertTitle">训练失败</b><button class="alx" id="runAlertX" title="关闭">×</button></div>
@@ -632,7 +654,7 @@
               <input class="pathval" value="workspace" spellcheck="false" autocomplete="off">
             </div>
             <div class="mggrp">
-              <div class="mggrphd">模型<span id="mgModelCount"></span></div>
+              <div class="mggrphd">模型</div>
               <div id="mgModels"></div>
             </div>
             <div class="mggrp">
@@ -649,20 +671,38 @@
           </aside>
 
           <div class="mgcenter">
-            <div class="mgviews" id="mgViews">
-              <b class="on" data-v="orig">原图</b>
-              <b data-v="det">检测</b>
-              <b data-v="swap">合成</b>
+            <!-- 顶部入口：人脸数据库。也是「＋」飞入动画的落点，角标 = 本次已加进去的张数 -->
+            <button class="mgdbentry" id="mgDbEntry" type="button" title="人脸数据库">
+              <svg class="ic"><use href="#i-layers"/></svg>
+              <span>人脸数据库</span>
+              <i class="mgdbbdg" id="mgDbBadge" hidden>0</i>
+            </button>
+            <!-- 合成视图就是唯一视图（不再有「合成 / 调试」切换）：框始终显示，
+                 点框内部 = 只把那一张脸切「合成 ↔ 原图」 -->
+            <div class="mgstage" id="mgStage">
+              <!-- 空态（舞台上还没有任何素材）：舞台中央一句话 + 两个入口。
+                   按钮不带自己的逻辑 —— 点下去就是点左栏那两个已有按钮，导入流程只有一份。
+                   一有素材（__mv.video / __mv.path / __mergeInputDir）就收起，见 mgStageEmpty()。
+                   以前这里是 #mgStageHint 一个胶囊「选择视频后显示」，空态没有入口。 -->
+<span id="mgStageHint" hidden>选择视频后显示</span><video id="mgVideo" playsinline muted preload="metadata"></video><img id="mgPreview" alt="">
+              <!-- 每张脸的模型 chip / 调试 / ＋ 按钮挂在这一层（canvas 只负责 2px 描边）。
+                   .mgfc 是 0×0 透明锚点：框内一个像素都不许落（验收按像素断言）。 -->
+              <div class="mgflayer" id="mgFaceLayer"></div>
+              <!-- 单脸调试六宫格：点框上的「调试」进来，点「返回」回合成视图。
+                   整块盖在舞台上但不碰底下的图 —— 返回时画面逐像素和进来前一致。 -->
+              <div class="mgfgrid" id="mgFaceGrid" hidden aria-hidden="true" role="dialog"
+                   aria-label="单脸六宫格调试"></div>
+              <span class="mgcnote" id="mgCmpNote" hidden>正在合成…</span>
             </div>
-            <div class="mgstage" id="mgStage"><span id="mgStageHint">选择视频后显示</span><video id="mgVideo" playsinline muted preload="metadata"></video><img id="mgPreview" alt=""></div>
           </div>
 
           <aside class="mgright">
             <div class="mgsec">
-              <div class="mggrphd"><i class="dot"></i>检测</div>
+              <div class="mggrphd">检测</div>
               <div class="mgrow"><span class="f">检测器</span>
+                <!-- 500m 这个权重根本不存在，已从选项里删掉；默认 TinyMog（快） -->
                 <select class="mgsel" id="mgDetector">
-                    <option>RetinaFace_10g</option><option>RetinaFace_500m</option><option>TinyMog</option>
+                    <option>TinyMog</option><option>RetinaFace_10g</option>
                   </select>
               </div>
               <div class="mgrow"><span class="f">特征点</span><span class="mgval">insightface-2d106det</span></div>
@@ -678,34 +718,42 @@
             </div>
 
             <div class="mgsec">
-              <div class="mggrphd"><i class="dot"></i>合成</div>
+              <div class="mggrphd">合成</div>
               <div class="mgrow"><span class="f">模式</span>
-                <select class="mgsel" id="mgMode">
-                  <option>overlay</option><option>original</option><option>hist-match</option>
-                  <option>seamless</option><option>seamless-hist-match</option>
-                  <option>raw-rgb</option><option>raw-predict</option><option>debug</option>
+                <!-- 只放**融合方式**（4 个）。原图 / 调试是「视图」，在画面右上角切，
+                     不混进这里（以前 debug / raw-* / original 混在这，选了也不生效）。 -->
+                <select class="mgsel" id="mgMode" title="融合方式">
+                  <option>overlay</option><option>hist-match</option>
+                  <option selected>seamless</option><option>seamless-hist-match</option>
                 </select>
               </div>
               <div class="mgrow"><span class="f">遮罩来源</span>
-                <div class="seg" data-k="seg"><b class="on">DFM</b><b>XSeg</b><b>XSegLite</b></div>
+                <div class="seg" data-k="seg"><b>DFM</b><b>XSeg</b><b class="on">XSegLite</b></div>
               </div>
               <div class="mgrow"><span class="f">遮罩模式</span>
                 <div class="seg" data-k="mask"><b class="on">prd×dst</b><b>prd</b><b>dst</b></div>
               </div>
               <div class="mgrow"><span class="f">色域迁移</span>
+                <!-- ct_mode：只留契约里的 5 档，默认 mt -->
                 <select class="mgsel" id="mgColor">
-                  <option>rct</option><option>mt</option><option>lut</option><option>lct</option>
-                  <option>mkl</option><option>idt</option><option>sot-m</option><option>mix-m</option><option>none</option>
+                  <option>mt</option><option>rct</option><option>lct</option><option>mkl</option><option>sot</option>
                 </select>
               </div>
-              <div class="mgrow"><span class="f">遮罩腐蚀</span><div class="mgnum"><input class="mgtiny" value="0" title="范围 −100 ~ 100"></div></div>
-              <div class="mgrow"><span class="f">遮罩羽化</span><div class="mgnum"><input class="mgtiny" value="4" title="范围 −100 ~ 100"></div></div>
+              <div class="mgrow"><span class="f">遮罩腐蚀</span><div class="mgnum"><input class="mgtiny" id="mgErode" value="0" title="范围 −100 ~ 100"></div></div>
+              <div class="mgrow"><span class="f">遮罩羽化</span><div class="mgnum"><input class="mgtiny" id="mgBlur" value="4" title="范围 −100 ~ 100"></div></div>
             </div>
 
     
 
             <div class="mgsec mgexport">
+              <!-- 「导出」只是入口：点它进导出设置页（mgOpenExportSettings），
+                   真正发请求的是那一页底部的「开始导出」。左栏一个模型都没选时禁用。 -->
               <button class="btn pri" id="mgExport" style="width:100%">导出</button>
+              <div class="mgexport-hint" id="mgExportHint" hidden>先选一个模型</div>
+              <!-- 标准 DFL 项目模式：先逐帧合成到 <项目>/merged/，再编码成片。
+                   和上面那个「导出」（4.0 MergeStudio 一口气出 mp4）并列，两条路都在。 -->
+              <button class="btn" id="mgExportProject" style="width:100%;margin-top:8px"
+                      title="逐帧合成到 &lt;项目&gt;/merged/ 再编码成片 · 可断点续跑">导出项目</button>
             </div>
           </aside>
         </div>
@@ -780,129 +828,434 @@
 </div>
         </div>
 
-        <div class="mgview" data-view="facedb">
-<div class="mgp-head">
-    <div class="mgp-tt">
-      <b>人脸库</b>
-    </div>
-    <!-- 计数：建库后由 MergePages.setFaceCount(n) 更新 -->
-    <span class="mgp-count" id="mgFaceCount">已建库 <b>0</b> 张人脸</span>
-    <!-- 动作对应 4.0 的 Compute Face Embeddings（POST /api/face/compute-embeddings） -->
-    <button class="btn mgp-btn" id="mgComputeEmb" type="button">计算人脸特征</button>
-          <button class="btn pri mgp-btn" id="mgToSettings" type="button">下一步</button>
-  </div>
+        <!-- ================= 合成器 · 人脸数据库（导出前必须经过） ================= -->
+        <!--
+          页面本身只放骨架，组卡片 / 人脸卡 / 回收站条目全部由 js/face_db.js 按
+          GET /api/merge/faces 的真实数据渲染。缩略图统一 128×128，来自
+          GET /api/merge/faces/thumb；DFM 输入尺寸由后端随组一起返回。
 
-  <!-- 页面内部滚动区：缩略图多了也不撑破容器 -->
-  <div class="mgp-scroll">
-    <div class="mgp-grid" id="mgFaceGrid">
-      <!-- 24 个棋盘格占位缩略图由 merge-pages.js 生成 -->
-    </div>
-    <div class="empty-note mgp-empty" id="mgFaceEmpty" hidden>还没有建立人脸库</div>
-  </div>
+          这一版把「没用的东西」整块删掉了：未分组区、移动到下拉 + 移动按钮、
+          移入回收站按钮、从当前帧提取人脸按钮、说明性小字、项目名副标题、
+          模式徽标、底部统计栏里的「关闭」。
+          批量语义只剩「组内」：顶栏不再有跨组的「全选 / 清空选择」，
+          「已选 N 张」本身就是清空按钮；全选挪到每张组卡片头部右侧的勾选框。
+          顶栏一行装完：标题 + 已选 N 张 + 关闭（唯一的关闭入口）。
+          「提取到 <dfm>」下拉已经删掉：新脸落进哪一组由后端按人脸 embedding 判定
+          （像哪个组里的脸就归哪个组），不归用户在这里选。
+          组卡片横向排一行（放不下就横向滚）；回收站面板本身就是拖放目标。
+        -->
+        <div class="mgview" data-view="facedb" id="mgFaceDb">
+          <div class="fdb" id="fdbRoot">
+            <header class="fdb-top">
+              <div class="fdb-title"><b>人脸数据库</b></div>
+              <div class="fdb-sel">
+                <!-- 「已选 N 张」既是状态显示，也是清空按钮（键盘 Esc 等价）。
+                     没有人选中时禁用它，Tab 也就不会停在一个按不动的按钮上。 -->
+                <button class="fdb-selected" id="fdbSelChip" type="button" title="清空选择（Esc）" disabled><span>已选</span><b id="fdbSelCount">0</b><span>张</span><span class="fdb-selected-x" aria-hidden="true">×</span></button>
+              </div>
+              <div class="fdb-topacts">
+                <button class="btn ghost fdb-close" id="fdbClose" type="button">关闭</button>
+              </div>
+            </header>
+
+            <div class="fdb-body">
+              <section class="fdb-main" id="fdbBoardWrap" aria-label="人脸分组">
+                <div class="fdb-board" id="fdbBoard" tabindex="-1">
+                  <div class="fdb-groups" id="fdbGroups"></div>
+
+                  <div class="fdb-empty" id="fdbEmpty" hidden>
+                    <div class="fdb-empty-ic" aria-hidden="true">＋</div>
+                    <b>人脸库还是空的</b>
+                    <span>在合成器的画面上点「＋」把这张脸加进来</span>
+                  </div>
+
+                  <div class="fdb-loading" id="fdbLoading"><span>正在读取人脸库…</span></div>
+                  <div class="fdb-error" id="fdbError" hidden>
+                    <b>人脸库读取失败</b>
+                    <span id="fdbErrorMsg"></span>
+                    <button class="mini" id="fdbRetry" type="button">重试</button>
+                  </div>
+                </div>
+              </section>
+
+              <aside class="fdb-trash" id="fdbTrash" aria-label="回收站" data-drop-trash="1">
+                <div class="fdb-trash-hd">
+                  <b>回收站</b>
+                  <span class="fdb-count"><b id="fdbTrashCount">0</b><span>张脸</span></span>
+                  <span class="fdb-spacer"></span>
+                  <button class="mini" id="fdbRestoreAll" type="button">全部还原</button>
+                  <button class="mini fdb-danger" id="fdbPurgeAll" type="button">清空</button>
+                </div>
+                <div class="fdb-trash-list" id="fdbTrashList"></div>
+                <div class="fdb-trash-empty" id="fdbTrashEmpty">回收站是空的</div>
+              </aside>
+            </div>
+
+            <footer class="fdb-foot">
+              <div class="fdb-stats">
+                <span><span>总脸数</span><b id="fdbStatTotal">0</b></span>
+                <span><span>回收站</span><b id="fdbStatTrash">0</b></span>
+              </div>
+              <button class="btn fdb-continue" id="fdbContinue" type="button">继续导出</button>
+            </footer>
+
+            <div class="fdb-drop-tip" id="fdbDropTip" hidden></div>
+
+            <!-- 二次确认共用同一张卡；由 face_db.js 填内容。 -->
+            <div class="fdb-modal" id="fdbModal" hidden role="dialog" aria-modal="true" aria-labelledby="fdbModalTitle">
+              <div class="fdb-modal-card">
+                <div class="fdb-modal-hd"><b id="fdbModalTitle">确认</b></div>
+                <div class="fdb-modal-desc" id="fdbModalDesc"></div>
+                <div class="fdb-modal-body" id="fdbModalBody"></div>
+                <div class="fdb-modal-foot">
+                  <button class="btn ghost" id="fdbModalCancel" type="button">取消</button>
+                  <button class="btn" id="fdbModalOk" type="button">确定</button>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
+        <!-- 导出设置：与训练器参数页同一套设计语言（.card + .cardhd + .cfgrow）。
+             每个分组一张卡，行 = 左侧定宽标签（.cl）+ 中间说明（.cd）+ 右侧控件（.cc）；
+             行高、控件（.seg / .mgsel / .inp）、底部 .cfgactions 全部复用训练页那几条规则，
+             这里只写本页的排布（.mgset / .mgset-scroll）。
+             参数最终写入 POST /api/export/start（字段名同 4.0 ExportStartRequest）。 -->
         <div class="mgview" data-view="settings">
-<div class="mgp-head">
-    <div class="mgp-tt">
-      <b>导出设置</b>
-    </div>
-    <!-- 参数最终写入 POST /api/export/start（字段名同 4.0 ExportStartRequest） -->
-    <span class="mgp-count">输出 · 编码 · 性能</span>
-          <button class="btn pri mgp-btn" id="mgStartExport2" type="button">开始导出</button>
-  </div>
+          <div class="mgset">
+            <div class="mgset-hd">
+              <b>导出设置</b>
+              <span class="hint" id="mgSettingsCount">输出 · 编码 · 性能</span>
+            </div>
 
-  <div class="mgp-scroll">
-    <!-- 组 1：输出 -->
-    <div class="mgp-sec">
-      <div class="mgp-hd">输出</div>
-      <div class="mgrow">
-        <span class="f">格式</span>
-        <div class="seg" data-k="image_format">
-          <b class="on" data-v="jpg" title="4.0 值 jpg（Cache Format，JPEG 100%）">JPEG</b>
-          <b data-v="png" title="4.0 值 png（PNG 帧缓存）">PNG</b>
-        </div>
-      </div>
-      <div class="mgrow">
-        <span class="f">质量</span>
-        <div class="mgnum">
-          <!-- MISSING: 4.0 后端 ExportStartRequest 没有质量字段，
-               _stage1_extract_frames 固定 -q:v 2（export_pipeline.py:1272）；
-               这里只按设计稿占位，禁用且不随导出请求提交 -->
-          <input class="mgtiny" id="mgQuality" type="number" min="1" max="100" value="95"
-                 title="4.0 固定 -q:v 2，无此参数" disabled>
-          <span class="mgunit">%</span>
-        </div>
-      </div>
-      <div class="mgrow">
-        <span class="f">输出路径</span>
-        <div class="inp mono pathinp">
-          <input class="pathval" id="mgOutPath" type="text" spellcheck="false" autocomplete="off"
-                 placeholder="留空 = 源视频名_result.mp4">
-          <span class="pill iconpill" id="mgOutPick" title="选择输出目录">
-            <svg class="ic"><use href="#i-folder"/></svg>
-          </span>
-        </div>
-      </div>
-    </div>
+            <div class="mgset-scroll">
+              <!-- 组 0：这次导出（只读回显 + 帧范围）。要改模型/参数就回合成器，这里只看不改。 -->
+              <div class="card">
+                <div class="cardhd"><b>这次导出</b><span class="hint">改模型 / 参数请回合成器</span></div>
+                <div class="cfgrow">
+                  <span class="cl">选中模型</span>
+                  <span class="cd">随 models[] 一起发出去</span>
+                  <span class="cc"><div class="mgexp-models" id="mgSelModels"></div></span>
+                </div>
+                <!-- 输出目录 / 输出路径：训练器「数据集参数」src·dst·预训练集 那行的同一套 DOM
+                     （app.js:9092）：整行一个大框 .inp.mono.pathinp.cfgpath，标签 .lb 在框内，
+                     右边 25×25 文件夹图标。这里不再有行外 .cl / .cc —— 那是上一版的样子，
+                     标签在框外、框只剩右边一截，和训练页不是一套。 -->
+                <div class="cfgrow cfgpathrow">
+                  <div class="inp mono pathinp cfgpath" style="flex:1 1 auto;width:auto;min-width:0">
+                    <span class="lb" title="默认输出位置（可编辑；也可以点右边图标选目录）">输出目录</span>
+                    <input class="pathval" id="mgDefOut" type="text" spellcheck="false" autocomplete="off">
+                    <span class="pill iconpill" id="mgDefOutPick" title="选择输出目录"><svg class="ic"><use href="#i-folder"/></svg></span>
+                  </div>
+                </div>
+                <div class="cfgrow">
+                  <span class="cl" title="默认全片。填了会随阶段请求带上 start_frame / end_frame。">帧范围</span>
+                  <span class="cd">留空 = 全片</span>
+                  <span class="cc">
+                    <input class="inp rng" id="mgFrameFrom" type="number" min="0" value="0"
+                           title="起始帧（0 = 从第一帧开始）">
+                    <span class="unit">→</span>
+                    <input class="inp rng" id="mgFrameTo" type="number" min="0" placeholder="末帧"
+                           title="结束帧（留空 = 到最后一帧，即全片）">
+                    <span class="unit" id="mgFrameTotal">全片</span>
+                    <button class="mini" id="mgFrameAll" type="button" title="恢复成整段视频（全片）">恢复全片</button>
+                  </span>
+                </div>
+              </div>
 
-    <!-- 组 2：编码 -->
-    <div class="mgp-sec">
-      <div class="mgp-hd">编码</div>
-      <div class="mgrow">
-        <span class="f">编码器</span>
-        <div class="seg" data-k="encoder">
-          <b class="on" data-v="h264_nvenc" title="NVENC 硬件编码（4.0 默认）">h264_nvenc</b>
-          <b data-v="libx264" title="x264 软件编码">libx264</b>
-        </div>
-      </div>
-      <div class="mgrow">
-        <span class="f">解码加速</span>
-        <div class="seg" data-k="hwaccel">
-          <b class="on" data-v="auto" title="hwaccel='auto'，无 GPU 时自动回退软解">开</b>
-          <b data-v="" title="hwaccel=''（关闭硬解）">关</b>
-        </div>
-      </div>
-    </div>
+              <!-- 组 1：输出 -->
+              <div class="card">
+                <div class="cardhd"><b>输出</b></div>
+                <div class="cfgrow">
+                  <span class="cl">格式</span>
+                  <span class="cd">4.0 的 Cache Format</span>
+                  <span class="cc">
+                    <div class="seg" data-k="image_format">
+                      <b class="on" data-v="jpg" title="4.0 值 jpg（Cache Format，JPEG 100%）">JPEG</b>
+                      <b data-v="png" title="4.0 值 png（PNG 帧缓存）">PNG</b>
+                    </div>
+                  </span>
+                </div>
+                <!-- 「质量」这一行**已删除**（用户口径）：帧图 JPEG 固定 quality=100 + 4:4:4
+                     （app/server/routes_merge.py 的 _STAGE_JPEG_QUALITY），PNG 本来就无损。
+                     以前那颗 95 的输入框既不可编辑、后端也从来没读过它 —— 一个动不了又
+                     不生效的旋钮只会让人以为画质是这里定的。低画质没有使用场景，不留。
+                     真要排障：body.jpeg_quality 仍然认（1..100，默认 100），只是界面不再暴露。 -->
+                <div class="cfgrow cfgpathrow">
+                  <div class="inp mono pathinp cfgpath" style="flex:1 1 auto;width:auto;min-width:0">
+                    <span class="lb" title="留空 = 源视频名_result.mp4">输出路径</span>
+                    <input class="pathval" id="mgOutPath" type="text" spellcheck="false" autocomplete="off"
+                           placeholder="留空 = 源视频名_result.mp4">
+                    <span class="pill iconpill" id="mgOutPick" title="选择输出目录"><svg class="ic"><use href="#i-folder"/></svg></span>
+                  </div>
+                </div>
+              </div>
 
-    <!-- 组 3：性能 -->
-    <div class="mgp-sec">
-      <div class="mgp-hd">性能</div>
-      <div class="mgrow">
-        <span class="f">并行进程</span>
-        <div class="mgnum">
-          <input class="mgtiny" id="mgWorkers" type="number" min="0" max="16" value="0"
-                 title="num_workers · 0 = 自动 · 范围 0 ~ 16">
-          <span class="mgunit">0 = 自动</span>
+              <!-- 组 2：编码 -->
+              <div class="card">
+                <div class="cardhd"><b>编码</b></div>
+                <div class="cfgrow">
+                  <span class="cl">编码器</span>
+                  <span class="cd">NVENC 硬件编码 / x264 软件编码</span>
+                  <span class="cc">
+                    <div class="seg" data-k="encoder">
+                      <b class="on" data-v="h264_nvenc" title="NVENC 硬件编码（4.0 默认）">h264_nvenc</b>
+                      <b data-v="libx264" title="x264 软件编码">libx264</b>
+                    </div>
+                  </span>
+                </div>
+                <div class="cfgrow">
+                  <span class="cl">解码加速</span>
+                  <span class="cd">hwaccel=auto，无 GPU 自动回退软解</span>
+                  <span class="cc">
+                    <div class="seg" data-k="hwaccel">
+                      <b class="on" data-v="auto" title="hwaccel='auto'，无 GPU 时自动回退软解">开</b>
+                      <b data-v="" title="hwaccel=''（关闭硬解）">关</b>
+                    </div>
+                  </span>
+                </div>
+              </div>
+
+              <!-- 组 3：性能 -->
+              <div class="card">
+                <div class="cardhd"><b>性能</b></div>
+                <!-- 整条合成链有 37 个 DFL_* 环境变量（清单见 app/docs/27-ENV-KNOBS.md），
+                     其中 35 个是「已经量到最优」的调优口 / 排障开关 —— 摆到界面上只会
+                     得到「调坏了却不知道为什么慢」。只留这两个真正要给用户选的：
+                       推理精度（DFL_DFM_DTYPE）：画质/显存/速度的取舍，没有唯一正确答案；
+                       合成后端（DFL_COMPOSE_GPU）：GPU 合成在 8GB 卡上不一定更快（docs/26）。
+                     ★ 两个都是「自动 = 请求体不带这个键」：别把「自动」写死成某个具体值
+                       发过去，那等于替用户做了决定，还让他以后找不到原因。
+                     ★ data-cfg 是记忆键（与训练器参数页同一套）：dfl-mg-cfg-memory 里
+                       存值，刷新/下次进页面回填 —— 见 app.js 的 mgCfgMem*。 -->
+                <div class="cfgrow">
+                  <span class="cl" title="DFL_DFM_DTYPE · 只影响 .dfm 推理">推理精度</span>
+                  <span class="cd">自动 = 不写死档位（后端默认 bf16w）</span>
+                  <span class="cc">
+                    <select class="mgsel" id="mgDfmDtype" data-cfg="dfm_dtype"
+                            title="自动：交给后端定档（默认 bf16w）；fp32 只用于与 onnx 对拍，比默认慢 2.4 倍">
+                      <option value="auto" selected>自动（推荐）</option>
+                      <option value="fp32" title="严格 fp32（关 TF32）：对拍用，慢 2.4 倍">fp32</option>
+                      <option value="bf16" title="权重 fp32 + autocast(bf16)：精度更高的那一档">bf16</option>
+                      <option value="bf16w" title="权重也压 bf16：更省显存（-250MB~-1.1GB）">bf16w</option>
+                    </select>
+                  </span>
+                </div>
+                <div class="cfgrow">
+                  <span class="cl" title="DFL_COMPOSE_GPU · 合成放在哪算">合成后端</span>
+                  <span class="cd">自动 = 现在的 CPU 路径</span>
+                  <span class="cc">
+                    <select class="mgsel" id="mgCmpBackend" data-cfg="compose_backend"
+                            title="自动：CPU 合成（默认）；gpu 走 torch CUDA，8GB 卡上 overlay 持平、seamless 更慢，所以不默认开">
+                      <option value="auto" selected>自动（推荐）</option>
+                      <option value="cpu" title="compose_frame（OpenCV，CPU）">cpu</option>
+                      <option value="gpu" title="compose_frame_gpu（torch CUDA）：seamless 也走 GPU（Poisson/DST）；1080p 单脸下可能比 CPU 慢，起不来会自动回退并告警">gpu</option>
+                    </select>
+                  </span>
+                </div>
+                <div class="cfgrow">
+                  <span class="cl">并行进程</span>
+                  <span class="cd">num_workers · 0 = 自动</span>
+                  <span class="cc">
+                    <input class="inp rng" id="mgWorkers" type="number" min="0" max="16" value="0"
+                           title="num_workers · 0 = 自动 · 范围 0 ~ 16">
+                  </span>
+                </div>
+                <!-- cache 默认不保留：成功导出后后端会把 <名字>_cache/ 整个删掉（这是既有行为）。
+                     选「保留」会把 keep_cache=true 随阶段请求发下去，方便数产物/续跑。 -->
+                <div class="cfgrow">
+                  <span class="cl">保留 cache</span>
+                  <span class="cd">成功后 <名字>_cache/ 默认会被删掉</span>
+                  <span class="cc">
+                    <div class="seg" data-k="keep_cache">
+                      <b class="on" data-v="">不保留</b><b data-v="1">保留</b>
+                    </div>
+                  </span>
+                </div>
+                <!-- 快速导出（融合流水线，fused=1）：视频模式**默认走它**。
+                     六段（解码/检测/对齐/dfm/遮罩/合成）在内存里同时跑，段间只有有界队列，
+                     不建 <名字>_cache/（这是它和分段链的关键区别），实测 ~2.8x。
+                     代价：没有阶段游标 → **不支持续跑**，取消就是整段重跑。
+                     关掉 = 回退六阶段分段链（可单跑、可续跑），留给排查和对照。 -->
+                <div class="cfgrow">
+                  <span class="cl">快速导出</span>
+                  <span class="cd">六段并行 · 不建 cache · 不可续跑</span>
+                  <span class="cc">
+                    <div class="seg" data-k="fast_export">
+                      <b class="on" data-v="1" title="六段同时在内存里跑：不建 &lt;名字&gt;_cache/，快约 2.8 倍；取消即整段重跑">开</b>
+                      <b data-v="" title="回退六阶段分段链（切帧→切脸→换脸→遮罩→合成→导出）：每步独立产物、可续跑">关</b>
+                    </div>
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <!-- 底部动作区：与训练页 .cfgactions 同一套（分隔线 + 吸底 + 右侧主按钮） -->
+            <div class="cfgactions mgset-acts">
+              <span class="hint" id="mgExportStatus"></span>
+              <div style="flex:1"></div>
+              <span class="mgexport-hint" id="mgStartHint" hidden>先选一个模型</span>
+              <button class="btn ghost" id="mgCancelExport" type="button">取消</button>
+              <button class="btn pri" id="mgStartExport" type="button">开始导出</button>
+            </div>
+          </div>
         </div>
-      </div>
-    </div>
-  </div>
-  <div id="mgExportStatus" class="hint"></div>
-        </div>
+
         <div class="mgview" data-view="progress">
           <div class="mgprog">
             <div class="mgprog-hd">
-              <b>正在导出</b>
-              <span class="mgprog-file" id="mgpFile">—</span>
+              <b id="mgpHdTitle">正在导出</b>
+              <!-- 文件名：没拿到就 **不渲染** 这个空壳。以前这里是「正在导出 —」，
+                   一个孤零零的破折号既不是文件名也不是状态（用户指出的噪音之一）。 -->
+              <span class="mgprog-file" id="mgpFile" hidden></span>
+            </div>
+
+            <!-- 终态结果：完成/失败/取消都在这里收口。
+                 导出中 hidden（这时只有下面那颗「取消导出」）；终态一出来就顶上来，
+                 给「返回导出设置」和「再次导出」两个出口，参数一个都不丢。 -->
+            <div class="mgprog-res" id="mgpResult" hidden>
+              <!-- 「结果」这行小标题删掉了：成功/失败/取消三种终态下面那行字已经说清楚了，
+                   它只是又一个噪音标签。 -->
+
+              <!-- 一行结论：完成路径 = 成片/取消说明；被拒路径 = 「显存不足：需要 X GB，可用 Y GB」 -->
+              <div class="mgprog-res-txt" id="mgpResultText"></div>
+            </div>
+
+            <!-- 生效配置不一致横幅：后端把 [eff-warn] 塞进 status.eff_warnings[]，
+                 这里只负责显示（可关闭，换一单就重新出现）。复用 .alert.warn/.loadbanner
+                 那一套（左侧强调条 + 图标 + 标题），和训练页的模块加载横幅同一种东西。 -->
+            <div class="alert warn loadbanner mgeff-warn" id="mgpEffWarn" hidden aria-live="polite">
+              <div class="alhd">
+                <span class="lbico" aria-hidden="true">!</span>
+                <b id="mgpEffWarnTitle">生效配置与界面可能不一致</b>
+                <button class="alx" id="mgpEffWarnX" type="button" title="关闭" aria-label="关闭">×</button>
+              </div>
+              <div class="albd" id="mgpEffWarnBody"></div>
+            </div>
+
+            <!-- 「当前生效」（只读）不再常驻：14 个字段以后归「控制台输出」界面，
+                 这里折成右下角一个文字入口 + 抽屉（点开才渲染，不占版面）。
+                 横幅必须留着 —— 它是「界面设了、后端没按它跑」的唯一提示。 -->
+
+            <!-- 顶部那条 6px 进度条 + 「45% / 32-72 帧 / 剩余 30 秒」整行**拆掉**了。
+                 进度不再用一条横条 + 一个百分数表示：它变成图里「缓存帧」那一列的水位
+                 （见下），帧数/速度/剩余挪进流水线卡片的标题行。页面上只留一处进度。 -->
+            <!-- 流水线实况（SVG）
+                 ------------------------------------------------------------
+                 为什么是这张图：快速导出（fused，默认路径）里六段是**并行**跑的，
+                 「六个圆点」只能表达进行中/完成，表达不了「谁把东西交给谁」「队列里
+                 还压着几个」「哪个池有几条线程」。这里换成 6 列 × N 条 lane：
+                   方块 = **一条真线程**（lane 名与条数全都来自 status.stages，
+                 前端不写死：合成池 8 线程就是 t0..t7，编码 6 线程就是 e0..e5），
+                   曲线 = 数据流方向（三次贝塞尔，两段在列间中线处平滑衔接），
+                   光点 = 正在传的那一帧（每次 tick 一个，从实际那条 lane 出发），
+                   列间那句「在飞 N」= status.stages[key].inflight（0 时不显示）。
+                 点亮：lane 瞬间到峰值 → 1.15s 暗回常态（可叠加）；>600ms 没 tick
+                 且没完成 → 整列琥珀色。结构和曲线一次建好、之后只改文字和坐标，
+                 不每个 tick 重建 DOM（这是「别再卡」的一半）。
+                 结构由 app.js 的 MG_PIPE 生成；这里只留一个空 svg 当挂载点。 -->
+            <div class="mgprog-steps" id="mgpStepsBox">
+              <div class="mgpipe" id="mgPipe">
+                <!-- 标题行 = 页面唯一的「数字进度」：一颗小水杯（和「成片」同一档水位）
+                     + 帧数 + 剩余 + 速度。百分比在这里已经不存在了。 -->
+                <div class="mgpipe-hd">
+                  <b>流水线</b>
+                  <span class="mgpipe-sub" id="mgPipeSub">六段并行 · 每格一条 lane</span>
+                  <span class="mgpipe-right">
+                    <span class="mgpipe-cup" id="mgPipeCup" role="img"
+                          aria-label="水位：已完成帧占总帧数的比例"><i id="mgPipeCupFill"></i></span>
+                    <span id="mgpFrames">—</span>
+                    <span id="mgpEta">剩余 —</span>
+                    <span id="mgPipeRight">— 帧/秒</span>
+                  </span>
+                </div>
+                <div class="mgpipe-sep"></div>
+                <div class="mgpipe-body">
+                  <svg id="mgPipeSvg" class="mgpipe-svg" viewBox="0 0 1200 340"
+                       preserveAspectRatio="xMidYMid meet" role="img"
+                       aria-label="导出流水线实况：六列 lane、数据流曲线与在飞帧数"></svg>
+                </div>
+              </div>
+            </div>
+
+
+            <!-- 终态的两个出口放在**页面底部**（用户：按钮放下面）。文本仍在标题下面，按钮在最后。 -->
+              <div class="mgprog-res-acts" id="mgpResultActs" hidden>
+                <button class="btn" id="mgpToSettings" type="button">返回导出设置</button>
+                <!-- 次要出口：用户明确说「不理解为什么被拒」，那他更想**试**一次 ——
+                     点了带 force=1 放行 _vram_guard（按最小档真跑）；真 OOM 会自动
+                     回滚到这一页并写明「确实不够、已回滚」，不会把后端搞坏。 -->
+                <button class="btn" id="mgpForceTry" type="button" hidden>仍然尝试（可能 OOM）</button>
+              </div>
+
+            <div class="mgprog-foot" id="mgpFoot">
+              <button class="btn" id="mgpCancel">取消导出</button>
+            </div>
+
+            <!-- 右下角的轻入口（文字链接）：14 个字段折进抽屉，信息不丢、也不占版面。
+                 没有 eff 回显时禁用 —— 点开一片空白的弹层比没有入口更糟。 -->
+            <div class="mgprog-efflnk">
+              <button class="mgprog-lnk" id="mgpEffOpen" type="button"
+                      aria-haspopup="dialog" aria-controls="mgpEffDrawer" disabled>查看生效配置</button>
+            </div>
+          </div>
+
+          <!-- 生效配置抽屉（不是常驻面板）：点「查看生效配置」才打开，打开时才渲染这 14 个字段。
+               值后面那个小标签是来源：界面 = 请求体给的 / 推断 = 后端从别的字段推的 / 默认 = 后端默认。
+               右下角入口 + 抽屉 = 「信息还在、版面不占」，且 14 字段以后整体搬去控制台界面时只删这一块。 -->
+          <div class="mgeff-drawer" id="mgpEffDrawer" hidden>
+            <div class="mgeff-mask" id="mgpEffMask"></div>
+            <aside class="mgeff-sheet" role="dialog" aria-modal="true"
+                   aria-labelledby="mgpEffTitle" tabindex="-1" id="mgpEffSheet">
+              <div class="mgeff-hd">
+                <b id="mgpEffTitle">当前生效（后端回显）</b>
+                <span class="mgeff-route" id="mgpEffRoute">—</span>
+                <button class="mgeff-x" id="mgpEffClose" type="button"
+                        title="关闭" aria-label="关闭">×</button>
+              </div>
+              <div class="mgeff-grid" id="mgpEffGrid"></div>
+            </aside>
+          </div>
+        </div>
+
+        <!-- 项目导出（DFL 项目模式）：逐帧合成 → merged/ → 编码。进度/警告/失败帧/输出都在这一页 -->
+        <div class="mgview" data-view="project">
+          <div class="mgprog">
+            <div class="mgprog-hd">
+              <b>导出项目</b>
+              <span class="mgprog-file" id="mgpjFile">—</span>
             </div>
 
             <div class="mgprog-bar">
-              <i id="mgpFill" style="width:0%"></i>
+              <i id="mgpjFill" style="width:0%"></i>
             </div>
             <div class="mgprog-meta">
-              <span id="mgpPct">0%</span>
-              <span id="mgpFrames">—</span>
-              <span id="mgpEta">剩余 —</span>
+              <span id="mgpjPct">0%</span>
+              <span id="mgpjFrames">已处理 0 / 0 帧</span>
+              <span id="mgpjSpeed">— 帧/秒</span>
+              <span id="mgpjEta">剩余 —</span>
             </div>
 
-            <div class="mgprog-steps">
-              <div class="mgpstep on" data-s="load"><i></i><b>载入模型</b><span>—</span></div>
-              <div class="mgpstep" data-s="swap"><i></i><b>逐帧合成</b><span>—</span></div>
-              <div class="mgpstep" data-s="encode"><i></i><b>编码</b><span>—</span></div>
-              <div class="mgpstep" data-s="mux"><i></i><b>完成</b><span>—</span></div>
+            <div class="mgpj-sec" id="mgpjWarnBox" hidden>
+              <div class="mgpj-hd">警告</div>
+              <ul class="mgpj-list mgpj-list--warn" id="mgpjWarn"></ul>
+            </div>
+
+            <div class="mgpj-sec" id="mgpjFailBox" hidden>
+              <div class="mgpj-hd">失败帧 <b id="mgpjFailCount">0</b></div>
+              <ul class="mgpj-list mgpj-list--fail" id="mgpjFailed"></ul>
+            </div>
+
+            <div class="mgpj-sec">
+              <div class="mgpj-hd">输出</div>
+              <div class="mgpj-out">
+                <span class="mono" id="mgpjOut">—</span>
+                <button class="btn" id="mgpjOpen" type="button" disabled>打开所在目录</button>
+              </div>
+              <div class="mgpj-hint" id="mgpjHint"></div>
             </div>
 
             <div class="mgprog-foot">
-              <button class="btn" id="mgpCancel">取消导出</button>
+              <button class="btn" id="mgpjCancel">取消导出</button>
             </div>
           </div>
         </div>
@@ -1310,10 +1663,12 @@
     </div>
   </div>
 
-  <script src="/static/js/i18n.js?v=98"></script>
+  <script src="/static/js/i18n.js?v=99"></script>
   <!-- TF 时代 dat 的迁移提示：参数页顶部那一行。单独成文件，Node 里能直接断言 -->
   <script src="/static/js/legacy_notice.js?v=1"></script>
-  <script src="/static/js/app.js?v=113"></script>
+  <script src="/static/js/loadbanner.js?v=1"></script>
+  <script src="/static/js/app.js?v=116"></script>
+  <script src="/static/js/face_db.js?v=1"></script>
 <script type="module">
   import { startWelcome3D, stopWelcome3D } from "/static/js/welcomeflow.js?v=9";
   window.__welcome3d = { start: startWelcome3D, stop: stopWelcome3D };

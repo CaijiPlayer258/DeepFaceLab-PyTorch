@@ -52,7 +52,7 @@ def _params_cache_path(dat_path):
 def _read_params_cache(dat_path):
     """缓存必须和 data.dat 一一对应：文件大小 + mtime 对不上就当没有。
 
-    外部工具（tools/clear_Iter_str.py、转换器、ipe rov 原版）会直接改 data.dat，
+    外部工具（tools/migrate/clear_Iter_str.py、转换器、ipe rov 原版）会直接改 data.dat，
     靠这对指纹保证我们不会拿一份过期的参数去覆盖它。
     """
     try:
@@ -273,8 +273,21 @@ class ModelBase(object):
             io.log_info("\n模型首次运行。")
 
         if silent_start:
-            self.device_config = nn.DeviceConfig.CPU() if cpu_only else nn.DeviceConfig.BestGPU()
-            io.log_info(f"静默启动：已选择设备 {'CPU' if self.device_config.cpu_only else self.device_config.devices[0].name}")
+            # 静默启动以前**完全忽略 force_gpu_idxs**：训练页选了「0,1」两卡，这里
+            # 还是 BestGPU() 只取显存最大的那一张 —— 多卡选择等于没传，而且不提示。
+            if cpu_only:
+                self.device_config = nn.DeviceConfig.CPU()
+            elif force_gpu_idxs:
+                # 注意：这里的序号是**逻辑**序号（CUDA_VISIBLE_DEVICES 映射之后），
+                # 由 4.1 的 _train_worker 算好再传下来。
+                self.device_config = nn.DeviceConfig.GPUIndexes(force_gpu_idxs)
+            else:
+                self.device_config = nn.DeviceConfig.BestGPU()
+            if self.device_config.cpu_only:
+                io.log_info("静默启动：已选择设备 CPU")
+            else:
+                io.log_info("静默启动：已选择设备 " + ", ".join(
+                    str(d.name) for d in self.device_config.devices))
         else:
             self.device_config = nn.DeviceConfig.GPUIndexes(force_gpu_idxs or nn.ask_choose_device_idxs(suggest_best_multi_gpu=True)) \
                                 if not cpu_only else nn.DeviceConfig.CPU()
@@ -421,7 +434,7 @@ class ModelBase(object):
             io.log_info('  ' + line)
         if len(report) > 12:
             io.log_info(f"  …（其余 {len(report) - 12} 行报告："
-                        f"python tools/import_legacy_dat.py --dat {self.model_data_path}）")
+                        f"python tools/migrate/import_legacy_dat.py --dat {self.model_data_path}）")
         self._legacy_dat = {'report': report, 'counts': counts, 'reasons': reasons}
         return migrated
 
@@ -450,7 +463,7 @@ class ModelBase(object):
             io.log_info("[LEGACY] 当前目录里连 TF 权重（.npy）都没有，这份 dat 只能当参数模板：")
         # 注意顺序：转换脚本是拿 dat 里的 options 建网络骨架的，老 dat（archi=dfhd 等）
         # 直接喂给它只会 ValueError: Unsupported SAEHD archi_type —— 先迁 dat 再转。
-        io.log_info('        python tools/import_legacy_dat.py '
+        io.log_info('        python tools/migrate/import_legacy_dat.py '
                     f'--dat "{self.model_data_path}" '
                     f'--apply --out "<目标模型目录>/{stem}_data.dat" --convert')
 
@@ -943,7 +956,10 @@ class ModelBase(object):
 
         self._ensure_disk_space()
 
-        Path(self.get_summary_path()).write_text(self.get_summary_text())
+        # encoding 必须显式给：Path.write_text 的默认值是这个进程的 locale（Windows 上
+        # 是 cp936），摘要里只要有 cp936 编不出的字符就直接抛 UnicodeEncodeError，
+        # 整个 save()（权重 + dat）跟着一起失败；而且同一份摘要换台机器读出来是乱码。
+        Path(self.get_summary_path()).write_text(self.get_summary_text(), encoding='utf-8')
 
         # Save .dat first — preserves current settings even if archiving fails
         if self._ensure_loss_history_complete():
@@ -1275,10 +1291,181 @@ class ModelBase(object):
     def get_summary_path(self):
         return self.get_strpath_storage_for_file('summary.txt')
 
-    def get_summary_text(self):
-        visible_options = self.options.copy()
-        visible_options.update(self.options_show_override)
+    # ------------------------------------------------------------------
+    #  摘要排版表：中文名 / 分组 / 结构参数集合 / 分组顺序
+    #
+    #  这几张表**只决定排版**，不决定「打印哪些键」。
+    #  打印集合完全来自 self.options 本身（见 get_summary_text 的 buckets）：
+    #    * 引擎新增一个 option → 摘要自动多一行，不用改这里；
+    #    * 这里漏了某个键的中文名 → 那一行照打，标签退化成键名本身。
+    #  以前这里是 4 个手写的键名白名单（架构/增强/补丁/训练），dat 里不在这四张
+    #  表里的键永远不会出现 —— freeze_* 全系列、lr_cos / lr_plateau_* /
+    #  gradient_checkpointing / src / dst / device / target_batch / xseg_* …
+    #  于是「摘要里看到的」和「实际训练时用的」对不上，把模型交给别人时尤其致命。
+    # ------------------------------------------------------------------
+    SUMMARY_STRUCT_KEYS = ('resolution', 'face_type', 'archi', 'e_dims',
+                           'ae_dims', 'd_dims', 'd_mask_dims')
 
+    SUMMARY_GROUP_ORDER = ('数据集', '训练设置', '优化器', '精度与显存', 'GAN',
+                           '损失与补丁', '数据增强', '冻结层', '预训练',
+                           '备份与日志', '遮罩/XSeg', '设备', '其他')
+
+    SUMMARY_LABELS = {
+        # 结构参数
+        'resolution': '分辨率', 'face_type': '人脸类型', 'archi': '架构',
+        'ae_dims': 'AE维度', 'e_dims': '编码器维', 'd_dims': '解码器维',
+        'd_mask_dims': '遮罩维', 'inter_dims': '中间层维度',
+        # 数据集
+        'src': 'src人脸集', 'dst': 'dst人脸集', 'pretrain_dataset_path': '预训练集',
+        # 训练设置
+        'batch_size': '批次大小', 'target_batch': '目标批次',
+        'accum_steps': '累积次数', 'target_iter': '目标迭代数',
+        'masked_training': '遮罩训练', 'blur_out_mask': '遮罩羽化',
+        'eyes_mouth_prio': '嘴眼优先', 'uniform_yaw': '均匀偏航',
+        # 优化器
+        'optimizer': '优化器', 'lr': '学习率', 'lr_policy': '学习率策略',
+        'lr_cos': '余弦周期', 'lr_total_steps': '学习率总步数',
+        'lr_plateau_factor': '平台衰减系数', 'lr_plateau_patience': '平台耐心',
+        'lr_plateau_min_ratio': '平台最小比例', 'lr_dropout': 'LR Dropout',
+        'lr_warmup_steps': 'LR 预热步数', 'lr_scheduler': 'LR调度器',
+        'lr_cos_period': '余弦周期', 'clipgrad': '梯度裁剪',
+        # 精度与显存
+        'use_bf16': 'BF16混合', 'gradient_checkpointing': '梯度检查点',
+        'models_opt_on_gpu': '优化器GPU', 'use_fast_generator': '快速生成器',
+        'eager_mode': '即时模式',
+        # GAN
+        'gan_power': 'GAN强度', 'gan_patch_size': 'GAN块大小', 'gan_dims': 'GAN维度',
+        # 损失与补丁
+        'true_face_power': '真脸强度', 'face_style_power': '面部风格',
+        'bg_style_power': '背景风格', 'vgg_perceptual_power': 'VGG感知损失',
+        'edge_enhance_power': '边缘强化', 'ct_mode': '色彩迁移',
+        'preview_grade_alg': '预览调色',
+        # 数据增强
+        'random_warp': '随机形变', 'random_occlusion': '随机遮挡',
+        'random_noise': '随机噪点', 'random_color_power': '随机偏色',
+        'random_color_alg': '偏色算法', 'random_hsv_power': 'HSV强度',
+        'random_src_flip': 'SRC翻转', 'random_dst_flip': 'DST翻转',
+        'random_flip': '随机翻转', 'rotation_range': '旋转范围',
+        'scale_range': '缩放范围', 't_range': '偏移范围',
+        'eyes_scale': '眼睛范围', 'mouth_scale': '嘴巴范围',
+        'pia_cycle_power': 'PIA循环一致',
+        # 冻结层
+        'freeze_encoder': '冻结编码器', 'freeze_inter': '冻结中间',
+        'freeze_inter_AB': '冻结inter_AB', 'freeze_inter_B': '冻结inter_B',
+        'freeze_decoder_mask': '冻结遮罩解码器', 'freeze_decoder_dst': '冻结输出',
+        'freeze_inter_src': '冻结源', 'freeze_inter_dst': '冻结目标',
+        'freeze_bottleneck': '冻结瓶颈', 'freeze_decoderA_mask': '冻结A遮罩',
+        'freeze_decoderB_mask': '冻结B遮罩', 'freeze_bottleneck_AB': '冻结共享',
+        'freeze_bottleneck_B': '冻结瓶颈B',
+        # 预训练
+        'pretrain': '预训练', 'pretrain_single_decoder': '单解码器',
+        # 备份与日志
+        'max_backups': '最大备份数', 'backup_interval': '备份间隔',
+        'crash_threshold': '崩溃阈值', 'write_preview_history': '预览历史',
+        'write_train_log': '训练日志CSV', 'log_code_stats': 'Inter分布日志',
+        'nan_guard': 'NaN梯度保护',
+        # 设备 / 遮罩-XSeg
+        'device': '设备', 'xseg_erode': 'XSeg腐蚀', 'xseg_blur': 'XSeg模糊',
+    }
+
+    SUMMARY_GROUP_OF = {
+        'src': '数据集', 'dst': '数据集', 'pretrain_dataset_path': '数据集',
+        'batch_size': '训练设置', 'target_batch': '训练设置',
+        'accum_steps': '训练设置', 'target_iter': '训练设置',
+        'masked_training': '训练设置', 'blur_out_mask': '训练设置',
+        'eyes_mouth_prio': '训练设置', 'uniform_yaw': '训练设置',
+        'optimizer': '优化器', 'lr': '优化器', 'lr_policy': '优化器',
+        'lr_cos': '优化器', 'lr_total_steps': '优化器',
+        'lr_plateau_factor': '优化器', 'lr_plateau_patience': '优化器',
+        'lr_plateau_min_ratio': '优化器', 'lr_dropout': '优化器',
+        'lr_warmup_steps': '优化器', 'lr_scheduler': '优化器',
+        'lr_cos_period': '优化器', 'clipgrad': '优化器',
+        'use_bf16': '精度与显存', 'gradient_checkpointing': '精度与显存',
+        'models_opt_on_gpu': '精度与显存', 'use_fast_generator': '精度与显存',
+        'eager_mode': '精度与显存',
+        'gan_power': 'GAN', 'gan_patch_size': 'GAN', 'gan_dims': 'GAN',
+        'true_face_power': '损失与补丁', 'face_style_power': '损失与补丁',
+        'bg_style_power': '损失与补丁', 'vgg_perceptual_power': '损失与补丁',
+        'edge_enhance_power': '损失与补丁', 'ct_mode': '损失与补丁',
+        'preview_grade_alg': '损失与补丁',
+        'random_warp': '数据增强', 'random_occlusion': '数据增强',
+        'random_noise': '数据增强', 'random_color_power': '数据增强',
+        'random_color_alg': '数据增强', 'random_hsv_power': '数据增强',
+        'random_src_flip': '数据增强', 'random_dst_flip': '数据增强',
+        'random_flip': '数据增强', 'rotation_range': '数据增强',
+        'scale_range': '数据增强', 't_range': '数据增强',
+        'eyes_scale': '数据增强', 'mouth_scale': '数据增强',
+        'pia_cycle_power': '数据增强',
+        'pretrain': '预训练', 'pretrain_single_decoder': '预训练',
+        'max_backups': '备份与日志', 'backup_interval': '备份与日志',
+        'crash_threshold': '备份与日志', 'write_preview_history': '备份与日志',
+        'write_train_log': '备份与日志', 'log_code_stats': '备份与日志',
+        'nan_guard': '备份与日志',
+        'device': '设备',
+    }
+
+    @classmethod
+    def _summary_group_of(cls, key):
+        """一个 option 键该排在哪个小标题下。
+
+        认识的走白表；不认识的按前缀猜（freeze_* / random_* / gan_* / lr* …）；
+        实在猜不出来就进「其他」—— 无论走哪条路，这个键**一定会被打印**。
+        """
+        g = cls.SUMMARY_GROUP_OF.get(key)
+        if g:
+            return g
+        k = str(key).lower()
+        if k.startswith('freeze_'):
+            return '冻结层'
+        if k.startswith('xseg') or 'mask' in k:
+            return '遮罩/XSeg'
+        if k.startswith('random_') or k.startswith('ct_'):
+            return '数据增强'
+        if k.startswith('lr') or k in ('optimizer', 'clipgrad'):
+            return '优化器'
+        if k.startswith('gan_'):
+            return 'GAN'
+        return '其他'
+
+    @staticmethod
+    def _summary_fmt_value(v):
+        """按 dat 里存的原始精度写出来，不做任何「好看化」。
+
+        * float 用 repr：0.00005 存进 pickle 就是 5e-05，摘要里也写 5e-05；
+          round / %g / f-string 都可能把它改成另一个写法。
+        * numpy 标量（老 dat 里 gan_patch_size / resolution 是 np.int64）先收敛成
+          Python 原生类型，否则会打印成 np.int64(16)。
+        * bool 打印 True/False（和 pickle 里的字面量一致），不是 1/0。
+        """
+        if v is None:
+            return 'None'
+        if isinstance(v, bool):
+            return 'True' if v else 'False'
+        try:
+            if isinstance(v, np.bool_):
+                return 'True' if bool(v) else 'False'
+            if isinstance(v, np.integer):
+                return str(int(v))
+            if isinstance(v, np.floating):
+                return repr(float(v))
+        except Exception:
+            pass
+        if isinstance(v, int):
+            return str(v)
+        if isinstance(v, float):
+            return repr(v)
+        if isinstance(v, (list, tuple)):
+            return '[' + ', '.join(ModelBase._summary_fmt_value(x) for x in v) + ']'
+        if isinstance(v, dict):
+            return '{' + ', '.join('%s: %s' % (k, ModelBase._summary_fmt_value(x))
+                                   for k, x in v.items()) + '}'
+        if isinstance(v, str) and v == '':
+            # 空串必须显式写成 ''：否则摘要里只剩一个「键名: 」，和「这个键没打印」
+            # 长得一模一样（pretrain_dataset_path 的默认值就是空串）。
+            return "''"
+        return str(v)
+
+    def get_summary_text(self):
         # ---- display-width helpers (CJK-aware) ----
         def _dw(s):
             return ModelBase._disp_len(s)
@@ -1286,183 +1473,125 @@ class ModelBase(object):
         def _ljust(s, w):
             return s + ' ' * max(0, w - _dw(s))
 
-        def _rjust(s, w):
-            return ' ' * max(0, w - _dw(s)) + s
-
         def _center(s, w):
             p = max(0, w - _dw(s))
             return ' ' * (p // 2) + s + ' ' * (p - p // 2)
 
-        # Wrap content in ==...==, padding to `w` display-width
+        # Wrap content in ==...==, padding to w display-width
         def _line(content='', w=None):
             if w is None:
                 w = inner_w
             return f'=={content}{" " * max(0, w - _dw(content))}=='
 
+        def _cell(key, val):
+            """一格：「中文名 键名: 值」（没有中文名就只写键名）。"""
+            lab = self.SUMMARY_LABELS.get(key) or ''
+            body = self._summary_fmt_value(val)
+            return f'{lab} {key}: {body}' if lab else f'{key}: {body}'
+
+        # ============================================================
+        #   1) 参数分区：结构参数 / 训练参数（全量，一个都不许漏）
+        # ============================================================
+        opts = dict(self.options or {})
+        override = dict(getattr(self, 'options_show_override', None) or {})
+
+        struct_keys = [k for k in self.SUMMARY_STRUCT_KEYS if k in opts]
+        struct_cells = [_cell(k, opts[k]) for k in struct_keys]
+        struct_set = set(struct_keys)
+
+        buckets = {}
+        for k in opts:
+            if k in struct_set:
+                continue
+            buckets.setdefault(self._summary_group_of(k), []).append(k)
+        for k in buckets:
+            buckets[k].sort()          # 组内按键名排序：不依赖手写顺序，也不依赖 dat 的键序
+
+        ordered_groups = [g for g in self.SUMMARY_GROUP_ORDER if buckets.get(g)]
+        for g in sorted(buckets):
+            if g not in ordered_groups:
+                ordered_groups.append(g)          # 万一有新的组名，也排在后面照样打印
+
+        # ---- 2 列宽度：所有区块共用同一套列宽，行与行才对得齐 ----
+        all_cells = list(struct_cells)
+        for g in ordered_groups:
+            all_cells += [_cell(k, opts[k]) for k in buckets[g]]
+        all_cells += [_cell(k, override[k]) for k in sorted(override)]
+        MIN_INNER = 72
+        COL_GAP = ' | '
+        PAD = '  '
+        col_w = max([_dw(c) + 2 for c in all_cells] + [24])
+        inner_w = max(col_w * 2 + _dw(COL_GAP) + _dw(PAD) * 2, MIN_INNER)
+        col_w = max(col_w, (inner_w - _dw(COL_GAP) - _dw(PAD) * 2) // 2)
+
+        def _rows(cells):
+            """把一串格子摊成 2 列的行（先读左列、再读右列）。"""
+            out = []
+            if not cells:
+                return out
+            per = (len(cells) + 1) // 2
+            left, right = cells[:per], cells[per:]
+            for i in range(per):
+                a = _ljust(left[i], col_w)
+                b = _ljust(right[i], col_w) if i < len(right) else ' ' * col_w
+                out.append(_line(PAD + a + COL_GAP + b + PAD, inner_w))
+            return out
+
+        def _group_header(name):
+            rule = '-' * max(0, inner_w - _dw(name) - 4)
+            return _line(f'-- {name} {rule}', inner_w)
+
         summary_text = []
-
-        # ============================================================
-        #   Option categories
-        # ============================================================
-        arch_opts = [
-            ('model_name', '模型名称'),
-            ('resolution', '分辨率'),
-            ('face_type', '人脸类型'),
-            ('archi', '架构'),
-            ('ae_dims', 'AE维度'),
-            ('e_dims', '编码器维'),
-            ('d_dims', '解码器维'),
-            ('d_mask_dims', '遮罩维'),
-        ]
-        aug_opts = [
-            ('random_warp', '随机形变'),
-            ('random_occlusion', '随机遮挡'),
-            ('random_noise', '随机噪点'),
-            ('random_color_power', '随机偏色'),
-            ('random_color_alg', '偏色算法'),
-            ('random_hsv_power', 'HSV强度'),
-            ('ct_mode', '色彩迁移'),
-            ('random_src_flip', 'SRC翻转'),
-            ('random_dst_flip', 'DST翻转'),
-            ('masked_training', '遮罩训练'),
-            ('blur_out_mask', '遮罩羽化'),
-            ('eyes_mouth_prio', '嘴眼优先'),
-                        ('eyes_scale', '眼睛范围'),
-            ('pia_cycle_power', 'PIA循环一致'),
-            ('mouth_scale', '嘴巴范围'),
-            ('uniform_yaw', '均匀偏航'),
-        ]
-        patch_opts = [
-            ('gan_power', 'GAN强度'),
-            ('true_face_power', '真脸强度'),
-            ('face_style_power', '面部风格'),
-            ('bg_style_power', '背景风格'),
-            ('vgg_perceptual_power', 'VGG感知损失'),
-            ('edge_enhance_power', '边缘强化'),
-            ('preview_grade_alg', '预览调色'),
-            ('gan_patch_size', 'GAN块大小'),
-            ('gan_dims', 'GAN维度'),
-        ]
-        train_opts = [
-            ('optimizer', '优化器'),
-            ('clipgrad', '梯度裁剪'),
-            ('crash_threshold', '崩溃阈值'),
-            ('use_bf16', 'BF16混合'),
-            ('batch_size', '批次大小'),
-            ('lr_dropout', '学习率策略'),
-            ('models_opt_on_gpu', '优化器GPU'),
-            ('use_fast_generator', '快速生成器'),
-            ('pretrain', '预训练'),
-            ('pretrain_single_decoder', '单解码器'),
-            ('write_preview_history', '预览历史'),
-            ('target_iter', '目标迭代'),
-            ('backup_interval', '备份间隔（迭代）'),
-            ('max_backups', '最大备份数'),
-            ('lr', '学习率'),
-            ('use_gradient_checkpointing', '梯度检查点'),
-            ('lr_scheduler', 'LR调度器'),
-            ('lr_cos_period', '余弦周期'),
-        ]
-
-        categories = [
-            ('模型架构', arch_opts),
-            ('数据增强', aug_opts),
-            ('补丁/损失', patch_opts),
-            ('训练设置', train_opts),
-        ]
-
-        # 只有 PIA 才有的选项：别的模型就算 options 里被塞进了这个 key 也不显示
-        # （否则 LIAE/SAEHD 的摘要里会冒出一行"PIA循环一致"）。
-        _pia_only_opts = {'pia_cycle_power'}
-        _is_pia = getattr(self, 'model_class_name', '') == 'PIA'
-
-        col_contents = []
-        for cat_name, opt_list in categories:
-            items = []
-            for key, label in opt_list:
-                if key in _pia_only_opts and not _is_pia:
-                    continue
-                if key == 'model_name':
-                    val = self.get_model_name()
-                else:
-                    val = visible_options.get(key)
-                if val is not None:
-                    items.append((label, str(val)))
-            col_contents.append(items)
-
-        # ---- column widths in display-width units ----
-        MIN_COL_DW = 18
-        col_dws = []
-        for items in col_contents:
-            if items:
-                max_dw = max(_dw(f'{k}: {v}') for k, v in items)
-                col_dws.append(max(max_dw + 2, MIN_COL_DW))
-            else:
-                col_dws.append(MIN_COL_DW)
-
-        n_cols = len(categories)
-        sep_dw = _dw(' | ')  # 3
-        pad = '  '
-        pad_dw = _dw(pad)    # 2
-        inner_w = sum(col_dws) + sep_dw * (n_cols - 1) + pad_dw * 2
-        inner_w = max(inner_w, 72)
 
         # ============================================================
         #   Header
         # ============================================================
         summary_text += [_line(_center(' 模型摘要 ', inner_w), inner_w)]
-        hdr = f'模型名称: {self.get_model_name()}  |  当前迭代: {self.get_iter()}'
+        # 分隔符刻意不用 " | "：那一对竖线是格子之间的列分隔符，标题行用它会
+        # 让「按列切分」的解析器把标题也当成一个参数格。
+        hdr = (f'模型名称: {self.get_model_name()}  ·  当前迭代: {self.get_iter()}'
+               f'  ·  参数项: {len(opts)}')
         summary_text += [_line(_center(hdr, inner_w), inner_w)]
         summary_text += [_line('', inner_w)]
-
-        sep_heavy = '-' * inner_w
-        summary_text += [_line(sep_heavy, inner_w)]
-        summary_text += [_line('', inner_w)]
+        summary_text += [_line('-' * inner_w, inner_w)]
 
         # ============================================================
-        #   4-column options table
+        #   结构参数（创建后不可改）
         # ============================================================
-        summary_text += [_line(sep_heavy, inner_w)]
+        if struct_cells:
+            summary_text += [_group_header('结构参数（创建后不可改，换值只能新建模型）')]
+            summary_text += _rows(struct_cells)
+            summary_text += [_line('', inner_w)]
+
+        # ============================================================
+        #   训练参数（self.options 全量，按分组排序）
+        # ============================================================
+        summary_text += [_group_header('训练参数（dat 里 options 的全部 %d 项）'
+                                       % (len(opts) - len(struct_set)))]
+        for g in ordered_groups:
+            summary_text += [_group_header('· ' + g)]
+            summary_text += _rows([_cell(k, opts[k]) for k in buckets[g]])
+        if not ordered_groups:
+            summary_text += [_line('  （这份 dat 的 options 里只有结构参数）', inner_w)]
         summary_text += [_line('', inner_w)]
 
-        col_sep = ' | '
-        # Category headers (centered in each column)
-        cat_hdr_parts = []
-        for i, (name, _) in enumerate(categories):
-            cat_hdr_parts.append(_center(name, col_dws[i]))
-        cat_hdr = col_sep.join(cat_hdr_parts)
-        summary_text += [_line(pad + cat_hdr + pad, inner_w)]
+        # 显示覆盖值：预训练时引擎按"实际生效值"覆盖几项（见各模型的
+        # options_show_override）。它们不是 dat 里的独立键，所以单独成块，
+        # 不混进上面的全量列表 —— 上面那一区的键集合必须和 dat 严格一一对应。
+        if override:
+            summary_text += [_group_header('实际生效值（引擎覆盖，非 dat 条目）')]
+            summary_text += _rows([_cell(k, override[k]) for k in sorted(override)])
+            summary_text += [_line('', inner_w)]
 
-        # Sub-header rules
-        sub_parts = ['-' * dw for dw in col_dws]
-        sub_rule = col_sep.join(sub_parts)
-        summary_text += [_line(pad + sub_rule + pad, inner_w)]
-
-        # Content rows
-        max_rows = max(len(c) for c in col_contents)
-        for row_idx in range(max_rows):
-            parts = []
-            for col_idx, items in enumerate(col_contents):
-                if row_idx < len(items):
-                    k, v = items[row_idx]
-                    cell_text = f'{k}: {v}'
-                    parts.append(_ljust(cell_text, col_dws[col_idx]))
-                else:
-                    parts.append(' ' * col_dws[col_idx])
-            row_str = col_sep.join(parts)
-            summary_text += [_line(pad + row_str + pad, inner_w)]
-
+        summary_text += [_line('-' * inner_w, inner_w)]
         summary_text += [_line('', inner_w)]
-        summary_text += [_line(sep_heavy, inner_w)]
-        summary_text += [_line('', inner_w)]
-
         # ============================================================
         #   Module status (key:value columns, same style as options)
         # ============================================================
         if self._module_info_list:
             # Separate modules from optimizers
             mods = [(n, p, s) for n, p, s in self._module_info_list if not n.endswith('_opt')]
-            opts = [(n, p, s) for n, p, s in self._module_info_list if n.endswith('_opt')]
+            opts_m = [(n, p, s) for n, p, s in self._module_info_list if n.endswith('_opt')]
 
             col_data = []
             # Column 1: module name + param count
@@ -1497,11 +1626,11 @@ class ModelBase(object):
                 dw = max(_dw(item) for item in items) if items else 10
                 col_dws.append(dw)
 
-            total_col_w = sum(col_dws) + (ncols - 1) * _dw(col_sep) + 2 * _dw(pad)
+            total_col_w = sum(col_dws) + (ncols - 1) * _dw(COL_GAP) + 2 * _dw(PAD)
             mod_total_w = max(total_col_w, inner_w)
             # Distribute extra width so module table fills the full inner width
             if mod_total_w > total_col_w:
-                avail = mod_total_w - (ncols - 1) * _dw(col_sep) - 2 * _dw(pad)
+                avail = mod_total_w - (ncols - 1) * _dw(COL_GAP) - 2 * _dw(PAD)
                 extra = avail - sum(col_dws)
                 if extra > 0:
                     for i in range(ncols):
@@ -1513,12 +1642,12 @@ class ModelBase(object):
             cat_hdr_parts = []
             for i, (name, _) in enumerate(col_data):
                 cat_hdr_parts.append(_center(name, col_dws[i]))
-            cat_hdr = col_sep.join(cat_hdr_parts)
-            summary_text += [_line(pad + cat_hdr + pad, mod_total_w)]
+            cat_hdr = COL_GAP.join(cat_hdr_parts)
+            summary_text += [_line(PAD + cat_hdr + PAD, mod_total_w)]
 
             sub_parts = ['-' * dw for dw in col_dws]
-            sub_rule = col_sep.join(sub_parts)
-            summary_text += [_line(pad + sub_rule + pad, mod_total_w)]
+            sub_rule = COL_GAP.join(sub_parts)
+            summary_text += [_line(PAD + sub_rule + PAD, mod_total_w)]
 
             max_rows = max(len(items) for _, items in col_data)
             for row_idx in range(max_rows):
@@ -1528,21 +1657,23 @@ class ModelBase(object):
                         parts.append(_ljust(items[row_idx], col_dws[col_idx]))
                     else:
                         parts.append(' ' * col_dws[col_idx])
-                row_str = col_sep.join(parts)
-                summary_text += [_line(pad + row_str + pad, mod_total_w)]
+                row_str = COL_GAP.join(parts)
+                summary_text += [_line(PAD + row_str + PAD, mod_total_w)]
 
             summary_text += [_line('', mod_total_w)]
-            summary_text += [_line(sep_heavy, mod_total_w)]
+            summary_text += [_line('-' * mod_total_w, mod_total_w)]
             summary_text += [_line('', mod_total_w)]
 
             total_params = sum(p for _, p, _ in mods)
-            opt_params = sum(p for _, p, _ in opts)
+            opt_params = sum(p for _, p, _ in opts_m)
             precision_str = 'FP32'
-            compute_mode = 'BF16' if getattr(self, 'use_bf16', False) else 'FP32'
+            # 以前这里读 getattr(self, 'use_bf16')：模型对象上根本没有这个属性，
+            # 于是永远打印 FP32。算力精度只看 dat 里那一位。
+            compute_mode = 'BF16' if bool(opts.get('use_bf16', False)) else 'FP32'
 
             # VRAM estimation — per-module based on actual param counts
-            batch_size = self.options.get('batch_size', 1)
-            resolution = self.options.get('resolution', 128)
+            batch_size = opts.get('batch_size', 1) or 1
+            resolution = opts.get('resolution', 128) or 128
 
             model_total_params = 0
             w_bytes = 0
@@ -1562,13 +1693,11 @@ class ModelBase(object):
             i_mb = 2 * batch_size * 3 * resolution * resolution * 4 / (1048576.0)
             # activation memory: intermediate feature maps retained for backward
             # Scales with model size × src+dst paths × batch × resolution
-            # 键名是 gradient_checkpointing：以前这里读 use_gradient_checkpointing（从来没被写过），
-            # 于是摘要里的"预估显存"永远按"没开检查点"算，比实际虚高近一倍。
-            gc_enabled = bool(self.options.get('gradient_checkpointing', False)
-                              or self.options.get('use_gradient_checkpointing', False))
-            # activation memory: scales with model size × src+dst paths × batch × resolution
+            # 键名是 gradient_checkpointing：以前这里读 use_gradient_checkpointing
+            # （dat 里从来没有这个键），于是「预估显存」永远按"没开检查点"算。
+            gc_enabled = bool(opts.get('gradient_checkpointing', False))
             act_mult = 1.75 if gc_enabled else 3.5  # checkpoint ~50% less activation
-            a_mb = w_mb * act_mult * (batch_size / 4) * (resolution / 256) ** 2
+            a_mb = w_mb * act_mult * (batch_size / 4) * ((resolution / 256) ** 2)
             # CUDA system overhead (context + allocator cache)
             c_mb = 900
             t_mb = w_mb + o_mb + g_mb + i_mb + a_mb + c_mb
@@ -1589,7 +1718,7 @@ class ModelBase(object):
                 inner_w = mod_total_w
 
         # ============================================================
-        #   Device info
+        #   Device info（真实硬件，不是 dat 里的 device 选项）
         # ============================================================
         dev_w = max(inner_w, 72)
         summary_text += [_line(_center(' 运行设备 ', dev_w), dev_w)]

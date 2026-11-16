@@ -398,7 +398,7 @@ class MetadataAnalyzer(FacesetBaseProcessor):
             landmarks_106pt = self.detect_landmarks_106pt(image)
             if landmarks_106pt is not None:
                 # 转换为 68 点
-                from Extractor.Extractor import landmark106to68
+                from Extractor._compat import landmark106to68
                 landmarks_68pt = landmark106to68(landmarks_106pt)
                 
                 # 保存 68pt landmarks
@@ -1680,7 +1680,7 @@ def _analyze_single_worker(args):
                         landmarks_106pt[:, 1] *= scale_y
                         
                         # 转换为 68 点
-                        from Extractor.Extractor import landmark106to68
+                        from Extractor._compat import landmark106to68
                         landmarks_68pt = landmark106to68(landmarks_106pt)
                         
                         enhanced_metadata['landmarks'] = landmarks_68pt.tolist()

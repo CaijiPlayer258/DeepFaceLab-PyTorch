@@ -1,0 +1,78 @@
+[
+ {
+  "tag": "low_g1_c1_auto_r0",
+  "cfg": {
+   "gpu": 1,
+   "cpu": 1,
+   "strategy": "",
+   "level": "low",
+   "name": "g1_c1_auto"
+  },
+  "fps": 14.01,
+  "wall": 10.1,
+  "util": {
+   "dec_wait": 0,
+   "det_wait": 16,
+   "gpu_wait": 12,
+   "cmp_wait": 62,
+   "enc_wait": 62,
+   "decode": 24,
+   "detect": 81,
+   "align": 16,
+   "embed": 1,
+   "dfm": 54,
+   "xseg": 14,
+   "compose": 25,
+   "encode": 33,
+   "write": 6
+  },
+  "plan": "快速导出 检测池：detect 池：1×GPU + 1×CPU（每份 2 线程 · 策略 eta）· GPU 16.8 ms / CPU 57.4 ms · 理论 +29% · 依据：显存 4096 MB 空闲 / 一份 300 MB → 装得下 11 份；自动档 GPU=1 份（实测还没有 ≥5% 的记录）；4 物理核 / 每份 2 线程 → 2 份；可用内存 3600 MB / 一份 260 MB → 2 份；显式 GPU=1 份（请求体 sess_gpu / env DFL_SESS_GPU）；显式 CPU=1 份（请求体 sess_cpu / env DFL_SESS_CPU）",
+  "bench": "快速导出 检测池 基准：GPU 16.79 ms / CPU 57.37 ms（1080p 零图，2 张取中位）· 实际起来 2 路（GPU 1 / CPU 1）",
+  "peak_rss_mb": 2886.3,
+  "phase": "done",
+  "error": "",
+  "fps_list": [
+   14.01
+  ],
+  "tier": "low",
+  "name": "g1_c1_auto"
+ },
+ {
+  "tag": "low_g0_c0_auto_r0",
+  "cfg": {
+   "gpu": 0,
+   "cpu": 0,
+   "strategy": "",
+   "level": "low",
+   "name": "g0_c0_auto"
+  },
+  "fps": 14.85,
+  "wall": 6.63,
+  "util": {
+   "dec_wait": 0,
+   "det_wait": 7,
+   "gpu_wait": 15,
+   "cmp_wait": 61,
+   "enc_wait": 56,
+   "decode": 19,
+   "detect": 58,
+   "align": 8,
+   "embed": 0,
+   "dfm": 54,
+   "xseg": 8,
+   "compose": 24,
+   "encode": 36,
+   "write": 6
+  },
+  "plan": "快速导出 检测池：detect 池：1×GPU + 0×CPU（每份 2 线程 · 策略 eta）· GPU 16.8 ms / CPU 57.4 ms · 理论 +0% · 依据：显存 4096 MB 空闲 / 一份 300 MB → 装得下 11 份；自动档 GPU=1 份（实测还没有 ≥5% 的记录）；4 物理核 / 每份 2 线程 → 2 份；可用内存 3600 MB / 一份 260 MB → 2 份；这一段只占墙钟 81%（<85%）→ 不是瓶颈，加 session 只会抢 CPU；显式 GPU=0 份（请求体 sess_gpu / env DFL_SESS_GPU）；显式 CPU",
+  "bench": "快速导出 检测池 基准：GPU 16.79 ms / CPU 57.37 ms（1080p 零图，2 张取中位）· 实际起来 1 路（GPU 1 / CPU 0）",
+  "peak_rss_mb": 1646.0,
+  "phase": "done",
+  "error": "",
+  "fps_list": [
+   14.85
+  ],
+  "tier": "low",
+  "name": "g0_c0_auto"
+ }
+]
