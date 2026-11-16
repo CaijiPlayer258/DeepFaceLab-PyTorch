@@ -80,3 +80,19 @@
   被这条规则判成"活着"，实际它确实是活的，但**判据本身不可靠**。所以"0 个死代码"应读作"没有明显死代码"。
 - 函数长度按 AST 的 `end_lineno` 算（py）；JS 用缩进启发式，`mgStageEmpty(12371)`
   这种数字是启发式失效（该函数之后没有同级函数），不代表它真有 1.2 万行。
+
+## 处置进展（2026-11 收尾）
+
+| # | 计划 | 状态 |
+|---|---|---|
+| 1 | `pipeline_project` 删老路 | **已做**（`a06a9e5`，−731 行；开关 `DFL_PROJ_PIPELINE` 一并删除） |
+| 2 | `_fused_run` 拆七段 | **未做**：它是 25 个闭包共享局部变量的 1697 行，拆它=改写成 ctx 对象（重写），且它正是今天所有性能改动的落点 —— 要先钉 fps/帧号/钉批 md5 基线。**已先把它周围可搬的 I/O 侧搬走**（`fused_io.py`，384 行），`pipeline_fused.py` 3178 → 2791 |
+| 3 | `pipeline_stages` 四阶段拆分 | **已做**（`5d3dadb`，4190 → 2588；`stage_{faces,pred,mask,merge}.py`；`stage6_accept` 64/0） |
+| 4 | app.js 按页面切 | **已做**（`bf68ab4` + `1cf9d4a`）：15938 行 → `js/app/` 下 **23 个分片**，最大 2041 行；后端拼成 `/static/js/app.js`（逐字节等价，`node app/tools/js/check_bundle.js` 校验） |
+| 5 | 删 16 行死代码 | **已做**（`1cf9d4a`；`compose.py` 的 `_paste_layer` / `compose_frame_frame_scope`） |
+
+**仍未动**（评估后认为不值得，理由在表内）：`vram.py`（88 个函数分摊，最健康）、`preview.py`（最大是类）、
+`_merge_runner.py`（子进程入口）、vendored 引擎、台架与归档区。
+
+教训一条（`1cf9d4a` 记下的）：用「下一个顶层 def」找函数尾会**吃掉夹在函数之间的模块级赋值**
+（`_cache_lock`/`_det_load_lock`/`_det_run_lock` 三行就这么被删，导入链立刻炸）。要删函数用 AST 的 `end_lineno`。
