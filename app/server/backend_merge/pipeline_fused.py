@@ -824,6 +824,7 @@ def _src_of(cfg: dict, keys, default, env_name: str) -> str:
     return "默认 %s" % cur
 
 
+# 地图：app/docs/notes/fused-run-map.md（六段与 20 个闭包的行号 + 改什么去哪一行）
 def _fused_run(cfg: dict) -> dict:
     """融合流水线：解码 → 检测 → 对齐/归组 → dfm → XSeg → 合成 → 编码。
 
