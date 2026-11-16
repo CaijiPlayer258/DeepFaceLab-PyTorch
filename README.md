@@ -77,8 +77,8 @@ weights/
 ├── retinaface_10g.onnx         ⬆ 同目录，平铺
 ├── insightface_2d106.onnx       68 点关键点
 ├── arcface_mbf.onnx             人脸识别 / 身份聚类
-├── errface_xgb.ubj              错脸检测
-├── bisenet_model_final.pth      人脸解析
+├── errface_xgb.ubj              错脸检测（core）
+├── bisenet_model_final.pth      人脸解析（**sam 组**，不装 sam 就没有）
 ├── sam2.1_hiera_*.pt            SAM2（sam 组，四个变体平铺）
 ├── groundingdino_swint_ogc.pth  Grounded SAM2 的检测头
 ├── sam_vit_b_01ec64.pth         SAM 点击分割
@@ -89,8 +89,8 @@ weights/
 
 | 包 | 内容 | 大小 | 必需？ |
 |---|---|---|---|
-| `core` | 检测器（`retinaface_10g.onnx` / `tinymog.onnx`）、`insightface_2d106.onnx`、`arcface_*.onnx`、`errface_xgb.ubj`、`bisenet_model_final.pth` | ~1.4 GB | ✅ 必需 |
-| `sam` | 遮罩绘制的交互分割：`sam_vit_b_01ec64.pth` / `sam2.1_hiera_*.pt` / `groundingdino_*.pth` / `bert-base-uncased/` | **~3.8 GB** | ❌ 可选 |
+| `core` | 检测器（`retinaface_10g.onnx` / `tinymog.onnx`，另带 15 个备用检测器）、`insightface_2d106.onnx`、`arcface_*.onnx`、`errface_xgb.ubj` 等 40 个文件 | ~1.4 GB | ✅ 必需 |
+| `sam` | 遮罩绘制的交互分割：`sam_vit_b_01ec64.pth` / `sam2.1_hiera_*.pt` / `groundingdino_*.pth` / `bert-base-uncased/` / **`bisenet_model_final.pth`** | **~3.8 GB** | ❌ 可选 |
 
 不装 SAM 那一组会怎样：**提取、训练、合成、自动遮罩全部照常**，
 只有「工具 → 遮罩绘制」里 SAM / Grounded SAM2 / BiSeNet 三块是灰的。
@@ -176,7 +176,7 @@ runtime/          Python 运行时（server / engine 两个 venv）—— 不入
 
 显卡：8 GB 显存可跑 128 分辨率 + batch 8（实测峰值 5.7 GB，约 6.5 it/s）。
 
-## 性能（本机实测，1080×1920 · 单脸 · 1439 帧）
+## 性能（RTX 5070 Laptop 8 GB · 1080×1920 · 单脸 · 1439 帧）
 
 | 项 | 数 | 说明 |
 |---|---|---|
