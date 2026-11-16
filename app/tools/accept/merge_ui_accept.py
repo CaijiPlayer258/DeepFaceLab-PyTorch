@@ -397,31 +397,80 @@ def main():
             "return JSON.stringify(m||{});})()") or "{}")
         check(mem.get("dfm_dtype") == "fp32" and mem.get("compose_backend") == "gpu",
               "D5 改完写进记忆（localStorage · data-cfg 键）", str(mem))
-        # 刷新页面：两个下拉必须还是 fp32 / gpu（记忆回填）
+        # 刷新页面：两个下拉必须是 fp32 / gpu（记忆回填）
         # 用 Page.navigate 而不是 location.reload()：reload 之后 CDP 的执行上下文会被销毁，
         # 紧接着的 Runtime.evaluate 有概率落到旧上下文上报个莫名其妙的异常。
-        b.goto(BASE + "/")
-        t0 = time.time()
-        while time.time() - t0 < 60:
-            try:
-                if b.eval("typeof window.go === 'function'"):
-                    break
-            except Exception:                              # noqa: BLE001
-                pass
-            time.sleep(0.3)
-        time.sleep(0.5)
-        b.eval("(function(){var w=document.getElementById('welcome'); if(w) w.style.display='none';"
-               " var m=document.getElementById('modal'); if(m) m.style.display='none';"
-               " return true;})()")
-        b.eval("window.go('merge'); true")
-        time.sleep(0.5)
-        b.eval("window.mgStep('settings'); true")
-        time.sleep(0.5)
+        def reload_merge():
+            """刷新一页并回到「导出设置」：记忆回填（mgCfgMemApply）+ 合成后端门控都跑完再读。"""
+            b.goto(BASE + "/")
+            t0 = time.time()
+            while time.time() - t0 < 60:
+                try:
+                    if b.eval("typeof window.go === 'function'"):
+                        break
+                except Exception:                          # noqa: BLE001
+                    pass
+                time.sleep(0.3)
+            time.sleep(0.5)
+            b.eval("(function(){var w=document.getElementById('welcome');"
+                   " if(w) w.style.display='none';"
+                   " var m=document.getElementById('modal'); if(m) m.style.display='none';"
+                   " return true;})()")
+            b.eval("window.go('merge'); true")
+            time.sleep(0.5)
+            b.eval("window.mgStep('settings'); true")
+            time.sleep(0.5)
+
+        # 合成后端那颗下拉 + 融合方式的现状（gpu 档禁没禁用、显示的是哪一档）+ 记忆快照
+        CMP_STATE = ("(function(){var s=document.getElementById('mgCmpBackend');var o=null;"
+                     "for(var i=0;i<s.options.length;i++){"
+                     "if(s.options[i].value==='gpu'){o=s.options[i];break;}}"
+                     "var d=document.getElementById('mgDfmDtype');"
+                     "var m=(window.__mgCfgMem?window.__mgCfgMem():null)||{};"
+                     "var p=(window.__mgCmpPref?window.__mgCmpPref():'');"
+                     "return JSON.stringify({mode:String((document.getElementById('mgMode')||{}).value||''),"
+                     "v:String(s.value),dfm:String(d&&d.value),gpu_disabled:!!(o&&o.disabled),"
+                     "mem_cb:String(m.compose_backend||''),mem_dt:String(m.dfm_dtype||''),pref:String(p)});})()")
+
+        reload_merge()                                     # 第 1 次刷新
         back = b.js(sh)["settings"]["sels"]
-        check([x["v"] for x in back] == ["fp32", "gpu"],
+        v6 = [x["v"] for x in back]
+        mem6 = json.loads(b.eval(CMP_STATE) or "{}")
+        # D6 的原话就是「刷新后还是 fp32 / gpu（**data-cfg 记忆**，不是回默认）」——
+        # 这句的主语是记忆：用户存过的偏好必须还在。seamless 下界面暂时显示「自动」
+        # 是另一件事（那是这一单确实用不上 GPU 合成，见 D7）：两者的分工写在这里，
+        # 别再让门控顺手把记忆改成 auto —— 那才是这轮修的那个 bug。
+        check(mem6.get("mem_dt") == "fp32" and mem6.get("mem_cb") == "gpu",
               "D6 刷新后还是 fp32 / gpu（data-cfg 记忆，不是回默认）",
-              str([(x["cfg"], x["v"]) for x in back]))
+              "记忆 dfm=%s/cmp=%s · 界面此刻 %s · 偏好 %s"
+              % (mem6.get("mem_dt"), mem6.get("mem_cb"), v6, mem6.get("pref")))
         shot(b, SHOTS / ("%s-settings-picked.png" % tag))
+
+        # ---- D7：seamless 下「这一单用不上」≠「记忆被改了」----
+        # 两次刷新之后：记忆仍是 gpu，界面上是 auto + gpu 档禁用；把融合方式改回 overlay，
+        # 应该**自动**回到 gpu（用户不用再挑一次）。这条是「别覆盖记忆」那个设计的正面证据。
+        s7a = json.loads(b.eval(CMP_STATE) or "{}")
+        reload_merge()                                     # 第 2 次刷新
+        s7b = json.loads(b.eval(CMP_STATE) or "{}")
+        # 改回 overlay：走用户那条路（#mgMode 的 change → mgSyncBlendSeg + mgGateCmpBackend）
+        b.eval("(function(){var e=document.getElementById('mgMode');e.value='overlay';"
+               "e.dispatchEvent(new Event('change',{bubbles:true}));return e.value;})()")
+        time.sleep(0.3)
+        s7c = json.loads(b.eval(CMP_STATE) or "{}")
+        check(s7a.get("v") == "auto" and s7a.get("gpu_disabled") is True
+              and s7b.get("v") == "auto" and s7b.get("gpu_disabled") is True
+              and s7b.get("mem_cb") == "gpu" and s7b.get("mem_dt") == "fp32"
+              and s7c.get("v") == "gpu" and s7c.get("dfm") == "fp32"
+              and s7c.get("gpu_disabled") is False,
+              "D7 seamless 下刷两次：记忆仍是 gpu、界面显示自动；改 overlay → 自动回到 gpu",
+              "刷1 %s/%s · 刷2 %s/%s · 记忆 %s/%s · 改 overlay %s/%s(gpu禁用=%s)"
+              % (s7a.get("v"), s7a.get("dfm"), s7b.get("v"), s7b.get("dfm"),
+                 s7b.get("mem_dt"), s7b.get("mem_cb"),
+                 s7c.get("dfm"), s7c.get("v"), s7c.get("gpu_disabled")))
+        # 清理时把融合方式也还回默认（下一段 B 只看版式，但别把状态留给下一轮）
+        b.eval("(function(){var e=document.getElementById('mgMode');e.value='seamless';"
+               "e.dispatchEvent(new Event('change',{bubbles:true}));return true;})()")
+        time.sleep(0.2)
         # 收拾干净：记忆清掉、界面回 auto（不把测试状态留给下一轮/下次人工看）
         b.eval("(function(){try{localStorage.removeItem('dfl-mg-cfg-memory');}catch(e){}"
                "document.getElementById('mgDfmDtype').value='auto';"

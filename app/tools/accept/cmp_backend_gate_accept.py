@@ -6,8 +6,10 @@ r"""合成后端 × 融合方式「界面上先互斥」的验收 —— **零�
   模型加载，属于用重锤敲螺丝。所以：
 
   V1  冷启动（记忆 compose_backend=gpu + 融合方式 seamless）：
-      #mgCmpBackend.value === 'auto' · localStorage 里也变成 'auto' · console 有那行 warn
-  V2  同一页面改 overlay → gpu 档 disabled===false、title 恢复；改回 seamless → 重新禁用并退回 auto
+      #mgCmpBackend.value === 'auto'（这单用不上 GPU 合成）· **localStorage 里仍是 gpu**
+      （用户偏好不该被门控吃掉，改回 overlay 要能自动恢复）· console 有那行 warn
+  V2  同一页面改 overlay → gpu 档 disabled===false、title 恢复、**值自动回到 gpu**；
+      改回 seamless → 重新禁用并退回 auto（记忆仍保 gpu）
   V3  请求体组装（**不导出**）：调界面自己那套 MergePages.settings() + mgPerfBody()，
       断言默认（自动）时不带 compose_gpu 键；再反向设成 gpu 证明这条线是通的
       （不然「没有这个键」可能只是永远为空）
@@ -365,7 +367,7 @@ def shot(b, path, clip=None):
         return None
 
 
-GATE_WARN = "融合方式=seamless，合成后端 gpu 已禁用"
+GATE_WARN = "合成后端 gpu 这单用不上"
 GPU_TITLE_ON = "compose_frame_gpu"
 
 
@@ -598,11 +600,15 @@ def main(argv=None):
             check(boot.get("cmp") == "auto", "V1b 载入后 #mgCmpBackend = auto",
                   "cmp=%r" % (boot.get("cmp"),))
             mem1 = boot.get("mem") or {}
-            check(mem1.get("compose_backend") == "auto",
-                  "V1c 记忆也改成 auto（localStorage 真写进去了，不是只在内存里改）",
+            # ★ 记忆是**用户的选择**：seamless 只让这单用不上 gpu，不代表他改主意了。
+            # 早先这里顺手把记忆改成 auto，于是把融合方式改回 overlay 之后还得再挑一次 gpu ——
+            # 那正是这一轮修掉的 bug。现在门控只动界面的 value，一个字都不写 localStorage。
+            check(mem1.get("compose_backend") == "gpu",
+                  "V1c 记忆**仍是 gpu**（门控只改界面显示，不覆盖用户偏好）",
                   "raw=%s" % (boot.get("mem_raw"),))
             v1_warn = [w for w in (boot.get("warns") or []) if GATE_WARN in w]
-            check(bool(v1_warn), "V1d console 有那行 warn", " | ".join(v1_warn)[:200] or "(无)")
+            check(bool(v1_warn), "V1d console 有那行 warn（说清「这单用不上、记忆还在」）",
+                  " | ".join(v1_warn)[:200] or "(无)")
 
             enter_settings(b)
             ui = read_ui(b)
@@ -611,8 +617,9 @@ def main(argv=None):
             check(ui.get("mode") == "seamless" and ui.get("cmp") == "auto",
                   "V1e 进设置页仍是 seamless + auto",
                   "mode=%r cmp=%r" % (ui.get("mode"), ui.get("cmp")))
-            check((ui.get("mem") or {}).get("compose_backend") == "auto",
-                  "V1f 进设置页后记忆仍是 auto", "raw=%s" % (ui.get("mem_raw"),))
+            check((ui.get("mem") or {}).get("compose_backend") == "gpu",
+                  "V1f 进设置页后记忆仍是 gpu（回填/渲染都不该改写它）",
+                  "raw=%s" % (ui.get("mem_raw"),))
             check(ui.get("gpu_disabled") is True,
                   "V1g seamless 时 gpu 这一档是 disabled（界面选不出来）",
                   "disabled=%s" % (ui.get("gpu_disabled"),))
@@ -629,6 +636,10 @@ def main(argv=None):
                 % (ov.get("gpu_disabled"), (ov.get("gpu_title") or "")[:60]))
             check(ov.get("mode") == "overlay", "V2a 融合方式已改成 overlay",
                   "mode=%r" % (ov.get("mode"),))
+            # 设计要点：偏好是 gpu，改回 overlay 就该**自动恢复**成 gpu（用户不用再挑一次）
+            check(ov.get("cmp") == "gpu",
+                  "V2a2 改回 overlay → 合成后端自动恢复成 gpu（不用再挑）",
+                  "cmp=%r" % (ov.get("cmp"),))
             check(ov.get("gpu_disabled") is False,
                   "V2b gpu 这一档又能选了（disabled === false）",
                   "disabled=%s" % (ov.get("gpu_disabled"),))
@@ -652,8 +663,8 @@ def main(argv=None):
             check(back.get("cmp") == "auto" and back.get("gpu_disabled") is True,
                   "V2e 改回 seamless → gpu 重新禁用且值退回 auto",
                   "cmp=%r disabled=%s" % (back.get("cmp"), back.get("gpu_disabled")))
-            check((back.get("mem") or {}).get("compose_backend") == "auto",
-                  "V2f 退回时记忆同步成 auto（下次载入不会再冒 gpu）",
+            check((back.get("mem") or {}).get("compose_backend") == "gpu",
+                  "V2f 退回 seamless 时记忆仍保 gpu（下次改回 overlay 还会自动恢复）",
                   "raw=%s" % (back.get("mem_raw"),))
             shot(b, SHOTS / ("%s-v2-settings-after-toggle.png" % tag))
 

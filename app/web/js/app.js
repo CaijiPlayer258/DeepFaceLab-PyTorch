@@ -6721,6 +6721,11 @@ function mgStageEmpty(on) {
           var y0 = TOPY + (space - (n * laneH + (n - 1) * GAP)) / 2;
           var col = mk("g", { "class": "col" });
           col.setAttribute("data-k", k);
+          /* ★ 重建时把这一列**当前**的状态贴回去：state[k] 还记着 on/done，可这些 g.col
+             是新建的 —— 不回填就成了「图上全灰、其实这一单还在跑」那种假死
+             （分段导出往上传 stages 时 lane 签名一变就重建，列标题的颜色就丢过一次；
+             验收 f 那段就是拿「六列有没有推进」当断言，一眼就看到了）。 */
+          if (state[k]) col.classList.add(state[k]);
           var t1 = mk("text", { x: cx, y: 24, "text-anchor": "middle", "class": "t-stage" });
           t1.textContent = NAME[k] || k;
           col.appendChild(t1);
@@ -7636,6 +7641,10 @@ function mgStageEmpty(on) {
       var box = $("mgpEffWarn");
       if (box) { box.hidden = true; box.classList.add("hide"); }
     }
+    /* 两条警告要能**同时看见**：用户完全可能一边踩了「检测器是按质量推断的」、
+       一边踩了「合成后端从 gpu 退回 cpu」。以前是 texts.join('\n') 塞进一个
+       textContent —— .albd 虽然 pre-line，但验收读 DOM 只拿得到一个字符串，
+       分不清「一条长文案」和「两条」，人也容易只读到第一行。现在一条一个 <div>。 */
     function mgpEffShowWarn(warns) {
       var box = $("mgpEffWarn");
       if (!box) return;
@@ -7643,14 +7652,38 @@ function mgStageEmpty(on) {
       for (var i = 0; i < (warns || []).length; i++) {
         var w = warns[i] || {};
         var t = w && w.text ? String(w.text) : String(w || "");
-        if (t) texts.push(t);
+        if (t && texts.indexOf(t) < 0) texts.push(t);      /* 同一句话只摆一行 */
       }
       if (!texts.length || MGP_EFF.dismissed) { mgpEffHideWarn(); return; }
       var title = $("mgpEffWarnTitle"), body = $("mgpEffWarnBody");
       if (title) title.textContent = "生效配置与界面可能不一致（" + texts.length + " 项）";
-      if (body) body.textContent = texts.join("\n");
+      if (body) {
+        body.innerHTML = "";
+        for (var j = 0; j < texts.length; j++) {
+          var line = document.createElement("div");
+          line.className = "mgeff-wl";
+          line.setAttribute("data-i", String(j));
+          line.textContent = texts[j];
+          body.appendChild(line);
+        }
+      }
       box.hidden = false;
       box.classList.remove("hide");
+    }
+    /* 警告列表按文案去重合并（保序）：后端 eff_warnings[] 是**累积**的，
+       但不同调用给回来的可能只是一部分（POST 响应 / 换阶段 / 轮询先到）——
+       整体替换会把已经在横幅上的那条抹掉。 */
+    function mgpEffMergeWarns(prev, next) {
+      var out = [], seen = {}, i, t;
+      var push = function (w) {
+        t = (w && w.text) ? String(w.text) : String(w || "");
+        if (!t || seen[t]) return;
+        seen[t] = 1;
+        out.push(w);
+      };
+      for (i = 0; i < (prev || []).length; i++) push(prev[i]);
+      for (i = 0; i < (next || []).length; i++) push(next[i]);
+      return out;
     }
     /* 画抽屉里的 14 个格子。force=false 时按 paintKey 判重：
        status 每 500ms 轮询一次，同一份配置不重画 DOM。 */
@@ -7729,7 +7762,9 @@ function mgStageEmpty(on) {
        抽屉关着的时候只记数据、不动 DOM —— 14 个字段不再常驻进度页。 */
     function mgpEffRender(eff, warns) {
       if (eff) MGP_EFF.eff = eff;
-      if (warns && warns.length) MGP_EFF.warns = warns;
+      /* 合并（不是整体替换）：换一次 status 只带回一部分警告时，不能把已经在横幅上的那条吞掉。
+         换一单才清空 —— 那在 mgpReset 里（warns: []）。 */
+      if (warns && warns.length) MGP_EFF.warns = mgpEffMergeWarns(MGP_EFF.warns, warns);
       eff = MGP_EFF.eff;
       /* 没有回显就别给一个点开是空的入口 */
       var openBtn = $("mgpEffOpen");
@@ -13160,32 +13195,80 @@ function mgStageEmpty(on) {
   /* ---------- 合成后端 × 融合方式：界面上先互斥，别让用户选了再被后台降级 ----------
      GPU 合成目前只实现了 overlay（seamless 那条在 8GB 卡上实测更慢，默认不进 GPU）。
      以前的做法是「随便选、后台退回 CPU 并弹横幅」——用户看到的是「界面 cpu / 顶部说选了 gpu」，
-     两边像在互相打架。现在：融合方式是 seamless 时，把 gpu 这一档**禁用**并在 title 里说清；
-     如果它已经是 gpu（上一次选的、记忆存着），静默改成「自动」并留一条说明。 */
+     两边像在互相打架。所以融合方式是 seamless 时，把 gpu 这一档**禁用**并在 title 里说清。
+     ★ 但「这一单用不上」≠「用户改主意了」：早先这里顺手把记忆（localStorage）也改成 auto，
+       于是用户为了跑一单 seamless 而调好的偏好被**静默丢弃**，把融合方式改回 overlay 之后
+       还得自己再挑一次 gpu（验收 D6「刷新后还是 gpu」就是照这个口径写的）。
+       现在的分工：
+         · _cmpPref      = 用户真正的偏好（初值来自记忆，只在用户动这个下拉时更新）；
+         · 下拉的 value  = **这次**实际会用哪一档（seamless 时先显示「自动」）；
+         · localStorage  = 只跟着用户的主动选择走，界面门控绝不写它。
+       融合方式改回 overlay/hist-match 时，若偏好是 gpu 就直接恢复成 gpu —— 不用再挑。 */
+  var _cmpPref = null;                 /* 'auto' | 'cpu' | 'gpu'；null = 还没读过记忆 */
+  function mgCmpPrefRead() {
+    var v = '';
+    try { v = String((mgCfgMemRead() || {}).compose_backend || ''); } catch (e) {}
+    return (v === 'gpu' || v === 'cpu' || v === 'auto') ? v : 'auto';
+  }
+  function mgCmpPref() {
+    if (_cmpPref === null) _cmpPref = mgCmpPrefRead();
+    return _cmpPref;
+  }
+  function mgCmpPrefSet(v) {
+    v = String(v == null ? '' : v);
+    if (v !== 'gpu' && v !== 'cpu' && v !== 'auto') return mgCmpPref();
+    _cmpPref = v;
+    return _cmpPref;
+  }
+  window.__mgCmpPref = mgCmpPref;       /* 验收读快照用（只读） */
   function mgGateCmpBackend() {
     var sel = document.getElementById('mgCmpBackend');
     var modeEl = document.getElementById('mgMode');
     if (!sel || !modeEl) return;
     var seamless = String(modeEl.value || '').indexOf('seamless') >= 0;
+    var pref = mgCmpPref();
     var gpuOpt = null, i;
     for (i = 0; i < sel.options.length; i++) {
       if (sel.options[i].value === 'gpu') { gpuOpt = sel.options[i]; break; }
     }
     if (!gpuOpt) return;
+    /* 控件的原始 title（index.html 里那句「自动：CPU 合成…」）留一份，恢复时原样写回 */
+    if (!sel.dataset.cmpTitle0) sel.dataset.cmpTitle0 = String(sel.title || '');
     gpuOpt.disabled = seamless;
     gpuOpt.title = seamless
       ? '融合方式是 seamless：GPU 合成只实现了 overlay，选 gpu 也会被退回 CPU（先把融合方式改成 overlay 再试）'
       : 'compose_frame_gpu（torch CUDA）：起不来会自动回退并告警';
-    if (seamless && sel.value === 'gpu') {
-      sel.value = 'auto';
-      try {
-        /* 记忆也要一起改，否则下次载入又回到 gpu（每开一次页面闪一下、日志里反复出现） */
-        if (typeof mgCfgMemSave === 'function') mgCfgMemSave('compose_backend', 'auto');
-      } catch (e) {}
-      if (window.console) console.warn('[导出] 融合方式=seamless，合成后端 gpu 已禁用 → 已改回「自动」');
+    if (seamless) {
+      /* 界面显示「自动」（这单确实用不上 gpu），**记忆和偏好一个字都不动** */
+      if (String(sel.value) === 'gpu') {
+        sel.value = 'auto';
+        /* 只在真发生过「显示被改成自动」时打一行，不然每开一次页面刷一遍日志 */
+        if (window.console) {
+          console.warn('[导出] 融合方式=seamless，合成后端 gpu 这单用不上 → 界面先显示「自动」'
+            + '（记忆仍是 gpu，改回 overlay 自动恢复）');
+        }
+      }
+      sel.title = '融合方式=seamless：这单用不上 GPU 合成，先显示「自动」；'
+        + (pref === 'gpu' ? '记忆里仍是 gpu，改回 overlay 会自动恢复' : '改回 overlay 才启用 gpu');
+      return;
     }
+    sel.title = sel.dataset.cmpTitle0;
+    /* 不再是 seamless：偏好是 gpu 就直接恢复（用户在界面上挑过的那个值不该被门控吃掉） */
+    if (pref === 'gpu') sel.value = 'gpu';
+    else if (String(sel.value) === 'gpu') sel.value = pref;   /* 偏好是 cpu/auto：别留在 gpu */
   }
   window.mgGateCmpBackend = mgGateCmpBackend;
+  /* 只有用户**在界面上主动改**这个下拉，才算「他的选择」：更新偏好 + 写记忆。
+     门控里那些 sel.value = 'auto' 是程序赋值，不派发 change，不会走到这里。 */
+  (function bindCmpPref() {
+    var sel = document.getElementById('mgCmpBackend');
+    if (!sel || sel.dataset.cmpPrefBound) return;
+    sel.dataset.cmpPrefBound = '1';
+    sel.addEventListener('change', function () {
+      mgCmpPrefSet(sel.value);
+      try { if (typeof mgCfgMemSave === 'function') mgCfgMemSave('compose_backend', _cmpPref); } catch (e) {}
+    });
+  })();
   var MG_CFG_MEM_KEY = "dfl-mg-cfg-memory";
   function mgCfgMemRead() {
     try {

@@ -10,7 +10,8 @@ r"""分段式视频导出验收：真后端 + 真视频 + 现有 .dfm，全部�
      合成从游标续跑、只补合成 + 编码。
   d) 成片与原逻辑一致：时长≈源、有音轨、抽 3 帧与单帧预览逐像素 ≤8/255。
   e) 帧图最高质量：cache 里的帧 vs 「合成结果原图」逐像素 mean < 1、max ≤ 2。
-  f) UI：四步动画（复用「模型转换」的 Stepper）在阶段切换时高亮前进；旧的四行「—」已消失。
+  f) UI：进度页的**流水线视图**（#mgPipeSvg 六列 g.col[data-k] + lane 方块）在阶段切换时
+     逐列高亮前进、最后六列全 done；旧的四行「—」已消失。等 DOM 一律有上限（超时 FAIL + 打现场）。
   g) cache 生命周期：成功导出后 <名字>_cache/ 不存在；失败/取消时保留。
   h) 阶段幂等：已完成的阶段再点一次 → skipped=true，不重跑。
 
@@ -53,6 +54,18 @@ SERVER_LOG = LOGDIR / "server.log"
 DFM = "阿証証証証-416"                  # 小的那个（539 MB），416 输入
 TOL = 8                                # 成片 vs 单帧预览的逐像素容差
 STAGE_NAMES = ("frames", "faces", "pred", "mask", "merge", "encode")
+
+# ---- 等待上限（秒）----
+# ★ 以前 f 那段是「while time.time() - t0 < 900」：目标节点改名之后查不到就空转 15 分钟。
+#   凡是「等 DOM」的一律有硬上限，超时立刻 FAIL 并把现场打出来；只有真干活（导出跑完）
+#   那个循环允许长一点，而且还要有「不再推进就收工」的旁路。
+DOM_WAIT = 10.0        # 等 DOM 结构（六列/列标题/lane 方块）出现
+BOOT_WAIT = 60.0       # 等 app.js 把 window.go / mgStageExport 挂上（后端这时可能在加载
+                       # 预览模型，静态文件会被挡住十几秒 —— 实测 20s 不够；60s 仍是硬上限）
+EXPORT_WAIT = 300.0    # 看着导出往回跑（真活）。视频只有 1~3 秒，但这台机器上同时跑着
+                       # 别的验收时「换脸」一段实测要 ~60s，6 段串起来 200s 也有可能 ——
+                       # 300s 是硬上限（仍然不是老代码那种 900s 空转），到点就 FAIL 并打现场
+STALL_WAIT = 20.0      # 不在跑了、列状态也这么久没变 → 收工交给断言
 
 BASE = ""
 RESULTS = []
@@ -704,27 +717,95 @@ def case_c_resume(video):
 
 
 # ============================================================
-# 案例 f：UI 四步动画
+# 案例 f：UI 流水线视图（六列 × lane —— 现行 DOM）
 # ============================================================
+# ★ 这一节以前查的是 #mgpSteps .cvst（竖排六步 stepper）。7d5d014 把 stepper 换成
+#   mgPipe 流水线视图之后，**#mgpSteps 这个 id 在页面里已经不存在了**：老代码查不到
+#   节点就在本机上空转满 900 秒，最后还按「0 个节点」去断言（all() 空集合为真）——
+#   空转 + 假绿。现在按现行 DOM 断言，并且每个等 DOM 的循环都有硬上限：
+#     · 结构（六列标题 / 列组 g.col[data-k] / lane 方块）等到位 ≤ DOM_WAIT 秒，
+#       超时**立刻 FAIL** 并把 #p-merge 下真实的 id 全打出来（不再空转）；
+#     · 看着导出往回跑只到「六列全 done」或「不再推进」，硬上限 EXPORT_WAIT 秒。
 UI_SNAP = r"""
 (function(){
-  var nodes = Array.prototype.slice.call(document.querySelectorAll("#mgpSteps .cvst"));
-  var rows = Array.prototype.slice.call(document.querySelectorAll("#p-merge .mgpstep"));
-  var txt = (document.querySelector("#p-merge") || {}).innerText || "";
+  var svg = document.getElementById('mgPipeSvg');
+  var cols = svg ? Array.prototype.slice.call(svg.querySelectorAll('g.col')) : [];
+  var ttl = Array.prototype.slice.call(document.querySelectorAll('#mgPipeSvg text.t-stage'));
+  var rows = Array.prototype.slice.call(document.querySelectorAll('#p-merge .mgpstep'));
+  var txt = (document.querySelector('#p-merge') || {}).innerText || '';
   return JSON.stringify({
-    n: nodes.length,
-    labels: nodes.map(function(n){ var t = n.querySelector(".cvnm"); return t ? t.textContent : ""; }),
-    icons: nodes.map(function(n){ var i = n.querySelector(".cvic"); return i ? i.textContent : ""; }),
-    cls: nodes.map(function(n){ return n.className; }),
+    svg: !!svg,
+    stepsBox: !!document.getElementById('mgpStepsBox'),
+    n: cols.length,
+    keys: cols.map(function(c){ return String(c.getAttribute('data-k') || ''); }),
+    labels: ttl.map(function(t){ return String(t.textContent || ''); }),
+    cls: cols.map(function(c){
+      var k = c.getAttribute('class');
+      return String(k === null ? '' : k);
+    }),
+    lanes: svg ? svg.querySelectorAll('rect.lane').length : 0,
     oldRows: rows.length,
     trace: (window.__mgpTrace || []).slice(-12),
-    eta: ((document.getElementById('mgpEta') || {}).textContent || ""),
-    welcome: (function(){var w=document.getElementById('welcome');return w?getComputedStyle(w).display:'-';})(),
-    hasOld: txt.indexOf("载入模型") >= 0 || txt.indexOf("逐帧合成") >= 0,
+    eta: ((document.getElementById('mgpEta') || {}).textContent || ''),
+    hasOld: txt.indexOf('载入模型') >= 0 || txt.indexOf('逐帧合成') >= 0,
     running: !!window.__mgStageRunning
   });
 })()
 """
+
+
+def wait_dom(b, expr, what, timeout=None):
+    """轮询一个 JS 表达式直到为真。超时返回 False —— 调用方负责 FAIL + 打印 DOM。
+
+    ★ 以前这里是「while time.time() - t0 < 900」：目标节点改名之后查不到就空转 15 分钟。
+      等 DOM 结构一律有上限，超时立刻把现场打出来。"""
+    timeout = DOM_WAIT if timeout is None else float(timeout)
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            if b.eval(expr):
+                return True
+        except Exception:                                  # noqa: BLE001
+            pass
+        time.sleep(0.2)
+    return False
+
+
+def dom_dump(b):
+    """失败时贴给人看：**真实**的 DOM 结构 + 页面到哪一步了。
+
+    只列 id 不够用：上次「页面没就绪」时 id 全在、但 app.js 还没跑完（cols=0），
+    光看 id 会以为是节点改名。所以把 readyState / 脚本资源 / 控制台里的错一起带上。"""
+    try:
+        raw = b.eval(
+            "(function(){var p=document.getElementById('p-merge');"
+            "var ids=p?Array.prototype.slice.call(p.querySelectorAll('[id]'))"
+            ".map(function(e){return e.id;}):[];"
+            "var svg=document.getElementById('mgPipeSvg');"
+            "var rs=[];try{rs=(performance.getEntriesByType('resource')||[])"
+            ".filter(function(x){return String(x.name).indexOf('.js')>0;})"
+            ".map(function(x){return String(x.name).split('/').pop()+'@'+Math.round(x.duration);});}catch(e){}"
+            "return JSON.stringify({readyState:document.readyState,"
+            "goType:typeof window.go, mseType:typeof window.mgStageExport, "
+            "jsLoaded:rs,"
+            "ids:ids.slice(0,90),"
+            "stepsBox:!!document.getElementById('mgpStepsBox'),"
+            "pipeSvg:!!svg,"
+            "cols:svg?svg.querySelectorAll('g.col').length:0,"
+            "tstage:document.querySelectorAll('#mgPipeSvg text.t-stage').length,"
+            "lanes:svg?svg.querySelectorAll('rect.lane').length:0,"
+            "mgpSteps:!!document.getElementById('mgpSteps'),"
+            "cvst:document.querySelectorAll('.cvst').length});})()")
+        tail = [str(x)[:160] for x in (getattr(b, "console", None) or [])[-3:]]
+        return "%s · console=%s" % (str(raw)[:700], tail)
+    except Exception as e:                                 # noqa: BLE001
+        return "DOM 现场取不到：%s" % e
+
+
+def _cls_short(cls):
+    """"col done" -> "done"：状态序列读起来短一点。"""
+    parts = [x for x in str(cls or "").split() if x != "col"]
+    return parts[0] if parts else "-"
 
 
 def case_ui(video):
@@ -741,28 +822,43 @@ def case_ui(video):
     b = Browser(edge)
     try:
         b.goto(BASE + "/")
-        t0 = time.time()
-        while time.time() - t0 < 60:
-            try:
-                if b.eval("typeof window.go === 'function' && typeof window.mgStageExport === 'function'"):
-                    break
-            except Exception:                              # noqa: BLE001
-                pass
-            time.sleep(0.4)
-        # 进合成页 → 进度视图（四步动画就在这一页）
+        # ★ 只等 window.go：mgStageExport 是**进了合成页**才挂上的（bindMergeUI 里那句
+        #   window.mgStageExport = mgStageExport）。老代码在这里等「go 且 mgStageExport」，
+        #   条件是永远不成立的 —— 它只是 60 秒后**默默往下走**，于是后面查什么都是空的。
+        if not wait_dom(b, "typeof window.go === 'function'", "页面就绪（window.go）",
+                        BOOT_WAIT):
+            return check(False, "f 页面没就绪（window.go 没挂上）", dom_dump(b))
+        # 进合成页 → 进度视图（流水线图就在这一页）
         # 关掉欢迎页的扫码浮层（不然截图/点击都被它挡着）
         b.eval("(function(){var w=document.getElementById('welcome');"
                " if(w){w.style.display='none';} "
                " var m=document.getElementById('modal'); if(m){m.style.display='none';} "
                " return true;})()")
         b.eval("window.go('merge'); true")
-        time.sleep(1.2)
+        if not wait_dom(b, "typeof window.mgStageExport === 'function'",
+                        "合成页就绪（mgStageExport）"):
+            return check(False, "f 进了合成页但 mgStageExport 没挂上（bindMergeUI 没跑完）",
+                         dom_dump(b))
         b.eval("window.mgStep && window.mgStep('progress'); true")
-        time.sleep(0.6)
+        # 结构就位：六列列组（g.col[data-k]）+ 六个列标题。超时就 FAIL，不空转。
+        if not wait_dom(b,
+                        "(function(){var s=document.getElementById('mgPipeSvg');"
+                        "return !!(s && s.querySelectorAll('g.col').length === 6"
+                        " && document.querySelectorAll('#mgPipeSvg text.t-stage').length === 6);})()",
+                        "流水线视图六列"):
+            snap_bad = b.js(UI_SNAP) or {}
+            return check(False, "f 流水线视图（#mgPipeSvg 的六列）没出现",
+                         "n=%s · %s" % (snap_bad.get("n"), dom_dump(b)))
         snap0 = b.js(UI_SNAP)
-        check(snap0.get("n") == 6, "f 六步动画有 6 个节点", "%s" % (snap0.get("labels"),))
-        check(snap0.get("labels") == ["切帧", "切脸", "换脸", "遮罩", "合成", "导出"],
-              "f 文案 = 切帧/切脸/换脸/遮罩/合成/导出", "%s" % (snap0.get("labels"),))
+        check(snap0.get("n") == 6 and snap0.get("keys") ==
+              ["frames", "det", "dfm", "xseg", "compose", "encode"],
+              "f 六列都在（现行流水线视图 · frames/det/dfm/xseg/compose/encode）",
+              "n=%s · keys=%s" % (snap0.get("n"), snap0.get("keys")))
+        check(snap0.get("labels") == ["切帧", "切脸", "换脸", "遮罩", "合成", "缓存帧"],
+              "f 列标题 = 切帧/切脸/换脸/遮罩/合成/缓存帧", "%s" % (snap0.get("labels"),))
+        check(int(snap0.get("lanes") or 0) > 0,
+              "f 每列的线程方块（rect.lane）画出来了",
+              "%s 个 · #mgpStepsBox=%s" % (snap0.get("lanes"), snap0.get("stepsBox")))
         check(snap0.get("oldRows") == 0 and not snap0.get("hasOld"),
               "f 旧的四行（载入模型/逐帧合成/编码/完成）已消失",
               "mgpstep=%s · 旧文案=%s" % (snap0.get("oldRows"), snap0.get("hasOld")))
@@ -780,39 +876,59 @@ def case_ui(video):
         except OSError:
             pass
         t0 = time.time()
-        while time.time() - t0 < 900:
+        t_change = t0
+        last_key = ""
+        while time.time() - t0 < EXPORT_WAIT:
             s = b.js(UI_SNAP)
-            cls = s.get("cls") or []
+            cls = list(s.get("cls") or [])
             # 切帧已 ✓、切脸正在跑：截一张图当「动画真的推进了」的视觉证据
             if (not shot.exists() and len(cls) == 6
                     and "done" in cls[0] and "on" in cls[1]):
                 try:
                     shot.write_bytes(base64.b64decode(
                         b.call("Page.captureScreenshot", format="png").get("data") or ""))
-                    say("f 截图（第 1 步 ✓、第 2 步高亮）：%s" % shot)
+                    say("f 截图（第 1 列 ✓、第 2 列高亮）：%s" % shot)
                 except Exception:                          # noqa: BLE001
                     pass
             key = ",".join(cls)
-            if not seq or seq[-1] != key:
-                seq.append(key)
+            if key != last_key:
+                last_key = key
+                t_change = time.time()
+                if not seq or seq[-1] != key:
+                    seq.append(key)
             for i, c in enumerate(cls):
-                if " on" in (" " + c) or c.endswith("on"):
+                if "on" in str(c).split():
                     seen_on[i] = True
-                if "done" in c:
+                if "done" in str(c).split():
                     seen_done[i] = True
-            if not s.get("running") and seen_done[3]:
+            all_done = len(cls) == 6 and all("done" in str(c).split() for c in cls)
+            any_err = any("err" in str(c).split() for c in cls)
+            if not s.get("running") and (all_done or any_err):
                 break
-            if not s.get("running") and any("err" in c for c in cls):
+            # 不在跑、列状态也 STALL_WAIT 秒没变 → 交给断言，不再空转
+            if not s.get("running") and (time.time() - t_change) > STALL_WAIT:
+                say("f 已经不在跑、列状态 %.0fs 没变 → 收工交给断言" % STALL_WAIT)
                 break
-            time.sleep(0.35)
+            time.sleep(0.15)
+        else:
+            say("f 看导出跑完的上限 %.0fs 到了 → 收工交给断言" % EXPORT_WAIT)
         final = b.js(UI_SNAP)
+        fcls = list(final.get("cls") or [])
         say("f trace：%s" % json.dumps(final.get("trace"), ensure_ascii=False)[:900])
-        check(all(seen_on), "f 每一步都出现过「当前步」高亮", "seen_on=%s" % (seen_on,))
-        check(all(seen_done), "f 每一步都推进到「完成」", "seen_done=%s" % (seen_done,))
-        check(final.get("icons") == ["✓"] * 6, "f 终态六个节点都是 ✓", "%s" % (final.get("icons"),))
-        check(len(seq) >= 6, "f 阶段切换时动画确实推进了", "%d 次状态变化" % len(seq))
-        say("f 动画状态序列：%s" % " -> ".join(x.replace("cvst", "").replace("  ", " ").strip() or "-"
+        # 每一列都要**可见地**推进过：至少出现过「当前步」高亮或「完成」。
+        # （单纯 on 会抖：这一段的视频只有 24 帧，某个阶段可能 200ms 就过去了，
+        #   0.15s 的轮询仍可能刚好落在两次状态之间 —— 那不叫没显示。）
+        check(all(a or b for a, b in zip(seen_on, seen_done)),
+              "f 每一列都亮过（当前步高亮 或 已推到完成）",
+              "on=%s · done=%s" % (seen_on, seen_done))
+        check(all(seen_done), "f 每一列都推进到「完成」", "seen_done=%s" % (seen_done,))
+        check(len(fcls) == 6 and all("done" in str(c).split() for c in fcls),
+              "f 终态六列都是 done", "%s" % (fcls,))
+        check(len(seq) >= 6, "f 阶段切换时列状态确实推进了", "%d 次状态变化" % len(seq))
+        say("f 列状态序列：%s" % " -> ".join(",".join(_cls_short(c) for c in x.split(","))
                                               for x in seq[:10]))
+        if not (all(seen_done) and len(fcls) == 6):
+            say("f DOM 现场：%s" % dom_dump(b))
         return True
     finally:
         b.close()

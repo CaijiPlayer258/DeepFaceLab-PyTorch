@@ -364,10 +364,14 @@ def _shot_banner(eff, warns):
             time.sleep(0.4)
             state = ev("(function(){var b=document.getElementById('mgpEffWarn');"
                        "var body=document.getElementById('mgpEffWarnBody');"
+                       "var t=document.getElementById('mgpEffWarnTitle');"
                        "var g=document.getElementById('mgpEffGrid');"
                        "var p=document.getElementById('mgpEffDrawer');"
                        "return JSON.stringify({banner: !!b && !b.hidden,"
                        "text: body?String(body.textContent):'',"
+                       "/* 一条警告一个 div：lines = 真的摆出来几行（不是 join 出来的一个字符串） */"
+                       "lines: body?body.children.length:0,"
+                       "title: t?String(t.textContent):'',"
                        "items: g?g.children.length:0,"
                        "panel: !!p && !p.hidden,"
                        "gone: !document.getElementById('mgpEff')});})()")
@@ -525,15 +529,55 @@ def main(argv=None):
             say("这一单真跑在 GPU 上（%s.torch 可用）→ 没有回退告警是正确行为" % "compose_gpu")
         wait_terminal("/api/merge/export/status")
 
+        # ---- H：一单同时踩两件事（检测器推断 + 合成后端降级）----
+        # 为什么要有这一段：F 是**前端**那一段，它只能显示喂进去的那份 status。
+        # 以前 F 喂的是上一单（G）的 status —— 那一单 detector 是显式给的，本来就没有
+        # detector 那条警告，于是「横幅里没有 detector」看着像前端丢字，其实是**数据只有一条**。
+        # 这里用一单同时踩两件事的请求（不带 detector + quality=high，blend=seamless 又带
+        # compose_gpu=1）把「后端到底累不累加」摆出来：两条都得在，横幅才谈得上「都看得见」。
+        head("H  一单两条警告：检测器推断 + 合成后端降级（横幅要两条都显示）")
+        st, d = post("/api/merge/export", {
+            "video": str(clip), "fused": 1, "quality": "high", "model": model,
+            "settings": SETTINGS, "compose_gpu": 1})
+        say("H 启动：HTTP %s ok=%s" % (st, d.get("ok")))
+        time.sleep(0.8)
+        s = wait_terminal("/api/merge/export/status")
+        ew = s.get("eff_warnings") or []
+        # ★ 证据：**那一刻** status 里到底有几条（横幅只能显示这里有的东西）
+        say("status.eff_warnings = %s" % json.dumps(ew, ensure_ascii=False)[:800])
+        say("status.warnings     = %s"
+            % json.dumps(s.get("warnings") or [], ensure_ascii=False)[:800])
+        _codes = [str(w.get("code")) for w in ew]
+        _texts = [str(w.get("text")) for w in ew]
+        check(len(ew) >= 2
+              and any("detector" in t for t in _texts)
+              and any("选了 gpu" in t for t in _texts),
+              "H1 eff_warnings[] 里两条都在（后一条没把前一条盖掉）",
+              "%d 条 · code=%s" % (len(ew), _codes))
+
         if not args.no_browser:
             head("F  前端横幅 + 「当前生效」面板（真实页面，Edge headless）")
-            ui = shot_banner(s.get("eff"), s.get("eff_warnings") or [])
+            say("喂给横幅的 status：eff.detector=%s/%s · eff_warnings=%d 条"
+                % ((s.get("eff") or {}).get("detector"),
+                   (s.get("eff") or {}).get("detector_src"), len(ew)))
+            ui = shot_banner(s.get("eff"), ew)
             if ui is None:
                 check(False, "F1 页面渲染", "浏览器那一段没跑起来")
             else:
+                # ★ 证据：DOM 里那一刻的横幅标题与正文（正文 = 每行一条 div 的 textContent）
+                say("DOM 横幅：title=%r lines=%s text=%r"
+                    % (str(ui.get("title")), ui.get("lines"),
+                       str(ui.get("text"))[:400]))
                 check(ui.get("banner") is True, "F1 顶部横幅可见", str(ui.get("banner")))
                 check("detector" in str(ui.get("text")), "F2 横幅文案里有 detector",
                       str(ui.get("text"))[:160])
+                # 真需求：两条警告要能**同时**看见（不是后一条挤掉前一条，也不是只有标题说 2 项）
+                check(ui.get("lines") == len(ew)
+                      and "detector" in str(ui.get("text"))
+                      and "选了 gpu" in str(ui.get("text")),
+                      "F2b 两条警告同时可见（detector 推断 + 合成后端降级）",
+                      "lines=%s/%s · title=%s"
+                      % (ui.get("lines"), len(ew), str(ui.get("title"))[:60]))
                 check(ui.get("gone") is True, "F3 常驻面板 #mgpEff 已删除", str(ui.get("gone")))
                 check(int(ui.get("items") or 0) >= len(FIELDS),
                       "F4 抽屉里 %d 个字段（14 → 16）" % len(FIELDS),

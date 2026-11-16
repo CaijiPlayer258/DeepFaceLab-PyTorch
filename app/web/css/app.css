@@ -5799,6 +5799,12 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   font-family: var(--mono, ui-monospace, Consolas, monospace);
   font-size: 11.5px;
 }
+/* 一条警告一个 div（两条同时成立时要**都看得见**：检测器推断 + 合成后端降级） */
+#p-merge .mgeff-warn .mgeff-wl + .mgeff-wl {
+  margin-top: 3px;
+  padding-top: 3px;
+  border-top: 1px dashed var(--line, rgba(255, 255, 255, .08));
+}
 #p-merge .mgeff-warn[hidden] { display: none !important; }
 
 /* ---------- 右下角的轻入口：文字链接，不抢进度条的视觉 ---------- */
