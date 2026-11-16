@@ -24,10 +24,10 @@ app/
 ├── main.py             pywebview 入口（旧壳，未删）
 ├── server/             FastAPI 业务
 │   ├── app.py          单文件 70KB —— 所有路由 + 业务都在这
-│   ├── _detect.py      RetinaFace ONNX
+│   ├── _vision/        检测/对齐/XSeg 的实身（detect.py = RetinaFace ONNX）
 │   ├── _dfl_train.py   训练包装：跑 4.0 的 main.py，禁掉自动弹浏览器
-│   ├── biliauth.py     B 站扫码登录
-│   └── _bili_mock.py   B 站假数据
+│   ├── backend_bili/   B 站扫码登录 / 投稿 / 下载（placeholder.py 是 DFL_BILI_MOCK 那套假数据）
+│   └── backend_*/      其余业务按域分包（顶层 _xxx.py 都是 PEP 562 转发壳）
 ├── web/                前端（StaticFiles 挂这里）
 │   ├── index.html      53KB 单页
 │   ├── js/app.js       190KB 单文件
@@ -35,9 +35,10 @@ app/
 │   ├── css/            app.css / shadcn.css
 │   ├── mask-editor/    遮罩绘制（copied from 4.0，独立子应用）
 │   └── _parts/         早期拆分稿，**没有任何地方引用**（现状见 _parts/README.md）
-├── core/               **空目录树**（data/extractor/merger/...），Qt 时代规划，烂尾
-├── modelhub/           ONNX 模型
-└── docs/               设计文档（01/02 已过期）
+├── core/               （已删：Qt 时代规划的空目录树，0 文件）
+├── engine/             4.1 引擎（xlib / core / models / MergeStudio / facelib / modelhub …）
+├── tools/              验收与迁移脚本（accept / bench / migrate）
+└── docs/               设计文档（01/02/05 已移入 docs/archive/4.0/）
 
 desktop/                Electron 壳
 workspace/              用户数据
