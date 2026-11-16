@@ -37,6 +37,15 @@ torch eager + TF32 比 ONNX 快 3~13%，而 bf16 是**这台 5070 Laptop 唯一�
         流（self.gstream）上捕获。捕获失败/形状不匹配 → 回退 eager 并打日志（不静默）。
     DFL_DFM_GRAPH_B=1,2,4,8                要捕获的 batch 档（其余档回退 eager）
     DFL_DFM_GRAPH_WARM=3                    捕获前在捕获流上热几次（cuDNN 选算法会变）
+    DFL_DFM_GRAPH_U8=1                      **把出参的 u8 量化录进图**（默认 1；=0 回到 host 侧量化，逐字节相同）
+        pred（shape[-1]==3）和两张遮罩（shape[-1]==1，且空间尺寸 == 输入尺寸）在**捕获时**
+        各追加「×255 → clamp(0,255) → 截断到 uint8」，于是图里多一份 uint8 出参：
+          · D2H 从 5·416²·4B 变成 5·416²·1B（4.00 倍小）；
+          · host 侧不再做 np.multiply/clip/astype —— 快速导出里那 4.3ms/帧 就是它。
+        fp32 的那份在图里**照样留着**，所以 stage / 项目 / preview 三条路径（不经过
+        want_u8）拿到的还是 fp32，一行没改；只有显式要 u8 的调用
+        （run_u8 / _dfm_run_batch(want_u8=True)，即快速导出的 GPU 车道）走新路。
+        只在 fp32 上乘：bf16 乘 255 会改末位（见 app/tools/bench/dfm_graph_u8_ab.py 的表）。
 
 数值关系（本机实测，见 DFM_TORCH_BF16_REPORT.md）：torch fp32 与 ONNX fp32 的
 max|diff| 是 1e-3 量级 —— 与 ORT 自己换 provider（CUDA vs CPU）的差同量级，
@@ -104,14 +113,18 @@ class _GraphRun:
       · pin      主机侧 pinned 舞台（np.copyto 进它，再异步 H2D）—— 少一次 pageable 拷贝。
     """
 
-    __slots__ = ("batch", "graph", "stat_in", "sout", "pin", "pin_np",
+    __slots__ = ("batch", "graph", "stat_in", "sout", "sout_u8", "pin", "pin_np",
                  "cap_ms", "vram_mb")
 
-    def __init__(self, batch, graph, stat_in, sout, pin, cap_ms, vram_mb):
+    def __init__(self, batch, graph, stat_in, sout, pin, cap_ms, vram_mb,
+                 sout_u8=None):
         self.batch = int(batch)
         self.graph = graph
         self.stat_in = stat_in
         self.sout = tuple(sout)
+        # u8 出参（DFL_DFM_GRAPH_U8=1）：pred + 两张遮罩都是 uint8（判据见 _quant_out）；
+        # None = 这一档没有 u8 版本（开关关着 / 没捕成），调用方按 dtype 判。
+        self.sout_u8 = None if sout_u8 is None else tuple(sout_u8)
         self.pin = pin
         self.pin_np = pin.numpy()
         self.cap_ms = float(cap_ms)
@@ -144,6 +157,14 @@ class DfmTorch:
         # 不存在"下一次前向把上一次的 numpy 覆盖掉"这种坑）。实测复用只省 0.2ms/次，
         # 不值得为它背一个生命周期约定 —— 见 app/tools/bench/dfm_out_bench.py 的表。
         self.pin_reuse = _env("DFL_DFM_PIN_REUSE", "0").lower() in ("1", "true", "yes", "on")
+        # 图里量化（DFL_DFM_GRAPH_U8）：pred 直接从图里拿 uint8 —— D2H 4 倍小、host 零 float 数学。
+        self.graph_u8 = _flag("DFL_DFM_GRAPH_U8", "1")
+        if self.graph_u8 and self.pin_reuse:
+            # u8 出参**直接当 pred_u8 用**（中间不再有 astype 复制一份），复用的 pinned
+            # 缓冲会被下一批覆盖 —— 两张脸最后合成出同一份像素。这一对组合必须掐掉。
+            self.pin_reuse = False
+            print("[dfm-torch] DFL_DFM_GRAPH_U8=1 与 DFL_DFM_PIN_REUSE=1 互斥"
+                  "（u8 出参不复制一份），pin_reuse 已按 0 处理", flush=True)
         # 出参搬法：merged（默认，一条 pinned + 一次同步）| legacy（每张量各自分配+同步）。
         # 留 legacy 是为了随时能 A/B 和回退 —— 它不是"死代码"，是逃生门。
         self.out_mode = _env("DFL_DFM_OUT", "merged").lower()
@@ -364,6 +385,37 @@ class DfmTorch:
             return net(xd.to(torch.bfloat16))
         return net(xd)
 
+    @staticmethod
+    def _q_u8(y):
+        """fp32 → uint8：×255 → clamp(0,255) → **截断**（不是四舍五入）。
+
+        逐位等于 host 那条 `np.multiply(x, 255) → clip(0,255) → astype(uint8)`：
+        x∈[0,1] 时 `np.clip(x,0,1)` 恒等，两边是同一个 IEEE-754 fp32 乘；
+        x>1 / x<0 时「先乘后 clamp」与「先 clamp 再乘」给的都是 255.0 / 0.0，
+        截断后同是 255 / 0。实测（app/tools/bench/dfm_graph_u8_ab.py）四个 batch 档
+        逐位 max=0、非零像素 0 —— 这条等价关系是整个开关成立的前提。
+        """
+        return (y * 255.0).clamp_(0.0, 255.0).to(torch.uint8)
+
+    def _quant_out(self, sout):
+        """把出参换成 uint8（DFL_DFM_GRAPH_U8=1）：pred + 两张遮罩。
+
+        遮罩只在**空间尺寸正好等于输入尺寸**时才录 u8 —— 下游 _mask2d 会 squeeze（无副作用）
+        但**也可能 cv2.resize**（有副作用：float 三次插值 vs u8 三次插值不是同一批像素）。
+        把 resize 这个门挡在捕获期，运行时那条分支就永远不成立。
+        """
+        out, hit = [], False
+        for y in sout:
+            ok = y.dim() == 4 and y.is_floating_point() and y.shape[-1] in (1, 3)
+            if ok and y.shape[-1] == 1:
+                ok = tuple(int(d) for d in y.shape[1:3]) == (int(self.size), int(self.size))
+            if ok:
+                out.append(self._q_u8(y))
+                hit = True
+            else:
+                out.append(y)
+        return tuple(out) if hit else None
+
     def set_graph(self, on=True, batches=None):
         """运行时开关（A/B 台架靠它在同一份会话上交替，不重载模型 = 不改 cuDNN 状态）。
 
@@ -459,18 +511,26 @@ class DfmTorch:
                 # （+3 次分配）。放进图 = 每次 replay 少 3 次提交，且逐位不变
                 # （同一个 aten cast、同一份 bf16 输入）。
                 sout = tuple(y if y.dtype == torch.float32 else y.float() for y in _ys)
+                # u8 量化也录进图（DFL_DFM_GRAPH_U8=1）：pred 那一路追加
+                # 「×255 → clamp(0,255) → 截断」，于是图里多一个 uint8 出参。
+                # 为什么在 fp32 上做：bf16 乘 255 的乘积是 bf16（8 位尾数），
+                # 254.9 这类值会被舍到 255.0 → 截断后 255（错 1 LSB）；fp32 不会。
+                sout_u8 = self._quant_out(sout) if self.graph_u8 else None
         torch.cuda.synchronize()
         dt = (time.perf_counter() - t0) * 1000.0
         vram = (torch.cuda.memory_allocated() - alloc0) / 1048576.0
-        gr = _GraphRun(int(b), cap, stat_in, sout, pin, dt, vram)
+        gr = _GraphRun(int(b), cap, stat_in, sout, pin, dt, vram, sout_u8)
         self.stats["g_cap_ms"] += dt
-        self._log("CUDA Graph 捕获 batch=%d %.0fms（热 %d 次）· 静态入参 %s · 出参 %s ·"
+        self._log("CUDA Graph 捕获 batch=%d %.0fms（热 %d 次）· 静态入参 %s · 出参 %s%s ·"
                   " 设备显存 +%.0fMB"
                   % (int(b), dt, self.g_warm, tuple(stat_in.shape),
-                     [tuple(t.shape) for t in gr.sout], vram))
+                     [tuple(t.shape) for t in gr.sout],
+                     (" · u8 出参 %s" % [str(t.dtype).replace("torch.", "")
+                                         for t in gr.sout_u8]) if sout_u8 else "",
+                     vram))
         return gr
 
-    def _forward_graph(self, x, gr):
+    def _forward_graph(self, x, gr, u8=False):
         """图重放一次：主机舞台 memcpy → 1 次 H2D → **1 次** cudaGraphLaunch → D2H。
 
         提交环上只剩 5~6 次 CUDA API（原来是 156 次 aten 提交 + 1 次流同步）—— 这才是
@@ -514,7 +574,9 @@ class DfmTorch:
             t2 = time.perf_counter()
             if ev1 is not None:
                 ev1.record()
-            outs = self._outs(gr.sout)
+            # u8：pred 从图的 uint8 出参搬（D2H 4 倍小、host 侧不再有任何 float 数学）。
+            # 这一档没捕出 u8（开关关着 / 捕失败）就退回 fp32 —— 调用方按 dtype 判。
+            outs = self._outs(gr.sout_u8 if (u8 and gr.sout_u8 is not None) else gr.sout)
         t3 = time.perf_counter()
         if ev0 is not None:
             try:
@@ -563,7 +625,7 @@ class DfmTorch:
                 t = y.detach()
                 if t.dtype != torch.float32:
                     t = t.float()
-                buf = torch.empty(t.shape, dtype=torch.float32, pin_memory=True)
+                buf = torch.empty(t.shape, dtype=t.dtype, pin_memory=True)
                 t1 = time.perf_counter()
                 buf.copy_(t, non_blocking=True)
                 t2 = time.perf_counter()
@@ -578,7 +640,9 @@ class DfmTorch:
         tens = []
         for y in ys:
             t = y.detach()
-            if t.dtype != torch.float32:
+            # uint8 = 图里量化好的 pred（DFL_DFM_GRAPH_U8=1），**别再转 float**：
+            # 转一下就白搬 4 倍数据、还要在 host 上再乘回去。
+            if t.dtype not in (torch.float32, torch.uint8):
                 t = t.float()
             tens.append(t)
         if not (self.pin and tens and tens[0].is_cuda):
@@ -588,24 +652,47 @@ class DfmTorch:
                 out.append(y.detach().cpu().numpy())
             self.stats["t_dsync"] += (time.perf_counter() - t0) * 1000.0
             return out
+        same_dt = all(t.dtype == torch.float32 for t in tens)
         tot = 0
-        for t in tens:
-            tot += int(t.numel())
-        key = tuple(tuple(t.shape) for t in tens)
+        if same_dt:
+            for t in tens:
+                tot += int(t.numel())
+            key = tuple(tuple(t.shape) for t in tens)
+        else:
+            # 混合 dtype（DFL_DFM_GRAPH_U8=1：pred 是 uint8、两张遮罩还是 fp32）：
+            # 仍然是**一次** pinned 分配 + **一次**同步，只是舞台按字节切、段首 4 字节对齐
+            # （fp32 视图要求）。多一次分配就白省了 _outs 当初合并的收益。
+            sizes, offs = [], []
+            for t in tens:
+                tot = (tot + 3) & ~3
+                offs.append(tot)
+                n = int(t.numel()) * t.element_size()
+                sizes.append(n)
+                tot += n
+            tot = (tot + 3) & ~3
+            key = (tuple(tuple(t.shape) for t in tens),
+                   tuple(t.dtype for t in tens))
         buf = self._pins.get(key) if self.pin_reuse else None
         if buf is None:
-            buf = torch.empty(tot, dtype=torch.float32, pin_memory=True)
+            buf = torch.empty(tot, dtype=torch.float32 if same_dt else torch.uint8,
+                              pin_memory=True)
             if self.pin_reuse:
                 self._pins[key] = buf
         t1 = time.perf_counter()
         views = []
-        off = 0
-        for t in tens:
-            n = int(t.numel())
-            v = buf[off:off + n].view(t.shape)
-            v.copy_(t, non_blocking=True)
-            off += n
-            views.append(v)
+        if same_dt:
+            off = 0
+            for t in tens:
+                n = int(t.numel())
+                v = buf[off:off + n].view(t.shape)
+                v.copy_(t, non_blocking=True)
+                off += n
+                views.append(v)
+        else:
+            for t, o, n in zip(tens, offs, sizes):
+                v = buf[o:o + n].view(t.dtype).view(t.shape)
+                v.copy_(t, non_blocking=True)
+                views.append(v)
         t2 = time.perf_counter()
         torch.cuda.current_stream().synchronize()
         t3 = time.perf_counter()
@@ -633,7 +720,21 @@ class DfmTorch:
                 x = next(iter(feeds.values()))
         return self.forward(x)
 
-    def forward(self, x):
+    def run_u8(self, input_feed=None):
+        """run() 的 u8 版：三个出参直接从图里拿 uint8（D2H 4 倍小、host 零 float 数学）。
+
+        拿不到 u8（开关关 / 这一档没捕 / 走了 eager）就**原样**返回 fp32 —— 调用方
+        必须按 dtype 判，绝不能假定 out[?].dtype == uint8（那样开关一关就改像素）。
+        """
+        if input_feed is None:
+            raise TypeError("run_u8 需要 input_feed")
+        feeds = input_feed
+        x = feeds.get(self.input_name)
+        if x is None:
+            x = next(iter(feeds.values()))
+        return self.forward(x, u8=True)
+
+    def forward(self, x, u8=False):
         a = x
         n = int(a.shape[0]) if isinstance(a, torch.Tensor) else int(np.shape(a)[0])
         with self.lock:
@@ -642,20 +743,20 @@ class DfmTorch:
             while i < n:
                 b = min(n - i, self.mb)
                 part = a[i:i + b] if i else a[:b]
-                outs.append(self._forward_one(part))
+                outs.append(self._forward_one(part, u8=u8))
                 i += b
         if len(outs) == 1:
             return outs[0]
         return [np.concatenate([o[k] for o in outs], 0) for k in range(len(outs[0]))]
 
-    def _forward_one(self, x):
+    def _forward_one(self, x, u8=False):
         # 图这一档在**搬上卡之前**分流：省的正是「156 次 aten 提交」那段主机时间。
         # 形状不匹配/没捕/捕失败 → _graph_for 返回 None，下面原样走 eager（绝不静默换算法）。
         _b0 = int(x.shape[0]) if isinstance(x, torch.Tensor) else int(np.shape(x)[0])
         if self.graph_on and _b0 and _b0 in self.g_batches:
             _gr = self._graph_for(_b0)
             if _gr is not None and _gr.batch == _b0:
-                return self._forward_graph(x, _gr)
+                return self._forward_graph(x, _gr, u8=u8)
         t0 = time.perf_counter()
         xd = self._to_device(x)
         b = int(xd.shape[0])
@@ -721,8 +822,11 @@ class DfmTorch:
         return (self.stats["ms"] / self.stats["faces"]) if self.stats["faces"] else 0.0
 
     def describe(self) -> str:
-        return "torch-%s/%s/b%d%s" % (self.device.type, self.dtype, self.mb,
-                                      "+graph" if (self.graph_on and self._gs) else "")
+        return "torch-%s/%s/b%d%s%s" % (
+            self.device.type, self.dtype, self.mb,
+            "+graph" if (self.graph_on and self._gs) else "",
+            "+u8" if (self.graph_u8 and any(getattr(g, "sout_u8", None)
+                                           for g in self._gs.values())) else "")
 
     def close(self):
         with self.lock:

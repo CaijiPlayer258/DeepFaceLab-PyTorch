@@ -1564,22 +1564,37 @@ def _dfm_session(dfm: str, lane: int = 0):
 
 
 def _mask2d(t, size):
-    """dfm 的遮罩输出 -> (size, size) float32 0..1（和 preview worker 里同名函数一致）。"""
+    """dfm 的遮罩输出 -> (size, size) float32 0..1（和 preview worker 里同名函数一致）。
+
+    uint8 进来说明这张遮罩是**图里量化过**的（DFL_DFM_GRAPH_U8=1，只有 want_u8 的调用
+    才有）：那时 DfmTorch 只在「空间尺寸 == 输入尺寸」时才把遮罩录成 uint8，所以这里
+    不需要 resize，squeeze 完直接就是 `_fused_q_u8(遮罩)` 的那份像素，原样返回。
+    形状对不上（别的模型）就按 u8/255 退回 float 语义 —— 正常到不了。
+    """
     import cv2
     import numpy as np
     m = np.squeeze(t)
     if m.ndim == 3:
         m = m[:, :, 0]
+    if m.dtype == np.uint8:
+        if m.shape[:2] == (int(size), int(size)):
+            return m
+        m = m.astype(np.float32) * (1.0 / 255.0)
     m = np.asarray(m, np.float32)
     if m.shape[:2] != (int(size), int(size)):
         m = cv2.resize(m, (int(size), int(size)), interpolation=cv2.INTER_CUBIC)
     return m
 
 
-def _dfm_run_batch(ent, batch_in):
+def _dfm_run_batch(ent, batch_in, want_u8=False):
     """一次前向跑 N 张（N = batch_in.shape[0]），返回 [(face, prd_mask, dst_mask)]。
 
     batch_in: (N,S,S,3) float32 0..1（NHWC；NCHW 的 dfm 在调用方转置）。
+
+    want_u8=True（只有快速导出的 GPU 车道传）：**请求** 三个出参直接是图里量化好的 uint8
+    （DFL_DFM_GRAPH_U8=1 才有）。face 值等于 `_fused_q_u8(np.clip(face01,0,1), clip=False)`、
+    遮罩值等于 `_fused_q_u8(mask)` —— 逐位相同（台架 48 格 max=0），消费方按 dtype 判，别假定。
+    拿不到就还是 fp32 0..1（开关关 / 这一档没捕 / ORT 后端），一切照旧。
     dfm 的 batch 维是动态的（['batch',416,416,3]），所以批处理不用重新导出模型；
     CUDA graph 那种「按 batch 捕获」的坑在 ORT 这边不存在（我们不开 cuda_graph），
     真要开 TRT 引擎就得按 batch 分桶 —— 见 _engines.try_engine 的 graph_max_batch。
@@ -1593,13 +1608,16 @@ def _dfm_run_batch(ent, batch_in):
         # 一次塞不下（原生 TRT 的优化档位可能只有 1）—— 按上限切开，结果顺序不变
         out = []
         for _i in range(0, n_in, cap):
-            out.extend(_dfm_run_batch(ent, batch_in[_i:_i + cap]))
+            out.extend(_dfm_run_batch(ent, batch_in[_i:_i + cap], want_u8=want_u8))
         return out
     x = batch_in
     if nchw:
         x = np.transpose(x, (0, 3, 1, 2))
     _INFER_CALLS["dfm"] += int(x.shape[0])
-    outs = sess.run(None, {name: np.ascontiguousarray(x, np.float32)})
+    feed = {name: np.ascontiguousarray(x, np.float32)}
+    # run_u8 只有 DfmTorch 有（ORT 会话没有这个口子）；没有就照旧 run()。
+    _ru8 = getattr(sess, "run_u8", None) if want_u8 else None
+    outs = _ru8(feed) if _ru8 is not None else sess.run(None, feed)
     n = int(x.shape[0])
     faces, prds, dsts = [], [], []
     for i in range(n):
@@ -1614,18 +1632,30 @@ def _dfm_run_batch(ent, batch_in):
             face = a[i]
             if face.ndim == 3 and face.shape[-1] == 1:
                 face = np.repeat(face, 3, axis=-1)
-        face = np.asarray(face, np.float32)
+        # uint8 = 图里量化好的 pred（DFL_DFM_GRAPH_U8=1）：**不能再 np.asarray(..., float32)**
+        # —— 那会把 0..255 变成 0..255 的浮点，后面 clip(0,1) 全变 1.0，整张脸雪白。
+        u8_face = np.asarray(face).dtype == np.uint8
+        if not u8_face:
+            face = np.asarray(face, np.float32)
         if face.ndim > 3:
             face = face[0]
         if nchw and face.shape[0] == 3:
             face = np.transpose(face, (1, 2, 0))
         if face.shape[:2] != (size, size):
-            face = cv2.resize(face, (size, size), interpolation=cv2.INTER_LANCZOS4)
+            # 图只会输出 (size,size)，这一支是给「输出分辨率和输入不同」的 ORT 模型留的。
+            # u8 走到这里说明上面那个前提不成立：反量化再 resize，退回 float 语义
+            # （会损失一档精度，但正常到不了 —— 走到了就说明模型不是这个形状）。
+            src = np.asarray(face, np.float32)
+            if u8_face:
+                src = src * (1.0 / 255.0)
+            face = np.clip(cv2.resize(src, (size, size), interpolation=cv2.INTER_LANCZOS4),
+                          0, 1)
+            u8_face = False
         prd = dst = None
         if len(outs) >= 3:
             prd = _mask2d(np.asarray(outs[0])[i], size)
             dst = _mask2d(np.asarray(outs[2])[i], size)
-        faces.append(np.clip(face, 0, 1))
+        faces.append(face if u8_face else np.clip(face, 0, 1))
         prds.append(prd)
         dsts.append(dst)
     return list(zip(faces, prds, dsts))

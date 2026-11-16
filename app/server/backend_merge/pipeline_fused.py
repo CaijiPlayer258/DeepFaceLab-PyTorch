@@ -216,6 +216,12 @@ def _fused_q_u8(x, fast: int, clip: bool = True):
     暂存按线程分开（见 _U8_TLS），所以多条 GPU 车道同时量化不会互相踩；返回的 uint8 是
     **新数组**，不共享缓冲（这些数组要跟着 face 一路活到合成，共享会被下一张脸覆盖）。
     """
+    if x.dtype == np.uint8:
+        # 图里已经量化过（DFL_DFM_GRAPH_U8=1，pred 一路直接从 CUDA Graph 出 uint8）：
+        # 这个数组**就是** `np.clip(x01 * 255.0, 0, 255).astype(np.uint8)` 的结果
+        # （四个 batch 档逐位 max=0，见 app/tools/bench/dfm_graph_u8_ab.py），
+        # 再乘一次 255 就废了。返回的是 pinned 舞台的视图，本拍内有效（pin_reuse 已被 DfmTorch 掐掉）。
+        return x
     if not fast or x.dtype != np.float32:
         return np.clip(x * 255.0, 0, 255).astype(np.uint8)
     _sc = _u8_scratch(x.shape)
@@ -2180,7 +2186,10 @@ def _fused_run(cfg: dict) -> dict:
                         arr[k] = f["dfm_in"]
                     t = time.perf_counter()
                     try:
-                        outs = _dfm_run_batch(_lane_ent(lane, dfm_path), arr)
+                        # want_u8=True：**请求** pred 直接是图里量化好的 uint8（省掉每张脸
+                        # 2MB 的 D2H 与 host 上 ×255/clip/astype 那 ~4.3ms/帧）。拿不到就是 fp32，
+                        # 下面 _fused_q_u8 按 dtype 走老路 —— 开关关着时逐字节不变。
+                        outs = _dfm_run_batch(_lane_ent(lane, dfm_path), arr, want_u8=True)
                     except Exception as e:                     # noqa: BLE001
                         if not (_is_oom(e) and len(faces) > 1):
                             raise
@@ -2194,7 +2203,7 @@ def _fused_run(cfg: dict) -> dict:
                         outs = []
                         for j in range(0, len(faces), h):
                             outs.extend(_dfm_run_batch(_lane_ent(lane, dfm_path),
-                                                       arr[j:j + h]))
+                                                       arr[j:j + h], want_u8=True))
                     ticks.add("dfm", time.perf_counter() - t)
                     bstat["calls"] += 1
                     bstat["faces"] += len(faces)
