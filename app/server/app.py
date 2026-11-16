@@ -55,13 +55,16 @@ from .backend_extract import frames as _mod_frames
 from .backend_extract import media as _mod_media
 from .backend_extract import routes as _mod_extract_routes
 
+# 合成用的取帧/建项目（从 backend_extract/frames.py 搬出来的，见该模块头）
+from .backend_merge import frames_prep as _mod_frames_prep
+
 
 app = FastAPI(title="DeepFaceLab 4.1", docs_url=None, redoc_url=None)
 
 
 _FORWARD_MODULES = (
     _mod_paths, _mod_jobs, _mod_maskcfg, _mod_model_info, _mod_runctl, _mod_merge_run,
-    _mod_media, _mod_detectors, _mod_frames, _mod_extract_routes,
+    _mod_media, _mod_detectors, _mod_frames, _mod_extract_routes, _mod_frames_prep,
     _mod_imageops, _mod_maskops, _mod_stats, _mod_dataset_routes,
 )
 
