@@ -17,7 +17,8 @@ from ..backend_extract.detectors import _get_xseg
 
 
 # ============================================================
-# 遮罩编辑器（照搬 MaskProcessor/ui 的 WebUI）
+# 遮罩编辑器（照搬 MaskProcessor/ui 的 WebUI；那份源码已归档到
+# app/docs/legacy-reference/MaskProcessor/ui，4.1 的实现在 app/web/mask-editor/）
 # 只实现不依赖模型的三个：开项目 / 读图 / 存遮罩
 # 需要 AI 的功能（SAM / BiSeNet / XSeg）返回 501，界面上会提示
 # ============================================================

@@ -790,9 +790,11 @@ def run_export_pipeline(
         print(f"[Export] DFL project: {_proj_dir} ({len(_frames)}f {len(_aligned)}a)", flush=True)
 
     # Clear frame cache before starting
+    # （原先是 import MergeStudio.api.routes_preview._get_cache_dir；4.1 走进程内
+    #   run_export_pipeline，那个独立 API 服务已归档到 app/docs/legacy-reference/MergeStudio/api，
+    #   这里就地算同一个目录：<MergeStudio>/workspace/preview_cache）
     try:
-        from MergeStudio.api.routes_preview import _get_cache_dir
-        cache_dir = _get_cache_dir()
+        cache_dir = Path(__file__).resolve().parents[1] / "workspace" / "preview_cache"
         if cache_dir.exists():
             for f in cache_dir.iterdir():
                 try:
