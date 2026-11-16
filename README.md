@@ -149,7 +149,7 @@ app/
 weights/          推理权重（平铺，见上）—— 不入库
 workspace/        用户数据：数据集 / 模型 / 输出 —— 不入库
 runtime/          Python 运行时（server / engine 两个 venv）—— 不入库
-legacy/           4.0 Qt 界面与素材（仅供对照）
+app/docs/legacy-reference/   已归档的死代码（4.0 Qt 界面、MaskProcessor 等，仅供对照）
 ```
 
 界面是 Web 技术栈，跑在 Electron 里；后端是本地 FastAPI，不依赖前端框架，改完刷新即可。

@@ -56,9 +56,10 @@ bg_*.png
 f_*.png
 
 # 登录凭证 / 用户信息：只留本机，不进仓库
-legacy/qt-ui/user/bilibili_cookie.txt
-legacy/qt-ui/user/user_info.json
-legacy/qt-ui/user/*.bak
+app/docs/legacy-reference/qt-ui/user/bilibili_cookie.txt
+app/docs/legacy-reference/qt-ui/user/user_info.json
+app/docs/legacy-reference/qt-ui/user/*.bak
+# 归档后 4.0 界面那份登录凭证的落点（**/ 通配已覆盖，这两行是显式说明）
 
 # GPU 实验目录：本地约 2 GB 的权重/引擎，纯实验，不进仓库
 app/DFL_GPU_LAB/

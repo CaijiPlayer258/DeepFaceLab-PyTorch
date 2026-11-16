@@ -52,5 +52,5 @@ workspace/              用户数据
    `mask-draw.html` / `mask-draw.js` 两份还没有逐字副本、`merge-*.html` 只内联了一部分，
    删之前要逐个确认（清单在 `_parts/README.md`）
 5. `app/main.py` 是死代码（pywebview 时代留下的，与 `serve.py` 端口逻辑重复、无人引用）
-   —— `legacy/qt-ui/` 已整目录删除（47 个文件 / 217 KB，从未被 import）
+   —— `legacy/qt-ui/` 已归档到 `app/docs/legacy-reference/qt-ui/`（58 个跟踪文件，从未被 import）
 6. `02-STRUCTURE.md` 描述的 Qt 方案与代码完全不符

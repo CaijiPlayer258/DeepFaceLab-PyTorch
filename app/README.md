@@ -43,7 +43,8 @@ python app\serve.py             :: 只起后端，浏览器开 http://127.0.0.1:
 
 - **静态前缀固定 `/static`**：`index.html` 里有 200+ 处绝对路径（字体尤其多），改前缀会大面积 404。
 - **`?v=` 由服务端按文件 mtime 重写**（`app.py` 的 `index()`），所以改完 js/css 刷新即可，不用手动清缓存。
-- **登录凭证不进仓库**：`legacy/qt-ui/user/bilibili_cookie.txt` 已被 `.gitignore` 拦住。
+- **登录凭证不进仓库**：`app/engine/ui/user/bilibili_cookie.txt`（运行期那份）与归档区里的
+  `app/docs/legacy-reference/qt-ui/user/bilibili_cookie.txt` 都被 `.gitignore` 的 `**/` 规则拦住。
 - **权重全部平铺在 `weights/` 根下**（`.onnx / .pth / .pt / .ubj`，只有 `bert-base-uncased/` 是个目录），`.gitignore` 已忽略，删了能重下但要重下。
 
 ## 五、还没做完的整理
