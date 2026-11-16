@@ -7,7 +7,7 @@
 | ① | 合成器三页 + 4 轨时间轴 | 完成 | `#mgTabs` 3 项，`.mgview` 3 个，`.mtl-trk` 4 条，时间轴 139px |
 | ② | 遮罩绘制页 | 完成 | 补 5 个控件；模型下拉真实扫描到 `xseglite.onnx`（18.1 MB） |
 | ③ | 训练参数补齐 | 完成 | 8 卡 56 行 → **15 卡 77 行** |
-| ④ | 全站对齐审计 | 完成 | `_parts/audit.md` 28 条清单；`.cfgrow .cl` 右边缘去重后 1 个值 |
+| ④ | 全站对齐审计 | 完成 | `audit.md`（同目录）28 条清单；`.cfgrow .cl` 右边缘去重后 1 个值 |
 
 ## 二、审查（独立子智能体）
 
@@ -120,6 +120,8 @@ errors 0
 
 【之前的错误】我照 `ui/components/page_maskprocessor.py`（**PyQt** 版）重做，那是桌面壳。
 4.0 的**网页版**在 `MaskProcessor/ui/`，是完整的在线遮罩编辑器。
+（这两处 4.0 源码现在都在 `app/docs/legacy-reference/` 下：`qt-ui/components/page_maskprocessor.py`、
+`MaskProcessor/ui/`。4.1 的实现在 `app/web/mask-editor/`。）
 
 ### 8.1 搬过来的文件
 把 `MaskProcessor/ui/*` 复制到 `4.1/app/web/mask-editor/`（index.html 20.8 KB、css 23.6 KB、js 共 65 KB、logo.png）。

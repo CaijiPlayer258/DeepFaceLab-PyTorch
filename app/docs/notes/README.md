@@ -18,6 +18,13 @@
 | `export_memory.md` | 导出/合成的显存峰值拆解 |
 | `experiments/` | 各轮性能实验的文字结论（解码腿 / 检测腿 / DFM 图 / seamless / 坏帧降级 / 编码器 / 并发 / GPU 时间线），见其中的 README |
 
+## 读之前先知道：文中引用的 4.0 源码在哪
+
+这些笔记写的时候是照着 4.0 的源码逐行核对的，正文里出现的
+`MaskProcessor/`、`DataAugmenter/`、`MergeStudio/api/`、`ui/components/`、`legacy/qt-ui/`
+这类路径，**源码本身已经归档**，现在都在 `app/docs/legacy-reference/` 下（对应关系见那个目录的
+README）。路径没逐条改写，因为它们是「当时的证据」，改了反而看不出核对的到底是哪一版。
+
 ## 附：前端拆分草稿的实测状态
 
 这些 `.js` / `.css` / `.html` 草稿现在在 `app/tools/parts/`（**构建不读、运行时也不读** ——
