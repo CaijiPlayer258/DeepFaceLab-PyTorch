@@ -1493,7 +1493,36 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
     import cv2
     import numpy as np
     out = cv2.imdecode(np.frombuffer(img, np.uint8), cv2.IMREAD_COLOR)
-    if out is None:
+    # ---- 人脸超分（在**最终这张图**上重新检测一次，按检测框做）----
+    # 为什么不用上游的 box：worker 回的图可能被缩过，而 box 是原帧坐标 ——
+    # 换算错一步，增强就会跑到画面别处（用户报的「不在脸上」）。
+    # 直接在当前这张图上检一次（~35ms），坐标天然对齐，代价可以接受。
+    try:
+        from . import facesr as _sr
+        _lv = _sr_level_of(payload)
+        if _lv > 0 and _sr.enabled():
+            from .knobs import apply_sr as _apply_sr
+            _apply_sr(_lv)
+            _bs = _detect_boxes(out, detector, thresh) or []
+            for _b in _bs:
+                try:
+                    _x, _y, _bw, _bh = [int(round(float(v))) for v in (_b.get("box") or _b)]
+                except Exception:                              # noqa: BLE001
+                    continue
+                if _bw <= 8 or _bh <= 8:
+                    continue
+                _x = max(0, min(_x, out.shape[1] - _bw))
+                _y = max(0, min(_y, out.shape[0] - _bh))
+                _m = np.zeros((_bh, _bw), np.float32)
+                cv2.ellipse(_m, (_bw // 2, _bh // 2),
+                            (max(1, _bw // 2 - 2), max(1, _bh // 2 - 2)), 0, 0, 360, 1.0, -1)
+                _m = cv2.GaussianBlur(_m, (0, 0), max(1.0, min(_bw, _bh) * 0.03))
+                out[_y:_y + _bh, _x:_x + _bw] = _sr.apply_roi(
+                    out[_y:_y + _bh, _x:_x + _bw], _m, _sr.strength())
+            if not want_png:
+                img = _encode_frame(out, maxw, fmt, quality)
+    except Exception as _e:                                    # noqa: BLE001
+        print("[sr] 预览跳过（%s: %s）" % (_e.__class__.__name__, str(_e)[:120]), flush=True)
         raise _BadInput("合成结果解不开", 500)
     # 先缩到 maxw 再画调试信息：字号/线宽按最终展示尺寸给，图缩一半时框线才不会细成一条。
     resized = False

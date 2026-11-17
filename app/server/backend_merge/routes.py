@@ -343,7 +343,7 @@ def merge_frame(idx: int, body: dict = None, w: int = 900, settings: str = "",
                           models=models, detector=detector, thresh=thresh,
                           fmt=fmt, quality=quality, raw=raw, compose=compose,
                           xseg_onnx=xseg_onnx, no_swap_faces=no_swap_faces, debug=debug)
-    return _sr_apply_resp(_frame_payload(idx, payload, default_w=w), payload)
+    return _frame_payload(idx, payload, default_w=w)
 
 
 @router.post("/api/merge/frame")
@@ -363,7 +363,7 @@ def merge_frame_post(body: dict = None, w: int = 900, settings: str = "",
                       detector=detector, thresh=thresh, fmt=fmt, quality=quality,
                       raw=raw, compose=compose, xseg_onnx=xseg_onnx,
                       no_swap_faces=no_swap_faces, debug=debug)
-    return _sr_apply_resp(_frame_payload(_body_idx(payload), payload, default_w=w), payload)
+    return _frame_payload(_body_idx(payload), payload, default_w=w)
 
 
 @router.get("/api/merge/face-debug")
@@ -759,7 +759,7 @@ def merge_merged_frame(idx: int, body: dict = None, w: int = 900, settings: str 
     if mode:
         resp = _frame_payload(idx, payload, default_w=w)
         resp["source"] = "live"
-        return _sr_apply_resp(resp, payload)
+        return resp
         return resp
     maxw = max(200, min(int(payload.get("w") or 900), 1600))
     return _merged_from_export(idx, maxw, payload)
@@ -789,7 +789,7 @@ def merge_merged_post(body: dict = None, w: int = 900, settings: str = "",
     if mode:
         resp = _frame_payload(idx, payload, default_w=w)
         resp["source"] = "live"
-        return _sr_apply_resp(resp, payload)
+        return resp
         return resp
     return _merged_from_export(idx, max(200, min(int(payload.get("w") or 900), 1600)),
                                payload)

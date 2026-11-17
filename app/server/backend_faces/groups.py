@@ -403,9 +403,13 @@ def decide_for_add(project: Path, vec, explicit_group: str = "",
 
     顺序（用户的语义，按这个实现）：
       1. 显式给了 group → 就用它（脚本/前端明确指定，不再猜）；
-      2. 库里有脸 → 和每个组的均值比余弦，最大且 >= 阈值 → 归该组（matched=True）；
-      3. 不到阈值 → 若这张脸在合成器上分了 dfm（chip 有值）→ 交给 chip 那个组；
+      2. **chip 上有 dfm 且库里有对应的组 → 归那个组**（用户在合成器上点名了这张脸用哪个模型）；
+      3. 否则和每个组的均值比余弦，最大且 >= 阈值 → 归该组（matched=True）；
       4. 都没有 → 不归组（"", matched=False），前端提示手动拖。
+
+    为什么把 chip 提到相似度前面：双人素材里两张脸是同一个 coser，embedding 几乎一样，
+    单靠相似度会让「第二张脸」永远落进第一个组（历史 bug：加两张，全进第 1 组）。
+    用户在画面上的点名比 embedding 更可靠 —— 那是他看得见的选择。
 
     source 说明这一条是谁定的：explicit / auto / chip / none。
     """
@@ -438,13 +442,23 @@ def decide_for_add(project: Path, vec, explicit_group: str = "",
                        "group_name": str(g.get("name") or g.get("dfm") or gid)})
         return result
 
+    chip = str(chip_dfm or "").strip()
+    if chip:
+        # chip 点名了模型：库里若有 dfm 同名的组 → 直接归它（用户的选择优先于 embedding）
+        g2 = next((x for x in index["groups"]
+                   if str(x.get("dfm") or "").strip() == chip), None)
+        if g2 is not None:
+            result.update({"group": str(g2["id"]), "dfm": "", "source": "chip",
+                           "group_name": str(g2.get("name") or g2.get("dfm") or g2["id"]),
+                           "matched": True})
+            return result
+
     if best is not None and best.get("matched") and best.get("group"):
         result.update({"group": best["group"], "dfm": "", "source": "auto",
                        "group_name": best.get("name") or "",
                        "similarity": best.get("similarity")})
         return result
 
-    chip = str(chip_dfm or "").strip()
     if chip:
         result.update({"group": "", "dfm": chip, "source": "chip",
                        "group_name": chip})
