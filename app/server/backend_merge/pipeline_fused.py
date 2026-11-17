@@ -1539,6 +1539,15 @@ def _fused_run(cfg: dict) -> dict:
                     job.rec["branch"] = "copy"
                 else:
                     job.rec["branch"] = "library" if plan is not None else "single"
+                    # 和预览同口径的一行：检测几张 / 分配几条 / 实际换几张 / 各自用谁
+                    if os.environ.get("DFL_DEBUG_FACES"):
+                        _named = {int(x) for _m in (models or []) for x in (_m.get("faces") or [])}
+                        _log_faces = [(int(f["k"]), str(f.get("name") or ""))
+                                      for f in faces if int(f["k"]) not in skip]
+                        print("[faces] 导出 frame=%s 检测=%d 分配=%d 换=%d · models=%s · 实际=%s"
+                              % (job.idx, len(faces), len(_named), len(_log_faces),
+                                 [(m.get("name"), list(m.get("faces") or [])) for m in (models or [])],
+                                 _log_faces), flush=True)
                     skip = set(int(i) for i in (no_swap or []))
                     use = []
                     for f in faces:

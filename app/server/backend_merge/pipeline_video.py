@@ -267,10 +267,23 @@ def _vid_models_for_frame(cfg: dict, frame, boxes, idx: int):
                      no_swap = 谁都不像的脸（保持原像素，不兜给任何模型）；
                      plan["models"] 为空 = 这一帧没一张脸匹配上 -> 整帧不换。
     """
+    singles = list(cfg["single_models"] or [])
+    # ---- 显式点名优先（和预览同一套契约）----
+    # payload 里某条 models 带非空 faces = 用户在合成器上逐脸点了模型。这时不能再让库的
+    # embedding 覆盖它 —— 否则就是「预览按 chip 走、导出按库走」，用户看到预览对、导出错。
+    _explicit = [m for m in singles if (m.get("faces") or [])]
+    if _explicit:
+        _all = bool(any(not (m.get("faces") or []) for m in singles))
+        _named = set()
+        for _m in _explicit:
+            _named.update(int(x) for x in (_m.get("faces") or []))
+        _skip = [] if _all else [int(_bi) for _bi in range(len(boxes or []))
+                                 if int(_bi) not in _named]
+        return singles, _skip, None
     plan = _auto_face_plan(cfg["plan_payload"], frame, cfg["snap"], "video", "",
-                           int(idx), cfg["detector"], cfg["thresh"], boxes=boxes)
+                          int(idx), cfg["detector"], cfg["thresh"], boxes=boxes)
     if plan is None:
-        return list(cfg["single_models"]), [], None
+        return singles, [], None
     return list(plan.get("models") or []), list(plan.get("unmatched") or []), plan
 
 
@@ -357,8 +370,13 @@ def _start_video_export(body: dict):
     # 两条路都要判（用户口径，截图 2）：
     #   · fused  —— 帧预算 + dfm 批是它的两个旋钮，按 mode=frames 算；
     #   · 分段链 —— 一次一帧一张脸，没有帧缓冲，按 mode=none（一份会话）算。
-    _dfms = (cfg.get("dfm")
-             or [m.get("dfm") for m in cfg.get("single_models") or []])
+    # 参与这一单的**全部** dfm：以前写成 cfg["dfm"] or [...]，只要 cfg["dfm"] 有值就
+    # 只算其中一个 —— 双模型导出时显存账少算一整个模型，计划说装得下、真跑就换页。
+    _dfms = []
+    for _p in ([cfg.get("dfm")] + [m.get("dfm") for m in (cfg.get("single_models") or [])]):
+        _p = str(_p or "").strip()
+        if _p and _p not in _dfms:
+            _dfms.append(_p)
     # force = 用户在拒绝面板上点了「仍然尝试（可能 OOM）」：装不下也放行最小档。
     # 只放行、不改账（plan.forced=True 且 need/avail 照旧），真 OOM 由 worker 里的
     # _vram_oom_rollback 收现场并回到拒绝态 —— 见 _fused_worker / _stage_worker。
