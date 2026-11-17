@@ -161,7 +161,7 @@ def _run(nchw):
     if obj is None:
         return None
     with _RUN_LOCK:
-        _infer(obj, nchw)
+        return _infer(obj, nchw)
 
 
 def _infer(obj, nchw):
