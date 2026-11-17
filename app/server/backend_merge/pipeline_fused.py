@@ -2183,12 +2183,36 @@ def _fused_run(cfg: dict) -> dict:
             raise _BadInput("内部错误：这些线程没被启动 %s —— 车道号与启动清单对不上"
                             % "、".join(sorted(_miss)), 500)
         # 全部线程退出 = 全片跑完；中途取消就置 stop 让所有段退出
+        # ---- 卡死看门狗 ----
+        # 只有活线程 + 进度不动，才是真卡死。45s 没进展就把所有线程栈打到日志里，
+        # 并把这一单判失败 —— 以前是「进度条停住、用户只能截屏问我」（实测踩过两次：
+        # 一次是车道线程带 NameError 静默退出，一次是模型加载卡在换页）。
+        _wd_last = -1.0
+        _wd_stamp = time.time()
+        _wd_fired = False
         while True:
             if _fused_cancelled():
                 stop.set()
                 break
             if not any(t.is_alive() for t in ths.values()):
                 break
+            _prog = float(got.get("frames") or 0) + float(got.get("encoded") or 0)
+            if _prog != _wd_last:
+                _wd_last = _prog
+                _wd_stamp = time.time()
+            elif (not _wd_fired) and (time.time() - _wd_stamp) > 45.0:
+                _wd_fired = True
+                import faulthandler as _fh
+                print("[fused] 卡死 45s：进度停在 frames=%s encoded=%s —— 线程栈如下"
+                      % (got.get("frames"), got.get("encoded")), flush=True)
+                try:
+                    _fh.dump_traceback(all_threads=True)
+                except Exception:                              # noqa: BLE001
+                    pass
+                _vid_log("快速导出卡死：45s 没有进展（frames=%s encoded=%s），"
+                         "线程栈已打到服务端日志" % (got.get("frames"), got.get("encoded")))
+                stop.set()
+                raise _BadInput("快速导出卡死：45s 没有任何进展（线程栈已打日志）", 500)
             time.sleep(0.1)
     finally:
         wall = time.time() - t_all
