@@ -850,10 +850,19 @@ def _source_ident(snap: dict, mode: str, name: str) -> list:
     return ["video"] + list(_grab_key(str(snap.get("path") or "")))
 
 
+def _sr_level_of(payload: dict) -> int:
+    """payload.sr → 0..100（和 knobs._sr_level 同一套解析；缓存身份要用它）。"""
+    try:
+        from .knobs import _sr_level as _lv
+        return int(_lv((payload or {}).get("sr")))
+    except Exception:                                      # noqa: BLE001
+        return 0
+
+
 def _compose_sig(snap: dict, mode: str, idx: int, name: str, cfg: dict, dfm: str,
                  models, xseg: str, detector: str, thresh: float,
                  fmt: str, quality: int, maxw: int, no_swap=None,
-                 debug: bool = False) -> str:
+                 debug: bool = False, sr: int = 0) -> str:
     """合成结果的身份：**参数一个都不能漏**，漏了就是"改了参数画面不动"的老 bug。
 
     debug 也是身份的一部分：同一帧同一组参数，「合成」和「调试」是两张不同的图，
@@ -866,7 +875,7 @@ def _compose_sig(snap: dict, mode: str, idx: int, name: str, cfg: dict, dfm: str
                            [[m["name"], m["dfm"], list(m["faces"])] for m in (models or [])],
                            str(fmt), int(quality), int(maxw),
                            sorted(int(x) for x in (no_swap or ())),
-                           bool(debug)],
+                           bool(debug), int(sr)],
                           sort_keys=True, default=str)
     except Exception:                          # noqa: BLE001
         tail = repr([idx, cfg, dfm, xseg, detector, thresh, fmt, quality, maxw])
@@ -1385,7 +1394,8 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
         xseg = _xseg_of(payload)
         sig = _compose_sig(snap, mode, idx, name, cfg, str(dfm), models, xseg,
                            detector, float(thresh), fmt, int(quality), int(maxw),
-                           no_swap, debug=debug_view)
+                           no_swap, debug=debug_view,
+                           sr=_sr_level_of(payload))
         hit = _compose_cached(sig)
         if hit is not None:
             return _cache_hit(hit)
@@ -1454,7 +1464,8 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
     if not sig:
         sig = _compose_sig(snap, mode, idx, name, cfg, str(dfm), models, xseg,
                            detector, float(thresh), fmt, int(quality), int(maxw),
-                           no_swap, debug=debug_view)
+                           no_swap, debug=debug_view,
+                           sr=_sr_level_of(payload))
         hit = _compose_cached(sig)
         if hit is not None:
             return _cache_hit(hit)

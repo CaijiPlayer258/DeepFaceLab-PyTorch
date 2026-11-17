@@ -43,7 +43,9 @@ from pathlib import Path
 _PREF = {"off": 0, "low": 18, "mid": 30, "high": 100}
 _FULL = 50.0      # 滑块 0..100 的中点：<=50 用 256 模型，>50 用 512
 _LOCK = threading.Lock()
-_SESS = {"obj": None, "why": "", "backend": "", "name": ""}
+# 会话缓存按 size 分家：256 与 512 是两个不同引擎，共用一个就会出现
+# 「引擎不接受输入形状 (1,3,512,512)（实际生效 (1,3,256,256)）」→ 静默跳过。
+_SESS = {}          # size -> {"obj", "backend", "name", "why"}
 _SIZE_DEFAULT = 256          # 256 版单次约 1/4 成本；512 版质量更好但本机吃不下
 
 
@@ -150,12 +152,12 @@ def _build_session():
             s = TrtSession(str(eng), use_graph=False, own_stream=True)
             return s, "trt", eng.name
         except Exception as e:                              # noqa: BLE001
-            _SESS["why"] = "TRT 引擎加载失败（%s）：%s" % (eng.name, str(e)[:160])
+            _SESS["_why"] = "TRT 引擎加载失败（%s）：%s" % (eng.name, str(e)[:160])
             if want == "trt":
                 return None, "trt", eng.name
     onnx = _model_path()
     if not onnx.is_file():
-        _SESS["why"] = "找不到模型 %s（DFL_SR_MODEL 可指定）" % onnx
+        _SESS["_why"] = "找不到模型 %s（DFL_SR_MODEL 可指定）" % onnx
         return None, "", ""
     try:
         import onnxruntime as ort
@@ -166,28 +168,32 @@ def _build_session():
         s = ort.InferenceSession(str(onnx), so, providers=provs)
         return s, ("onnx-cuda" if provs and provs[0].startswith("CUDA") else "onnx-cpu"), onnx.name
     except Exception as e:                                  # noqa: BLE001
-        _SESS["why"] = "onnxruntime 加载失败：%s" % str(e)[:200]
+        _SESS["_why"] = "onnxruntime 加载失败：%s" % str(e)[:200]
         return None, "", ""
 
 
 def session():
-    """返回 (会话, 后端名)；不可用时返回 (None, 原因)。"""
+    """返回 (会话, 原因)。按当前 size 取自己的那一份（见 _SESS 的注释）。"""
+    sz = size()
     with _LOCK:
-        if _SESS["obj"] is None and not _SESS["why"]:
+        rec = _SESS.get(sz)
+        if rec is None:
             obj, backend, name = _build_session()
-            _SESS.update({"obj": obj, "backend": backend, "name": name})
+            rec = {"obj": obj, "backend": backend, "name": name, "why": _SESS.pop("_why", "")}
+            _SESS[sz] = rec
             if obj is None:
-                _log("不可用：" + (_SESS["why"] or "未知原因"))
+                _log("不可用（%dpx）：%s" % (sz, rec["why"] or "未知原因"))
             else:
                 _log("后端 %s · %s" % (backend, name))
-        return _SESS["obj"], (_SESS["why"] or "")
+        return rec["obj"], (rec.get("why") or "")
 
 
 def info() -> dict:
-    """给 [eff] / status 用的回显。"""
+    """给 [eff] / status 用的回显（报当前 size 那一份会话）。"""
+    rec = _SESS.get(size()) or {}
     return {"level": level(), "mode": mode(), "strength": round(strength(), 2), "size": size(),
-            "backend": _SESS.get("backend") or "", "model": _SESS.get("name") or "",
-            "why": _SESS.get("why") or ""}
+            "backend": rec.get("backend") or "", "model": rec.get("name") or "",
+            "why": rec.get("why") or ""}
 
 
 _RUN_LOCK = threading.Lock()

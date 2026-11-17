@@ -61,87 +61,6 @@ def _mask2d(t, size, np, cv2):
     return m
 
 
-# ---------------- 预览超分（GPEN）----------------
-# 4.1 的「人脸超分」滑块要在预览里**看得见**，只能贴在这里：预览的合成就是本文件
-# 用 MergeMaskedFace 做的，服务端 compose.py 那条 _apply_sr_layers 完全不经过。
-#
-# 参数由父进程随请求带下来（sr_alpha / sr_model / sr_size），因为：
-#   · 本进程是 4.0 引擎的 python，import 不到 server 包；
-#   · env 在 spawn 时就固定了，父进程之后再改看不见。
-# 会话在这里自己建：本解释器有 onnxruntime（含 TRT/CUDA EP），所以能用 GPU 跑。
-_SR = {"alpha": 0.0, "model": "", "size": 256}
-_SR_SESS = {}
-
-
-def _sr_session(model, size):
-    key = (model, int(size))
-    if key in _SR_SESS:
-        return _SR_SESS[key]
-    sess = None
-    try:
-        if model and os.path.isfile(model):
-            import onnxruntime as _ort
-            so = _ort.SessionOptions()
-            so.log_severity_level = 4
-            provs = [p for p in ("TensorrtExecutionProvider", "CUDAExecutionProvider",
-                                 "CPUExecutionProvider")
-                     if p in _ort.get_available_providers()]
-            sess = _ort.InferenceSession(model, so, providers=provs)
-            _say({"sr": "preview SR ready · %s · %dpx · %s"
-                        % (os.path.basename(model), int(size), provs[0])})
-    except Exception as e:                                  # noqa: BLE001
-        _say({"warn": "preview SR session failed: %s: %s"
-                      % (e.__class__.__name__, str(e)[:140])})
-        sess = None
-    _SR_SESS[key] = sess
-    return sess
-
-
-def _sr_patch(frame, box, np, cv2):
-    """对这张脸的 box 区域做一次帧空间超分，按 _paste_face 的同款椭圆 × α 混回。
-
-    滑块为 0（alpha=0）时一行都不跑 —— 预览的默认开销不变。
-    """
-    a = float(_SR.get("alpha") or 0.0)
-    if a <= 0 or not _SR.get("model"):
-        return frame
-    try:
-        h, w = frame.shape[:2]
-        x, y, bw, bh = [int(v) for v in (box or [])]
-        if bw <= 8 or bh <= 8:
-            return frame
-        bw = max(8, min(bw, w))
-        bh = max(8, min(bh, h))
-        x = max(0, min(x, w - bw))
-        y = max(0, min(y, h - bh))
-        sess = _sr_session(str(_SR["model"]), int(_SR.get("size") or 256))
-        if sess is None:
-            return frame
-        size = int(_SR.get("size") or 256)
-        roi = frame[y:y + bh, x:x + bw]
-        big = cv2.resize(roi, (size, size), interpolation=cv2.INTER_LINEAR)
-        xin = (big.astype(np.float32) / 255.0 - 0.5) / 0.5
-        nchw = np.transpose(xin, (2, 0, 1))[None, ...].astype(np.float32)
-        out = sess.run(None, {"input": nchw})
-        y_out = np.asarray(out[0] if isinstance(out, (list, tuple)) else out, np.float32)[0]
-        y_out = np.transpose(y_out, (1, 2, 0))
-        sr = np.clip((y_out * 0.5 + 0.5) * 255.0, 0, 255).astype(np.uint8)
-        sr = cv2.resize(sr, (bw, bh), interpolation=cv2.INTER_LINEAR)
-        mask = np.zeros((bh, bw), np.float32)
-        cv2.ellipse(mask, (bw // 2, bh // 2),
-                    (max(1, bw // 2 - 2), max(1, bh // 2 - 2)), 0, 0, 360, 1.0, -1)
-        mask = cv2.GaussianBlur(mask, (0, 0), max(1.0, min(bw, bh) * 0.03))
-        wt = np.clip(mask[..., None] * a, 0.0, 1.0)
-        mixed = sr.astype(np.float32) * wt + roi.astype(np.float32) * (1.0 - wt)
-        dst = frame.copy()
-        dst[y:y + bh, x:x + bw] = np.clip(mixed, 0, 255).astype(np.uint8)
-        return dst
-    except Exception as e:                                  # noqa: BLE001
-        _say({"warn": "preview SR skipped: %s: %s" % (e.__class__.__name__, str(e)[:140])})
-        return frame
-
-
-
 def _paste_face(frame, face, box, np, cv2):
     """非常规尺寸的合成结果（raw-* 模式回的是脸本身）按检测框羽化贴回原帧。"""
     h, w = frame.shape[:2]
@@ -493,7 +412,6 @@ def main():
                     pass                          # 调试视图本身就是输出
                 else:
                     out = _paste_face(frame, out, it.get("box"), np, cv2)
-                    out = _sr_patch(out, it.get("box"), np, cv2)
             per = [{"dfm": dfm, "size": size}]
         else:
             # ---- 多模型：同一张帧上按顺序一张脸一张脸贴 ----
@@ -532,7 +450,6 @@ def main():
                         out = fo                      # 调试视图本身就是输出
                     else:
                         out = _paste_face(out, fo, fc.get("box"), np, cv2)
-                        out = _sr_patch(out, fc.get("box"), np, cv2)
                 else:
                     out = fo
                 per.append({"dfm": f_dfm, "size": size_k,
@@ -621,10 +538,6 @@ def main():
         rid = req.get("id")
         cmd = str(req.get("cmd") or "")
         # 超分滑块随每一发请求走（env 在 spawn 时就定死了，改不动）
-        if "sr_alpha" in req:
-            _SR["alpha"] = float(req.get("sr_alpha") or 0.0)
-            _SR["model"] = str(req.get("sr_model") or "")
-            _SR["size"] = int(req.get("sr_size") or 256)
         # 人脸超分滑块随请求走：worker 是**独立解释器**，spawn 之后父进程再改 env 它也看不见，
         # 所以每一发都按这一发带的 sr 重设一次（预览才看得见 GPEN 的效果）。
         try:

@@ -97,6 +97,40 @@ def merge_dfl_mode(video: str = "", path: str = "", project: str = ""):
     """给界面用：当前素材能不能开 DFL 项目模式（判据见 _dfl_mode_state）。"""
     return _ok(**_dfl_mode_state(video=video, path=path, project=project))
 
+def _sr_apply_resp(resp: dict, payload: dict) -> dict:
+    """预览响应的**统一出口**：按滑块对这张脸做一次超分，再写回 resp。
+
+    为什么放在路由出口而不是 worker/合成里：
+      · worker 是 4.0 引擎的独立解释器，stdio 是 JSON 协议，ORT 的日志会把协议打花；
+      · 合成函数有缓存（_COMPOSE_CACHE / _PREVIEW_HIT），缓存命中的响应不会再走合成，
+        放在里面就会出现「第一次有效、第二次没效果」。
+    在出口处理，所有路径（现算 / 缓存命中 / 单帧 / 批量）表现一致。
+    """
+    try:
+        from .knobs import _sr_level as _lv, apply_sr as _apply_sr
+        # 先把这一单的档位落到 env：facesr 的 strength()/size() 都读 env，
+        # 不设的话这里会用上一单的档（表现是"滑了没反应 / 反应慢半拍"）。
+        if int(_apply_sr((payload or {}).get("sr"))) <= 0:
+            return resp
+        import base64 as _b64s, numpy as _np, cv2 as _cv2
+        from .preview import _sr_frame_bytes
+        box = resp.get("box")
+        for key in ("jpg", "img", "png"):
+            u = resp.get(key)
+            if not isinstance(u, str) or not u:
+                continue
+            head, _, b64 = u.partition(",")
+            blob = _b64s.b64decode(b64 or u)
+            blob = _sr_frame_bytes(blob, box, _np, _cv2)
+            resp[key] = (head + "," if head else "data:image/jpeg;base64,") + _b64s.b64encode(blob).decode("ascii")
+            if key == "jpg":
+                resp["img"] = resp[key]
+        return resp
+    except Exception as e:                                  # noqa: BLE001
+        print("[sr] 预览跳过（%s: %s）" % (e.__class__.__name__, str(e)[:120]), flush=True)
+        return resp
+
+
 @router.get("/api/merge/videos")
 @_api
 def merge_videos(dir: str = ""):
@@ -293,7 +327,7 @@ def merge_frame(idx: int, body: dict = None, w: int = 900, settings: str = "",
                           models=models, detector=detector, thresh=thresh,
                           fmt=fmt, quality=quality, raw=raw, compose=compose,
                           xseg_onnx=xseg_onnx, no_swap_faces=no_swap_faces, debug=debug)
-    return _frame_payload(idx, payload, default_w=w)
+    return _sr_apply_resp(_frame_payload(idx, payload, default_w=w), payload)
 
 
 @router.post("/api/merge/frame")
@@ -313,7 +347,7 @@ def merge_frame_post(body: dict = None, w: int = 900, settings: str = "",
                       detector=detector, thresh=thresh, fmt=fmt, quality=quality,
                       raw=raw, compose=compose, xseg_onnx=xseg_onnx,
                       no_swap_faces=no_swap_faces, debug=debug)
-    return _frame_payload(_body_idx(payload), payload, default_w=w)
+    return _sr_apply_resp(_frame_payload(_body_idx(payload), payload, default_w=w), payload)
 
 
 @router.get("/api/merge/face-debug")
@@ -709,6 +743,7 @@ def merge_merged_frame(idx: int, body: dict = None, w: int = 900, settings: str 
     if mode:
         resp = _frame_payload(idx, payload, default_w=w)
         resp["source"] = "live"
+        return _sr_apply_resp(resp, payload)
         return resp
     maxw = max(200, min(int(payload.get("w") or 900), 1600))
     return _merged_from_export(idx, maxw, payload)
@@ -738,6 +773,7 @@ def merge_merged_post(body: dict = None, w: int = 900, settings: str = "",
     if mode:
         resp = _frame_payload(idx, payload, default_w=w)
         resp["source"] = "live"
+        return _sr_apply_resp(resp, payload)
         return resp
     return _merged_from_export(idx, max(200, min(int(payload.get("w") or 900), 1600)),
                                payload)

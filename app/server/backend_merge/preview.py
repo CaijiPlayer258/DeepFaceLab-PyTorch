@@ -62,21 +62,41 @@ _PREVIEW_MAX_BATCH = 16           # 一条请求最多带几帧（worker 内部�
 # 现在：真源码 → 落盘时按内容哈希拷一份到 %TEMP%（名字带 sha1 前 10 位，内容变了自然换名），
 # 好处都保留（不污染仓库 pycache、旧版本不会幽灵复用），但它已经是**可编译、可 grep、
 # 可断点**的普通文件了。改它不用再碰 preview.py。
-def _sr_req(req: dict) -> dict:
-    """把这一单的超分滑块翻成 worker 能直接用的三个值（见 preview_worker._sr_patch）。"""
+def _sr_frame_bytes(blob: bytes, box, np, cv2) -> bytes:
+    """把 worker 回的帧按这张脸的 box 做一次超分，再编回 JPEG。
+
+    为什么在父进程做、不在 worker 里做：worker 是 4.0 引擎的独立解释器，
+    stdio 是 JSON 协议通道，任何第三方库往 stdout 打一行就会让父进程解析失败
+    （实测过：ORT 装 TRT provider 失败时打一堆 "EP Error … falling back"，
+    界面只看到「换脸失败：预览 worker 没给原因」）。
+    父进程这边有 TRT 引擎、有 facesr.apply_roi，且不影响协议。
+    """
     try:
         from . import facesr as _sr
-        a = float(_sr.strength())
-        if os.environ.get("DFL_SR_DEBUG"):
-            print("[sr-debug] level=%s alpha=%s model=%s"
-                  % (_sr.level(), a, _sr._model_path()), flush=True)
-        if a <= 0:
-            return dict(req, sr_alpha=0.0)
-        return dict(req, sr_alpha=round(a, 3),
-                    sr_model=str(_sr._model_path()),
-                    sr_size=int(_sr.size()))
-    except Exception:                                       # noqa: BLE001
-        return dict(req, sr_alpha=0.0)
+        a = _sr.strength()
+        if a <= 0 or not blob:
+            return blob
+        arr = np.frombuffer(blob, np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return blob
+        h, w = img.shape[:2]
+        x, y, bw, bh = [int(v) for v in (box or [])]
+        if bw <= 8 or bh <= 8:
+            return blob
+        x = max(0, min(x, w - bw))
+        y = max(0, min(y, h - bh))
+        mask = np.zeros((bh, bw), np.float32)
+        cv2.ellipse(mask, (bw // 2, bh // 2),
+                    (max(1, bw // 2 - 2), max(1, bh // 2 - 2)), 0, 0, 360, 1.0, -1)
+        mask = cv2.GaussianBlur(mask, (0, 0), max(1.0, min(bw, bh) * 0.03))
+        roi = img[y:y + bh, x:x + bw]
+        img[y:y + bh, x:x + bw] = _sr.apply_roi(roi, mask, a)
+        ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+        return buf.tobytes() if ok else blob
+    except Exception as e:                                  # noqa: BLE001
+        print("[sr] 预览跳过（%s: %s）" % (e.__class__.__name__, str(e)[:120]), flush=True)
+        return blob
 
 
 _WORKER_FILE = Path(__file__).with_name("preview_worker.py")
@@ -1169,9 +1189,9 @@ def _worker_swap(worker, items, threads=1, state=None):
     if state is not None:
         state["stage"] = "queued"      # worker 里排队的时间不算进单帧超时
     on_stage = ((lambda st: state.__setitem__("stage", st)) if state is not None else None)
-    # 超分滑块：worker 是独立解释器，import 不到 server 包也看不见我们的 env，
-    # 所以 α / 模型 / 边长只能随请求带过去（滑块为 0 时 alpha=0，worker 一行都不跑）。
-    resp = worker.call(_sr_req({"cmd": "swap", "threads": k, "items": items}), blobs,
+    # 超分在**父进程**做（见 _sr_frame_bytes）：worker 的 stdio 是 JSON 协议通道，
+    # 让它在自己进程里跑 ORT 会把日志混进协议（实测直接让父进程解析失败）。
+    resp = worker.call({"cmd": "swap", "threads": k, "items": items}, blobs,
                        work_timeout=_PREVIEW_WORK_TIMEOUT * rounds,
                        on_stage=on_stage)
     if not resp.get("ok"):
