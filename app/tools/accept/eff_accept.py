@@ -151,6 +151,10 @@ def start_server():
     env["DFL_WORKSPACE"] = str(WS)
     env["PYTHONIOENCODING"] = "utf-8"
     env["NO_PROXY"] = env["no_proxy"] = "127.0.0.1,localhost"
+    # G 段断言的是「seamless 被显式关掉 GPU 版 → 退回 CPU + 一条 [eff-warn]」这条**可复盘路径**。
+    # 现在 seamless 默认也走 GPU（compose_gpu.seamless_on 默认 True，见 knobs.refine_compose），
+    # 不显式关掉的话 G4/G5/G6/G7/H1 会去断言一个已经不存在的默认行为。
+    env["DFL_COMPOSE_GPU_SEAMLESS"] = "0"
     env.pop("DFL_PORT", None)
     env.pop("DFL_STAGE_KEEP", None)
     logf = open(str(SERVER_LOG), "ab")
