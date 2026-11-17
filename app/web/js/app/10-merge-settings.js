@@ -1390,6 +1390,30 @@
     /* 手动指定 = 覆盖自动判定：把这一张从 MG_FACE_AUTO 里摘掉，
        否则下一次回包之前 chip 还会显示自动判出来的那个名字。 */
     delete MG_FACE_AUTO[i];
+    /* 第一次手动改某张脸的模型时，把「默认那个模型」钉到其它没分配的脸上。
+       不钉的话：MG_FACE_MODEL 只剩被改的那一张 → mgFaceModelsPayload() 只发一个模型 →
+       后端按「只给了一个模型」= 全部脸都用它处理，用户看到的就是
+       「我只改了第二张，怎么两张都变成新模型了」。只有第一次会这样。 */
+    try {
+      var _def = (typeof mgPreviewModel === "function") ? String(mgPreviewModel() || "") : "";
+      if (_def) {
+        /* 已知的脸 = 上一发回包里自动判过的 + 手动分配过的 + 这一张 */
+        var _set = {};
+        [MG_FACE_AUTO, MG_FACE_MODEL].forEach(function (m) {
+          Object.keys(m || {}).forEach(function (k) { _set[k] = 1; });
+        });
+        _set[String(i)] = 1;
+        Object.keys(_set).forEach(function (k) {
+          var j = parseInt(k, 10);
+          if (isNaN(j) || j === i) return;
+          if (MG_FACE_MODEL[j] || MG_FACE_NOSWAP[j]) return;
+          /* 自动判出来的那一个也算"正在用的模型" —— 把它**写实**到 map 里，
+             否则 payload 只带被改的那一个，后端按单模型处理 = 全场都用它。 */
+          var _cur = (typeof mgFaceModel === "function") ? String(mgFaceModel(j) || "") : "";
+          MG_FACE_MODEL[j] = _cur || _def;
+        });
+      }
+    } catch (e) {}
     if (name) { MG_FACE_MODEL[i] = name; delete MG_FACE_NOSWAP[i]; }
     else { delete MG_FACE_MODEL[i]; MG_FACE_NOSWAP[i] = true; }   /* 「不换脸」→ no_swap_faces */
     MG_FACE_BUSY[i] = true;
