@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 
-def decode_lane(*, readinto_on, probe, budget, video, start_i, dec_mode, src_bits, dec_threads, gen, stop, end_i, ticks, sem, live_lock, live, det_prep_on, _det_prep, det, q_dec, _fail, _put, _stage_tick, _FusedFrame, np, time, _fused_open_frames):
+def decode_lane(*, readinto_on, probe, budget, video, start_i, dec_mode, src_bits, dec_threads, gen, stop, end_i, ticks, sem, live_lock, live, det_prep_on, _det_prep, det, q_dec, _fail, _put, _stage_tick, _FusedFrame, np, time, _fused_open_frames, END):
     """① 解码：ffmpeg 的 rawvideo 流 → 帧对象，塞进 q_dec（原样搬自 _fused_run._decode）。"""
     proc = None
     # readinto 的环形缓冲：槽数 = 帧预算 + 4。为什么不担心被覆盖：在飞帧由 sem 卡在

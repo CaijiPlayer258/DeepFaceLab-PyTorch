@@ -1417,6 +1417,7 @@ def _fused_run(cfg: dict) -> dict:
             np=np,
             time=time,
             _fused_open_frames=_fused_open_frames,
+            END=END,
         )
 
     # ---- ② 检测：默认 1 路（检测器是共享对象，本来就不能并发）；异构池时 N 路 ----
@@ -2727,7 +2728,7 @@ from .vram import (
 
 
 # I/O 侧已搬到 fused_io.py（跳过账本 / raw 写者 / ffmpeg 命令 / cv2 线程）；这里转发，调用点不变。
-from .fused_lanes import decode_lane
+from .fused_lanes import decode_lane, detect_lane   # noqa: E402  （两个车道都在这儿；只 import decode_lane 会让 det 线程 NameError）
 from .fused_io import (  # noqa: E402,F401
     _FusedRawWriter, _FusedSkipBad, _fused_cv2_threads, _fused_pipe_cmd,
 )
