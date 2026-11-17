@@ -875,7 +875,14 @@
     if (!sr || sr.dataset.srBound) return;
     sr.dataset.srBound = "1";
     sr.addEventListener("input", mgSrPaint);
-    sr.addEventListener("change", mgSrPaint);
+    sr.addEventListener("change", function () {
+      mgSrPaint();
+      /* 松手就重画当前帧：预览要能立刻反映超分档位（以前只有拖时间轴才会重算） */
+      try {
+        var n = (window.MergeTimeline && window.MergeTimeline.getFrame) ? window.MergeTimeline.getFrame() : 0;
+        if (window.mvMerged) window.mvMerged(n);
+      } catch (e) {}
+    });
     mgSrPaint();
   })();
 

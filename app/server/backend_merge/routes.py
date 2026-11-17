@@ -97,6 +97,22 @@ def merge_dfl_mode(video: str = "", path: str = "", project: str = ""):
     """给界面用：当前素材能不能开 DFL 项目模式（判据见 _dfl_mode_state）。"""
     return _ok(**_dfl_mode_state(video=video, path=path, project=project))
 
+def _sr_of_payload(payload: dict) -> int:
+    """这一单的超分档位：**顶层 sr 优先，其次 settings.sr**。
+
+    前端把滑块放在合成参数里（settings.sr，和 ct_mode / blend 同级），而导出协议在顶层。
+    两个口径都认，免得「界面上滑了、后端没收到」。
+    """
+    from .knobs import _sr_level as _lv
+    payload = payload or {}
+    if payload.get("sr") not in (None, ""):
+        return int(_lv(payload.get("sr")))
+    st = payload.get("settings")
+    if isinstance(st, dict):
+        return int(_lv(st.get("sr")))
+    return 0
+
+
 def _sr_apply_resp(resp: dict, payload: dict) -> dict:
     """预览响应的**统一出口**：按滑块对这张脸做一次超分，再写回 resp。
 
@@ -107,10 +123,10 @@ def _sr_apply_resp(resp: dict, payload: dict) -> dict:
     在出口处理，所有路径（现算 / 缓存命中 / 单帧 / 批量）表现一致。
     """
     try:
-        from .knobs import _sr_level as _lv, apply_sr as _apply_sr
+        from .knobs import apply_sr as _apply_sr
         # 先把这一单的档位落到 env：facesr 的 strength()/size() 都读 env，
         # 不设的话这里会用上一单的档（表现是"滑了没反应 / 反应慢半拍"）。
-        if int(_apply_sr((payload or {}).get("sr"))) <= 0:
+        if int(_apply_sr(_sr_of_payload(payload))) <= 0:
             return resp
         import base64 as _b64s, numpy as _np, cv2 as _cv2
         from .preview import _sr_frame_bytes

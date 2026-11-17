@@ -57,12 +57,15 @@
     n = parseInt(n, 10) || 0;
     var seq = ++MV_SEQ.swap;
     var body = {
-      frame: n, idx: n, n: n, w: 900,
+      /* 超分开着时要原尺寸：SR 在父进程做，先缩到 900 再超分等于白做（脸只有 ~170px） */
+      frame: n, idx: n, n: n, w: (window.mgSrLevel && window.mgSrLevel() > 0 ? 1920 : 900),
       /* 和合成请求同一个口径：有「不换脸」的脸才要无损，否则 jpg（快 3 倍） */
       no_swap_faces: (window.mgFaceNoSwapIds ? window.mgFaceNoSwapIds() : []),
       fmt: ((window.mgFaceNoSwapIds && window.mgFaceNoSwapIds().length) ? "png" : "jpg"),
       model: (window.mgFaceSingleModel ? window.mgFaceSingleModel() : ""),
       models: (window.mgFaceModelsPayload ? window.mgFaceModelsPayload() : []),
+      /* 超分滑块：顶层也发一份（后端两个口径都认；settings 里那份是合成参数口径） */
+      sr: (window.mgSrLevel ? window.mgSrLevel() : 0),
       settings: (window.mgCmpSettings ? window.mgCmpSettings() : {})
     };
     function legacy() {
