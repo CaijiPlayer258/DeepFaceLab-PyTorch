@@ -69,7 +69,7 @@ _MERGE_MODES = ("overlay", "hist-match", "seamless", "seamless-hist-match")
 # 不许静默折成 overlay（那正是「选了没反应」的老 bug 的温床）。
 _MERGE_VIEW_MODES = ("original", "raw-rgb", "raw-predict", "debug")
 # MergeStudio.core.config.ctm_dict（+ "sot" 这个直白写法：worker 的 ct_map 把它
-# 折成 ctm_dict 里那一档，见 _PREVIEW_WORKER_SRC 的 ct_map["sot"]）
+# 折成 ctm_dict 里那一档，见 preview_worker.py 的 ct_map["sot"]）
 _COLOR_TRANSFER = ("none", "rct", "lct", "mkl", "mkl-m", "idt", "idt-m",
                    "sot", "sot-m", "mix-m", "mt", "lut")
 # 接口契约里的两条主参数（★ 默认值就是「不传 settings」时的结果，改这里 = 改默认）

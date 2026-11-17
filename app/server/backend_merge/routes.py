@@ -1154,9 +1154,16 @@ def merge_preview(body: dict):
     # 不取帧、不检测、不换脸。只留 1 条，键里带着文件身份 / t / 模型 / 遮罩 / 参数，
     # 任何一项变了都不会串味。
     try:
+        # 人脸超分滑块也算「参数」：只改它、别的都不动时，缓存必须判为不同的一单，
+        # 否则滑到 512 预览还是上一张（用户报的「看不出增强」有一半是这条）。
+        try:
+            from .knobs import _sr_level as _lv
+            _sr_lv = _lv((body or {}).get("sr"))
+        except Exception:                                   # noqa: BLE001
+            _sr_lv = 0
         hit_sig = json.dumps([list(_grab_key(video)), round(float(t), 3),
                               str(dfm), str(xseg), detector, float(thresh),
-                              cfg, settings,
+                              cfg, settings, int(_sr_lv),
                               [[m["name"], m["dfm"], list(m["faces"])]
                                for m in (models or [])]], sort_keys=True, default=str)
     except Exception:

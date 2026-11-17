@@ -176,7 +176,7 @@ from .backend_merge.pipeline_stages import (
 from .backend_merge.preview import (
     _PREVIEW_BOOT_TIMEOUT, _PREVIEW_HIT, _PREVIEW_HIT_LOCK, _PREVIEW_IDLE_EXIT,
     _PREVIEW_LOAD_TIMEOUT, _PREVIEW_MAX_BATCH, _PREVIEW_MAX_MODELS, _PREVIEW_MAX_SWAPS,
-    _PREVIEW_QUALITY, _PREVIEW_SEND_QUALITY, _PREVIEW_WARM_TIMEOUT, _PREVIEW_WORKER_SRC,
+    _PREVIEW_QUALITY, _PREVIEW_SEND_QUALITY, _PREVIEW_WARM_TIMEOUT,
     _PREVIEW_WORK_TIMEOUT, _PROJ_BIG_MB, _PROJ_SMALL_MB, _PreviewWorker, _PreviewWorkerPool,
     _WARM_LOCK, _WARM_PENDING, _WARM_STATE, _WARM_THREAD, _WORKER, _WORKER_MAX_MODELS,
     _det_cached, _dfm_of, _face_ids_val, _faces_val, _img_bytes, _jpeg_bytes, _model_for_face,
