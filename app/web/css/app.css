@@ -2085,7 +2085,7 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
 #p-merge .mgleft::-webkit-scrollbar-track,
 #p-merge .mgright::-webkit-scrollbar-track { background: transparent; }
 #p-merge .mgsec { padding: 10px 0; }
-#p-merge .mgrow { padding: 4px 0; }
+#p-merge .mgrow { padding: 1px 0; }
 #p-merge .mggrp { margin-bottom: 0; }
 #p-merge .mgtl { padding: 6px 10px; }
 
@@ -6278,3 +6278,30 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 [data-theme="dark"] #p-merge .mgsr { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .08); }
 [data-theme="dark"] #p-merge .mgsr::-webkit-slider-thumb { border-color: rgba(255, 255, 255, .22); }
 
+/* ============================================================================
+   合成器第一屏右栏：**控件高度统一到 30px**
+   ----------------------------------------------------------------------------
+   量出来的现状（getBoundingClientRect，panelW=262）：
+     .ddbtn（下拉）      30px   ← 基准
+     .seg（分段）        26px
+     .mgnum/.mgtiny      26px（24 + 上下 1px 边框）
+     .mgval（只读文本）  17px（纯文字，行高就是字高）
+     .mgsrwrap（滑块）   17px
+   一列里四个高度，看着就是"参差不齐"。统一到 30px：数字框 28+2 边框、分段 2px 内衬 + 26 的子块，
+   只读文本和滑块行给盒子高度让行距一致。
+   ============================================================================ */
+#p-merge .mgright { --mg-ctl-h: 30px; }
+/* 导出按钮钉在栏底：控件变高以后，小窗口下它会被滚出可视区（截图里就只剩半截）。
+   sticky 而不是 fixed —— 它仍在滚动容器里，只是粘住底边。 */
+#p-merge .mgright .mgexport {
+  position: sticky;
+  bottom: 0;
+  background: var(--panel);
+  padding-top: 6px;
+}
+#p-merge .mgright .mgnum { height: var(--mg-ctl-h); }
+#p-merge .mgright .mgtiny { height: calc(var(--mg-ctl-h) - 2px); }   /* 上下各 1px 边框 */
+#p-merge .mgright .seg { height: var(--mg-ctl-h); padding: 2px; box-sizing: border-box; }
+#p-merge .mgright .seg b { height: 100%; display: inline-flex; align-items: center; padding: 0 6px; font-size: 11.5px; }
+#p-merge .mgright .mgval { height: var(--mg-ctl-h); display: flex; align-items: center; }
+#p-merge .mgright .mgsrwrap { height: var(--mg-ctl-h); }
