@@ -742,6 +742,17 @@
               </div>
               <div class="mgrow"><span class="f">遮罩腐蚀</span><div class="mgnum"><input class="mgtiny" id="mgErode" value="0" title="范围 −100 ~ 100"></div></div>
               <div class="mgrow"><span class="f">遮罩羽化</span><div class="mgnum"><input class="mgtiny" id="mgBlur" value="4" title="范围 −100 ~ 100"></div></div>
+              <!-- 人脸超分（GPEN）：合成后就地做一次盲修复。滑块 0..100 ——
+                   0=关 · 1~50 用 GPEN-256（α=lv/50）· 51~100 用 GPEN-512（α=(lv-50)/50）。
+                   放在主视图而不是导出设置：它是"这一单画质"的选择，和遮罩羽化同级。
+                   纪律：全局一个值，不做逐脸/逐帧条件（GAN 加的是风格，条件化会帧间跳）。 -->
+              <div class="mgrow"><span class="f">人脸超分</span>
+                <div class="mgsrwrap">
+                  <input class="mgsr" id="mgSr" type="range" min="0" max="100" step="1" value="0"
+                         data-cfg="sr" aria-label="人脸超分强度">
+                  <b class="mgsr-v" id="mgSrVal">off</b>
+                </div>
+              </div>
             </div>
 
     
@@ -1051,20 +1062,6 @@
                       <option value="cpu" title="compose_frame（OpenCV，CPU）">cpu</option>
                       <option value="gpu" title="compose_frame_gpu（torch CUDA）：seamless 也走 GPU（Poisson/DST）；1080p 单脸下可能比 CPU 慢，起不来会自动回退并告警">gpu</option>
                     </select>
-                  </span>
-                </div>
-                <!-- 人脸超分：**一个滑块**，不是开关。
-                     0 = 关；1~50 用 GPEN-256（α = lv/50）；51~100 用 GPEN-512（α = (lv-50)/50）。
-                     轨道左右两段不同颜色：左边 256、右边 512（用户要求的分段配色）。
-                     为什么连续：GPEN 自己没有任何强度参数，真正的旋钮是「SR 与原图的混合比例」。
-                     纪律：全局一个值，不做逐脸/逐帧条件 —— GAN 会加风格，条件化会在帧间跳。 -->
-                <div class="cfgrow">
-                  <span class="cl" title="DFL_SR · 人脸超分（GPEN-BFR）">人脸超分</span>
-                  <span class="cd" id="mgSrHint">0=关 · 左 256 · 右 512</span>
-                  <span class="cc">
-                    <input class="mgsr" id="mgSr" type="range" min="0" max="100" step="1" value="0"
-                           data-cfg="sr" aria-label="人脸超分强度">
-                    <b class="mgsr-v" id="mgSrVal">off</b>
                   </span>
                 </div>
                 <div class="cfgrow">

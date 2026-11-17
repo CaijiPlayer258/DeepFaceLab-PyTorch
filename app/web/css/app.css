@@ -6207,10 +6207,18 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 /* ---------- 人脸超分滑块（合成器设置页）----------
    轨道两段配色：左 0~50 = GPEN-256（青），右 50~100 = GPEN-512（紫）。
    用户要求「左边为 0 和 256，右边是 512」——所以中点必须是硬分界（50% 处不留渐变）。 */
+#p-merge .mgsrwrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;            /* 右栏是 68px + 1fr 的 grid：这一格必须能缩，否则滑块会压到标签上 */
+}
 #p-merge .mgsr {
   -webkit-appearance: none;
   appearance: none;
-  width: 120px;
+  width: 100%;
+  min-width: 0;
+  flex: 1 1 auto;
   height: 8px;
   vertical-align: middle;
   border-radius: 4px;
@@ -6239,7 +6247,8 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 }
 #p-merge .mgsr-v {
   display: inline-block;
-  min-width: 58px;
+  flex: 0 0 auto;
+  min-width: 52px;
   white-space: nowrap;
   margin-left: 8px;
   font-size: 11px;
