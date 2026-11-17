@@ -175,6 +175,7 @@
       mgpFusedPaint({ running: true, msg: "启动快速导出…", vid: {} });
       document.dispatchEvent(new CustomEvent("merge:export-start", { detail: payload }));
 
+
       fetch("/api/merge/export", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
@@ -312,9 +313,43 @@
 
     /* 真跑一次合成。工作台里的「导出」会先走到导出设置页，
        两个「开始导出」（#mgStartExport2 在工作台、#mgStartExport 在子页）共用这一份逻辑。 */
+    /* 检测策略（合成器上方那格「总是重检 / 沿用 DFL」）——**唯一的区分依据**：
+         · 总是重检：从源视频重新检测，走融合流水线；
+         · 沿用 DFL：用同名文件夹里现成的 aligned/，走 DFL 项目模式（不重新检测）。
+       可用性判据在后端一处（_dfl_mode_state）：同名文件夹 + aligned/ + 至少一张帧图。 */
+    function mgDetectPolicy() {
+      var v = "";
+      try { v = String(mgSegVal("detect", "总是重检") || ""); } catch (e) { v = ""; }
+      return (v.indexOf("沿用") >= 0) ? "reuse" : "redetect";
+    }
+    window.mgDetectPolicy = mgDetectPolicy;
+
     function mgRunExport(payload) {
       payload = payload || {};
       document.dispatchEvent(new CustomEvent("merge:export-start", { detail: payload }));
+
+      if (mgDetectPolicy() === "reuse") {
+        /* 沿用 DFL：先问后端这个素材能不能开项目模式，能就直接起项目导出。 */
+        var q = [];
+        var vp = mgVidPath();
+        if (vp) q.push("video=" + encodeURIComponent(vp));
+        if (window.__mergeInputDir) q.push("path=" + encodeURIComponent(window.__mergeInputDir));
+        fetch("/api/merge/dfl-mode" + (q.length ? ("?" + q.join("&")) : ""))
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            var st = (d && d.data) || d || {};
+            if (!st.ok) {
+              mgToastErr("pj-unavailable", "不能走 DFL 项目模式", String(st.why || ""), "warn", 6000);
+              return;
+            }
+            if (window.mgpjStart) window.mgpjStart(st.dir);
+            else toast("导出未启动", "项目导出模块没加载", "error");
+          })
+          .catch(function (e) {
+            toast("导出未启动", String((e && e.message) || e).slice(0, 120), "error");
+          });
+        return;
+      }
 
       var inputDir = window.__mergeInputDir || "";
       /* 视频模式：只要打开了源视频就能导出，不需要先抽帧 + 对齐成项目。

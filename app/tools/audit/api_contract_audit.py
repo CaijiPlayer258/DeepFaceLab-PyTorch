@@ -86,9 +86,15 @@ def _ast_op_count() -> int:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             for dec in node.decorator_list:
-                if isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute) \
-                        and dec.func.attr.lower() in VERBS:
-                    n += 1
+                if not (isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute)
+                        and dec.func.attr.lower() in VERBS):
+                    continue
+                # include_in_schema=False 的路由不进 openapi（例：app.py 里直接吐
+                # /static/js/app.js 的那条），交叉验证不数它 —— 否则永远差 1。
+                if any(k.arg == "include_in_schema" and isinstance(k.value, ast.Constant)
+                       and k.value.value is False for k in dec.keywords):
+                    continue
+                n += 1
     return n
 
 

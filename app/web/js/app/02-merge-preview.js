@@ -190,6 +190,7 @@
       if (!r2.ok) throw new Error(d2.detail || "打开失败");
 
       window.__mergeInputDir = p;
+      if (window.mgDflModeSync) setTimeout(window.mgDflModeSync, 0);   /* 素材换了：刷「沿用 DFL」可用性 */
       /* 「打开项目」这条路从来没写过 window.__mv：预览取图一直是 no-path，
          时间轴也拿不到这次的帧数。顺手补上（keep/重建的 key 也靠它才算得对）。 */
       var mv = window.__mv;
@@ -249,6 +250,7 @@
       row.dataset.path = project;
       row.innerHTML = '<span class="nm">' + name + '</span><span class="tag">' + (frames || 0) + ' 帧</span>';
       row.addEventListener("click", function () {
+      if (window.mgDflModeSync) setTimeout(window.mgDflModeSync, 0);   /* 素材换了：刷「沿用 DFL」可用性 */
         window.__mergeInputDir = project;
         window.mgOpenPrepared(project, frames, 0);
       });
@@ -271,6 +273,7 @@
     if (!project) {
       toast("打开素材", "这个项目没有路径，打不开", "error");
       return;
+      if (window.mgDflModeSync) setTimeout(window.mgDflModeSync, 0);   /* 素材换了：刷「沿用 DFL」可用性 */
     }
     window.__mergeInputDir = project;
     fetch("/api/merge/open", {

@@ -40,6 +40,63 @@ router = APIRouter()
 # ============================================================
 # 路由
 # ============================================================
+# ============================================================
+# DFL 项目模式：可用性判定 + 单一入口
+# ============================================================
+def _dfl_mode_state(video: str = "", path: str = "", project: str = "") -> dict:
+    """「能不能走 DFL 项目模式」的**唯一**判定。
+
+    规则（用户定死的，别再往里加检查）：
+      同名文件夹存在
+      且 该文件夹下有 aligned/
+      且 aligned/ 里至少一张图
+      且 该文件夹里至少一张帧图
+      → 视为可以开启 DFL 项目模式。
+
+    **不检查人脸与帧图一一对应**，不检查元数据完整性，不抽样比对 —— 那些是导出时
+    真出问题再报错的事，不该挡在门口。
+    """
+    cands = []
+    for raw in (project, path):
+        raw = str(raw or "").strip()
+        if raw:
+            cands.append(Path(raw))
+    vraw = str(video or "").strip()
+    if vraw:
+        v = Path(vraw)
+        stem = v.stem                      # 同名文件夹：<视频名>/（不含扩展名）
+        cands.append(Path(WORKSPACE) / stem)
+        cands.append(v.parent / stem)
+    seen = set()
+    tried = []
+    for d in cands:
+        key = str(d).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        tried.append(str(d))
+        if not d.is_dir():
+            continue
+        aligned = d / "aligned"
+        frames = _scan_first(d, _PROJ_FRAME_EXT, 1)
+        faces = _scan_first(aligned, {".jpg", ".jpeg"}, 1) if aligned.is_dir() else []
+        if frames and faces:
+            return {"ok": True, "dir": str(d), "aligned": str(aligned), "why": ""}
+        if not frames:
+            return {"ok": False, "dir": str(d), "aligned": str(aligned),
+                    "why": "同名文件夹里没有帧图：%s（先抽帧）" % d}
+        return {"ok": False, "dir": str(d), "aligned": str(aligned),
+                "why": "同名文件夹里没有 aligned/ 或它是空的：%s（先跑人脸对齐）" % aligned}
+    return {"ok": False, "dir": "", "aligned": "",
+            "why": "找不到同名文件夹（找过：%s）" % ("、".join(tried) if tried else "无输入")}
+
+
+@router.get("/api/merge/dfl-mode")
+@_api
+def merge_dfl_mode(video: str = "", path: str = "", project: str = ""):
+    """给界面用：当前素材能不能开 DFL 项目模式（判据见 _dfl_mode_state）。"""
+    return _ok(**_dfl_mode_state(video=video, path=path, project=project))
+
 @router.get("/api/merge/videos")
 @_api
 def merge_videos(dir: str = ""):
@@ -305,6 +362,21 @@ def merge_export(body: dict):
       · 给了帧目录 -> 老路：4.0 MergeStudio 子进程一口气出 mp4（下面的代码）。
     """
     body = _as_dict(body)
+    # ---- 检测策略：沿用 DFL = 走项目模式（用现成 aligned，不重新检测）----
+    # 这是**两个按钮合成一个按钮之后唯一的区分依据**（界面上那格「总是重检 / 沿用 DFL」）。
+    # 判定规则见 _dfl_mode_state()：同名文件夹 + aligned/ + 至少一张帧图，仅此而已。
+    _policy = str(body.get("detect_policy") or "").strip().lower().replace("-", "_")
+    if _policy in ("reuse", "reuse_dfl", "dfl", "project"):
+        _st = _dfl_mode_state(video=str(body.get("video") or body.get("source_video") or ""),
+                              path=str(body.get("input_dir") or ""),
+                              project=str(body.get("project_dir") or body.get("project") or ""))
+        if not _st.get("ok"):
+            raise _BadInput("DFL 项目模式不可用：%s" % (_st.get("why") or "未知原因"))
+        _sub = dict(body)
+        _sub["project_dir"] = _st["dir"]
+        _sub.setdefault("frames_dir", _st["dir"])
+        _sub.setdefault("aligned_dir", _st["aligned"])
+        return merge_export_project(_sub)
     # ---- 收到请求先回显一份（脱敏）：路径只留文件名、base64 换成长度 ----
     _eff.log_request("/api/merge/export", body)
 

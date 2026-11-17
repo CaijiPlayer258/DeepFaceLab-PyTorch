@@ -2806,6 +2806,8 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
   max-width: 100%;
   overflow: hidden;
 }
+/* 分段里"当前不可选"的那一格（例：没有 DFL 项目时的「沿用 DFL」） */
+.seg b.dis { opacity: .4; cursor: not-allowed; }
 #p-merge .mgright .seg b {
   padding: 4px 8px;
   font-size: 11px;

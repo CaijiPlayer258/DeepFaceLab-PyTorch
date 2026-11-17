@@ -2058,6 +2058,7 @@
 
     function mgOpenExportSettings() {
       if (!mgSyncExportGate()) {
+      mgDflModeSync();   /* 素材可能刚换过：进设置页前刷一次「沿用 DFL」的可用性 */
         mgToastErr("export-nosel", "先选一个模型",
                    "左栏「模型」里点一个（可多选），导出要用它换脸", "warn", 4000);
         return false;
@@ -2067,6 +2068,65 @@
       return true;
     }
     window.mgOpenExportSettings = mgOpenExportSettings;
+
+    /* ---------------- 检测策略：决定「导出」走哪条流水线 ----------------
+       · 总是重检   从源视频重新检测（融合流水线）
+       · 沿用 DFL   用同名文件夹里现成的 aligned/（DFL 项目模式，不重新检测）
+       能不能选「沿用 DFL」由后端一处判（/api/merge/dfl-mode → _dfl_mode_state）：
+       同名文件夹 + aligned/ + 至少一张帧图。别在前端自己猜路径。 */
+    var MGPJ_UNAVAILABLE = "";
+    function mgDflSeg() {
+      return document.querySelector('#p-merge .seg[data-k="detect"]');
+    }
+    function mgDflModeSync(done) {
+      var seg = mgDflSeg();
+      if (!seg) { if (done) done(null); return; }
+      var bs = Array.prototype.slice.call(seg.querySelectorAll("b"));
+      var reuse = bs[1];
+      if (!reuse) { if (done) done(null); return; }
+      var q = [];
+      var vp = (typeof mgVidPath === "function") ? String(mgVidPath() || "") : "";
+      if (vp) q.push("video=" + encodeURIComponent(vp));
+      if (window.__mergeInputDir) q.push("path=" + encodeURIComponent(window.__mergeInputDir));
+      fetch("/api/merge/dfl-mode" + (q.length ? ("?" + q.join("&")) : ""))
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          var st = (d && d.data) || d || {};
+          MGPJ_UNAVAILABLE = st.ok ? "" : String(st.why || "不可用");
+          reuse.classList.toggle("dis", !st.ok);
+          reuse.setAttribute("aria-disabled", st.ok ? "false" : "true");
+          reuse.title = st.ok
+            ? ("DFL 项目模式：用 " + st.dir + " 里现成的 aligned/，不重新检测")
+            : ("不能选：「" + MGPJ_UNAVAILABLE + "」。要这一档请先抽帧 + 人脸对齐，或改用「总是重检」");
+          if (!st.ok && reuse.classList.contains("on")) {
+            reuse.classList.remove("on");
+            if (bs[0]) bs[0].classList.add("on");
+          }
+          if (done) done(st);
+        })
+        .catch(function () { if (done) done(null); });
+    }
+    window.mgDflModeSync = mgDflModeSync;
+
+    (function bindDflSeg() {
+      var seg = mgDflSeg();
+      if (!seg || seg.dataset.dflBound) return;
+      seg.dataset.dflBound = "1";
+      /* 捕获阶段拦住「点不可用的那一格」：分段的高亮是通用逻辑加的，
+         这里必须在它之前把事件吃掉，否则会出现"亮着但用不了"。 */
+      seg.addEventListener("click", function (e) {
+        var b = e.target && e.target.closest ? e.target.closest("b") : null;
+        if (b && b.classList.contains("dis")) {
+          e.stopPropagation();
+          e.preventDefault();
+          mgToastErr("pj-unavailable", "不能选「沿用 DFL」", MGPJ_UNAVAILABLE || "还没有可用的 DFL 项目", "warn", 6000);
+          return;
+        }
+        mgDflModeSync();
+      }, true);
+    })();
+    /* 首屏进来也同步一次（素材可能在上次会话里就打开了） */
+    setTimeout(function () { try { mgDflModeSync(); } catch (e) {} }, 1200);
 
     var exBtn = $("mgExport");
     if (exBtn && !exBtn.dataset.bound) {
