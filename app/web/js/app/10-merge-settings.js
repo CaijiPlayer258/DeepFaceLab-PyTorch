@@ -862,6 +862,7 @@
     if (out) out.textContent = mgSrText(lv);
     var sr = document.getElementById("mgSr");
     if (sr) {
+      sr.classList.toggle("is-off", lv <= 0);
       sr.title = lv <= 0 ? "关（不做超分）"
         : (lv <= 50 ? "GPEN-256 · 混合 " + (lv / 50).toFixed(2) + "（单次约 10~20ms）"
                     : "GPEN-512 · 混合 " + ((lv - 50) / 50).toFixed(2) + "（单次约 60~73ms，慢 7 倍）");

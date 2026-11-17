@@ -171,6 +171,13 @@ def main():
             ev("(function(){try{window.scrollTo(0,0);}catch(e){}"
                "document.documentElement.style.scrollBehavior='auto';"
                "return 1;})()")
+            if name.startswith("05-merge"):
+                # 演示态：把超分滑块拨到 60（512 档 · α0.20），否则默认 0 时轨道是压暗的，
+                # 截图里看不出渐变。
+                ev("(function(){var s=document.getElementById('mgSr');"
+                   "if(s){s.value=60;s.dispatchEvent(new Event('input',{bubbles:true}));}"
+                   "return 1;})()")
+                time.sleep(0.3)
             # 关掉可能挡住的欢迎/教程层
             ev("(function(){['welcome','tutMask','onboard'].forEach(function(id){"
                "var el=document.getElementById(id); if(el){el.style.display='none';}});return 1;})()")
