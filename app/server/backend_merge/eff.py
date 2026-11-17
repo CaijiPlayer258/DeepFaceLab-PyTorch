@@ -643,8 +643,18 @@ def _eff_publish(route: str, kind: str, body: dict, cfg: dict,
     # 开着就必须留痕：它按帧吃 GPU，不看这一栏会以为"只是稍微慢一点"。
     try:
         from . import facesr as _sr
-        if _sr.enabled() or _sr.mode() != "off":
-            eff["sr"] = _sr.info()
+        _lv = int(kn.get("sr") or 0)
+        if _lv > 0 or _sr.enabled():
+            _info = _sr.info()
+            eff["sr"] = {
+                "level": _lv if _lv > 0 else _info.get("level", 0),
+                "size": 256 if (_lv if _lv > 0 else 0) <= 50 else 512,
+                "strength": round((_lv if _lv > 0 else 0) / 50.0, 2) if 0 < (_lv if _lv > 0 else 0) <= 50
+                            else round(((_lv - 50) / 50.0), 2) if (_lv if _lv > 0 else 0) > 50 else 0.0,
+                "backend": _info.get("backend") or "",
+                "model": _info.get("model") or "",
+                "why": _info.get("why") or "",
+            }
             if _sr.enabled() and _sr.session()[0] is None:
                 eff.setdefault("warnings", []).append({
                     "code": "eff-sr-missing", "field": "sr", "level": "warn",

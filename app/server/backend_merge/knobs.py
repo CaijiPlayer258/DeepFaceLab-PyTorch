@@ -111,6 +111,9 @@ def resolve(body) -> dict:
         "compose_backend": "cpu", "compose_backend_src": "default",
         "compose_gpu": "",
         "dfm_dtype_env": False, "compose_env": False,
+        # 人脸超分滑块（0..100）。不在这里做「能不能跑」的判断（那是 facesr 的事），
+        # 这里只负责把界面上的值带到 env 去。
+        "sr": _sr_level(body.get("sr")),
         "warnings": [],
     }
 
@@ -219,11 +222,46 @@ def apply(kn: dict) -> list:
             _set_env(DFM_ENV, "auto")       # 显式选「自动」：后端按权重体量挑
         else:
             _set_env(DFM_ENV, None)         # 谁都没说：还原进程原值（不设 = 后端默认档）
+    # 人脸超分：界面滑块值（0..100）。env 没被显式设过才由这一单决定。
+    if not os.environ.get("DFL_SR_ENV_LOCKED"):
+        lv = kn.get("sr")
+        try:
+            lv = int(float(lv)) if lv not in ("", None) else 0
+        except (TypeError, ValueError):
+            lv = 0
+        lv = max(0, min(100, lv))
+        if lv > 0:
+            os.environ["DFL_SR"] = str(lv)
+            os.environ.pop("DFL_SR_SIZE", None)      # 让滑块决定尺寸
+        else:
+            os.environ.pop("DFL_SR", None)
+            os.environ.pop("DFL_SR_SIZE", None)
     if not kn.get("compose_env"):
         g = kn.get("compose_gpu")
         # "" = 请求体没说（自动）→ 还原进程原值（默认就是「关」，即 CPU 路径）
         _set_env(GPU_ENV, None if g in ("", None) else str(int(g)))
     return notes
+
+
+def _sr_level(v) -> int:
+    """请求体里的 sr（0..100，允许 "off/low/mid/high" 与字符串数字）→ int。"""
+    if isinstance(v, bool) or v is None:
+        return 0
+    if isinstance(v, (int, float)):
+        return max(0, min(100, int(round(float(v)))))
+    txt = str(v).strip().lower()
+    if txt in ("", "off", "none", "0"):
+        return 0
+    if txt == "low":
+        return 18
+    if txt == "mid":
+        return 30
+    if txt == "high":
+        return 100
+    try:
+        return max(0, min(100, int(round(float(txt)))))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _set_env(name: str, value) -> None:

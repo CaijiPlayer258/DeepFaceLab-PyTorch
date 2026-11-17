@@ -362,6 +362,8 @@
     });
   })();
   mgCfgMemApply();
+  /* 记忆回填之后要重画超分滑块的读数（滑块值变了但标签还是旧的） */
+  try { if (window.mgSrPaint) window.mgSrPaint(); } catch (e) {}
 
   /* ---------- 事件绑定 ---------- */
 

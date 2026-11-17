@@ -7,17 +7,24 @@
 所以这里拿的是**合成之后那帧里的脸区域**（原生分辨率），只重采样一次：
 裁 → 512 → 推理 → 缩回 → 按遮罩 alpha 混回。
 
-混回强度是**默认 0.6**，不是 1.0
-------------------------------
-GPEN 是盲修复网络，它会把脸往「训练分布里的清晰人脸」拉。换脸的脸本身是干净的，
-只有"缺高频"，100% 替换会把目标人的特征洗掉 —— 实测同素材 100% 时 ArcFace 相似度掉得明显。
-所以给档位：off / low(0.35) / mid(0.6) / high(1.0)，默认 off（不改任何现有产出）。
+强度是**连续滑块**，不是开关（GPEN 自身没有强度参数）
+------------------------------------------------
+GPEN 的输出是确定的 —— 模型里没有"变阻器"。真正的连续旋钮是**混回比例**：
+      out = 原图 × (1 - α) + SR × α
+α = 0 就是关；α = 1 是整脸替换（会把目标人特征洗掉，实测 ArcFace 相似度明显下降）。
+
+滑块 0..100 分两段（两档模型，颜色也分两段）：
+      0        关
+      1..50    用 GPEN-256，α = lv/50
+      51..100  用 GPEN-512，α = (lv-50)/50
+所以 60 不是"512 的 60%"，而是"512 满力的 20%" —— 滑块是连续的，模型在 50 处换档。
 
 后端优先级：TRT 引擎 → onnxruntime(CUDA) → 都不行就**明确告警并跳过**（不静默）
 ----------------------------------------------------------------------------
-  DFL_SR=off|low|mid|high        档位（默认 off）
+  DFL_SR=0..100                 滑块值（默认 0 = 关；兼容 off/low/mid/high = 0/35/60/100）
   DFL_SR_BACKEND=auto|trt|onnx   后端（auto = 有 engine 用 engine）
-  DFL_SR_MODEL=<onnx 路径>        默认 weights/gpen_bfr_512.onnx
+  DFL_SR_SIZE=256|512            强制尺寸（排障用；正常由滑块决定）
+  DFL_SR_MODEL=<onnx 路径>        覆盖模型路径（不给就按 size 选）
   engine 放 weights/_engine/gpen_bfr_512.<sm>.<prec>.engine（用 app/tools/models/build_sr_engine.py 编）
 
 为什么不做 torch 后端：GPEN 官方权重是 ONNX 更省事（torch 版要 vendor 它的网络定义 + StyleGAN2 的
@@ -30,7 +37,11 @@ import threading
 import time
 from pathlib import Path
 
-_PREF = {"off": 0.0, "low": 0.35, "mid": 0.6, "high": 1.0}
+# 档位→百分比（旧写法继续可用）；真身是 **0..100 的滑块值**，见 level()
+# 兼容旧写法（以前是离散档位）；数值就是滑块位置。mid 保持"256 满力的六成"这层含义不变，
+# 免得历史实测数据（mid=0.6、256）对不上。
+_PREF = {"off": 0, "low": 18, "mid": 30, "high": 100}
+_FULL = 50.0      # 滑块 0..100 的中点：<=50 用 256 模型，>50 用 512
 _LOCK = threading.Lock()
 _SESS = {"obj": None, "why": "", "backend": "", "name": ""}
 _SIZE_DEFAULT = 256          # 256 版单次约 1/4 成本；512 版质量更好但本机吃不下
@@ -40,17 +51,43 @@ def _log(msg: str) -> None:
     print("[sr] " + msg, flush=True)
 
 
+def level() -> int:
+    """滑块值 0..100。0 = 关；<=50 走 256 模型，>50 走 512 模型。
+
+    兼容旧写法：DFL_SR=off/low/mid/high 分别等价于 0/35/60/100。
+    """
+    raw = str(os.environ.get("DFL_SR") or "0").strip().lower()
+    if raw in _PREF:
+        return int(_PREF[raw])
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(100, int(round(v))))
+
+
 def mode() -> str:
-    v = str(os.environ.get("DFL_SR") or "off").strip().lower()
-    return v if v in _PREF else "off"
+    """给日志/回显用的短标签（不参与计算）。"""
+    lv = level()
+    return "off" if lv <= 0 else ("%d" % lv)
 
 
 def strength() -> float:
-    return float(_PREF.get(mode(), 0.0))
+    """混合强度 0..1 —— 这是 GPEN 之外的**连续旋钮**（模型本身没有强度参数）。
+
+    左半段（1..50）用 256，强度 = lv/50；右半段（51..100）用 512，强度 = (lv-50)/50。
+    所以右半段的起点是「512 刚开、强度很小」，不是「512 满力」——滑块是连续的。
+    """
+    lv = level()
+    if lv <= 0:
+        return 0.0
+    if lv <= _FULL:
+        return lv / _FULL
+    return (lv - _FULL) / _FULL
 
 
 def enabled() -> bool:
-    return strength() > 0.0
+    return level() > 0
 
 
 def _weights_dir() -> Path:
@@ -59,12 +96,14 @@ def _weights_dir() -> Path:
 
 
 def size() -> int:
-    """工作分辨率：256（默认，快）或 512（质量档）。DFL_SR_SIZE 覆盖。"""
-    try:
-        v = int(str(os.environ.get("DFL_SR_SIZE") or _SIZE_DEFAULT).strip())
-    except (TypeError, ValueError):
-        v = _SIZE_DEFAULT
-    return 512 if v >= 384 else 256
+    """工作分辨率：滑块 <=50 用 256，>50 用 512。DFL_SR_SIZE 可显式覆盖（排障用）。"""
+    forced = str(os.environ.get("DFL_SR_SIZE") or "").strip()
+    if forced:
+        try:
+            return 512 if int(float(forced)) >= 384 else 256
+        except (TypeError, ValueError):
+            pass
+    return 256 if level() <= _FULL else 512
 
 
 def _model_path() -> Path:
@@ -146,7 +185,7 @@ def session():
 
 def info() -> dict:
     """给 [eff] / status 用的回显。"""
-    return {"mode": mode(), "strength": round(strength(), 2), "size": size(),
+    return {"level": level(), "mode": mode(), "strength": round(strength(), 2), "size": size(),
             "backend": _SESS.get("backend") or "", "model": _SESS.get("name") or "",
             "why": _SESS.get("why") or ""}
 

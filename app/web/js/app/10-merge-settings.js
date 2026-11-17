@@ -843,6 +843,41 @@
   /* 融合方式只有这 4 个（和「模式」下拉的选项、后端白名单三处必须一致）。 */
   var MG_MERGE_BLENDS = ["overlay", "hist-match", "seamless", "seamless-hist-match"];
 
+  /* 人脸超分：滑块 0..100。0=关；1..50 用 GPEN-256（α=lv/50）；51..100 用 GPEN-512（α=(lv-50)/50）。
+     模型本身没有强度参数，连续旋钮就是「SR 与 原图 的混合比例」。 */
+  function mgSrLevel() {
+    var el = document.getElementById("mgSr");
+    var v = el ? Number(el.value) : 0;
+    if (!isFinite(v)) v = 0;
+    return Math.max(0, Math.min(100, Math.round(v)));
+  }
+  function mgSrText(lv) {
+    if (lv <= 0) return "off";
+    if (lv <= 50) return "256 · α" + (lv / 50).toFixed(2);
+    return "512 · α" + ((lv - 50) / 50).toFixed(2);
+  }
+  function mgSrPaint() {
+    var lv = mgSrLevel();
+    var out = document.getElementById("mgSrVal");
+    if (out) out.textContent = mgSrText(lv);
+    var sr = document.getElementById("mgSr");
+    if (sr) {
+      sr.title = lv <= 0 ? "关（不做超分）"
+        : (lv <= 50 ? "GPEN-256 · 混合 " + (lv / 50).toFixed(2) + "（单次约 10~20ms）"
+                    : "GPEN-512 · 混合 " + ((lv - 50) / 50).toFixed(2) + "（单次约 60~73ms，慢 7 倍）");
+    }
+  }
+  window.mgSrLevel = mgSrLevel;
+  window.mgSrPaint = mgSrPaint;
+  (function bindSr() {
+    var sr = document.getElementById("mgSr");
+    if (!sr || sr.dataset.srBound) return;
+    sr.dataset.srBound = "1";
+    sr.addEventListener("input", mgSrPaint);
+    sr.addEventListener("change", mgSrPaint);
+    mgSrPaint();
+  })();
+
   function mgCmpSettings() {
     var ct = String((document.getElementById("mgColor") || {}).value || "mt");
     var mm = mgSegVal("mask", "prd×dst") || "prd×dst";
@@ -873,6 +908,8 @@
       mask_style: mm,
       erode_mask: erode,
       blur_mask: blur,
+      /* 人脸超分滑块 0..100（0 = 关；<=50 用 256，>50 用 512）—— 后端 knobs 读这个键 */
+      sr: mgSrLevel(),
       detector: mgDetectorName(),
       face_type: String((document.getElementById("mgFaceType") || {}).value || "whole_face")
     };

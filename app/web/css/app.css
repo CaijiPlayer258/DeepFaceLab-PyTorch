@@ -6203,3 +6203,46 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 #p-merge .mgprog-res-acts #mgpForceTry[hidden],
 #p-merge .mgprog-res-acts #mgpForceTry[style*="display: none"] { display: none !important; }
 #p-merge .mgprog-lnk[hidden] { display: none !important; }
+
+/* ---------- 人脸超分滑块（合成器设置页）----------
+   轨道两段配色：左 0~50 = GPEN-256（青），右 50~100 = GPEN-512（紫）。
+   用户要求「左边为 0 和 256，右边是 512」——所以中点必须是硬分界（50% 处不留渐变）。 */
+#p-merge .mgsr {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 120px;
+  height: 8px;
+  vertical-align: middle;
+  border-radius: 4px;
+  outline: none;
+  background: linear-gradient(to right,
+      #2f9e8f 0%, #2f9e8f 50%,
+      #7c5cff 50%, #7c5cff 100%);
+  border: 1px solid var(--line);
+  cursor: pointer;
+}
+#p-merge .mgsr::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--ink-2);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .25);
+}
+#p-merge .mgsr::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--ink-2);
+}
+#p-merge .mgsr-v {
+  display: inline-block;
+  min-width: 58px;
+  white-space: nowrap;
+  margin-left: 8px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}

@@ -156,7 +156,17 @@ def main():
         for name, key, desc in PAGES:
             if only and not any(name.startswith(o) for o in only):
                 continue
-            ok = ev("(function(){try{window.go('%s');return 1;}catch(e){return String(e);}})()" % key)
+            _page, _view = (key.split("@", 1) + [""])[:2] if "@" in key else (key, "")
+            ok = ev("(function(){try{window.go('%s');return 1;}catch(e){return String(e);}})()" % _page)
+            if _view:
+                time.sleep(1.0);
+                ev("(function(){['#p-merge','#p-merge .mgview.in','#p-merge .mgview.in .mgshell',"
+                   "'main','body'].forEach(function(sel){var v=document.querySelector(sel);"
+                   "if(v){v.scrollTop=v.scrollHeight;}});"
+                   "var sr=document.getElementById('mgSr');"
+                   "if(sr&&sr.scrollIntoView){sr.scrollIntoView({block:'center'});}return 1;})()");
+                time.sleep(0.6)
+                ok = ev("(function(){try{window.mgStep('%s');return 1;}catch(e){return String(e);}})()" % _view)
             time.sleep(2.2)
             ev("(function(){try{window.scrollTo(0,0);}catch(e){}"
                "document.documentElement.style.scrollBehavior='auto';"
