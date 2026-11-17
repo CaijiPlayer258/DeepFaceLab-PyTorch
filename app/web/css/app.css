@@ -2085,7 +2085,7 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
 #p-merge .mgleft::-webkit-scrollbar-track,
 #p-merge .mgright::-webkit-scrollbar-track { background: transparent; }
 #p-merge .mgsec { padding: 10px 0; }
-#p-merge .mgrow { padding: 1px 0; }
+#p-merge .mgrow { padding: 3px 0; }
 #p-merge .mggrp { margin-bottom: 0; }
 #p-merge .mgtl { padding: 6px 10px; }
 
@@ -6290,7 +6290,7 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
    一列里四个高度，看着就是"参差不齐"。统一到 30px：数字框 28+2 边框、分段 2px 内衬 + 26 的子块，
    只读文本和滑块行给盒子高度让行距一致。
    ============================================================================ */
-#p-merge .mgright { --mg-ctl-h: 30px; }
+#p-merge .mgright { --mg-ctl-h: 28px; }
 /* 导出按钮钉在栏底：控件变高以后，小窗口下它会被滚出可视区（截图里就只剩半截）。
    sticky 而不是 fixed —— 它仍在滚动容器里，只是粘住底边。 */
 #p-merge .mgright .mgexport {
@@ -6298,7 +6298,20 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   bottom: 0;
   background: var(--panel);
   padding-top: 6px;
+  margin-top: 10px;
 }
+/* 分组标题（DETECT / MERGE）上下留白收紧：一行 11.5px 的标题不该占 45px */
+#p-merge .mgright .mgsec > .mggrp,
+#p-merge .mgright .mgsec > .mgttl { margin-bottom: 0; }
+/* 分组标题行本身压到 16px（原来 20+），一行小标题不该吃掉半行的空间 */
+#p-merge .mgright .mggrphd,
+#p-merge .mgright .mgttl {
+  min-height: 0;
+  line-height: 16px;
+  margin: 0 0 2px;
+}
+#p-merge .mgright .mgsec + .mgsec { margin-top: -2px; }
+#p-merge .mgright .ddbtn { height: var(--mg-ctl-h); }   /* .ddbtn 全局写死 30px，这一栏要跟--mg-ctl-h 走 */
 #p-merge .mgright .mgnum { height: var(--mg-ctl-h); }
 #p-merge .mgright .mgtiny { height: calc(var(--mg-ctl-h) - 2px); }   /* 上下各 1px 边框 */
 #p-merge .mgright .seg { height: var(--mg-ctl-h); padding: 2px; box-sizing: border-box; }
