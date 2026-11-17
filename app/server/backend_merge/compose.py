@@ -1675,7 +1675,7 @@ def _face_debug_payload(payload: dict) -> dict:
 
     xseg = _xseg_of(payload)
     key = json.dumps([_source_ident(snap, mode, name), int(idx), int(face_i),
-                      str(dfm), cfg, xseg, int(panel_size)], sort_keys=True, default=str)
+                      str(dfm), cfg, xseg, int(panel_size), _sr_level_of(payload)], sort_keys=True, default=str)
     with _FACE_DBG_LOCK:
         hit = _FACE_DBG_CACHE.get(key)
         if hit is not None:
@@ -1711,6 +1711,34 @@ def _face_debug_payload(payload: dict) -> dict:
                        "w": int(item.get("w") or panel_size),
                        "h": int(item.get("h") or panel_size),
                        "png": "data:image/png;base64," + raw})
+    # 最后一格「merged」按滑块过一遍超分：调试页要看的就是「GPEN 之后」的样子。
+    # 这一格是**脸本身**（panel_size），不是整帧，所以直接按整块 + 椭圆遮罩做。
+    try:
+        from .knobs import apply_sr as _apply_sr
+        _lv = int(_apply_sr(_sr_level_of(payload)))
+        if _lv > 0:
+            import base64 as _b64d
+            import cv2 as _cv2
+            from . import facesr as _sr
+            for _pn in panels:
+                if str(_pn.get("label") or "").strip() != "merged":
+                    continue
+                _raw = _pn["png"].split(",", 1)[-1]
+                _img = _cv2.imdecode(np.frombuffer(_b64d.b64decode(_raw), np.uint8),
+                                    _cv2.IMREAD_COLOR)
+                if _img is None:
+                    continue
+                _h, _w = _img.shape[:2]
+                _m = np.zeros((_h, _w), np.float32)
+                _cv2.ellipse(_m, (_w // 2, _h // 2), (max(1, _w // 2 - 2), max(1, _h // 2 - 2)),
+                            0, 0, 360, 1.0, -1)
+                _m = _cv2.GaussianBlur(_m, (0, 0), max(1.0, min(_w, _h) * 0.02))
+                _img = _sr.apply_roi(_img, _m, _sr.strength())
+                _ok2, _buf = _cv2.imencode(".png", _img)
+                if _ok2:
+                    _pn["png"] = "data:image/png;base64," + _b64d.b64encode(_buf).decode("ascii")
+    except Exception as _e:                                # noqa: BLE001
+        print("[sr] 调试页跳过（%s: %s）" % (_e.__class__.__name__, str(_e)[:120]), flush=True)
     if len(panels) != 6:
         raise _BadInput("六宫格只出了 %d 张（要 6 张）—— worker 版本对不上？" % len(panels), 500)
 
