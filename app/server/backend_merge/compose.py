@@ -1550,6 +1550,17 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
             resp["faces"] = _manual_faces(res.get("faces"), _auto_library(payload))
             resp["auto"] = False
         resp["swaps"] = int(res.get("swaps") or 0)
+        # 多人素材排查用：一张脸没换时，这三组数对不上就能立刻定位是"没检测到"、
+        # "没分配上"还是"worker 没换"。DFL_DEBUG_FACES=1 打开。
+        if os.environ.get("DFL_DEBUG_FACES"):
+            _det = len(boxes or [])
+            _want = sum(len(m.get("faces") or []) for m in (models or []))
+            _got = len(res.get("faces") or [])
+            print("[faces] frame=%s 检测=%d 分配=%d 换=%d · models=%s · got=%s"
+                  % (idx, _det, _want, int(res.get("swaps") or 0),
+                     [(m.get("name"), list(m.get("faces") or [])) for m in (models or [])],
+                     [(f.get("idx"), f.get("dfm_name") or f.get("model") or "") for f in (res.get("faces") or [])]),
+                  flush=True)
     _compose_store(sig, resp)
     return resp
 
