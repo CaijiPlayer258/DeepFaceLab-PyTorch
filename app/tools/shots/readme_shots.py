@@ -88,7 +88,7 @@ def edge(port):
     profile = TMP / ("readme_shots_%s" % uuid.uuid4().hex[:8])
     proc = subprocess.Popen(
         [EDGE, "--headless=new", "--disable-gpu", "--hide-scrollbars",
-         "--window-size=1500,950", "--no-first-run", "--no-default-browser-check",
+         "--window-size=" + os.environ.get("DFL_SHOT_SIZE", "1500,950"), "--no-first-run", "--no-default-browser-check",
          "--user-data-dir=%s" % profile, "--remote-debugging-port=%d" % dbg,
          "about:blank"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -145,13 +145,14 @@ def main():
         # 先落语言/主题，再进站：这一条 setItem 在 about:blank 上做不了，所以先开页
         call("Page.navigate", {"url": "http://127.0.0.1:%d/" % port})
         time.sleep(4)
+        _theme = os.environ.get("DFL_SHOT_THEME", "light")
         ev("(function(){try{localStorage.setItem('dfl-lang','en');}catch(e){}"
-           "document.documentElement.setAttribute('data-theme','light');return 1;})()")
+           "document.documentElement.setAttribute('data-theme','%s');return 1;})()" % _theme)
         call("Page.navigate", {"url": "http://127.0.0.1:%d/" % port})
         time.sleep(5)
         ev("(function(){try{window.I18N.apply('en');}catch(e){}"
-           "try{window.applyTheme('light',{instant:true});}catch(e){}"
-           "document.documentElement.setAttribute('data-theme','light');return 1;})()")
+           "try{window.applyTheme('%s',{instant:true});}catch(e){}"
+           "document.documentElement.setAttribute('data-theme','%s');return 1;})()" % (_theme, _theme))
         time.sleep(1.5)
         for name, key, desc in PAGES:
             if only and not any(name.startswith(o) for o in only):

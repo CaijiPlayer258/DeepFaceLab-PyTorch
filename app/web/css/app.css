@@ -2975,7 +2975,7 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
    ============================================================================ */
 #p-merge .mgbody {
   gap: 0 !important;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;   /* 三栏之间已有分隔线，外面不再套一圈（深色主题下那圈很显眼） */
   border-radius: 12px;
   background: var(--panel);
   overflow: hidden;
