@@ -591,6 +591,13 @@ def main():
             continue
         rid = req.get("id")
         cmd = str(req.get("cmd") or "")
+        # 人脸超分滑块随请求走：worker 是**独立解释器**，spawn 之后父进程再改 env 它也看不见，
+        # 所以每一发都按这一发带的 sr 重设一次（预览才看得见 GPEN 的效果）。
+        try:
+            from .knobs import apply_sr as _apply_sr
+            _apply_sr(req.get("sr"))
+        except Exception:                                  # noqa: BLE001
+            pass
         if cmd == "exit":
             break
         # 请求可以带裸字节块：头的 "blobs": [n1, n2, …] 就是后面几块的字节数。

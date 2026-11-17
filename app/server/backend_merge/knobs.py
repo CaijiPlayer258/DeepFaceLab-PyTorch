@@ -222,25 +222,31 @@ def apply(kn: dict) -> list:
             _set_env(DFM_ENV, "auto")       # 显式选「自动」：后端按权重体量挑
         else:
             _set_env(DFM_ENV, None)         # 谁都没说：还原进程原值（不设 = 后端默认档）
-    # 人脸超分：界面滑块值（0..100）。env 没被显式设过才由这一单决定。
-    if not os.environ.get("DFL_SR_ENV_LOCKED"):
-        lv = kn.get("sr")
-        try:
-            lv = int(float(lv)) if lv not in ("", None) else 0
-        except (TypeError, ValueError):
-            lv = 0
-        lv = max(0, min(100, lv))
-        if lv > 0:
-            os.environ["DFL_SR"] = str(lv)
-            os.environ.pop("DFL_SR_SIZE", None)      # 让滑块决定尺寸
-        else:
-            os.environ.pop("DFL_SR", None)
-            os.environ.pop("DFL_SR_SIZE", None)
+    # 人脸超分：界面滑块值（0..100）。
+    apply_sr(kn.get("sr"))
     if not kn.get("compose_env"):
         g = kn.get("compose_gpu")
         # "" = 请求体没说（自动）→ 还原进程原值（默认就是「关」，即 CPU 路径）
         _set_env(GPU_ENV, None if g in ("", None) else str(int(g)))
     return notes
+
+
+def apply_sr(value) -> int:
+    """把滑块值写进进程 env —— **预览与导出共用这一处**。
+
+    预览（/api/merge/merged、/api/merge/frame）不走 apply()，以前只有导出会设 DFL_SR，
+    于是滑到 512·α1.00、预览里却看不出任何增强（用户报的「前端合成没有 GPEN 效果」）。
+    """
+    lv = _sr_level(value)
+    if os.environ.get("DFL_SR_ENV_LOCKED"):
+        return lv
+    if lv > 0:
+        os.environ["DFL_SR"] = str(lv)
+        os.environ.pop("DFL_SR_SIZE", None)          # 让滑块决定尺寸
+    else:
+        os.environ.pop("DFL_SR", None)
+        os.environ.pop("DFL_SR_SIZE", None)
+    return lv
 
 
 def _sr_level(v) -> int:

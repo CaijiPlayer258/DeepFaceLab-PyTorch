@@ -1268,6 +1268,14 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
         无人脸         → has_face=false, swapped=false, no_faces=true
     检测整条链路只做一次（调用方这份 boxes 直接交给 worker 和自动分配复用）。
     """
+    # 预览也要吃「人脸超分」滑块：以前只有导出会写 env，滑到 512·α1.00 预览却看不出
+    # 任何变化（用户报的「前端合成没有 GPEN 效果」）。payload.sr = 滑块值 0..100。
+    try:
+        from .knobs import apply_sr as _apply_sr
+        _apply_sr(payload.get("sr") if isinstance(payload, dict) else None)
+    except Exception:                                      # noqa: BLE001
+        pass
+
     t_start = time.time()
     payload = _as_dict(payload)
     maxw = max(200, min(int(payload.get("w") or default_w or 900), 1600))

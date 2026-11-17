@@ -8,13 +8,20 @@
   /* 保存在工作区里（face68.json），换端口、换机器都还在。
      判据是 r.ok：后端没有这份数据时回 404 + detail（以前是 200 + points:null，
      只能靠 d.points == null 猜），这里把 detail 摆到界面上，别让它静默回内置坐标。 */
-  function loadFace() {
+  /* loud=true 才弹提示：启动时这一发只是把保存过的 68 点读回来，没保存过是正常状态，
+     不该在右下角冒一条吐司（用户报的「开窗就弹」）。真正该喊的是用户主动点角度图那类动作。 */
+  function loadFace(loud) {
     return fetch("/api/face").then(function (r) {
       if (!r.ok) {
         return r.json().catch(function () { return {}; }).then(function (d) {
-          toast("这一帧没有关键点",
-                String((d && (d.detail || d.error)) || ("HTTP " + r.status)).slice(0, 120),
-                "info");
+          if (loud) {
+            toast("这一帧没有关键点",
+                  String((d && (d.detail || d.error)) || ("HTTP " + r.status)).slice(0, 120),
+                  "info");
+          } else {
+            console.info("[face] 没有保存过的 68 点（正常）：" +
+                         String((d && (d.detail || d.error)) || ("HTTP " + r.status)).slice(0, 80));
+          }
           return null;
         });
       }
