@@ -361,6 +361,8 @@
     body.n = frame;
     body.face = parseInt(i, 10) || 0;
     body.panel_size = 256;
+    /* 超分档位：顶层也发一份（和预览同一个口径；后端两个口径都认） */
+    if (window.mgSrLevel) body.sr = window.mgSrLevel();
     return body;
   }
   window.mgFdbgBody = mgFdbgBody;
@@ -490,6 +492,57 @@
     return el;
   }
   window.mgFaceDebugOpen = mgFaceDebugOpen;
+
+  /* 六宫格是"打开那一发"取回来的静态图：改参数（含超分滑块）后必须重取，
+     否则用户看到的就是「怎么调都不变」。这里做 200ms 防抖，连续拖动只发最后一发。 */
+  var MG_FDBG_TIMER = 0;
+  function mgFaceDebugRefresh() {
+    if (!MG_FDBG || MG_FDBG.face == null || MG_FDBG.face < 0) return;
+    var el = mgFdbgEl();
+    if (!el || el.hidden) return;                  /* 没开着就不用管 */
+    clearTimeout(MG_FDBG_TIMER);
+    MG_FDBG_TIMER = setTimeout(function () {
+      if (MG_FDBG.face < 0) return;
+      var seq = ++MG_FDBG.seq;
+      MG_FDBG.busy = true;
+      fetch("/api/merge/face-debug", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(mgFdbgBody(MG_FDBG.face))
+      }).then(function (r) {
+        return r.json().then(function (d) {
+          if (!r.ok || !d || d.ok === false) throw new Error((d && (d.detail || d.error)) || ("HTTP " + r.status));
+          return d;
+        });
+      }).then(function (d) {
+        if (seq !== MG_FDBG.seq) return;
+        MG_FDBG.busy = false;
+        MG_FDBG.data = d;
+        mgFdbgFill(d);
+      }).catch(function (e) {
+        if (seq !== MG_FDBG.seq) return;
+        MG_FDBG.busy = false;
+        var sub = document.getElementById("mgfgSub");
+        if (sub) sub.textContent = "六宫格重取失败：" + String((e && e.message) || e).slice(0, 90);
+      });
+    }, 200);
+  }
+  window.mgFaceDebugRefresh = mgFaceDebugRefresh;
+
+  (function bindFdbgLive() {
+    var panel = document.querySelector("#p-merge .mgright");
+    if (!panel || panel.dataset.fdbgLive) return;
+    panel.dataset.fdbgLive = "1";
+    /* 右栏所有控件：下拉/分段/数字框/滑块，改完就重取 */
+    ["change", "input"].forEach(function (evt) {
+      panel.addEventListener(evt, function (e) {
+        var t = e.target;
+        if (!t) return;
+        if (t.id === "mgSr") mgSrPaint && mgSrPaint();
+        mgFaceDebugRefresh();
+      });
+    });
+  })();
 
   function mgFaceDebugClose() {
     MG_FDBG.seq++;                 /* 在飞的那一发回来也不要了 */
