@@ -940,6 +940,13 @@ def _models_of(body: dict):
 def _model_for_face(idx: int, models) -> int:
     """第 idx 张脸归哪个模型。
 
+    **契约（前端 mgFaceModelsPayload 必须照这个发）**：
+      · 每次请求都发**完整的每脸分配**（回包后把每张脸当前用的模型写进 map）；
+      · 只改一张时其它脸也要在那份 payload 里 —— 否则下面的第 3 条兜底会把它们算给第 0 个
+        （历史 bug：只改一张、两张都变）。现在那段兜底已被 _face_unassigned 拦掉，
+        未分配的脸保持原像素 —— 但那是兜底，正常路径不该依赖它；
+      · faces=[] 的语义是「我管全部脸」（单模型就是这么写的），不是「我不管」。
+
     三级：
       1) 有模型显式点名这张脸（faces 里含 idx）→ 按 models 顺序先声明先得；
       2) 没有点名的，交给 faces=[] 的那个（空 faces 就是「我管所有脸」，单模型就

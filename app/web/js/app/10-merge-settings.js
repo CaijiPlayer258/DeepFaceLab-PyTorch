@@ -859,11 +859,14 @@
       if (!byName[nm]) { byName[nm] = []; order.push(nm); }
       byName[nm].push(i);
     });
-    /* 一张都没手动分配 → 发空数组：**让后端按人脸 embedding 自动决定每张脸用哪个
-       dfm**（/api/merge/frame、/api/merge/merged 的自动分配）。
-       以前这里退回「左栏选中 = 全部脸」，那等于用同一个模型换所有人 ——
-       和「组里的人脸 = 那个组的 dfm」的语义正好相反。 */
-    if (!order.length) return [];
+    if (!order.length) {
+      /* 还没人手动分配 → 显式声明「默认模型管全部脸」。
+         以前这里发空数组：后端走**单模型老路径 = 只换主角那一张**，
+         双人帧就会「只换了一张」（用户报的第一条）。faces:[] 在契约里就是「我管全部」。 */
+      var _def = "";
+      try { _def = String((typeof mgPreviewModel === "function" ? mgPreviewModel() : "") || ""); } catch (e) { _def = ""; }
+      return _def ? [{ name: _def, faces: [] }] : [];
+    }
     return order.map(function (nm) {
       return { name: nm, faces: byName[nm].sort(function (a, b) { return a - b; }) };
     });
@@ -1379,6 +1382,20 @@
       };
     });
     MG_FACE_AUTO = next;
+  /* 契约（和 backend/preview._model_for_face 一致）：**每次请求都发完整的每脸分配**。
+     做法：每发回包后，把「这张脸现在实际在用的模型」写实进 MG_FACE_MODEL ——
+     自动判出来的名字也算。不写实的话 map 是空的，第一次手动改一张就只发一个模型，
+     后端只能按「单模型/兜底」处理，于是出现「只改一张、两张都变」或「另一张不换」。 */
+  (function materialize() {
+    var def = "";
+    try { def = String((typeof mgPreviewModel === "function" ? mgPreviewModel() : "") || ""); } catch (e) { def = ""; }
+    Object.keys(next).forEach(function (k) {
+      var j = parseInt(k, 10);
+      if (isNaN(j) || MG_FACE_MODEL[j] || MG_FACE_NOSWAP[j]) return;
+      var nm = String((next[k] && (next[k].dfm || next[k].groupName)) || "") || def;
+      if (nm) MG_FACE_MODEL[j] = nm;
+    });
+  })();
     mgSyncFaceCards();
     if (window.mvRedrawBoxes) window.mvRedrawBoxes();   /* 框色跟着判出来的模型走 */
   }
@@ -1390,30 +1407,6 @@
     /* 手动指定 = 覆盖自动判定：把这一张从 MG_FACE_AUTO 里摘掉，
        否则下一次回包之前 chip 还会显示自动判出来的那个名字。 */
     delete MG_FACE_AUTO[i];
-    /* 第一次手动改某张脸的模型时，把「默认那个模型」钉到其它没分配的脸上。
-       不钉的话：MG_FACE_MODEL 只剩被改的那一张 → mgFaceModelsPayload() 只发一个模型 →
-       后端按「只给了一个模型」= 全部脸都用它处理，用户看到的就是
-       「我只改了第二张，怎么两张都变成新模型了」。只有第一次会这样。 */
-    try {
-      var _def = (typeof mgPreviewModel === "function") ? String(mgPreviewModel() || "") : "";
-      if (_def) {
-        /* 已知的脸 = 上一发回包里自动判过的 + 手动分配过的 + 这一张 */
-        var _set = {};
-        [MG_FACE_AUTO, MG_FACE_MODEL].forEach(function (m) {
-          Object.keys(m || {}).forEach(function (k) { _set[k] = 1; });
-        });
-        _set[String(i)] = 1;
-        Object.keys(_set).forEach(function (k) {
-          var j = parseInt(k, 10);
-          if (isNaN(j) || j === i) return;
-          if (MG_FACE_MODEL[j] || MG_FACE_NOSWAP[j]) return;
-          /* 自动判出来的那一个也算"正在用的模型" —— 把它**写实**到 map 里，
-             否则 payload 只带被改的那一个，后端按单模型处理 = 全场都用它。 */
-          var _cur = (typeof mgFaceModel === "function") ? String(mgFaceModel(j) || "") : "";
-          MG_FACE_MODEL[j] = _cur || _def;
-        });
-      }
-    } catch (e) {}
     if (name) { MG_FACE_MODEL[i] = name; delete MG_FACE_NOSWAP[i]; }
     else { delete MG_FACE_MODEL[i]; MG_FACE_NOSWAP[i] = true; }   /* 「不换脸」→ no_swap_faces */
     MG_FACE_BUSY[i] = true;
