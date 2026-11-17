@@ -955,6 +955,21 @@ def _model_for_face(idx: int, models) -> int:
     return 0
 
 
+def _face_unassigned(idx: int, models) -> bool:
+    """这张脸是不是「没有任何模型点名它、也没有哪个模型声明管全部脸」。
+
+    用户报的问题就出在这：payload 只带 {阿証:[1]} 时，_model_for_face 的第 3 条兜底
+    （"都没有 → 第 0 个"）会把**没被点名的脸**也算给阿証 —— 于是「我只改了第二张，
+    两张都变成阿証」。显式点名了谁，就只换谁；没被点名的保持原像素（不换 > 换错）。
+    """
+    models = list(models or [])
+    if not models:
+        return False
+    if any(int(idx) in (m.get("faces") or []) for m in models):
+        return False
+    return not any(not (m.get("faces") or []) for m in models)
+
+
 def _used_names(models, loaded, applied=None) -> list:
     """models 里哪些真的参与了这次请求（按 models 顺序、去重）。
 
@@ -1125,6 +1140,10 @@ def _swap_desc(job: dict, frame, boxes, best, box_xyxy, box_wh, timings,
             x1, y1, x2, y2 = [float(v) for v in (b.get("box") or ())]
         except Exception:
             skipped.append({"face": int(i), "why": "检测框不合法"})
+            continue
+        if _face_unassigned(int(i), models):
+            # 显式点名了谁就只换谁：没被点名的脸保持原像素（第 3 条兜底会把它们算给第 0 个模型）
+            skipped.append({"face": int(i), "why": "这一张没有分配模型：保持原像素"})
             continue
         mi = _model_for_face(i, models)
         m = models[mi]
