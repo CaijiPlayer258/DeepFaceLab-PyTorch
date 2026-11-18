@@ -1965,6 +1965,11 @@ def _stage_out_path(video: Path, rng: dict, body: dict) -> Path:
     「输出路径」，两条路不该给出不一样的文件名。
     """
     tag = "" if rng["full"] else "_%04d-%04d" % (int(rng["start"]), int(rng["end"]))
+    # out_tag：同一次 A/B 里两条路径要有**不同**文件名，否则互相覆盖、没法对拍。
+    # 两条路径都走这个函数，所以标签加在这里 = 命名规则仍然只有一份。
+    _ot = str(body.get("out_tag") or "").strip()
+    if _ot:
+        tag = "_" + _ot + tag
     out_raw = str(body.get("output_dir") or body.get("output") or "").strip()
     if out_raw:
         op = _norm_path(out_raw)
