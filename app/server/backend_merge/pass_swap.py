@@ -95,11 +95,11 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
             mat = get_transform_mat(np.asarray(lm, np.float32), size, FaceType.WHOLE_FACE, scale=1.0)
             warped = cv2.warpAffine(img, mat, (size, size), flags=cv2.INTER_CUBIC)
             ins.append(np.clip(warped.astype(np.float32) / 255.0, 0, 1))
-            mats.append((f, mat))
+            mats.append((f, mat, lm))
         if not ins:
             continue
         outs = _dfm_run_batch(ent, np.stack(ins, axis=0), want_u8=True)
-        for (f, _mat), got in zip(mats, outs):
+        for (f, _mat, lm), got in zip(mats, outs):
             try:
                 pred, prd, _dst = got[0], got[1], (got[2] if len(got) > 2 else None)
             except Exception:                                # noqa: BLE001
@@ -115,6 +115,7 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
             key = "f%06d_%d" % (int(f["frame"]), int(f["idx"]))
             if buf_from is None:
                 buf_from = int(f["frame"])
+            buf[key + "_lm"] = np.asarray(lm, np.float32)
             buf[key + "_pred"] = p
             buf[key + "_mask"] = m
             done += 1
