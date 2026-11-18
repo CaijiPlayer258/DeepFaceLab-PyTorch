@@ -28,6 +28,15 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
     t0 = time.time()
     video = Path(str(cfg["video"]))
     crf = int(cfg.get("crf") or 17)
+    # 编码器：优先用请求里给的那个（导出设置里的 h264_nvenc）；拿不到就 libx264。
+    # 之前写死 libx264 —— 用户的设置被静默忽略，等于换了个编码器还不知道。
+    _enc = str(cfg.get("encoder") or "").strip()
+    if "nvenc" in _enc:
+        _preset = "p5"
+    elif _enc.startswith("libx"):
+        _preset = "medium"
+    else:
+        _enc, _preset = "libx264", "medium"
     fps = 0.0
     out = Path(str(cfg["out"]))
     models = [m for m in (cfg.get("single_models") or []) if str(m.get("dfm") or "").strip()]
@@ -86,7 +95,7 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
                "-i", str(video),
                "-map", "0:v:0", "-map", "1:a:0?",
                "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-               "-c:v", "libx264", "-crf", str(int(crf)), "-preset", "medium",
+               "-c:v", _enc, "-crf", str(int(crf)), "-preset", _preset,
                "-pix_fmt", "yuv420p", "-c:a", "copy", str(part)]
         # 直接起 ffmpeg（不走 _merge_runner._run_encode：它的进度回调里有 % 格式化的老坑）
         import subprocess as _sp

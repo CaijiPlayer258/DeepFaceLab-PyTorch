@@ -103,6 +103,9 @@ def merge(video, passes, out_path=None, cfg=None, frames=None, log=print,
                           "xseg_prd": None, "xseg_dst": None,
                           "dst_dfm": None})
         out = compose_frame(img, faces, cfg, {}) if faces else img
+        # 注：GPU seamless（compose_gpu.seamless_merge）需要把 compose 的图层准备
+        # （warp / 遮罩 / 色彩迁移）整段搬到 GPU 上下文里，属于单独一单的活。
+        # 这里**不假接**：宁可慢，也不能让「看起来走了 GPU」而结果不同。
         if faces:
             swapped += 1
         if vw is not None:

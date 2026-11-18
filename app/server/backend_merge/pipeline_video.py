@@ -597,6 +597,7 @@ def _start_passes_export(body: dict):
     cfg["start"] = int(body.get("start_frame") or 0)
     cfg["end"] = int(body.get("end_frame") or 0) or None
     cfg["crf"] = int(body.get("crf") or 17)
+    cfg["encoder"] = str(body.get("encoder") or "")
     with _merge_job_lock:
         if _merge_job.get("running"):
             raise _BadInput("已经在导出（%s）—— 等它结束或点取消"
