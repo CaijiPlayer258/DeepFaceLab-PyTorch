@@ -172,6 +172,21 @@ def _fused_lane_count(cfg=None) -> int:
         n = 1
     return max(1, min(int(_FUSED_LANES_MAX), int(n)))
 
+    # ---- 多模型时**强制单车道** ----
+    # 每条车道都会为「本次用到的每个 dfm」各建一份独立会话（lane>0 走 cache=False）。
+    # 两个模型 × 两条车道 = 4 份会话，8GB 卡上直接把显存打穿：实测两模型导出卡在第
+    # 40 帧，三个 prep 线程同时堵在 _dfm_session 里（线程栈见 *.stacks.txt），
+    # 既是重复占用也是重复加载。多模型一律退回 1 条车道：批内多模型交替够用，
+    # 显存从 4 份降到 2 份。单模型不受影响（仍按 gpu_lanes 走）。
+    _dfm_set = set()
+    if isinstance(cfg, dict):
+        for _p in [cfg.get("dfm")] + [m.get("dfm") for m in (cfg.get("single_models") or [])]:
+            _p = str(_p or "").strip()
+            if _p:
+                _dfm_set.add(_p)
+    if len(_dfm_set) > 1:
+        return 1
+
 
 # u8 量化的写法（DFL_FUSED_U8，**默认 1**）：
 #   0 = 老口径 np.clip(x * 255.0, 0, 255).astype(np.uint8)，每张脸连着开三个 float32 临时量
@@ -2204,15 +2219,17 @@ def _fused_run(cfg: dict) -> dict:
             elif (not _wd_fired) and (time.time() - _wd_stamp) > 45.0:
                 _wd_fired = True
                 import faulthandler as _fh
-                print("[fused] 卡死 45s：进度停在 frames=%s encoded=%s —— 线程栈如下"
-                      % (got.get("frames"), got.get("encoded")), flush=True)
+                # 栈写到**文件**：stdout 在某些宿主里被替换/重定向，dump 会静默失败
+                # （实测：日志里连一行 Thread 0x 都没有）。文件一定写得进去。
+                _stk = ""
                 try:
-                    import sys as _sys
-                    _fh.dump_traceback(file=_sys.stdout, all_threads=True)
-                except Exception:                              # noqa: BLE001
-                    pass
-                _vid_log("快速导出卡死：45s 没有进展（frames=%s encoded=%s），"
-                         "线程栈已打到服务端日志" % (got.get("frames"), got.get("encoded")))
+                    _stk = str(Path(str(cfg.get("out") or "fused")) ) + ".stacks.txt"
+                    with open(_stk, "w", encoding="utf-8") as _sf:
+                        _fh.dump_traceback(file=_sf, all_threads=True)
+                except Exception as _e2:                       # noqa: BLE001
+                    _stk = "（写栈失败：%s）" % str(_e2)[:80]
+                _vid_log("快速导出卡死：45s 没有进展（frames=%s encoded=%s）· 线程栈：%s"
+                         % (got.get("frames"), got.get("encoded"), _stk))
                 stop.set()
                 raise _BadInput("快速导出卡死：45s 没有任何进展（线程栈已打日志）", 500)
             time.sleep(0.1)

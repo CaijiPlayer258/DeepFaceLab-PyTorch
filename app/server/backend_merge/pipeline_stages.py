@@ -1062,6 +1062,12 @@ def _dfm_session(dfm: str, lane: int = 0):
         # 量这一份会话到底吃掉多少显存（权重 + 这个进程的 CUDA context + ORT arena）。
         # 为什么要量：arena 会长（384 模型：建会话 +2.3GB，之后每批 8 张的前向再涨 ~1GB），
         # 估出来的数偏小 —— 而「显存去向」那一栏必须是真数，不能是拍的。
+        # 加载/预热期间必须能被看见：1.5GB dfm 在机械盘 + 显存紧张时，warm（含 CUDA Graph
+        # 捕获）实测能卡住几十秒。不打印的话，界面和日志里就是「进度条停住」——
+        # 用户只能截屏问。实测线程栈：prep 堵在 dfm_torch.warm → _forward_one → _outs。
+        _t_load = time.time()
+        _stage_log("换脸：加载模型 %s%s …"
+                   % (Path(key).name, ("（lane %d）" % lane) if lane else ""))
         _own_f0 = _vram_measure_begin()
         ws = Path(WORKSPACE)
         info = {}
@@ -1193,6 +1199,9 @@ def _dfm_session(dfm: str, lane: int = 0):
         _stage_log("换脸：dfm 已加载 %s · %d×%d · %s · 单次最多 %d 张%s"
                    % (Path(key).name, size, size, backend, cap,
                       ("　← GPU 车道 #%d（独立会话、独立权重）" % lane) if lane else ""))
+        if "_t_load" in dir():
+            _stage_log("换脸：模型 %s 加载耗时 %.1fs"
+                       % (Path(key).name, time.time() - _t_load))
         return ent
 
 
