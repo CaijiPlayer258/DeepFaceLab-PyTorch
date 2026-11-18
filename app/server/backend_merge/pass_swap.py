@@ -88,8 +88,8 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
                 continue
             from .compose import _frame_landmarks
             # _frame_landmarks 要的是 {box:[x1,y1,x2,y2]}；index 里存的是 [x,y,w,h]
-            lm = _frame_landmarks(img, {"box": [x, y, x + w, y + h]},
-                                  [x, y, x + w, y + h])
+            det = {"box": [x, y, x + w, y + h], "kps": f.get("kps5") or []}
+            lm = _frame_landmarks(img, det, [x, y, x + w, y + h])
             if lm is None:
                 continue
             mat = get_transform_mat(np.asarray(lm, np.float32), size, FaceType.WHOLE_FACE, scale=1.0)

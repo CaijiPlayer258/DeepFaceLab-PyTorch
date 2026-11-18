@@ -114,6 +114,8 @@ def scan(video, detector="tinymog", thresh=0.5, plan_payload=None, models=None,
             if with_kps:
                 lm = _frame_landmarks(frame, b, [x1, y1, x2, y2])
             faces_out.append({"frame": int(idx), "idx": int(bi), "box": wh,
+                              "kps5": ([[round(float(a), 2), round(float(b2), 2)]
+                                       for a, b2 in (b.get("kps") or [])] or None),
                               "kps68": (np.asarray(lm).round(2).tolist() if lm is not None else None),
                               "model": meta[0], "group": meta[1],
                               "similarity": meta[2], "matched": bool(meta[3])})
