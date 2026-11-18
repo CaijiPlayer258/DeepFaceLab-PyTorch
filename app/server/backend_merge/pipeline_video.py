@@ -359,6 +359,16 @@ def _start_video_export(body: dict):
     """
     body = _as_dict(body)
     fused = _fused_on(body)
+    # ---- 多模型分趟（docs/37）：命中就不再走快速导出那条六段并行 ----
+    # 旧路径让每个 dfm 各持一份会话（每条 lane 再乘一份），8GB 卡上 warm 会卡死。
+    # 分趟是「一趟只装一个模型」，显存与模型数解耦。
+    _dfm_set = set()
+    for _m in (body.get("models") or []):
+        _p = str((_m or {}).get("dfm") or "").strip()
+        if _p:
+            _dfm_set.add(_p)
+    if fused and len(_dfm_set) > 1:
+        return _start_passes_export(body)
     cfg = _fused_cfg(body) if fused else _stage_cfg(body, "frames", chain=True)
     if not fused:
         cfg["stages"] = list(_STAGE_ORDER)
@@ -573,3 +583,55 @@ from .pipeline_stages import (
 from .vram import (
     _vram_cpu_on, _vram_guard,
 )
+
+# ============================================================
+# 多模型分趟导出（docs/37）
+# ------------------------------------------------------------
+# 握手点只有一个：_start_video_export 里判定「distinct dfm > 1」就转到这里。
+# 进度复用 _stage_progress(stage="fused") —— 前端那张车道图不用改就能显示。
+# ============================================================
+def _start_passes_export(body: dict):
+    from . import pipeline_passes as _pp
+    body = _as_dict(body)
+    cfg = _fused_cfg(body)
+    cfg["start"] = int(body.get("start_frame") or 0)
+    cfg["end"] = int(body.get("end_frame") or 0) or None
+    cfg["crf"] = int(body.get("crf") or 17)
+    with _merge_job_lock:
+        if _merge_job.get("running"):
+            raise _BadInput("已经在导出（%s）—— 等它结束或点取消"
+                            % (_merge_job.get("out") or "上一个任务"), 409)
+        _merge_job.update({"running": True, "active": True, "log": [], "ok": None,
+                           "error": None, "error_detail": "", "out": str(cfg["out"]),
+                           "pct": 0, "msg": "分趟导出：启动 …", "passes": True})
+    def _run():
+        try:
+            def _prog(pct, msg, done=None, total=None):
+                with _merge_job_lock:
+                    _merge_job["pct"] = int(pct)
+                    _merge_job["msg"] = str(msg)
+                    if done is not None:
+                        _merge_job["frames_done"] = int(done)
+                    if total:
+                        _merge_job["frames_total"] = int(total)
+                try:
+                    _stage_progress("fused", int(pct), str(msg),
+                                    frames_done=(int(done) if done is not None else None),
+                                    frames_total=(int(total) if total else None))
+                except Exception:                          # noqa: BLE001
+                    pass
+            res = _pp.run(cfg, log=_vid_log, progress=_prog,
+                          cancelled=lambda: bool(_merge_job.get("cancel")))
+            with _merge_job_lock:
+                _merge_job.update({"running": False, "ok": True, "pct": 100,
+                                   "msg": "分趟导出完成：%d 帧" % int(res.get("frames") or 0),
+                                   "finished_at": time.time()})
+        except BaseException as e:                             # noqa: BLE001
+            with _merge_job_lock:
+                _merge_job.update({"running": False, "ok": False,
+                                   "error": str(e)[:300],
+                                   "msg": "分趟导出失败：%s" % str(e)[:160],
+                                   "finished_at": time.time()})
+    threading.Thread(target=_run, name="passes-export", daemon=True).start()
+    return _ok(ok=True, fused=False, passes=True, out=str(cfg["out"]),
+               vram_plan={}, msg="分趟导出已启动")

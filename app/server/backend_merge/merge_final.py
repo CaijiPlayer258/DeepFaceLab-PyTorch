@@ -32,7 +32,7 @@ def _load_chunks(pool: Path, names) -> dict:
 
 
 def merge(video, passes, out_path=None, cfg=None, frames=None, log=print,
-          limit=None, prefetch=2) -> dict:
+          limit=None, prefetch=2, png_dir=None, on_frame=None) -> dict:
     """passes = [pass_<model>.json 的路径, ...]（顺序无关，按帧号合并）。"""
     import cv2
     from .compose import compose_frame
@@ -68,9 +68,15 @@ def merge(video, passes, out_path=None, cfg=None, frames=None, log=print,
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    if out_path is None:
-        out_path = str(video.with_name(video.stem + "_passes.mp4"))
-    vw = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    vw = None
+    if png_dir:
+        # 生产路径：帧写 PNG，交给 _merge_runner._build_encode_cmd 那套 ffmpeg
+        Path(str(png_dir)).mkdir(parents=True, exist_ok=True)
+        out_path = str(png_dir)
+    else:
+        if out_path is None:
+            out_path = str(video.with_name(video.stem + "_passes.mp4"))
+        vw = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
 
     cur = -1
     cur_frame = 0
@@ -99,11 +105,20 @@ def merge(video, passes, out_path=None, cfg=None, frames=None, log=print,
         out = compose_frame(img, faces, cfg, {}) if faces else img
         if faces:
             swapped += 1
-        vw.write(out)
+        if vw is not None:
+            vw.write(out)
+        else:
+            cv2.imwrite(str(Path(str(png_dir)) / ("%08d.png" % (written + 1))), out)
         written += 1
+        if on_frame:
+            try:
+                on_frame(written)
+            except Exception:                              # noqa: BLE001
+                pass
         if limit and written >= int(limit):
             break
-    vw.release()
+    if vw is not None:
+        vw.release()
     cap.release()
     res = {"out": str(out_path), "frames": int(written), "swapped": int(swapped),
            "faces_keys": int(len(keys)), "source_frames": int(total),

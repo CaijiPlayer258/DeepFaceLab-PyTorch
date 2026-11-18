@@ -1,0 +1,103 @@
+# -*- coding: utf-8 -*-
+"""多模型导出走分趟（docs/37 第 3 步接进 API）。
+
+    Pass0 扫描 → 每个模型一趟（显存里一次只有一份）→ 合流写 PNG → 生产 ffmpeg 编码
+
+为什么要单独一条路：旧路径让两个 dfm 会话同时常驻，8GB 卡上 warm 阶段会卡死
+（线程栈见 workspace/*.stacks.txt）。这里改成顺序装、顺序跑，显存与模型数解耦。
+"""
+from __future__ import annotations
+
+import shutil
+import tempfile
+import time
+from pathlib import Path
+
+
+def run(cfg, log=print, progress=None, cancelled=None) -> dict:
+    """跑完整一单。cfg 需要：video / out / models(name+dfm) / config / start / end。
+
+    progress(pct, msg, frames_done=None, frames_total=None) 由调用方给（接到 _stage_progress）。
+    返回 {out, frames, elapsed_s}；异常原样抛给调用方（它负责把 job 标失败）。
+    """
+    from .merge_final import merge
+    from .pass0 import scan
+    from .pass_swap import run as pass_run
+    from .. import _merge_runner as MR
+
+    t0 = time.time()
+    video = Path(str(cfg["video"]))
+    crf = int(cfg.get("crf") or 17)
+    fps = 0.0
+    out = Path(str(cfg["out"]))
+    models = [m for m in (cfg.get("single_models") or []) if str(m.get("dfm") or "").strip()]
+    if not models:
+        raise RuntimeError("分趟导出需要至少一个模型")
+
+    def _p(pct, msg, done=None, total=None):
+        if progress:
+            progress(int(pct), msg, done, total)
+        log(msg)
+
+    # ---- ① 扫描：分母在这一趟里长出来 ----
+    _p(2, "分趟导出：扫描人脸分配表 …")
+    idx = scan(video, models=models, start=int(cfg.get("start") or 0),
+               end=(int(cfg["end"]) if cfg.get("end") else None), log=log)
+    if not idx.get("swap_faces"):
+        raise RuntimeError("这一单没有任何待换的脸（检测 %d 张，一张都没分配到模型）"
+                           % int(idx.get("detected") or 0))
+    total_faces = int(idx["swap_faces"])
+
+    # ---- ② 每个模型一趟 ----
+    metas = []
+    done_faces = 0
+    for k, m in enumerate(models, start=1):
+        if cancelled and cancelled():
+            raise RuntimeError("已取消")
+        nm = str(m.get("name") or "")
+        _p(2 + int(40 * (k - 1) / max(1, len(models))),
+           "分趟导出：第 %d/%d 趟 · %s" % (k, len(models), nm))
+        pool_idx = video.parent / (video.stem + "_cache") / "pool" / "index.json"
+        r = pass_run(video, pool_idx, nm, str(m["dfm"]), log=log)
+        done_faces += int(r.get("faces") or 0)
+        if r.get("faces"):
+            metas.append(r["path"])
+    if not metas:
+        raise RuntimeError("没有任何模型产出脸原料")
+
+    # ---- ③ 合流：写 PNG，交给生产编码器 ----
+    _p(45, "分趟导出：合流（每帧只混合一次）…")
+    png_dir = Path(tempfile.mkdtemp(prefix="dfl_passes_"))
+    try:
+        res = merge(video, metas, cfg=dict(cfg.get("config") or {}), png_dir=str(png_dir),
+                    on_frame=lambda n: _p(45 + int(45 * min(1.0, n / max(1, idx.get("frames") or n))),
+                                          "分趟导出：合流 %d 帧" % n, n, int(idx.get("frames") or 0)),
+                    log=log)
+        _p(92, "分趟导出：编码 …")
+        _ff = MR._resolve_ffmpeg("", "", Path(str(cfg.get("dfl_root") or ".")))
+        ffmpeg = str(_ff[0] if isinstance(_ff, (tuple, list)) else _ff)
+        part = Path(str(out)).with_suffix(".part.mp4")
+        # 编码命令直接在这里拼（不依赖 _merge_runner 内部那几个私有函数：
+        # 它们的入参口径不稳，接的时候已经被 % 格式化坑过两次）。
+        _fps = float(res.get("fps") or fps or 25.0)
+        cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-nostats",
+               "-framerate", "%.6g" % _fps, "-start_number", "1",
+               "-i", str(png_dir / "%08d.png"),
+               "-i", str(video),
+               "-map", "0:v:0", "-map", "1:a:0?",
+               "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+               "-c:v", "libx264", "-crf", str(int(crf)), "-preset", "medium",
+               "-pix_fmt", "yuv420p", "-c:a", "copy", str(part)]
+        # 直接起 ffmpeg（不走 _merge_runner._run_encode：它的进度回调里有 % 格式化的老坑）
+        import subprocess as _sp
+        _pr = _sp.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if _pr.returncode:
+            raise RuntimeError("编码失败（ffmpeg %s）：%s"
+                               % (_pr.returncode, (_pr.stderr or "")[-400:]))
+        shutil.move(str(part), str(out))
+    finally:
+        shutil.rmtree(str(png_dir), ignore_errors=True)
+
+    _p(100, "分趟导出完成：%d 帧" % int(res.get("frames") or 0))
+    return {"out": str(out), "frames": int(res.get("frames") or 0),
+            "faces": int(done_faces), "elapsed_s": round(time.time() - t0, 1)}
