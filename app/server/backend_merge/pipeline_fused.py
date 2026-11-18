@@ -1542,8 +1542,9 @@ def _fused_run(cfg: dict) -> dict:
                     # 和预览同口径的一行：检测几张 / 分配几条 / 实际换几张 / 各自用谁
                     if os.environ.get("DFL_DEBUG_FACES"):
                         _named = {int(x) for _m in (models or []) for x in (_m.get("faces") or [])}
+                        _skip_set = {int(x) for x in (no_swap or [])}
                         _log_faces = [(int(f["k"]), str(f.get("name") or ""))
-                                      for f in faces if int(f["k"]) not in skip]
+                                      for f in faces if int(f["k"]) not in _skip_set]
                         print("[faces] 导出 frame=%s 检测=%d 分配=%d 换=%d · models=%s · 实际=%s"
                               % (job.idx, len(faces), len(_named), len(_log_faces),
                                  [(m.get("name"), list(m.get("faces") or [])) for m in (models or [])],
@@ -2206,7 +2207,8 @@ def _fused_run(cfg: dict) -> dict:
                 print("[fused] 卡死 45s：进度停在 frames=%s encoded=%s —— 线程栈如下"
                       % (got.get("frames"), got.get("encoded")), flush=True)
                 try:
-                    _fh.dump_traceback(all_threads=True)
+                    import sys as _sys
+                    _fh.dump_traceback(file=_sys.stdout, all_threads=True)
                 except Exception:                              # noqa: BLE001
                     pass
                 _vid_log("快速导出卡死：45s 没有进展（frames=%s encoded=%s），"
