@@ -900,6 +900,14 @@ def _stage_faces_detect(det, imgs, thresh):
 #   pred/000001_00_dstdm.png  dfm 自带的 dst 遮罩
 # 这一阶段**只做推理**：不碰遮罩组合、不碰合成、不写 frames/。
 _PRED_LOCK = threading.RLock()
+# 加载/预热的"心跳"：warm + CUDA Graph 捕获在 60W 笔记本上可以跑 40~60s，
+# 那是一段**合法**的静止（帧数为 0）。看门狗只认帧数会把这段误判成卡死，
+# 所以加载期间不停刷新这个时间戳（见 _dfm_session / pipeline_fused 的看门狗）。
+_LOAD_HEARTBEAT = {"t": 0.0}
+
+
+def _beat_load():
+    _LOAD_HEARTBEAT["t"] = time.time()
 _DFM_SESS = {}          # dfm -> (sess, input_name, size, nchw, providers)
 _INFER_CALLS = collections.Counter()   # 各阶段真正跑了几次推理（验收要断言合成阶段 = 0）
 
@@ -1046,7 +1054,9 @@ def _dfm_session(dfm: str, lane: int = 0):
         raise RuntimeError("第 %d 条 GPU 车道要一份独立的 dfm 会话，但当前后端是 %s"
                            "（只有 torch 后端能开多份）" % (lane, _bkind))
     ckey += _lane_tag
+    _beat_load()
     with _PRED_LOCK:
+        _beat_load()
         hit = _DFM_SESS.get(ckey)
         if hit is not None:
             return hit
@@ -1066,6 +1076,7 @@ def _dfm_session(dfm: str, lane: int = 0):
         # 捕获）实测能卡住几十秒。不打印的话，界面和日志里就是「进度条停住」——
         # 用户只能截屏问。实测线程栈：prep 堵在 dfm_torch.warm → _forward_one → _outs。
         _t_load = time.time()
+        _beat_load()
         _stage_log("换脸：加载模型 %s%s …"
                    % (Path(key).name, ("（lane %d）" % lane) if lane else ""))
         _own_f0 = _vram_measure_begin()

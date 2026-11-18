@@ -2157,6 +2157,45 @@ def _fused_run(cfg: dict) -> dict:
                                          else (lambda _i, _w: _skip_note())))
         raw_w.start()
 
+    # ---- CUDA Graph 自动关闭（4K / 多模型）----
+    # 实测：4K 帧 + 416 模型时，dfm 的 CUDA Graph **重放会挂住**（线程栈停在
+    # dfm_torch._forward_graph → _outs，40s+ 不动，看门狗判卡死）；
+    # 同一单设 DFL_DFM_GRAPH=0 后 20s 跑完。所以这两种情况默认关图、并写明原因。
+    # 想强制开：DFL_DFM_GRAPH=1（显式给了环境变量时这里不覆盖）。
+    _dfm_all = []
+    for _mm in ([cfg.get("dfm")] + [x.get("dfm") for x in (cfg.get("single_models") or [])]):
+        _p2 = str(_mm or "").strip()
+        if _p2 and _p2 not in _dfm_all:
+            _dfm_all.append(_p2)
+    try:
+        _fp = cfg.get("frame_wh") or ()
+        _big = bool(_fp and int(_fp[0]) * int(_fp[1]) >= 3840 * 2160 * 0.9)
+    except Exception:                                          # noqa: BLE001
+        _big = False
+    if os.environ.get("DFL_DFM_GRAPH") is None and (_big or len(_dfm_all) > 1):
+        os.environ["DFL_DFM_GRAPH"] = "0"
+        _vid_log("快速导出：CUDA Graph 自动关闭（%s）—— 4K/多模型下重放会挂住，"
+                 "关图后逐位一致、只是慢一点；要强制开请设 DFL_DFM_GRAPH=1"
+                 % ("4K 帧" if _big else "多模型"))
+    # ---- 预装会话：必须在开线程**之前** ----
+    # 以前是懒加载：4 个线程（3 prep + 1 车道）同时撞进 _dfm_session，
+    # 一个在里面做 warm + CUDA Graph 捕获（实测可达几十秒），其余三个在 _PRED_LOCK 上排队。
+    # 看门狗看到的就是「45s 没进展」（线程栈里 4 个线程同点，见 workspace/*.stacks.txt）。
+    # 在这里一次性装好：耗时可见、只发生一次、线程起来就是热的。
+    _pre_dfms = []
+    for _m in ([cfg.get("dfm")] + [mm.get("dfm") for mm in (cfg.get("single_models") or [])]):
+        _x = str(_m or "").strip()
+        if _x and _x not in _pre_dfms:
+            _pre_dfms.append(_x)
+    for _x in _pre_dfms:
+        _t_pre = time.time()
+        _vid_log("快速导出：预装会话 %s …" % Path(_x).name)
+        try:
+            _dfm_session(_x)
+            _vid_log("快速导出：会话就绪 %s（%.1fs）" % (Path(_x).name, time.time() - _t_pre))
+        except Exception as _pe:                               # noqa: BLE001
+            _vid_log("快速导出：预装会话失败 %s（%s: %s）"
+                     % (Path(_x).name, _pe.__class__.__name__, str(_pe)[:160]))
     ths = {}
     t_all = time.time()
     try:
@@ -2213,6 +2252,12 @@ def _fused_run(cfg: dict) -> dict:
             if not any(t.is_alive() for t in ths.values()):
                 break
             _prog = float(got.get("frames") or 0) + float(got.get("encoded") or 0)
+            try:
+                from .pipeline_stages import _LOAD_HEARTBEAT as _hb
+                if (time.time() - float(_hb.get("t") or 0.0)) < 20.0:
+                    _wd_stamp = time.time()      # 正在加载/预热：这是合法静止
+            except Exception:                  # noqa: BLE001
+                pass
             if _prog != _wd_last:
                 _wd_last = _prog
                 _wd_stamp = time.time()

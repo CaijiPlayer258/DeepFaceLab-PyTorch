@@ -598,6 +598,10 @@ def _start_passes_export(body: dict):
     cfg["end"] = int(body.get("end_frame") or 0) or None
     cfg["crf"] = int(body.get("crf") or 17)
     cfg["encoder"] = str(body.get("encoder") or "")
+    # 显式给了 out 就用它（对拍/脚本要能指定目标文件；以前只吃自动命名，
+    # 两条路径会写同一个文件名，互相覆盖 —— 对拍时根本分不出谁是谁）
+    if str(body.get("out") or "").strip():
+        cfg["out"] = str(body.get("out"))
     with _merge_job_lock:
         if _merge_job.get("running"):
             raise _BadInput("已经在导出（%s）—— 等它结束或点取消"
