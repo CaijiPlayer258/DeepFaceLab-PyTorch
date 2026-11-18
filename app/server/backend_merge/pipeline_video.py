@@ -367,7 +367,8 @@ def _start_video_export(body: dict):
         _p = str((_m or {}).get("dfm") or "").strip()
         if _p:
             _dfm_set.add(_p)
-    if fused and len(_dfm_set) > 1:
+    # force_passes：调试/验收用，单模型也走分趟 —— 只有它能和快速导出做「同分配对拍」。
+    if fused and (len(_dfm_set) > 1 or _bool_val(body.get("force_passes"), False)):
         return _start_passes_export(body)
     cfg = _fused_cfg(body) if fused else _stage_cfg(body, "frames", chain=True)
     if not fused:
