@@ -595,6 +595,8 @@ def _start_passes_export(body: dict):
     from . import pipeline_passes as _pp
     body = _as_dict(body)
     cfg = _fused_cfg(body)
+    if os.environ.get("DFL_AB"):
+        print("[ab] passes out=%s · body.out_tag=%r" % (cfg.get("out"), body.get("out_tag")), flush=True)
     cfg["start"] = int(body.get("start_frame") or 0)
     cfg["end"] = int(body.get("end_frame") or 0) or None
     cfg["crf"] = int(body.get("crf") or 17)

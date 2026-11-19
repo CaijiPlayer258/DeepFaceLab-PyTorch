@@ -460,6 +460,8 @@ def _fused_cfg(body: dict) -> dict:
     dfm, model_name = _stage_dfm_pair(body, need=True)
     xseg = _xseg_of(body)
     out = _stage_out_path(video, rng, body)
+    if os.environ.get("DFL_AB"):
+        print("[ab] fused out=%s · out_tag=%r" % (out, body.get("out_tag")), flush=True)
     if _same_path(out, video):
         raise _BadInput("输出不能是源视频本身：%s" % out)
 
