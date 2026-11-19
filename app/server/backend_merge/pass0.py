@@ -27,7 +27,7 @@ def _pool_dir(video: Path) -> Path:
 
 def scan(video, detector="tinymog", thresh=0.5, plan_payload=None, models=None,
          stride=1, start=0, end=None, out_dir=None, log=print,
-         with_kps=False) -> dict:
+         with_kps=False, on_frame=None) -> dict:
     """扫一遍视频，把「哪一帧的第几张脸归哪个模型」写成 index.json。
 
     plan_payload 交给 _auto_face_plan 判归属（有人脸库就按 embedding 判，没有就用 models）。
@@ -72,6 +72,11 @@ def scan(video, detector="tinymog", thresh=0.5, plan_payload=None, models=None,
             break
         boxes = list(_detect_boxes(frame, detector, thresh) or [])
         detected += len(boxes)
+        if on_frame:
+            try:
+                on_frame(int(len(boxes)))
+            except Exception:                              # noqa: BLE001
+                pass
         owner = {}       # 脸序号 -> (model, group, sim, matched)
         if explicit:
             for bi in range(len(boxes)):

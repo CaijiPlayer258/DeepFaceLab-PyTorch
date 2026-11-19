@@ -25,7 +25,7 @@ def _pool_dir(video: Path) -> Path:
 
 
 def run(video, index_path, model_name, dfm_path, chunk_frames=16,
-        limit=None, log=print, out_dir=None, want_xseg=False) -> dict:
+        limit=None, log=print, out_dir=None, want_xseg=False, on_face=None) -> dict:
     """跑一趟：只处理 index.json 里属于 model_name 的脸。
 
     返回 {model, faces, chunks, size, elapsed_s, path}。
@@ -100,6 +100,11 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
         if not ok or img is None:
             continue
         faces = by_frame[frame]
+        if on_face and faces:
+            try:
+                on_face(len(faces))
+            except Exception:                                  # noqa: BLE001
+                pass
         ins, mats = [], []
         for f in faces:
             try:

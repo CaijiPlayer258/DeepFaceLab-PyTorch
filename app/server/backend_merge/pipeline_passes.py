@@ -38,6 +38,7 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
     from .merge_final import merge
     from .pass0 import scan
     from .pass_swap import run as pass_run
+    from .meter import _STAGE_METER as _METER
     from .loud import note, need
     from .. import _merge_runner as MR
 
@@ -67,12 +68,34 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
     # ① 扫描
     _mm = int((cfg.get("config") or {}).get("mask_mode", 6) or 0)
     _mask_on = _mm >= 6                     # 6/7/8/9 才走遮罩网络；<6 用 dfm 遮罩
+    _n_lane = max(1, min(8, int((cfg.get('config') or {}).get('compose_lanes') or 8)))
+    _e_lane = max(1, min(6, int((cfg.get('config') or {}).get('encode_lanes') or 3)))
+    try:
+        _METER.begin()
+        _METER.reset(lanes={
+            'det': ['TinyMog#0'],
+            'dfm': [str(models[0] if models else 'dfm') + '#0'],
+            'xseg': ['XSegLite#0'],
+            'compose': ['t%d' % i for i in range(_n_lane)],
+            'encode': ['e%d' % i for i in range(_e_lane)],
+        })
+    except Exception:                                   # noqa: BLE001
+        pass
     _p(2, "分趟导出：扫描人脸分配表 …",
        meta={"phase": "scan", "pass_i": 0, "pass_n": len(models), "pool": 0,
              "mask_on": bool(_mask_on), "frozen": False})
+    def _scan_frame(nb):
+        try:
+            _METER.tick("frames")
+            if nb:
+                _METER.tick("det", nb)
+        except Exception:                                     # noqa: BLE001
+            pass
+
     idx = scan(video, models=models, plan_payload=cfg.get("plan_payload"),
                start=int(cfg.get("start") or 0),
-               end=(int(cfg["end"]) if cfg.get("end") else None), log=log)
+               end=(int(cfg["end"]) if cfg.get("end") else None), log=log,
+               on_frame=_scan_frame)
     total_faces = int(idx.get("swap_faces") or 0)
     if not total_faces:
         raise RuntimeError("这一单没有任何待换的脸（检测 %d 张，一张都没分配到模型）"
@@ -120,7 +143,17 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
                  "pass_label": nm, "faces_done": done_faces,
                  "faces_total": total_faces, "pool": done_faces,
                  "mask_on": bool(_mask_on), "frozen": True})
-        r = pass_run(video, pool_idx, nm, str(m["dfm"]), log=log, want_xseg=True)
+        def _on_face(n, _nm=nm):
+            try:
+                _METER.tick("dfm", n)
+                if _mask_on:
+                    _METER.tick("xseg", n)
+                _METER.note_batch({"dfm": n})
+            except Exception:                                 # noqa: BLE001
+                pass
+
+        r = pass_run(video, pool_idx, nm, str(m["dfm"]), log=log,
+                     want_xseg=True, on_face=_on_face)
         done_faces += int(r.get("faces") or 0)
         if r.get("faces"):
             metas.append(r["path"])
@@ -134,10 +167,16 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
              "mask_on": bool(_mask_on), "frozen": True})
     png_dir = Path(tempfile.mkdtemp(prefix="dfl_passes_"))
     try:
+        def _on_merged(n):
+            try:
+                _METER.tick("compose")
+            except Exception:                             # noqa: BLE001
+                pass
+            _p(45 + int(45 * min(1.0, n / max(1, idx.get("frames") or n))),
+               "分趟导出：合流 %d 帧" % n, n, int(idx.get("frames") or 0))
+
         res = merge(video, metas, cfg=dict(cfg.get("config") or {}), png_dir=str(png_dir),
-                    on_frame=lambda n: _p(45 + int(45 * min(1.0, n / max(1, idx.get("frames") or n))),
-                                          "分趟导出：合流 %d 帧" % n, n, int(idx.get("frames") or 0)),
-                    log=log)
+                    on_frame=_on_merged, log=log)
         _p(92, "分趟导出：编码 …", meta={"phase": "encode"})
         try:
             _ff = MR._resolve_ffmpeg("", "", Path("."))
@@ -161,6 +200,12 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
         shutil.move(str(part), str(out))
     finally:
         shutil.rmtree(str(png_dir), ignore_errors=True)
+
+    try:
+        _METER.tick("encode", max(1, int(res.get("frames") or 1)))
+        _METER.stop()
+    except Exception:                                     # noqa: BLE001
+        pass
 
     _p(100, "分趟导出完成：%d 帧" % int(res.get("frames") or 0))
     return {"out": str(out), "frames": int(res.get("frames") or 0),
