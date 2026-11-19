@@ -118,7 +118,9 @@
          否则 lane 永远是「— 帧」、光点一次都不放（用户看到的就是"没动画"）。 */
       if (d && d.mode === 'passes') {
         try {
-          if (typeof mgpStatusPaint === 'function') mgpStatusPaint(d);
+          var _painted = false;
+          if (typeof window.mgPassesPaint === 'function') _painted = window.mgPassesPaint(d);
+          if (!_painted && typeof mgpStatusPaint === 'function') mgpStatusPaint(d);
           /* 经典图里未点亮的 lane 用的是 --ink-3，深底上几乎看不见；
              分趟这条路把字提亮一档（只改 fill，不动布局）。 */
           var _svg = document.getElementById('mgPipeSvg');

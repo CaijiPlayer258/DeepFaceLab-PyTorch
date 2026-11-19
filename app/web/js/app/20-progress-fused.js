@@ -896,4 +896,20 @@
     }).catch(function (e) { console.warn("models load failed", e); });
   }
   window.loadModels = loadModels;
-
+
+/* ------------------------------------------------------------------
+   分趟（passes）也要驱动那张图。
+   为什么放在这个文件里：MG_PIPE 所在的外层 IIFE 跨 16..20 这几个分片，
+   21 号在 IIFE 外面根本看不到它（实测 window.MG_PIPE === undefined）。
+   这里只把「喂一拍 status」这件事暴露出去，画法一行不改 ——
+   光点是 MG_PIPE 自己按 ticks 增量 spawn 的，完成一个加一个，没有假动画。
+   ------------------------------------------------------------------ */
+window.mgPassesPaint = function (d) {
+  try {
+    if (typeof MG_PIPE !== "undefined" && MG_PIPE && MG_PIPE.paint) {
+      MG_PIPE.paint(d || {});
+      return true;
+    }
+  } catch (e) { /* 画不出来不该打断轮询 */ }
+  return false;
+};
