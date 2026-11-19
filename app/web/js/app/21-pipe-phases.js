@@ -86,9 +86,23 @@
     }
   }
 
+  /* 真正的入口是 window.mgpPipe（页面每拍都调它），不是 18-bypass 里那个同名 paint。
+     之前挂错地方 = 前端"啥动静没有"。这里包一层：passes 走相位图，其余原样交回去。 */
   window.mgPipePhases = function (d) {
     var svg = document.getElementById("mgPipeSvg");
     if (!svg) return false;
     try { draw(svg, d || {}); return true; } catch (e) { return false; }
+  };
+
+  var _origPipe = window.mgpPipe;
+  window.mgpPipe = function (d) {
+    try {
+      if (d && d.pipeline && d.pipeline.shape === "passes" && window.mgPipePhases(d)) {
+        var sub = document.getElementById("mgPipeSub");
+        if (sub) sub.textContent = "分趟 · 逐个模型 · 池在闸门后才合成";
+        return;
+      }
+    } catch (e) { /* 失败就退回原渲染器 */ }
+    if (_origPipe) _origPipe(d);
   };
 })();

@@ -267,15 +267,6 @@
         var right = $("mgPipeRight");
         var rate = Number((d.vid || {}).frame_fps || d.frame_fps || 0);
         if (right) right.textContent = rate > 0 ? (rate.toFixed(1) + " 帧/秒") : "— 帧/秒";
-        /* 分相位流水线（多模型）：六列图是并发视图，表达不了「趟是串行的」。
-           后端发 pipeline.shape=passes 就改画相位图，两条路各画各的真实形状。 */
-        if (d.pipeline && d.pipeline.shape === "passes" && window.mgPipePhases) {
-          if (window.mgPipePhases(d)) {
-            var sub0 = $("mgPipeSub");
-            if (sub0) sub0.textContent = "分相位 · 趟是串行的";
-            return;
-          }
-        }
         var live = isLive(d.stages) ? d.stages
                  : (isLive(d.stages_live) ? d.stages_live : null);
         if (!live) {
