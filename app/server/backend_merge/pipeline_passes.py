@@ -80,6 +80,18 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
     _p(45, "分趟导出：合流（每帧只混合一次）…")
     png_dir = Path(tempfile.mkdtemp(prefix="dfl_passes_"))
     try:
+        # 和快速导出同一套"有效设置"：knobs 会把 mode/ct/erode/blur 归一化，
+        # 并可能改写模块级开关（合成后端、色彩迁移实现）。少了这一步，两边合成的
+        # 默认口径不同 —— 实测差 32 LSB，且差异全在脸框内。
+        from . import knobs as _knobs
+        _kn = _knobs.refine_compose(_knobs.resolve(dict(cfg.get("settings") or {})),
+                                    str((cfg.get("config") or {}).get("mode") or ""),
+                                    fused=True)
+        try:
+            for _t in _knobs.apply(_kn):
+                log(str(_t))
+        except Exception:                                  # noqa: BLE001
+            pass
         res = merge(video, metas, cfg=dict(cfg.get("config") or {}), png_dir=str(png_dir),
                     on_frame=lambda n: _p(45 + int(45 * min(1.0, n / max(1, idx.get("frames") or n))),
                                           "分趟导出：合流 %d 帧" % n, n, int(idx.get("frames") or 0)),
