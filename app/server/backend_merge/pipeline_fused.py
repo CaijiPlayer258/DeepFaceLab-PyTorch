@@ -1941,6 +1941,20 @@ def _fused_run(cfg: dict) -> dict:
                             out_frame = compose_frame(job.frame, _compose_args_cpu(job),
                                                       comp_cfg, job.timings)
                     else:
+                        # 单脸对拍：DFL_DUMP_FACE=<frame> 把喂给合成的数组原样存一份
+                        _dump_f = os.environ.get("DFL_DUMP_FACE")
+                        if _dump_f and str(int(_dump_f)) == str(int(job.idx)):
+                            try:
+                                import numpy as _npd
+                                _arr = {}
+                                for _ii, _ff in enumerate(_compose_args_cpu(job)):
+                                    for _k, _v in _ff.items():
+                                        if isinstance(_v, (list, _npd.ndarray)):
+                                            _arr["f%d_%s" % (_ii, _k)] = _npd.asarray(_v)
+                                _npd.savez_compressed(str(Path(str(cfg["out"]))) + ".face.npz", **_arr)
+                                _vid_log("快速导出：dump 第 %d 帧合成输入 %d 个数组" % (int(job.idx), len(_arr)))
+                            except Exception as _de:                            # noqa: BLE001
+                                _vid_log("dump 失败：%s" % str(_de)[:120])
                         out_frame = compose_frame(job.frame, _compose_args_cpu(job),
                                                   comp_cfg, job.timings)
                 except Exception as e:                         # noqa: BLE001
