@@ -701,6 +701,8 @@ def _start_passes_export(body: dict):
                         _merge_job["pass"] = {"i": int(meta.get("pass_i") or 0),
                                               "n": int(meta.get("pass_n") or 0),
                                               "label": str(meta.get("pass_label") or "")}
+                        _merge_job["mask_on"] = bool(meta.get("mask_on"))
+                        _merge_job["pool_frozen"] = bool(meta.get("frozen"))
                         _merge_job["pool"] = {"faces": int(meta.get("pool") or 0),
                                               "faces_total": int(meta.get("faces_total") or 0),
                                               "kind": "disk"}

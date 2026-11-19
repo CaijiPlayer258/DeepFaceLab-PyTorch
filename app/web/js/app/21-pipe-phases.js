@@ -39,7 +39,7 @@
                                "class": "fedge", "marker-end": "url(#fArrow)" }));
   }
 
-  function pool(g, x, y, w, h, faces, total, stageTxt) {
+  function pool(g, x, y, w, h, faces, total, stageTxt, scanning) {
     g.appendChild(mk("rect", { x: x, y: y, width: w, height: h, rx: 8, "class": "fpool" }));
     var pct = total ? Math.min(1, faces / total) : 0;
     var fillH = Math.max(0, h * pct);
@@ -48,9 +48,10 @@
     var ttl = mk("text", { x: x + w / 2, y: y - 8, "text-anchor": "middle", "class": "t-stage" });
     ttl.textContent = "人脸暂存池"; g.appendChild(ttl);
     var l1 = mk("text", { x: x + w / 2, y: y + h + 16, "text-anchor": "middle", "class": "t-count" });
-    l1.textContent = faces + " / " + (total || "?") + " 张"; g.appendChild(l1);
+    l1.textContent = scanning ? (faces + " 张") : (faces + " / " + (total || "?") + " 张");
     var l2 = mk("text", { x: x + w / 2, y: y + h + 30, "text-anchor": "middle", "class": "t-count" });
-    l2.textContent = (total ? (Math.round(pct * 1000) / 10) + "%" : "—"); g.appendChild(l2);
+    l2.textContent = scanning ? "占比未知" : (total ? (Math.round(pct * 1000) / 10) + "%" : "—");
+    g.appendChild(l2);
     var l3 = mk("text", { x: x + w / 2, y: y + h + 44, "text-anchor": "middle", "class": "t-count" });
     l3.textContent = stageTxt || ""; g.appendChild(l3);
   }
@@ -66,6 +67,7 @@
     var g = mk("g"); svg.appendChild(g);
 
     var cur = String(d.work_phase || d.phase || "");
+    var maskOn = (d.mask_on !== false);   // 后端说本单没有遮罩模型 -> 遮罩那格整格不画
     var pi = d.pass_info || {};
     var nPass = pi.n || 2;
     var passLabel = pi.label || "模型";
@@ -102,14 +104,20 @@
     node(g, x, y, NW, NH, "对齐", "68 点", cur === "pass" ? "on" : "");
     x += NW; arrow(g, x + 2, y + NH / 2, x + GAP - 2, y + NH / 2); x += GAP;
     node(g, x, y, NW + 28, NH, passLabel + "#0", "换脸", cur === "pass" ? "on" : "");
-    x += NW + 28; arrow(g, x + 2, y + NH / 2, x + GAP - 2, y + NH / 2); x += GAP;
-    node(g, x, y, NW + 16, NH, "XSegLite#0", "遮罩", cur === "pass" ? "on" : "");
-    x += NW + 16;
+    x += NW + 28;
+    if (maskOn) {
+      arrow(g, x + 2, y + NH / 2, x + GAP - 2, y + NH / 2); x += GAP;
+      node(g, x, y, NW + 16, NH, "XSegLite#0", "遮罩", cur === "pass" ? "on" : "");
+      x += NW + 16;
+    }
 
     /* 池：竖着挂在遮罩之后，标签在池子右侧（上一版压在下面，看不清） */
     var pw = 40, ph = 96, px = x + 18, py = y - 6;
     arrow(g, x + 2, y + NH / 2, px - 4, y + NH / 2);
-    pool(g, px, py, pw, ph, poolFaces, poolTotal, pi.i ? ("阶段 " + pi.i + "/" + pi.n) : "");
+    var scanning = (cur === "scan") || (d.pool_frozen === false);
+    pool(g, px, py, pw, ph, poolFaces, poolTotal,
+         scanning ? "已发现（还在涨）" : (pi.i ? ("阶段 " + pi.i + "/" + pi.n) : ""),
+         scanning);
 
     /* 闸门 */
     var gx = px + pw + 96, gy = y;
@@ -127,8 +135,8 @@
 
     /* 闸门关着时补一句人话（用户要能看懂「为什么后面不动」） */
     if (!gateOpen) {
-      var tip = mk("text", { x: PAD, y: 268, "class": "t-count" });
-      tip.textContent = "闸门关着：等 " + nPass + " 趟全部写完池子，合流才会开始（合成 0 帧是正常的）";
+      var tip = mk("text", { x: PAD, y: 306, "class": "t-count" });
+      tip.textContent = "闸门关着：等 " + nPass + " 趟写完池子才开合流（此刻合成 0 帧是正常的）";
       g.appendChild(tip);
     }
   }

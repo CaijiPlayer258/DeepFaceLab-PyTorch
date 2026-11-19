@@ -65,8 +65,11 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
         raise RuntimeError("passes: cfg.single_models 为空（这一单没有模型）")
 
     # ① 扫描
-    _p(2, "分趟导出：扫描人脸分配表 …", meta={"phase": "scan", "pass_i": 0,
-                                          "pass_n": len(models), "pool": 0})
+    _mm = int((cfg.get("config") or {}).get("mask_mode", 6) or 0)
+    _mask_on = _mm >= 6                     # 6/7/8/9 才走遮罩网络；<6 用 dfm 遮罩
+    _p(2, "分趟导出：扫描人脸分配表 …",
+       meta={"phase": "scan", "pass_i": 0, "pass_n": len(models), "pool": 0,
+             "mask_on": bool(_mask_on), "frozen": False})
     idx = scan(video, models=models, plan_payload=cfg.get("plan_payload"),
                start=int(cfg.get("start") or 0),
                end=(int(cfg["end"]) if cfg.get("end") else None), log=log)
@@ -115,7 +118,8 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
            "分趟导出：第 %d/%d 趟 · %s" % (k, len(todo), nm),
            meta={"phase": "pass", "pass_i": k, "pass_n": len(todo),
                  "pass_label": nm, "faces_done": done_faces,
-                 "faces_total": total_faces, "pool": done_faces})
+                 "faces_total": total_faces, "pool": done_faces,
+                 "mask_on": bool(_mask_on), "frozen": True})
         r = pass_run(video, pool_idx, nm, str(m["dfm"]), log=log, want_xseg=True)
         done_faces += int(r.get("faces") or 0)
         if r.get("faces"):
@@ -126,7 +130,8 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
     # ④ 闸门后的合流
     _p(45, "分趟导出：闸门打开，合流（每帧只混合一次）…",
        meta={"phase": "merge", "pass_i": len(todo), "pass_n": len(todo),
-             "pool": done_faces, "faces_total": total_faces})
+             "pool": done_faces, "faces_total": total_faces,
+             "mask_on": bool(_mask_on), "frozen": True})
     png_dir = Path(tempfile.mkdtemp(prefix="dfl_passes_"))
     try:
         res = merge(video, metas, cfg=dict(cfg.get("config") or {}), png_dir=str(png_dir),

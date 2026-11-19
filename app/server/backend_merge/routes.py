@@ -664,6 +664,8 @@ def merge_export_status():
             "mode": snap.get("mode"),
             "mode_why": snap.get("mode_why"),
             "pipeline": snap.get("pipeline"),
+            "mask_on": snap.get("mask_on"),
+            "pool_frozen": snap.get("pool_frozen"),
             "pool": snap.get("pool"),
             "pass_info": snap.get("pass"),
             "work_phase": snap.get("phase"),
