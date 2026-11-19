@@ -2120,6 +2120,24 @@ def _fused_run(cfg: dict) -> dict:
         _msrc = ""
     _xse_label = str(_msrc or "XSeg")
     _enc_label = str(cfg.get("encoder") or "encoder")
+    # ---- 真实链路 ----
+    # 前端那张六列图是「线程视图」，里面没有「对齐/归组」这种段落；用户反馈
+    # 流程和图对不上，就是这一层缺失。把后端实际跑的链条按顺序发出去。
+    try:
+        with _merge_job_lock:
+            _merge_job["pipeline"] = {"shape": "fused", "steps": [
+                {"id": "dec", "label": "解码", "n": 1},
+                {"id": "det", "label": "检测", "name": _det_label, "n": int(n_det)},
+                {"id": "prep", "label": "对齐/归组", "n": 1},
+                {"id": "dfm", "label": "换脸", "name": _dfm_label, "n": int(n_lanes)},
+                {"id": "xse", "label": "遮罩", "name": _xse_label,
+                 "n": (1 if need_xseg else 0)},
+                {"id": "cmp", "label": "合成", "n": int(n_cmp)},
+                {"id": "enc", "label": "编码", "name": _enc_label, "n": int(n_enc)},
+                {"id": "out", "label": "成片", "n": 0},
+            ]}
+    except Exception:                                      # noqa: BLE001
+        pass
     _STAGE_METER.reset(lanes={
         "frames": ["解码"],
         "det": ["%s#%d" % (_det_label, _i) for _i in range(n_det)],

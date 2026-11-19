@@ -6320,3 +6320,19 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 #p-merge .mgright .seg b { height: 100%; display: inline-flex; align-items: center; padding: 0 6px; font-size: 11.5px; }
 #p-merge .mgright .mgval { height: var(--mg-ctl-h); display: flex; align-items: center; }
 #p-merge .mgright .mgsrwrap { height: var(--mg-ctl-h); }
+
+/* 真实链路（后端 status.pipeline）：六列图是线程视图，这一行才是后端实际跑的链条。
+   两者不一致时以这一行为准 —— 它由后端按实际顺序生成，前端不猜。 */
+#p-merge .mgpipeflow {
+  margin: 2px 0 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--ink-1);
+  font-size: 12px;
+  line-height: 1.6;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  word-break: break-all;
+}
+#p-merge .mgpipeflow[hidden] { display: none; }
