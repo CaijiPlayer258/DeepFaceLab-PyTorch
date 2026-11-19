@@ -313,4 +313,15 @@
         drawBypass();
         return true;
       }
-
+
+
+/* 暴露给后面的分片：21-pipe-phases 要包它的 paint()。
+   以前它是分片内的局部 var，window 上根本没有（实测 typeof MG_PIPE === "undefined"），
+   所以「包住真入口」那一步从未生效。 */
+
+/* 暴露给后面的分片：21-pipe-phases 要包它的 paint()。
+   必须放在文件**最末**——放中间那行会在外层 IIFE 还没 return 时执行，
+   那时 MG_PIPE 还是 undefined（实测 window.MG_PIPE === undefined 就是这么来的）。 */
+window.__pipeTailMarker = (window.__pipeTailMarker || 0) + 1;
+window.__pipeTailType = (typeof MG_PIPE);
+if (typeof MG_PIPE !== "undefined") window.MG_PIPE = MG_PIPE;

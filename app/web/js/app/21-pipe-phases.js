@@ -1,4 +1,5 @@
 'use strict';
+window.__shard21_loaded = (window.__shard21_loaded || 0) + 1;
 /* 分相位流水线渲染（多模型换多人脸这条路）。
 
   为什么单独一个渲染器：fused 那张六列图是**并发视图**（六个阶段同时在跑），
@@ -123,14 +124,15 @@
      不是 window.mgpPipe —— 之前两轮都挂错了地方，所以「怎么都不生效」。
      分片共享同一个 IIFE 作用域，这里能直接拿到 MG_PIPE。 */
   try {
-    if (typeof MG_PIPE !== "undefined" && MG_PIPE && MG_PIPE.paint) {
-      var _origPaint = MG_PIPE.paint;
-      MG_PIPE.paint = function (d) {
+    var _MP = window.MG_PIPE;
+    if (_MP && _MP.paint) {
+      var _origPaint = _MP.paint;
+      _MP.paint = function (d) {
         try { _syncSub(d || {}); } catch (e) { /* 纯展示 */ }
         try {
           if (d && d.pipeline && d.pipeline.shape === "passes" && window.mgPipePhases(d)) return;
         } catch (e) { /* 退回原渲染器 */ }
-        return _origPaint.call(MG_PIPE, d);
+        return _origPaint.call(_MP, d);
       };
     }
   } catch (e) { /* 没有 MG_PIPE 就只保留轮询侧那一道保险 */ }
@@ -145,4 +147,53 @@
     _realPipe = window.mgpPipe;
     window.mgpPipe = _wrappedPipe;
   }
+})();
+
+/* ------------------------------------------------------------------
+   自洽渲染器：直接读 /api/merge/export/status 自己画。
+   为什么要这样：MG_PIPE 在分片作用域里（window 上没有），前几轮包装全部落空；
+   这里不再依赖任何内部符号，只依赖 DOM id（#mgPipeSvg / #mgPipeSub）。
+   只在「导出进度」这块可见时轮询，其它页面不打扰后端。
+   ------------------------------------------------------------------ */
+(function () {
+  var TICK = 1000;
+  var lastSig = "";
+
+  function visible(el) {
+    return !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+  }
+
+  function render(d) {
+    var svg = document.getElementById("mgPipeSvg");
+    if (!svg || !d || !d.pipeline || d.pipeline.shape !== "passes") return false;
+    if (window.mgPipePhases && window.mgPipePhases(d)) return true;
+    return false;
+  }
+
+  function syncSub(d) {
+    var sub = document.getElementById("mgPipeSub");
+    if (!sub || !d) return;
+    if (d.mode === "passes") {
+      sub.textContent = "分趟 · " + (d.mode_why || "") + " · 闸门后才合成";
+    } else if (d.mode === "fused") {
+      sub.textContent = "快速导出 · " + (d.mode_why || "");
+    }
+  }
+
+  function tick() {
+    var svg = document.getElementById("mgPipeSvg");
+    if (!svg) return;                          // 没有这块就别发请求
+    if (document.visibilityState === "hidden") return;
+    fetch("/api/merge/export/status").then(function (r) { return r.json(); }).then(function (d) {
+      var sig = [d.mode, (d.pipeline || {}).shape, d.work_phase,
+                 (d.pool || {}).faces, (d.pass_info || {}).i].join("|");
+      syncSub(d);
+      if (sig === lastSig) return;
+      lastSig = sig;
+      render(d);
+    }).catch(function () { /* 网络抖动忽略 */ });
+  }
+
+  setInterval(tick, TICK);
+  tick();
 })();
