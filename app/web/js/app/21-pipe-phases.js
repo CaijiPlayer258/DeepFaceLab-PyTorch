@@ -52,7 +52,11 @@
     }
     g.appendChild(el('rect', { x: a.x - pw / 2, y: a.top, width: pw, height: a.h, rx: 7, 'class': 'lane pool' }));
     var fh = a.h * pct;
-    if (fh > 1) g.appendChild(el('rect', { x: a.x - pw / 2, y: a.top + a.h - fh, width: pw, height: fh, rx: 7, 'class': 'water poolwater' }));
+    if (fh > 1) {
+      g.appendChild(el('rect', { x: a.x - pw / 2, y: a.top + a.h - fh, width: pw, height: fh, rx: 7,
+                                 'class': 'water poolwater',
+                                 style: 'fill:#4ea1ff;fill-opacity:.55' }));
+    }
     var t0 = el('text', { x: a.x, y: a.top - 10, 'text-anchor': 'middle', 'class': 't-stage' });
     t0.textContent = '人脸暂存池'; g.appendChild(t0);
     var t1 = el('text', { x: a.x, y: a.top + a.h + 16, 'text-anchor': 'middle', 'class': 't-count' });
@@ -79,6 +83,14 @@
     fetch('/api/merge/export/status').then(function (r) { return r.json(); }).then(function (d) {
       syncSub(d);
       if (d && d.mode === 'passes') window.__mgPoolAfter = (d.mask_on === false) ? 'dfm' : 'xseg';
+      /* 分趟这条路没有自己的轮询驱动经典图 —— 这里把 status 交给它，
+         否则 lane 永远是「— 帧」、光点一次都不放（用户看到的就是"没动画"）。 */
+      if (d && d.mode === 'passes') {
+        try {
+          if (typeof mgpStatusPaint === 'function') mgpStatusPaint(d);
+          else if (typeof window.mgpPipe === 'function') window.mgpPipe(d);
+        } catch (e) { /* 渲染器内部报错不影响轮询 */ }
+      }
       var sig = [d.mode, d.work_phase, (d.pool || {}).faces, (d.pass_info || {}).i, (d.pass_info || {}).label].join('|');
       if (sig === last) return;
       last = sig;

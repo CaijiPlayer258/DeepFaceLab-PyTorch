@@ -74,7 +74,7 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
         _METER.begin()
         _METER.reset(lanes={
             'det': ['TinyMog#0'],
-            'dfm': [str(models[0] if models else 'dfm') + '#0'],
+            'dfm': [str((models[0] or {}).get('name') or 'dfm') + '#0'] if models else ['dfm#0'],
             'xseg': ['XSegLite#0'],
             'compose': ['t%d' % i for i in range(_n_lane)],
             'encode': ['e%d' % i for i in range(_e_lane)],
