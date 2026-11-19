@@ -60,6 +60,47 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
     total_faces = int(idx["swap_faces"])
 
     # ---- ② 每个模型一趟 ----
+    # 跑哪些模型**以分配表为准**（index.json 里实际出现的 model），不是 body 的列表：
+    # 库判定可能把脸分给 body 里没有的模型（用户只传了一个模型时尤其明显）。
+    # 以前按 body 循环 → 那些脸的模型没被跑 → "没有任何模型产出脸原料"。
+    def _abs_dfm(_x) -> str:
+        """把「库里的 dfm 字段」变成真路径：库里存的是**名字**（阿証…-416），
+        不是路径；直接丢给 _dfm_session 会变成 NO_SUCHFILE（实测）。"""
+        _p = Path(str(_x or "").strip())
+        if _p.is_file():
+            return str(_p)
+        try:
+            from .._common.paths import WORKSPACE as _WS      # 真身在 _common/paths.py
+            for _c in (Path(str(_WS)) / "model" / _p.name,
+                       Path(str(_WS)) / "model" / (_p.name + ".dfm")):
+                if _c.is_file():
+                    return str(_c)
+        except Exception:                                      # noqa: BLE001
+            pass
+        return ""
+
+    _by_name = {str(m.get("name") or ""): _abs_dfm(m.get("dfm")) for m in models}
+    try:
+        from .. import _faces as _store
+        from .compose import _auto_library
+        _lib = _auto_library({"project": cfg.get("project")})
+        if _lib is not None:
+            for _g in (_store.load_index(_lib).get("groups") or []):
+                _n = str(_g.get("name") or "")
+                if _n and _n not in _by_name:
+                    _by_name[_n] = _abs_dfm(_g.get("dfm"))
+    except Exception:                                          # noqa: BLE001
+        pass
+    _need = []
+    for _f in (idx.get("faces") or []):
+        _n = str(_f.get("model") or "")
+        if _n and _n not in _need:
+            _need.append(_n)
+    models = [{"name": _n, "dfm": _by_name.get(_n, ""), "faces": []}
+              for _n in _need if _by_name.get(_n)]
+    _models_n = len(models)
+    if not models:
+        raise RuntimeError("分配表里的模型都找不到对应的 .dfm（表里：%s）" % (_need or "空"))
     metas = []
     done_faces = 0
     for k, m in enumerate(models, start=1):

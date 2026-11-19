@@ -2216,16 +2216,19 @@ def _fused_run(cfg: dict) -> dict:
         _p2 = str(_mm or "").strip()
         if _p2 and _p2 not in _dfm_all:
             _dfm_all.append(_p2)
+    _pr = dict(cfg.get("probe") or {})
     try:
-        _fp = cfg.get("frame_wh") or ()
-        _big = bool(_fp and int(_fp[0]) * int(_fp[1]) >= 3840 * 2160 * 0.9)
-    except Exception:                                          # noqa: BLE001
+        # 帧尺寸从 probe 拿：cfg 里根本没有 frame_wh 这个键（以前读它 → 永远 False），
+        # 于是 4K 也去开 CUDA Graph → 卡在「启动快速导出…」，前端看起来毫无反应。
+        _pw, _ph = int(_pr.get("width") or 0), int(_pr.get("height") or 0)
+        _big = bool(_pw and _ph and _pw * _ph >= 2560 * 1440)
+    except Exception:                                      # noqa: BLE001
         _big = False
     if os.environ.get("DFL_DFM_GRAPH") is None and (_big or len(_dfm_all) > 1):
         os.environ["DFL_DFM_GRAPH"] = "0"
-        _vid_log("快速导出：CUDA Graph 自动关闭（%s）—— 4K/多模型下重放会挂住，"
-                 "关图后逐位一致、只是慢一点；要强制开请设 DFL_DFM_GRAPH=1"
-                 % ("4K 帧" if _big else "多模型"))
+        _vid_log("快速导出：CUDA Graph 自动关闭（%s）—— 该分辨率/多模型下重放会挂住；"
+                 "关图后逐位一致，只是慢一点。要强制开请设 DFL_DFM_GRAPH=1"
+                 % ("高分辨率帧 %dx%d" % (_pw, _ph) if _big else "多模型"))
     # ---- 预装会话：必须在开线程**之前** ----
     # 以前是懒加载：4 个线程（3 prep + 1 车道）同时撞进 _dfm_session，
     # 一个在里面做 warm + CUDA Graph 捕获（实测可达几十秒），其余三个在 _PRED_LOCK 上排队。
