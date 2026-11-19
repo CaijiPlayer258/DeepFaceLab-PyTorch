@@ -85,7 +85,7 @@ def scan(video, detector="tinymog", thresh=0.5, plan_payload=None, models=None,
             # 不补这一步，没被点名的脸永远不换 —— 用户看到「两个模型只换了一个人」。
             if plan_payload is not None and len(owner) < len(boxes):
                 try:
-                    from .preview import _auto_face_plan
+                    from .compose import _auto_face_plan
                     _plan2 = _auto_face_plan(plan_payload, frame, plan_payload.get("snap") or {},
                                             "video", "", int(idx), detector, float(thresh),
                                             boxes=boxes)
@@ -99,7 +99,7 @@ def scan(video, detector="tinymog", thresh=0.5, plan_payload=None, models=None,
                                   f.get("similarity"), True)
         elif plan_payload is not None:
             try:
-                from .preview import _auto_face_plan
+                from .compose import _auto_face_plan
                 plan = _auto_face_plan(plan_payload, frame, plan_payload.get("snap") or {},
                                        "video", "", int(idx), detector, float(thresh),
                                        boxes=boxes)
