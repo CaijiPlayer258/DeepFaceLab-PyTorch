@@ -414,7 +414,13 @@ def _start_video_export(body: dict):
              % (len(_dfm_set), (_names + ["库:" + len(_lib_dfms).__str__()]),
                 "分趟（passes）" if (len(_dfm_set) > 1 or _bool_val(body.get("force_passes"), False))
                 else "快速导出（fused）"))
-    if fused and (len(_dfm_set) > 1 or _bool_val(body.get("force_passes"), False)):
+    _mode_pick = ("passes" if (len(_dfm_set) > 1 or _bool_val(body.get("force_passes"), False))
+                  else "fused")
+    with _merge_job_lock:
+        _merge_job["mode"] = _mode_pick
+        _merge_job["mode_why"] = ("distinct dfm=%d（body=%d + 库=%d）"
+                                  % (len(_dfm_set), len(_names), len(_lib_dfms)))
+    if _mode_pick == "passes" and fused:
         return _start_passes_export(body)
     cfg = _fused_cfg(body) if fused else _stage_cfg(body, "frames", chain=True)
     if not fused:

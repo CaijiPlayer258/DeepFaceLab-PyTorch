@@ -96,12 +96,16 @@
 
   var _origPipe = window.mgpPipe;
   window.mgpPipe = function (d) {
+    d = d || {};
+    /* 副标题永远如实写「后端选了哪条路」——这是排查时唯一可信的一行。 */
+    var sub = document.getElementById("mgPipeSub");
+    if (sub && d.mode) {
+      sub.textContent = (d.mode === "passes")
+        ? ("分趟 · " + (d.mode_why || "逐模型")) + " · 池在闸门后才合成"
+        : ("快速导出 · " + (d.mode_why || "单模型"));
+    }
     try {
-      if (d && d.pipeline && d.pipeline.shape === "passes" && window.mgPipePhases(d)) {
-        var sub = document.getElementById("mgPipeSub");
-        if (sub) sub.textContent = "分趟 · 逐个模型 · 池在闸门后才合成";
-        return;
-      }
+      if (d.pipeline && d.pipeline.shape === "passes" && window.mgPipePhases(d)) return;
     } catch (e) { /* 失败就退回原渲染器 */ }
     if (_origPipe) _origPipe(d);
   };

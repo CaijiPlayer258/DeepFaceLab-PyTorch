@@ -661,6 +661,8 @@ def merge_export_status():
             # 分相位流水线（多模型）：后端声明，前端只画。
             # 这两个键以前被这里"整个丢掉"—— 前端拿不到 shape/phase，只能照六列画，
             # 于是「图上六个阶段并发、实际一趟一趟串行」，看起来当然对不上。
+            "mode": snap.get("mode"),
+            "mode_why": snap.get("mode_why"),
             "pipeline": snap.get("pipeline"),
             "pool": snap.get("pool"),
             "pass_info": snap.get("pass"),
