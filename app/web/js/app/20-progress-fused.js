@@ -82,6 +82,16 @@
           .then(function (d) {
             if (fired) return;
             mgpFusedPaint(d);
+        /* 后端这一单走的是哪条路：fused（六列）/ passes（分趟）。
+           以前完全看不到，用户选了 2 个模型却看到六列图时没法判断是哪种情况。 */
+        try {
+          var _sub = document.getElementById("mgPipeSub");
+          if (_sub && d && d.mode) {
+            _sub.textContent = (d.mode === "passes")
+              ? "分趟 · 一个模型一趟 · 池在闸门后才合成"
+              : "快速导出 · 六段并行";
+          }
+        } catch (e) {}
             if (d.running) return;
             fired = true;
             mgFusedStopPoll();

@@ -1203,13 +1203,22 @@ function mgStageEmpty(on) {
     } catch (e) { byFace = []; }
     var assigned = {};
     byFace.forEach(function (x) { if (x && x.name) assigned[x.name] = (x.faces || []).slice(); });
-    if (!sel.length) return byFace;       /* 0 个选中：这条不该发生（导出入口已禁用），兜底放行库分配 */
-    return sel.map(function (n) {
-      return {
-        name: n,
-        faces: Object.prototype.hasOwnProperty.call(assigned, n) ? assigned[n] : []
-      };
+    /* 导出 payload = **分配表 ∪ 左栏选中**。
+       以前只从左栏 sel 出发：如果两张脸的 chip 指到了左栏没勾的那个模型，
+       它就被丢掉 —— 后端只看到 1 个 dfm，于是走 fused（六列图），用户以为池没了。
+       现在反过来：先把分配表里出现过的模型都带上，再补左栏勾了但没分配的（faces:[]=管全部）。 */
+    var out = [], seen = {};
+    byFace.forEach(function (x) {
+      if (!x || !x.name) return;
+      seen[x.name] = 1;
+      out.push({ name: x.name, faces: (x.faces || []).slice() });
     });
+    sel.forEach(function (n) {
+      if (seen[n]) return;
+      seen[n] = 1;
+      out.push({ name: n, faces: [] });
+    });
+    return out;
   }
   window.mgExportModelsPayload = mgExportModelsPayload;
 

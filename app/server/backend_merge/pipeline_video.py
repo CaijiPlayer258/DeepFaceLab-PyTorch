@@ -368,6 +368,13 @@ def _start_video_export(body: dict):
         if _p:
             _dfm_set.add(_p)
     # force_passes：调试/验收用，单模型也走分趟 —— 只有它能和快速导出做「同分配对拍」。
+    # 让"这一单到底走哪条路"可见：之前前端没有任何地方能看出后端选了 fused，
+    # 用户选了 2 个模型却看到六列图时无从判断是"没传上去"还是"传上去但被判成 1 个"。
+    _names = [str((m or {}).get("name") or "") for m in (body.get("models") or [])]
+    _vid_log("导出模式：distinct dfm=%d · models=%s → %s"
+             % (len(_dfm_set), _names,
+                "分趟（passes）" if (len(_dfm_set) > 1 or _bool_val(body.get("force_passes"), False))
+                else "快速导出（fused）"))
     if fused and (len(_dfm_set) > 1 or _bool_val(body.get("force_passes"), False)):
         return _start_passes_export(body)
     cfg = _fused_cfg(body) if fused else _stage_cfg(body, "frames", chain=True)
@@ -660,5 +667,5 @@ def _start_passes_export(body: dict):
                                    "msg": "分趟导出失败：%s" % str(e)[:160],
                                    "finished_at": time.time()})
     threading.Thread(target=_run, name="passes-export", daemon=True).start()
-    return _ok(ok=True, fused=False, passes=True, out=str(cfg["out"]),
+    return _ok(ok=True, fused=False, passes=True, mode="passes", out=str(cfg["out"]),
                vram_plan={}, msg="分趟导出已启动")
