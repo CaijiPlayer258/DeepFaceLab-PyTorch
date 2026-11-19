@@ -143,12 +143,23 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
                  "pass_label": nm, "faces_done": done_faces,
                  "faces_total": total_faces, "pool": done_faces,
                  "mask_on": bool(_mask_on), "frozen": True})
+        _live = {"faces": 0}
+
         def _on_face(n, _nm=nm):
             try:
                 _METER.tick("dfm", n)
                 if _mask_on:
                     _METER.tick("xseg", n)
                 _METER.note_batch({"dfm": n})
+                _live["faces"] += int(n)
+                if _live["faces"] % 8 == 0:          # 池子边跑边长，别等整趟结束
+                    _p(2 + int(40 * (k - 1) / max(1, len(todo))),
+                       "分趟导出：第 %d/%d 趟 · %s" % (k, len(todo), _nm),
+                       meta={"phase": "pass", "pass_i": k, "pass_n": len(todo),
+                             "pass_label": _nm, "faces_done": done_faces + _live["faces"],
+                             "faces_total": total_faces,
+                             "pool": done_faces + _live["faces"],
+                             "mask_on": bool(_mask_on), "frozen": True})
             except Exception:                                 # noqa: BLE001
                 pass
 

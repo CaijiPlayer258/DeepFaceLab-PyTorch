@@ -57,14 +57,14 @@
                                  'class': 'water poolwater',
                                  style: 'fill:#4ea1ff;fill-opacity:.55' }));
     }
-    var t0 = el('text', { x: a.x, y: a.top - 10, 'text-anchor': 'middle', 'class': 't-stage' });
+    var t0 = el('text', { x: a.x, y: a.top - 10, 'text-anchor': 'middle', 'class': 't-stage', style: 'fill:#e8ecf5' });
     t0.textContent = '人脸暂存池'; g.appendChild(t0);
-    var t1 = el('text', { x: a.x, y: a.top + a.h + 16, 'text-anchor': 'middle', 'class': 't-count' });
+    var t1 = el('text', { x: a.x, y: a.top + a.h + 16, 'text-anchor': 'middle', 'class': 't-count', style: 'fill:#c9d2e4' });
     t1.textContent = scanning ? (faces + ' 张') : (faces + ' / ' + total); g.appendChild(t1);
-    var t2 = el('text', { x: a.x, y: a.top + a.h + 30, 'text-anchor': 'middle', 'class': 't-count' });
+    var t2 = el('text', { x: a.x, y: a.top + a.h + 30, 'text-anchor': 'middle', 'class': 't-count', style: 'fill:#c9d2e4' });
     t2.textContent = scanning ? '已发现（还在涨）' : (Math.round(pct * 1000) / 10) + '%'; g.appendChild(t2);
     var pi = d.pass_info || {};
-    var t3 = el('text', { x: a.x, y: a.top + a.h + 44, 'text-anchor': 'middle', 'class': 't-count' });
+    var t3 = el('text', { x: a.x, y: a.top + a.h + 44, 'text-anchor': 'middle', 'class': 't-count', style: 'fill:#c9d2e4' });
     t3.textContent = pi.i ? ('趟 ' + pi.i + '/' + pi.n) : ''; g.appendChild(t3);
     svg.appendChild(g);
   }
@@ -82,12 +82,54 @@
     if (!svg || document.visibilityState === 'hidden') return;
     fetch('/api/merge/export/status').then(function (r) { return r.json(); }).then(function (d) {
       syncSub(d);
+      window.__mgMode = (d && d.mode) || '';
       if (d && d.mode === 'passes') window.__mgPoolAfter = (d.mask_on === false) ? 'dfm' : 'xseg';
       /* 分趟这条路没有自己的轮询驱动经典图 —— 这里把 status 交给它，
          否则 lane 永远是「— 帧」、光点一次都不放（用户看到的就是"没动画"）。 */
       if (d && d.mode === 'passes') {
         try {
           if (typeof mgpStatusPaint === 'function') mgpStatusPaint(d);
+          /* 经典图里未点亮的 lane 用的是 --ink-3，深底上几乎看不见；
+             分趟这条路把字提亮一档（只改 fill，不动布局）。 */
+          var _svg = document.getElementById('mgPipeSvg');
+          if (_svg) {
+            /* 列标题下那行计数自己写：paint() 的 counts 通道在分趟这条路上不认
+               （它走 MGP 的 idx/counts，不是 stages），这里是唯一的真数来源。 */
+            var _sg = d.stages || {};
+            var _want = ["frames", "det", "dfm", "xseg", "compose", "encode"];
+            var _titles = [].slice.call(_svg.querySelectorAll('text.t-stage'));
+            var _counts = [].slice.call(_svg.querySelectorAll('text.t-count'));
+            _titles.forEach(function (t, i) {
+              var k = _want[i];
+              if (!k || !_counts[i]) return;
+              var v = (_sg[k] || {}).ticks;
+              if (typeof v === 'number') _counts[i].textContent = v + ' 帧';
+            });
+            var _laneName = {
+              frames: '解码', det: 'TinyMog#0',
+              dfm: ((d.pass_info || {}).label || '模型') + '#0',
+              xseg: 'XSegLite#0', compose: 't0', encode: 'e0'
+            };
+            _titles.forEach(function (t, i) {
+              var k = _want[i];
+              if (!k) return;
+              var col = t.parentNode;
+              if (!col) return;
+              var lt = col.querySelector('text.t-lane');
+              if (lt) {
+                var _cur = (lt.textContent || '').trim();
+                if (!_cur || _cur === '—' || _cur === '–' || _cur === '-') lt.textContent = _laneName[k] || k;
+              }
+            });
+            /* 深底上看不清的根因：这些文字用的是 --ink-2/--ink-3（次要色）。
+               分趟这条路统一提亮：标题 #e8ecf5、计数 #b9c2d6、其余 #c9d2e4。 */
+            [].slice.call(_svg.querySelectorAll('text')).forEach(function (t) {
+              var c = t.getAttribute('class') || '';
+              if (c.indexOf('t-stage') >= 0) t.style.fill = '#e8ecf5';
+              else if (c.indexOf('t-count') >= 0) t.style.fill = '#b9c2d6';
+              else t.style.fill = '#c9d2e4';
+            });
+          }
           else if (typeof window.mgpPipe === 'function') window.mgpPipe(d);
         } catch (e) { /* 渲染器内部报错不影响轮询 */ }
       }

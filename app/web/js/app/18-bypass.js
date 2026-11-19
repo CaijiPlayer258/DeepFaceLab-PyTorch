@@ -311,7 +311,7 @@
           wants.push(delta > 0 ? delta : 0);
           if (delta > 0) total += delta;
           /* 卡住 = 还在跑 + 这一段没完成 + 已经 >600ms 没 tick（tick 一恢复就自动复原） */
-          markStall(k, running && state[k] !== "done" &&
+          markStall(k, window.__mgMode !== "passes" && running && state[k] !== "done" &&
                        (t - (lastAt[k] || t)) > STALL_MS);
         }
         /* 这一拍放多少个光点：按 PULSE_PER_S 折算的预算**按比例**稀释（各段比例不变），
