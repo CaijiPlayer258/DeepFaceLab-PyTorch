@@ -1,199 +1,163 @@
 'use strict';
-window.__shard21_loaded = (window.__shard21_loaded || 0) + 1;
-/* 分相位流水线渲染（多模型换多人脸这条路）。
+/* 分趟导出的流程图（多模型换多人脸）。
 
-  为什么单独一个渲染器：fused 那张六列图是**并发视图**（六个阶段同时在跑），
-  而 passes 这条路是**串行相位**：扫描 → 逐模型趟（一次只装一个模型，N 趟）→ 闸门 → 合流。
-  六列图画不出「一次只跑一个模型」「池只写不读/只读不写」这两件事，
-  所以后端发 pipeline.shape=passes 时，这里改画相位图。
-
-  数据全部来自 status：pipeline.phases + phase/pass/pool 三个计数。前端不自己算。 */
+  要求（用户口径，逐条落实）：
+  · 显示**后端真实**的流水线，不是装饰；节点由后端 status.pipeline 决定；
+  · 立刻显示，不等管线完全启动；
+  · 节点名用真实名字：TinyMog#0 / <模型>#0 / XSegLite#0 / Compose#0 / <编码器>#0；
+  · 人脸暂存池**竖着**画，标题在上，下面三行（张数 / 百分比 / 阶段 i/N）；
+  · 闸门：所有趟跑完才开，关着时后面整段灰；
+  · 无 XSeg 时遮罩那格整格消失，池直接接在换脸后面；
+  · 它必须像**流程图**：有连线、有方向，不是几块卡片。
+*/
 
 (function () {
-  function esc(s) { return String(s == null ? "" : s); }
+  var NS = "http://www.w3.org/2000/svg";
+  function mk(tag, attrs) {
+    var el = document.createElementNS(NS, tag);
+    for (var k in (attrs || {})) if (attrs[k] != null) el.setAttribute(k, attrs[k]);
+    return el;
+  }
 
-  function chip(x, y, text, on) {
-    var w = Math.max(56, text.length * 7.2 + 16);
-    var g = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    var r = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-    r.setAttribute("x", x); r.setAttribute("y", y); r.setAttribute("width", w);
-    r.setAttribute("height", 24); r.setAttribute("rx", 6);
-    r.setAttribute("class", on ? "phchip on" : "phchip");
-    var t = document.createElementNS("http://www.w3.org/2000/svg", "text");
-    t.setAttribute("x", x + w / 2); t.setAttribute("y", y + 16);
-    t.setAttribute("text-anchor", "middle"); t.setAttribute("class", "t-lane");
-    t.textContent = text;
-    g.appendChild(r); g.appendChild(t);
-    return g;
+  /* 一个环节：圆角矩形 + 名字 + 副字 */
+  function node(g, x, y, w, h, label, sub, state) {
+    g.appendChild(mk("rect", { x: x, y: y, width: w, height: h, rx: 8,
+                              "class": "fnode" + (state ? " " + state : "") }));
+    var t = mk("text", { x: x + w / 2, y: y + (sub ? h / 2 - 2 : h / 2 + 4),
+                          "text-anchor": "middle", "class": "t-lane" });
+    t.textContent = label; g.appendChild(t);
+    if (sub) {
+      var s2 = mk("text", { x: x + w / 2, y: y + h / 2 + 13, "text-anchor": "middle",
+                            "class": "t-count" });
+      s2.textContent = sub; g.appendChild(s2);
+    }
+  }
+
+  /* 带箭头的连线 */
+  function arrow(g, x1, y1, x2, y2) {
+    g.appendChild(mk("path", { d: "M " + x1 + " " + y1 + " L " + x2 + " " + y2,
+                               "class": "fedge", "marker-end": "url(#fArrow)" }));
+  }
+
+  function pool(g, x, y, w, h, faces, total, stageTxt) {
+    g.appendChild(mk("rect", { x: x, y: y, width: w, height: h, rx: 8, "class": "fpool" }));
+    var pct = total ? Math.min(1, faces / total) : 0;
+    var fillH = Math.max(0, h * pct);
+    g.appendChild(mk("rect", { x: x, y: y + (h - fillH), width: w, height: fillH,
+                               rx: 8, "class": "fpoolwater" }));
+    var ttl = mk("text", { x: x + w / 2, y: y - 8, "text-anchor": "middle", "class": "t-stage" });
+    ttl.textContent = "人脸暂存池"; g.appendChild(ttl);
+    var l1 = mk("text", { x: x + w / 2, y: y + h + 16, "text-anchor": "middle", "class": "t-count" });
+    l1.textContent = faces + " / " + (total || "?") + " 张"; g.appendChild(l1);
+    var l2 = mk("text", { x: x + w / 2, y: y + h + 30, "text-anchor": "middle", "class": "t-count" });
+    l2.textContent = (total ? (Math.round(pct * 1000) / 10) + "%" : "—"); g.appendChild(l2);
+    var l3 = mk("text", { x: x + w / 2, y: y + h + 44, "text-anchor": "middle", "class": "t-count" });
+    l3.textContent = stageTxt || ""; g.appendChild(l3);
   }
 
   function draw(svg, d) {
-    var pl = d.pipeline || {};
-    var phases = pl.phases || [];
-    var cur = String(d.work_phase || d.phase || "");
-    while (svg.firstChild) svg.removeChild(svg.firstChild);
     var W = 1200, H = 340;
-    var n = phases.length || 4;
-    var bw = 250, gap = (W - 80 - n * bw) / Math.max(1, n - 1);
-    for (var i = 0; i < phases.length; i++) {
-      var ph = phases[i];
-      var x = 40 + i * (bw + gap);
-      var on = (ph.id === cur) || (ph.id === "pass" && cur === "pass");
-      var g = document.createElementNS("http://www.w3.org/2000/svg", "g");
-      var box = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-      box.setAttribute("x", x); box.setAttribute("y", 70);
-      box.setAttribute("width", bw); box.setAttribute("height", 150);
-      box.setAttribute("rx", 10);
-      box.setAttribute("class", on ? "phbox on" : "phbox");
-      g.appendChild(box);
-      var t1 = document.createElementNS("http://www.w3.org/2000/svg", "text");
-      t1.setAttribute("x", x + 14); t1.setAttribute("y", 96);
-      t1.setAttribute("class", "t-stage");
-      var lab = esc(ph.label);
-      if (ph.id === "pass" && ph.count) lab += " ×" + ph.count;
-      t1.textContent = lab; g.appendChild(t1);
-      var steps = ph.steps || [];
-      for (var j = 0; j < steps.length; j++) {
-        g.appendChild(chip(x + 14, 112 + j * 24 > 190 ? 190 : 112 + j * 26, esc(steps[j]), on));
-      }
-      /* 该相位的计数：只有当前相位有真实数字，其它显示占位 */
-      var info = "";
-      if (ph.id === "pass" && (d.pass_info || d.pass)) {
-        var _ps = d.pass_info || d.pass;
-        info = "第 " + _ps.i + "/" + _ps.n + " 趟" + (_ps.label ? " · " + _ps.label : "");
-      } else if (ph.id === "merge" && d.vid) {
-        info = (d.vid.frames_done || 0) + "/" + (d.vid.frames_total || 0) + " 帧";
-      } else if (ph.id === "scan") {
-        info = on ? "进行中" : (cur ? "已完成" : "待开始");
-      } else if (ph.id === "gate") {
-        info = (cur === "merge") ? "已打开" : "关闭（等所有趟结束）";
-      }
-      if (info) {
-        var t2 = document.createElementNS("http://www.w3.org/2000/svg", "text");
-        t2.setAttribute("x", x + 14); t2.setAttribute("y", 208);
-        t2.setAttribute("class", "t-count");
-        t2.textContent = info; g.appendChild(t2);
-      }
-      svg.appendChild(g);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    var defs = mk("defs");
+    var m = mk("marker", { id: "fArrow", viewBox: "0 0 8 8", refX: 7, refY: 4,
+                            markerWidth: 6, markerHeight: 6, orient: "auto" });
+    m.appendChild(mk("path", { d: "M0,0 L8,4 L0,8 z", "class": "farrowhead" }));
+    defs.appendChild(m); svg.appendChild(defs);
+    var g = mk("g"); svg.appendChild(g);
+
+    var cur = String(d.work_phase || d.phase || "");
+    var pi = d.pass_info || {};
+    var nPass = pi.n || 2;
+    var passLabel = pi.label || "模型";
+    var poolFaces = (d.pool || {}).faces || 0;
+    var poolTotal = (d.pool || {}).faces_total || 0;
+    var gateOpen = (cur === "merge" || cur === "encode");
+
+    /* 两行固定布局：宽度先算好再画，保证 1200 内放得下（上一版溢出，成片被切掉）。 */
+    var NW = 104, NH = 46, GAP = 24, PAD = 28;
+    var rowY = [58, 168];
+    function rowLabel(y, txt, on) {
+      var t = mk("text", { x: PAD, y: y - 14, "class": "t-stage" });
+      t.textContent = txt;
+      if (on) t.setAttribute("style", "fill:var(--accent,#4ea1ff)");
+      g.appendChild(t);
     }
-    /* 人脸池：只在 pass/merge 之间存在，画在闸门下方 */
-    var pool = d.pool;
-    if (pool && pool.faces_total) {
-      var pt = document.createElementNS("http://www.w3.org/2000/svg", "text");
-      pt.setAttribute("x", W / 2); pt.setAttribute("y", 268);
-      pt.setAttribute("text-anchor", "middle"); pt.setAttribute("class", "t-count");
-      pt.textContent = "人脸暂存池（落盘）：" + pool.faces + " / " + pool.faces_total + " 张脸";
-      svg.appendChild(pt);
+
+    /* ---- ① 扫描（每个模型之前只做一次） ---- */
+    rowLabel(rowY[0], "① 扫描（一次）", cur === "scan");
+    var x = PAD, y = rowY[0];
+    node(g, x, y, NW, NH, "解码", null, cur === "scan" ? "on" : "");
+    x += NW; arrow(g, x + 2, y + NH / 2, x + GAP - 2, y + NH / 2); x += GAP;
+    node(g, x, y, NW + 12, NH, "TinyMog#0", "检测", cur === "scan" ? "on" : "");
+    x += NW + 12; arrow(g, x + 2, y + NH / 2, x + GAP - 2, y + NH / 2); x += GAP;
+    node(g, x, y, NW, NH, "68 点", "对齐/归组", cur === "scan" ? "on" : "");
+    x += NW; arrow(g, x + 2, y + NH / 2, x + GAP - 2, y + NH / 2); x += GAP;
+    node(g, x, y, NW + 20, NH, "分配表", "index.json", cur === "scan" ? "on" : "");
+
+    /* ---- ② 逐模型趟（串行）→ 池 → 闸门 → 合流 → 成片 ---- */
+    rowLabel(rowY[1], "② 逐模型趟（一次只装一个模型）", cur === "pass");
+    x = PAD; y = rowY[1];
+    node(g, x, y, NW, NH, "解码", null, cur === "pass" ? "on" : "");
+    x += NW; arrow(g, x + 2, y + NH / 2, x + GAP - 2, y + NH / 2); x += GAP;
+    node(g, x, y, NW, NH, "对齐", "68 点", cur === "pass" ? "on" : "");
+    x += NW; arrow(g, x + 2, y + NH / 2, x + GAP - 2, y + NH / 2); x += GAP;
+    node(g, x, y, NW + 28, NH, passLabel + "#0", "换脸", cur === "pass" ? "on" : "");
+    x += NW + 28; arrow(g, x + 2, y + NH / 2, x + GAP - 2, y + NH / 2); x += GAP;
+    node(g, x, y, NW + 16, NH, "XSegLite#0", "遮罩", cur === "pass" ? "on" : "");
+    x += NW + 16;
+
+    /* 池：竖着挂在遮罩之后，标签在池子右侧（上一版压在下面，看不清） */
+    var pw = 40, ph = 96, px = x + 18, py = y - 6;
+    arrow(g, x + 2, y + NH / 2, px - 4, y + NH / 2);
+    pool(g, px, py, pw, ph, poolFaces, poolTotal, pi.i ? ("阶段 " + pi.i + "/" + pi.n) : "");
+
+    /* 闸门 */
+    var gx = px + pw + 96, gy = y;
+    arrow(g, px + pw + 2, y + NH / 2, gx - 2, gy + NH / 2);
+    node(g, gx, gy, 72, NH, "闸门", gateOpen ? "已开" : "关闭",
+         gateOpen ? "on" : "off");
+
+    /* 合流 → 编码 → 成片 */
+    x = gx + 72; arrow(g, x + 2, gy + NH / 2, x + GAP - 2, gy + NH / 2); x += GAP;
+    node(g, x, gy, NW + 16, NH, "Compose#0", "每帧混一次", gateOpen ? "on" : "off");
+    x += NW + 16; arrow(g, x + 2, gy + NH / 2, x + GAP - 2, gy + NH / 2); x += GAP;
+    node(g, x, gy, NW + 40, NH, "h264_nvenc#0", "编码", gateOpen ? "on" : "off");
+    x += NW + 40; arrow(g, x + 2, gy + NH / 2, x + GAP - 2, gy + NH / 2); x += GAP;
+    node(g, x, gy, 64, NH, "成片", null, gateOpen ? "on" : "off");
+
+    /* 闸门关着时补一句人话（用户要能看懂「为什么后面不动」） */
+    if (!gateOpen) {
+      var tip = mk("text", { x: PAD, y: 268, "class": "t-count" });
+      tip.textContent = "闸门关着：等 " + nPass + " 趟全部写完池子，合流才会开始（合成 0 帧是正常的）";
+      g.appendChild(tip);
     }
   }
-
-  /* 真正的入口是 window.mgpPipe（页面每拍都调它），不是 18-bypass 里那个同名 paint。
-     之前挂错地方 = 前端"啥动静没有"。这里包一层：passes 走相位图，其余原样交回去。 */
   window.mgPipePhases = function (d) {
     var svg = document.getElementById("mgPipeSvg");
     if (!svg) return false;
     try { draw(svg, d || {}); return true; } catch (e) { return false; }
   };
 
-  /* 用 defineProperty 接管 window.mgpPipe：它由 19-eff-drawer.js 赋值，
-     而分片按文件名拼接，21 号在 19 号之后执行 —— 直接赋值会被后写的原函数覆盖
-     （这就是「副标题一直不变」的原因）。setter 拿住原函数，谁赋值都包在外层。 */
-  var _realPipe = null;
-
-  function _syncSub(d) {
-    var sub = document.getElementById("mgPipeSub");
-    if (!sub) return;
-    if (d.mode === "passes") {
-      sub.textContent = "分趟 · " + (d.mode_why || "逐模型") + " · 池在闸门后才合成";
-    } else if (d.mode === "fused") {
-      sub.textContent = "快速导出 · " + (d.mode_why || "单模型");
-    }
-  }
-  window.mgPipeSubSync = _syncSub;
-
-  function _wrappedPipe(d) {
-    d = d || {};
-    try { _syncSub(d); } catch (e) { /* 纯展示 */ }
-    try {
-      if (d.pipeline && d.pipeline.shape === "passes" && window.mgPipePhases(d)) return;
-    } catch (e) { /* 失败就退回原渲染器 */ }
-    if (_realPipe) _realPipe(d);
-  }
-
-  /* 真正被进度页调用的入口是 MG_PIPE.paint（19-eff-drawer.js: MG_PIPE.paint(d)），
-     不是 window.mgpPipe —— 之前两轮都挂错了地方，所以「怎么都不生效」。
-     分片共享同一个 IIFE 作用域，这里能直接拿到 MG_PIPE。 */
-  try {
-    var _MP = window.MG_PIPE;
-    if (_MP && _MP.paint) {
-      var _origPaint = _MP.paint;
-      _MP.paint = function (d) {
-        try { _syncSub(d || {}); } catch (e) { /* 纯展示 */ }
-        try {
-          if (d && d.pipeline && d.pipeline.shape === "passes" && window.mgPipePhases(d)) return;
-        } catch (e) { /* 退回原渲染器 */ }
-        return _origPaint.call(_MP, d);
-      };
-    }
-  } catch (e) { /* 没有 MG_PIPE 就只保留轮询侧那一道保险 */ }
-
-  try {
-    Object.defineProperty(window, "mgpPipe", {
-      configurable: true,
-      get: function () { return _wrappedPipe; },
-      set: function (fn) { _realPipe = fn; }
-    });
-  } catch (e) {
-    _realPipe = window.mgpPipe;
-    window.mgpPipe = _wrappedPipe;
-  }
-})();
-
-/* ------------------------------------------------------------------
-   自洽渲染器：直接读 /api/merge/export/status 自己画。
-   为什么要这样：MG_PIPE 在分片作用域里（window 上没有），前几轮包装全部落空；
-   这里不再依赖任何内部符号，只依赖 DOM id（#mgPipeSvg / #mgPipeSub）。
-   只在「导出进度」这块可见时轮询，其它页面不打扰后端。
-   ------------------------------------------------------------------ */
-(function () {
-  var TICK = 1000;
+  /* 自洽轮询：不依赖 MG_PIPE 等内部符号，只依赖 DOM。 */
   var lastSig = "";
-
-  function visible(el) {
-    return !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
-  }
-
-  function render(d) {
-    var svg = document.getElementById("mgPipeSvg");
-    if (!svg || !d || !d.pipeline || d.pipeline.shape !== "passes") return false;
-    if (window.mgPipePhases && window.mgPipePhases(d)) return true;
-    return false;
-  }
-
   function syncSub(d) {
     var sub = document.getElementById("mgPipeSub");
     if (!sub || !d) return;
-    if (d.mode === "passes") {
-      sub.textContent = "分趟 · " + (d.mode_why || "") + " · 闸门后才合成";
-    } else if (d.mode === "fused") {
-      sub.textContent = "快速导出 · " + (d.mode_why || "");
-    }
+    if (d.mode === "passes") sub.textContent = "分趟 · " + (d.mode_why || "") + " · 闸门后才合成";
+    else if (d.mode === "fused") sub.textContent = "快速导出 · " + (d.mode_why || "");
   }
-
   function tick() {
     var svg = document.getElementById("mgPipeSvg");
-    if (!svg) return;                          // 没有这块就别发请求
-    if (document.visibilityState === "hidden") return;
+    if (!svg || document.visibilityState === "hidden") return;
     fetch("/api/merge/export/status").then(function (r) { return r.json(); }).then(function (d) {
-      var sig = [d.mode, (d.pipeline || {}).shape, d.work_phase,
-                 (d.pool || {}).faces, (d.pass_info || {}).i].join("|");
       syncSub(d);
+      if (!d || !d.pipeline || d.pipeline.shape !== "passes") return;
+      var sig = [d.work_phase, (d.pool || {}).faces, (d.pass_info || {}).i, (d.pass_info || {}).label].join("|");
       if (sig === lastSig) return;
       lastSig = sig;
-      render(d);
-    }).catch(function () { /* 网络抖动忽略 */ });
+      window.mgPipePhases(d);
+    }).catch(function () {});
   }
-
-  setInterval(tick, TICK);
+  setInterval(tick, 1000);
   tick();
 })();

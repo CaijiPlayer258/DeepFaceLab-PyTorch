@@ -6340,3 +6340,28 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 #p-merge .mgpipe .phchip.on {
   stroke: var(--accent, #4ea1ff);
 }
+
+/* 分趟流程图（21-pipe-phases）：环节 / 连线 / 池 / 闸门。
+   视觉沿用六列那套 token，不新造语言。 */
+#p-merge .mgpipe .fnode {
+  fill: var(--panel-2);
+  stroke: var(--line-strong);
+  stroke-width: 1;
+}
+#p-merge .mgpipe .fnode.on { stroke: var(--accent, #4ea1ff); stroke-width: 1.6; }
+#p-merge .mgpipe .fnode.off { opacity: .45; }
+#p-merge .mgpipe .fedge {
+  stroke: var(--line-strong);
+  stroke-width: 1.2;
+  fill: none;
+}
+#p-merge .mgpipe .farrowhead { fill: var(--line-strong); }
+#p-merge .mgpipe .fpool {
+  fill: var(--panel-2);
+  stroke: var(--line-strong);
+  stroke-width: 1.2;
+}
+#p-merge .mgpipe .fpoolwater {
+  fill: var(--accent, #4ea1ff);
+  opacity: .55;
+}
