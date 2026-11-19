@@ -6324,7 +6324,7 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 /* 真实链路（后端 status.pipeline）：六列图是线程视图，这一行才是后端实际跑的链条。
    两者不一致时以这一行为准 —— 它由后端按实际顺序生成，前端不猜。 */
 #p-merge .mgpipeflow {
-  margin: 2px 0 8px;
+  margin: 8px 18px 0;
   padding: 8px 12px;
   border-radius: 8px;
   background: var(--panel-2);
