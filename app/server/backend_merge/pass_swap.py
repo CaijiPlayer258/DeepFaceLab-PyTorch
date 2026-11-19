@@ -56,7 +56,9 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
         try:
             from .pipeline_stages import _mask_src as _msfn
             _mask_src = _msfn({})          # 界面选的遮罩来源（XSegLite / XSeg / DFM）
-        except Exception:                                      # noqa: BLE001
+        except Exception as _e:                                # noqa: BLE001
+            from .loud import note as _ln
+            _ln("pass_swap 取遮罩来源", _e, "遮罩来源按空处理（可能少一张遮罩）", log)
             _mask_src = ""
         try:
             from .pipeline_stages import _stage_xseg
@@ -143,8 +145,9 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
                     if len(_ms) >= 2:
                         buf[key + "_xprd"] = np.asarray(_ms[0], np.float32) * 255.0
                         buf[key + "_xdst"] = np.asarray(_ms[1], np.float32) * 255.0
-                except Exception:                              # noqa: BLE001
-                    pass
+                except Exception as _e:                        # noqa: BLE001
+                    from .loud import note as _ln
+                    _ln("pass_swap 算 XSeg 遮罩", _e, "这张脸只有 dfm 遮罩，合成口径会和导出一致性变差", log)
             buf[key + "_pred"] = p
             buf[key + "_mask"] = m
             done += 1

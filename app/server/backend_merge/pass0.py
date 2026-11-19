@@ -89,7 +89,9 @@ def scan(video, detector="tinymog", thresh=0.5, plan_payload=None, models=None,
                     _plan2 = _auto_face_plan(plan_payload, frame, plan_payload.get("snap") or {},
                                             "video", "", int(idx), detector, float(thresh),
                                             boxes=boxes)
-                except Exception:                          # noqa: BLE001
+                except Exception as _e2:                       # noqa: BLE001
+                    from .loud import note as _ln
+                    _ln("pass0 库兜底", _e2, "没被点名的脸不会换（只换显式点名的那几张）", log)
                     _plan2 = None
                 for f in ((_plan2 or {}).get("faces") or []):
                     _bi = int(f.get("idx") or 0)
