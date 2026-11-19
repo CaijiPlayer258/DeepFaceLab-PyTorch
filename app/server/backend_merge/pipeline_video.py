@@ -388,7 +388,10 @@ def _start_video_export(body: dict):
                 _dfm_set.add(_p2)
     except Exception as _e:                                    # noqa: BLE001
         _vid_log("导出模式：读人脸库失败（%s）" % str(_e)[:100])
-    _names = [str((m or {}).get("name") or "") for m in (body.get("models") or [])]
+    # 逐条记下来（名字 + faces），这样"前端到底传了什么"一眼可见，
+    # 不用再去猜是丢了模型还是丢了 faces。
+    _names = ["%s%s" % (str((m or {}).get("name") or ""), (m or {}).get("faces") or [])
+              for m in (body.get("models") or [])]
     _vid_log("导出模式：distinct dfm=%d · models=%s → %s"
              % (len(_dfm_set), (_names + ["库:" + len(_lib_dfms).__str__()]),
                 "分趟（passes）" if (len(_dfm_set) > 1 or _bool_val(body.get("force_passes"), False))

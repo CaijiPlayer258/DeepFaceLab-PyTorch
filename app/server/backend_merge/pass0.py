@@ -81,6 +81,22 @@ def scan(video, detector="tinymog", thresh=0.5, plan_payload=None, models=None,
                         if (not fs_) or (bi in [int(x) for x in fs_]):
                             owner[bi] = (str(m.get("name") or ""), "", None, True)
                             break
+            # 显式只点了一部分脸（或者前端把某个模型丢了）：剩下的脸交给库去判。
+            # 不补这一步，没被点名的脸永远不换 —— 用户看到「两个模型只换了一个人」。
+            if plan_payload is not None and len(owner) < len(boxes):
+                try:
+                    from .preview import _auto_face_plan
+                    _plan2 = _auto_face_plan(plan_payload, frame, plan_payload.get("snap") or {},
+                                            "video", "", int(idx), detector, float(thresh),
+                                            boxes=boxes)
+                except Exception:                          # noqa: BLE001
+                    _plan2 = None
+                for f in ((_plan2 or {}).get("faces") or []):
+                    _bi = int(f.get("idx") or 0)
+                    if _bi in owner or not f.get("matched"):
+                        continue
+                    owner[_bi] = (str(f.get("dfm") or ""), str(f.get("group") or ""),
+                                  f.get("similarity"), True)
         elif plan_payload is not None:
             try:
                 from .preview import _auto_face_plan

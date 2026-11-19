@@ -51,7 +51,8 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
     # ---- ① 扫描：分母在这一趟里长出来 ----
     _p(2, "分趟导出：扫描人脸分配表 …", meta={"phase": "scan", "pass_i": 0,
                                           "pass_n": len(models), "pool": 0})
-    idx = scan(video, models=models, start=int(cfg.get("start") or 0),
+    idx = scan(video, models=models, plan_payload=cfg.get("plan_payload"),
+               start=int(cfg.get("start") or 0),
                end=(int(cfg["end"]) if cfg.get("end") else None), log=log)
     if not idx.get("swap_faces"):
         raise RuntimeError("这一单没有任何待换的脸（检测 %d 张，一张都没分配到模型）"
