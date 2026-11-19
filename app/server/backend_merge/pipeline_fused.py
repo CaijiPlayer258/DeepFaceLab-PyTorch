@@ -2638,6 +2638,14 @@ def _fused_worker(cfg: dict):
         traceback.print_exc()
         ok, err = False, "%s: %s" % (e.__class__.__name__, str(e)[:600])
     finally:
+        # 第一件事：无条件把「还能不能再点导出」解开。
+        # 这段收尾里任何一步抛异常（clear_face_group_cache / 回滚 / 删临时目录），
+        # 后面的 running=False 就执行不到 —— 用户之后每次点导出都收到「已经在导出」。
+        with _merge_job_lock:
+            _merge_job.update({"running": False, "active": False,
+                               "finished_at": time.time()})
+        with _STAGE_LOCK:
+            _STAGE_JOB.update({"running": False})
         # 流水线实况收单：不再涨，但**保留** lanes/ticks —— 进度页那张图在「完成」
         # 那一刻要还是满的（收单就清空的话，界面会当场塌成一排占位格）。
         _STAGE_METER.stop()
