@@ -94,19 +94,39 @@
     try { draw(svg, d || {}); return true; } catch (e) { return false; }
   };
 
-  var _origPipe = window.mgpPipe;
-  window.mgpPipe = function (d) {
-    d = d || {};
-    /* 副标题永远如实写「后端选了哪条路」——这是排查时唯一可信的一行。 */
+  /* 用 defineProperty 接管 window.mgpPipe：它由 19-eff-drawer.js 赋值，
+     而分片按文件名拼接，21 号在 19 号之后执行 —— 直接赋值会被后写的原函数覆盖
+     （这就是「副标题一直不变」的原因）。setter 拿住原函数，谁赋值都包在外层。 */
+  var _realPipe = null;
+
+  function _syncSub(d) {
     var sub = document.getElementById("mgPipeSub");
-    if (sub && d.mode) {
-      sub.textContent = (d.mode === "passes")
-        ? ("分趟 · " + (d.mode_why || "逐模型")) + " · 池在闸门后才合成"
-        : ("快速导出 · " + (d.mode_why || "单模型"));
+    if (!sub) return;
+    if (d.mode === "passes") {
+      sub.textContent = "分趟 · " + (d.mode_why || "逐模型") + " · 池在闸门后才合成";
+    } else if (d.mode === "fused") {
+      sub.textContent = "快速导出 · " + (d.mode_why || "单模型");
     }
+  }
+  window.mgPipeSubSync = _syncSub;
+
+  function _wrappedPipe(d) {
+    d = d || {};
+    try { _syncSub(d); } catch (e) { /* 纯展示 */ }
     try {
       if (d.pipeline && d.pipeline.shape === "passes" && window.mgPipePhases(d)) return;
     } catch (e) { /* 失败就退回原渲染器 */ }
-    if (_origPipe) _origPipe(d);
-  };
+    if (_realPipe) _realPipe(d);
+  }
+
+  try {
+    Object.defineProperty(window, "mgpPipe", {
+      configurable: true,
+      get: function () { return _wrappedPipe; },
+      set: function (fn) { _realPipe = fn; }
+    });
+  } catch (e) {
+    _realPipe = window.mgpPipe;
+    window.mgpPipe = _wrappedPipe;
+  }
 })();

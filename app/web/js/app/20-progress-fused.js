@@ -82,6 +82,8 @@
           .then(function (d) {
             if (fired) return;
             mgpFusedPaint(d);
+        /* 第二道保险：不管 mgpPipe 有没有被接管，这里都把后端自报的 mode 写进副标题。 */
+        try { if (window.mgPipeSubSync) window.mgPipeSubSync(d); } catch (e) {}
         /* 后端这一单走的是哪条路：fused（六列）/ passes（分趟）。
            以前完全看不到，用户选了 2 个模型却看到六列图时没法判断是哪种情况。 */
         try {
