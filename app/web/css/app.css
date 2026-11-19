@@ -6070,20 +6070,20 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 
 /* ---------- 图里的文字层级 ---------- */
 #p-merge .mgpipe .t-stage {
-  font-size: 11.5px;
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 600;
   letter-spacing: .02em;
-  fill: var(--ink-2);
+  fill: var(--ink-1);
 }
 #p-merge .mgpipe .t-count {
-  font-size: 10.5px;
-  fill: var(--ink-3);
+  font-size: 12px;
+  fill: var(--ink-2);
   font-variant-numeric: tabular-nums;
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
 }
 #p-merge .mgpipe .t-lane {
-  font-size: 9.5px;
-  fill: var(--ink-3);
+  font-size: 11px;
+  fill: var(--ink-1);
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
 }
 /* （列间原来那句「在飞 N」已按用户要求去掉：连线改成「收束到腰点再散开」之后，

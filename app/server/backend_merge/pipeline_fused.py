@@ -2109,13 +2109,24 @@ def _fused_run(cfg: dict) -> dict:
     # 合成池 n_cmp 条（t0..t7）、编码 n_enc 条（e0..e5）、dfm/xseg 各一个 session 就 1 条、
     # det 有几路异构 session 就有几条。xseg 不用（遮罩不来自模型）时给空列表 ——
     # 界面画成「不用」，不假装有一条在跑的 lane。
+    # 车道名用**真实名字**（TinyMog#0 / <模型>#0 / XSegLite#0 / h264_nvenc#0）：
+    # 之前是 det#0/dfm#0/xse#0 这种占位符，用户反馈"看不清管线流程"——图上写着 dfm#0，
+    # 但没人知道那是哪个模型。名字直接来自这一单实际用的检测器/模型/遮罩/编码器。
+    _det_label = str(cfg.get("detector") or "detector")
+    _dfm_label = Path(str(cfg.get("dfm") or "")).stem or "dfm"
+    try:
+        _msrc = _mask_src(cfg.get("settings") or {})
+    except Exception:                                      # noqa: BLE001
+        _msrc = ""
+    _xse_label = str(_msrc or "XSeg")
+    _enc_label = str(cfg.get("encoder") or "encoder")
     _STAGE_METER.reset(lanes={
         "frames": ["解码"],
-        "det": ["det#%d" % _i for _i in range(n_det)],
-        "dfm": ["dfm#%d" % _i for _i in range(int(n_lanes))],
-        "xseg": (["xse#0"] if need_xseg else []),
-        "compose": ["t%d" % _i for _i in range(n_cmp)],
-        "encode": ["e%d" % _i for _i in range(n_enc)],
+        "det": ["%s#%d" % (_det_label, _i) for _i in range(n_det)],
+        "dfm": ["%s#%d" % (_dfm_label if int(n_lanes) == 1 else _dfm_label, _i) for _i in range(int(n_lanes))],
+        "xseg": (["%s#0" % _xse_label] if need_xseg else []),
+        "compose": ["Compose#%d" % _i for _i in range(n_cmp)],
+        "encode": ["%s#%d" % (_enc_label, _i) for _i in range(n_enc)],
     })
     # 每个阶段的「下游队列」= 列间那句「在飞 N」（inflight 直接读 qsize()）
     _STAGE_METER.bind({"frames": q_dec, "det": q_det, "dfm": q_gpu,
