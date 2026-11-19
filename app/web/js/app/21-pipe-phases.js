@@ -69,6 +69,36 @@
     svg.appendChild(g);
   }
 
+  /* 池水单独一步：不管上面 paint 成没成，这一笔都要画上（数字对、水位也得对）。 */
+  function paintPoolWater(d) {
+    var svg = document.getElementById('mgPipeSvg');
+    if (!svg) return;
+    var old = svg.querySelector('g[data-pool-water]');
+    if (old) svg.removeChild(old);
+    if (!d || d.mode !== 'passes') return;
+    var faces = (d.pool || {}).faces || 0, total = (d.pool || {}).faces_total || 0;
+    if (!total) return;
+    var g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.setAttribute('data-pool-water', '1');
+    /* 池子的矩形就在图上（我自己画的那只），按它算水位 */
+    var tank = svg.querySelector('rect.pool');
+    if (!tank) return;
+    var x = +tank.getAttribute('x'), y = +tank.getAttribute('y');
+    var w = +tank.getAttribute('width'), h = +tank.getAttribute('height');
+    var pct = Math.max(0, Math.min(1, faces / total));
+    var fh = h * pct;
+    if (fh > 1) {
+      var r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      r.setAttribute('x', x); r.setAttribute('y', y + h - fh);
+      r.setAttribute('width', w); r.setAttribute('height', fh);
+      r.setAttribute('rx', 7);
+      r.setAttribute('fill', '#4ea1ff');
+      r.setAttribute('fill-opacity', '0.55');
+      g.appendChild(r);
+    }
+    svg.appendChild(g);
+  }
+
   function syncSub(d) {
     var sub = document.getElementById('mgPipeSub');
     if (!sub || !d || !d.mode) return;
@@ -110,15 +140,13 @@
               dfm: ((d.pass_info || {}).label || '模型') + '#0',
               xseg: 'XSegLite#0', compose: 't0', encode: 'e0'
             };
-            _titles.forEach(function (t, i) {
+            var _lanes = [].slice.call(_svg.querySelectorAll('text.t-lane'));
+            _lanes.forEach(function (t, i) {
               var k = _want[i];
               if (!k) return;
-              var col = t.parentNode;
-              if (!col) return;
-              var lt = col.querySelector('text.t-lane');
-              if (lt) {
-                var _cur = (lt.textContent || '').trim();
-                if (!_cur || _cur === '—' || _cur === '–' || _cur === '-') lt.textContent = _laneName[k] || k;
+              var _cur = (t.textContent || '').trim();
+              if (!_cur || _cur === '—' || _cur === '–' || _cur === '-') {
+                t.textContent = _laneName[k] || k;
               }
             });
             /* 深底上看不清的根因：这些文字用的是 --ink-2/--ink-3（次要色）。
@@ -137,6 +165,7 @@
       if (sig === last) return;
       last = sig;
       drawPool(d);
+      paintPoolWater(d);
     }).catch(function () {});
   }
   setInterval(tick, 1000);
