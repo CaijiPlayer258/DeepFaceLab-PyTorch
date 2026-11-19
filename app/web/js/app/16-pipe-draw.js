@@ -20,6 +20,26 @@
     var MG_PIPE = (function () {
       var NS = "http://www.w3.org/2000/svg";
       var KEYS = ["frames", "det", "dfm", "xseg", "compose", "encode"];
+
+/* 列可以由后端注入：nodes=[{key,label}]。默认是原来那六段 + 成片。
+   为什么要这个：多模型分趟这条路要显示自己的节点（解码/TinyMog#0/对齐/换脸/遮罩/
+   池/闸门/合成/编码/成片），但**视觉必须是同一套**（列头 + lane + 收敛曲线 + 光点 + 成片杯）。
+   所以不去另画一套，而是把 KEYS/NAME 变成可写，build() 照旧。 */
+window.mgPipeSetNodes = function (nodes) {
+  if (!nodes || !nodes.length) return false;
+  var keys = [], names = {};
+  for (var i2 = 0; i2 < nodes.length; i2++) {
+    var k2 = String(nodes[i2].key), l2 = String(nodes[i2].label || k2);
+    keys.push(k2); names[k2] = l2;
+  }
+  KEYS.length = 0;
+  for (var a = 0; a < keys.length; a++) KEYS.push(keys[a]);
+  for (var b in NAME) if (Object.prototype.hasOwnProperty.call(NAME, b)) delete NAME[b];
+  for (var c in names) if (Object.prototype.hasOwnProperty.call(names, c)) NAME[c] = names[c];
+  try { sig = null; } catch (e) { /* 未初始化 */ }
+  try { build(lanesOf(null)); } catch (e) { return false; }
+  return true;
+};
       /* 最后一列不叫「导出」了：这一段真的只是把合成好的帧**编码/缓存**出来，
          真正写出成片是后面 ffmpeg 那一趟（也计时到这一段）。用户看到的「导出」两个字
          出现在这一列会以为进度已经到写视频了，所以叫「缓存帧」。后端/日志里那个
