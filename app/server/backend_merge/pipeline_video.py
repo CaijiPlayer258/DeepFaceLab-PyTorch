@@ -370,9 +370,27 @@ def _start_video_export(body: dict):
     # force_passes：调试/验收用，单模型也走分趟 —— 只有它能和快速导出做「同分配对拍」。
     # 让"这一单到底走哪条路"可见：之前前端没有任何地方能看出后端选了 fused，
     # 用户选了 2 个模型却看到六列图时无从判断是"没传上去"还是"传上去但被判成 1 个"。
+    # 后端再判一次：接口只拿到 1 个 dfm（或一个都没有）时，看**人脸库**里有几个组。
+    # 库里有两个组 = 两个不同模型要换不同的人，这就是 passes 的判据；
+    # 以前只看 body.models，前端少传一个就整单退化成 fused（用户看到"池没了"）。
+    _lib_dfms = []
+    try:
+        from .compose import _auto_library
+        from .. import _faces as _store
+        _lib = _auto_library(body)
+        if _lib is not None:
+            for _g in (_store.load_index(_lib).get("groups") or []):
+                _p2 = str(_g.get("dfm") or "").strip()
+                if _p2 and _p2 not in _lib_dfms:
+                    _lib_dfms.append(_p2)
+        for _p2 in _lib_dfms:
+            if _p2 not in _dfm_set:
+                _dfm_set.add(_p2)
+    except Exception as _e:                                    # noqa: BLE001
+        _vid_log("导出模式：读人脸库失败（%s）" % str(_e)[:100])
     _names = [str((m or {}).get("name") or "") for m in (body.get("models") or [])]
     _vid_log("导出模式：distinct dfm=%d · models=%s → %s"
-             % (len(_dfm_set), _names,
+             % (len(_dfm_set), (_names + ["库:" + len(_lib_dfms).__str__()]),
                 "分趟（passes）" if (len(_dfm_set) > 1 or _bool_val(body.get("force_passes"), False))
                 else "快速导出（fused）"))
     if fused and (len(_dfm_set) > 1 or _bool_val(body.get("force_passes"), False)):
