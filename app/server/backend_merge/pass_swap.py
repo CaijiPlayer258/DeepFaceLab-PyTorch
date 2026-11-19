@@ -25,7 +25,7 @@ def _pool_dir(video: Path) -> Path:
 
 
 def run(video, index_path, model_name, dfm_path, chunk_frames=16,
-        limit=None, log=print, out_dir=None) -> dict:
+        limit=None, log=print, out_dir=None, want_xseg=False) -> dict:
     """跑一趟：只处理 index.json 里属于 model_name 的脸。
 
     返回 {model, faces, chunks, size, elapsed_s, path}。
@@ -47,6 +47,16 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
 
     ent = _dfm_session(str(dfm_path))
     size = int(ent[2])
+    # XSeg：mask_mode 走遮罩网络时必须有它，否则合成用的遮罩口径和导出不一致
+    # （实测：只有 dfm 遮罩时，合成结果与快速导出差 34 LSB，差异全在脸框内）。
+    _xseg = None
+    if want_xseg:
+        try:
+            from .pipeline_stages import _stage_xseg
+            _xseg = _stage_xseg()
+            log("[pass:%s] 已装载 XSeg（遮罩来源与导出一致）" % model_name)
+        except Exception as _e:                                # noqa: BLE001
+            log("[pass:%s] XSeg 装载失败（%s），这一趟只有 dfm 遮罩" % (model_name, str(_e)[:80]))
     t0 = time.time()
     d = Path(str(out_dir)) if out_dir else _pool_dir(video)
     (d / "chunks").mkdir(parents=True, exist_ok=True)
@@ -95,6 +105,7 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
             mat = get_transform_mat(np.asarray(lm, np.float32), size, FaceType.WHOLE_FACE, scale=1.0)
             warped = cv2.warpAffine(img, mat, (size, size), flags=cv2.INTER_CUBIC)
             ins.append(np.clip(warped.astype(np.float32) / 255.0, 0, 1))
+            warped_u8 = warped
             mats.append((f, mat, lm))
         if not ins:
             continue
@@ -116,6 +127,16 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
             if buf_from is None:
                 buf_from = int(f["frame"])
             buf[key + "_lm"] = np.asarray(lm, np.float32)
+            if _xseg is not None:
+                try:
+                    _ms = _xseg.mask_batch([np.asarray(p, np.float32) / 255.0,
+                                            np.clip(warped_u8.astype(np.float32) / 255.0, 0, 1)],
+                                           out_size=256) or []
+                    if len(_ms) >= 2:
+                        buf[key + "_xprd"] = np.asarray(_ms[0], np.float32) * 255.0
+                        buf[key + "_xdst"] = np.asarray(_ms[1], np.float32) * 255.0
+                except Exception:                              # noqa: BLE001
+                    pass
             buf[key + "_pred"] = p
             buf[key + "_mask"] = m
             done += 1

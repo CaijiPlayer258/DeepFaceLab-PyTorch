@@ -97,10 +97,15 @@ def merge(video, passes, out_path=None, cfg=None, frames=None, log=print,
             lm = cache.get(k + "_lm")
             if pred is None or mask is None or lm is None:
                 continue
+            _xp = cache.get(k + "_xprd")
+            _xd = cache.get(k + "_xdst")
             faces.append({"landmarks": np.asarray(lm, np.float32),
                           "pred": np.asarray(pred, np.float32) / 255.0,
                           "prd_dfm": np.asarray(mask, np.float32) / 255.0,
-                          "xseg_prd": None, "xseg_dst": None,
+                          # XSeg 遮罩必须一起给：composition 的遮罩口径要和导出一致
+                          # （没有它时实测差 34 LSB，差异全在脸框内）
+                          "xseg_prd": (np.asarray(_xp, np.float32) / 255.0) if _xp is not None else None,
+                          "xseg_dst": (np.asarray(_xd, np.float32) / 255.0) if _xd is not None else None,
                           "dst_dfm": None})
         out = compose_frame(img, faces, cfg, {}) if faces else img
         # 注：GPU seamless（compose_gpu.seamless_merge）需要把 compose 的图层准备

@@ -67,7 +67,9 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
         _p(2 + int(40 * (k - 1) / max(1, len(models))),
            "分趟导出：第 %d/%d 趟 · %s" % (k, len(models), nm))
         pool_idx = video.parent / (video.stem + "_cache") / "pool" / "index.json"
-        r = pass_run(video, pool_idx, nm, str(m["dfm"]), log=log)
+        # 一律算 XSeg 遮罩：合成要用哪张遮罩由 mask_mode 决定，原料里两张都备着，
+        # 合流时才能和导出的遮罩口径一致（只算 dfm 遮罩时会差 34 LSB）。
+        r = pass_run(video, pool_idx, nm, str(m["dfm"]), log=log, want_xseg=True)
         done_faces += int(r.get("faces") or 0)
         if r.get("faces"):
             metas.append(r["path"])
