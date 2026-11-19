@@ -669,6 +669,28 @@ def _start_passes_export(body: dict):
                 {"id": "gate", "label": "闸门", "steps": ["等所有趟写完"]},
                 {"id": "merge", "label": "合流", "steps": ["读池", "合成", "编码", "成片"]},
             ]}
+            # 等宽列：这一单实际经过的节点按顺序给出，前端照它排（不再写死六列）
+            _det = str(cfg.get("detector") or "detector")
+            _enc = str(cfg.get("encoder") or "h264_nvenc")
+            _msrc = "XSeg"
+            try:
+                from .pipeline_stages import _mask_src as _msf
+                _ms = _msf(cfg.get("settings") or {})
+                _msrc = str((_ms or {}).get("label") or "XSeg") if isinstance(_ms, dict) else "XSeg"
+            except Exception:                                  # noqa: BLE001
+                pass
+            _merge_job["pipeline"]["nodes"] = [
+                {"id": "dec", "label": "解码"},
+                {"id": "det", "label": "%s#0" % _det},
+                {"id": "align", "label": "对齐"},
+                {"id": "dfm", "label": "换脸"},
+                {"id": "xse", "label": "%s#0" % _msrc},
+                {"id": "pool", "label": "人脸暂存池"},
+                {"id": "gate", "label": "闸门"},
+                {"id": "cmp", "label": "合成"},
+                {"id": "enc", "label": "%s#0" % _enc},
+                {"id": "out", "label": "成片"},
+            ]
     except Exception:                                          # noqa: BLE001
         pass
     # 命名统一交给 _stage_out_path（_fused_cfg 已经算好）；要区分两单用 out_tag，

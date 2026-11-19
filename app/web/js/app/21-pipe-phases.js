@@ -1,99 +1,149 @@
 'use strict';
-/* 分趟导出的「旁路」叠层：**保留经典六列图**，只在它上面补几笔。
+/* 分趟流程图（等宽列 + 连线 + 帧流动画）。
 
-  用户口径：在之前那版经典图（七等分列 + lane 方块 + 贝塞尔曲线 + 成片杯）上改，
-  加几条旁路，而不是另画一套表格。
-  这里只做三件事：
-    1. 在「遮罩」和「合成」两列之间插一个人脸暂存池（竖的）+ 闸门；
-    2. 从池子到合成列画一条虚线旁路（和经典图里无脸帧那条同风格）；
-    3. 左上角写一行相位（趟 i/N · 模型名）。
-  几何照抄 16-pipe-draw.js 的常量，保证落在同一套坐标里。
+  用户口径：
+    · 列不是写死的六段 —— 后端 status.pipeline.nodes 给几个就画几个，**等宽**；
+    · 必须有连线（帧从一格流到下一格）；
+    · 必须有「帧在流」的视觉：连线上跑的光点；
+    · 节点名用真实名字（TinyMog#0 / <模型>#0 / XSegLite#0 / Compose#0 / <编码器>#0）；
+    · 池竖直、闸门关着时后半段灰、扫描期不给百分比。
 */
 (function () {
   var NS = "http://www.w3.org/2000/svg";
-  var W = 1200, PADL = 56, TOPY = 58, NCOL = 7;
-  var COLW = (W - PADL * 2) / NCOL;
+  var W = 1200, H = 300, PAD = 40, TOP = 92, BOXH = 46;
   function mk(tag, attrs) {
     var el = document.createElementNS(NS, tag);
     for (var k in (attrs || {})) if (attrs[k] != null) el.setAttribute(k, attrs[k]);
     return el;
   }
 
-  function overlay(d) {
-    var svg = document.getElementById("mgPipeSvg");
-    if (!svg) return false;
-    var old = svg.querySelector("g[data-pool-overlay]");
-    if (old) svg.removeChild(old);
-    if (!d || !d.pipeline || d.pipeline.shape !== "passes") return false;
-
-    var cur = String(d.work_phase || "");
+  function draw(svg, d) {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    var pl = d.pipeline || {}; var nodes = pl.nodes || [];
+    if (!nodes.length) return false;
+    var cur = String(d.work_phase || d.phase || '');
     var pi = d.pass_info || {};
-    var scanning = (cur === "scan") || (d.pool_frozen === false);
-    var gateOpen = (cur === "merge" || cur === "encode");
+    var scanning = (cur === 'scan') || (d.pool_frozen === false);
+    var gateOpen = (cur === 'merge' || cur === 'encode');
     var faces = (d.pool || {}).faces || 0;
     var total = (d.pool || {}).faces_total || 0;
     var pct = total ? Math.min(1, faces / total) : 0;
 
-    var g = mk("g", { "data-pool-overlay": "1" });
-    var x0 = PADL + 3 * COLW, x1 = PADL + 4 * COLW;
-    // 放在「遮罩」lane 与「合成」lane 之间的空隙里（lane 盒宽 74，两列中心相距 155.4）
-    var px = (x0 + x1) / 2 - 15, py = 200, pw = 30, ph = 92;   // lane 盒在 145..190，池放其下
+    var n = nodes.length;
+    var colW = (W - PAD * 2) / n;          // 等宽：列宽只由节点数决定
+    var bw = Math.min(colW - 18, 104);     // 盒子略窄于列，留出连线的空隙
+    var defs = mk('defs');
+    var m = mk('marker', { id: 'fArrow', viewBox: '0 0 8 8', refX: 7, refY: 4,
+                          markerWidth: 5, markerHeight: 5, orient: 'auto' });
+    m.appendChild(mk('path', { d: 'M0,0 L8,4 L0,8 z', 'class': 'farrowhead' }));
+    defs.appendChild(m); svg.appendChild(defs);
+    var g = mk('g'); svg.appendChild(g);
 
-    g.appendChild(mk("path", {
-      d: "M " + (x0 + 40) + " " + (py + ph / 2) + " L " + (px - 6) + " " + (py + ph / 2),
-      "class": "edge poolin" }));
-    g.appendChild(mk("rect", { x: px, y: py, width: pw, height: ph, rx: 6, "class": "lane pool" }));
-    var fh = Math.max(0, ph * pct);
-    g.appendChild(mk("rect", { x: px, y: py + (ph - fh), width: pw, height: fh, rx: 6,
-                               "class": "water poolwater" }));
-    var t = mk("text", { x: px + pw / 2, y: py - 8, "text-anchor": "middle", "class": "t-stage" });
-    t.textContent = "人脸暂存池"; g.appendChild(t);
-    var l1 = mk("text", { x: px + pw / 2, y: 302, "text-anchor": "middle", "class": "t-count" });
-    l1.textContent = scanning ? (faces + " 张") : (faces + " / " + total + " 张"); g.appendChild(l1);
-    var l2 = mk("text", { x: px + pw / 2, y: 318, "text-anchor": "middle", "class": "t-count" });
-    l2.textContent = scanning ? "已发现（还在涨）" : (Math.round(pct * 1000) / 10) + "%"; g.appendChild(l2);
-    var l3 = mk("text", { x: px + pw / 2, y: 334, "text-anchor": "middle", "class": "t-count" });
-    l3.textContent = pi.i ? ("趟 " + pi.i + "/" + pi.n + (pi.label ? " · " + pi.label : "")) : "";
-    g.appendChild(l3);
+    var cx = [], states = [], midY = TOP + BOXH / 2;
+    for (var i = 0; i < n; i++) {
+      var nd = nodes[i];
+      var x = PAD + i * colW + colW / 2;
+      cx.push(x);
+      var on = (nd.id === 'dec' || nd.id === 'det' || nd.id === 'align') ? (cur === 'scan')
+             : (nd.id === 'dfm' || nd.id === 'xse' || nd.id === 'pool') ? (cur === 'pass')
+             : (nd.id === 'gate' || nd.id === 'cmp' || nd.id === 'enc' || nd.id === 'out') ? gateOpen
+             : false;
+      states.push(on);
+      var label = String(nd.label || nd.id);
+      if (nd.id === 'dfm' && pi.label) label = pi.label + '#0';
+      if (nd.id === 'pool') {
+        /* 池：竖着画在最下面一行，不占列 */
+        continue;
+      }
+      if (nd.id === 'gate') {
+        g.appendChild(mk('rect', { x: x - 26, y: TOP + 5, width: 52, height: 36, rx: 7,
+                                   'class': 'fnode gate' + (gateOpen ? ' on' : ' off') }));
+        var gt = mk('text', { x: x, y: TOP + 28, 'text-anchor': 'middle', 'class': 't-lane' });
+        gt.textContent = (gateOpen ? '开' : '关'); g.appendChild(gt);
+        var gb = mk('text', { x: x, y: TOP - 10, 'text-anchor': 'middle', 'class': 't-stage' });
+        gb.textContent = '闸门'; g.appendChild(gb);
+        continue;
+      }
+      g.appendChild(mk('rect', { x: x - bw / 2, y: TOP, width: bw, height: BOXH, rx: 8,
+                                 'class': 'fnode' + (on ? ' on' : ' off') }));
+      var t = mk('text', { x: x, y: TOP + BOXH / 2 + 4, 'text-anchor': 'middle', 'class': 't-lane' });
+      t.textContent = label; g.appendChild(t);
+    }
 
-    var gx = px + pw + 6, gy = py + ph / 2 - 14;
-    g.appendChild(mk("path", { d: "M " + (px + pw) + " " + (py + ph / 2) + " L " + gx + " " + (py + ph / 2),
-                               "class": "edge" }));
-    g.appendChild(mk("rect", { x: gx, y: gy, width: 26, height: 28, rx: 6,
-                               "class": "lane gate" + (gateOpen ? " on" : "") }));
-    var gt = mk("text", { x: gx + 13, y: gy + 18, "text-anchor": "middle", "class": "t-lane" });
-    gt.textContent = gateOpen ? "开" : "关"; g.appendChild(gt);
+    /* 连线：相邻两列之间一条带箭头的曲线 + 跑动的光点 */
+    for (var j = 0; j < n - 1; j++) {
+      var a = cx[j], b2 = cx[j + 1];
+      var x1 = a + bw / 2, x2 = b2 - bw / 2;
+      var isPool = nodes[j].id === 'pool' || nodes[j + 1].id === 'pool';
+      if (isPool) continue;                                  // 池那条单独画
+      if (x2 - x1 < 6) continue;
+      var dpath = 'M ' + x1 + ' ' + midY + ' C ' + (x1 + (x2 - x1) / 2) + ' ' + (midY - 12) + ', ' +
+                  (x1 + (x2 - x1) / 2) + ' ' + (midY + 12) + ', ' + x2 + ' ' + midY;
+      g.appendChild(mk('path', { d: dpath, 'class': 'fedge', 'marker-end': 'url(#fArrow)' }));
+      /* 帧流动：沿同一条路径跑 3 个点（CSS 动画驱动 dashoffset 更省，但 animateMotion 最稳） */
+      for (var k2 = 0; k2 < 3; k2++) {
+        var dot = mk('circle', { r: 2.4, 'class': 'fdot' + (states[j + 1] ? ' on' : '') });
+        var anim = mk('animateMotion', { dur: '2.4s', repeatCount: 'indefinite',
+                                        begin: (k2 * 0.8) + 's', path: dpath });
+        dot.appendChild(anim); g.appendChild(dot);
+      }
+    }
 
-    g.appendChild(mk("path", {
-      d: "M " + (gx + 26) + " " + (gy + 28) +
-         " C " + (x1 - 60) + " " + (gy + 90) + ", " + (x1 - 40) + " 300, " + (x1 - 6) + " 300",
-      "class": "edge bypass poolbypass" + (gateOpen ? "" : " dim") }));
-
-    var badge = mk("text", { x: W - PADL, y: 30, "text-anchor": "end", "class": "t-stage" });
-    badge.textContent = "阶段 · " + (cur === "scan" ? "扫描" : (cur === "pass" ? "逐模型趟" : "合流")) +
-                       (pi.n ? "（" + (pi.i || 0) + "/" + pi.n + " 趟）" : "");
-    g.appendChild(badge);
-    svg.appendChild(g);
+    /* 池：竖着，落在「遮罩」列与「闸门」列之间，画在盒子下方 */
+    var poolIdx = -1;
+    for (var q = 0; q < n; q++) if (nodes[q].id === 'pool') poolIdx = q;
+    if (poolIdx >= 0) {
+      var pxp = cx[poolIdx];
+      var ph = 64, pw = 30;
+      var py = midY - ph / 2;
+      /* 前后连线（和别的列一样，水平进出） */
+      if (poolIdx > 0) {
+        var xa = cx[poolIdx - 1] + bw / 2, xb = pxp - pw / 2;
+        if (xb - xa > 4) {
+          g.appendChild(mk('path', { d: 'M ' + xa + ' ' + midY + ' L ' + xb + ' ' + midY,
+                                     'class': 'fedge', 'marker-end': 'url(#fArrow)' }));
+        }
+      }
+      if (poolIdx < n - 1) {
+        var xc = pxp + pw / 2, xd = cx[poolIdx + 1] - bw / 2;
+        if (xd - xc > 4) {
+          g.appendChild(mk('path', { d: 'M ' + xc + ' ' + midY + ' L ' + xd + ' ' + midY,
+                                     'class': 'fedge', 'marker-end': 'url(#fArrow)' }));
+        }
+      }
+      g.appendChild(mk('rect', { x: pxp - pw / 2, y: py, width: pw, height: ph, rx: 6, 'class': 'fpool' }));
+      var fh = ph * pct;
+      g.appendChild(mk('rect', { x: pxp - pw / 2, y: py + ph - fh, width: pw, height: fh, rx: 6, 'class': 'fpoolwater' }));
+      var pt = mk('text', { x: pxp, y: py - 8, 'text-anchor': 'middle', 'class': 't-stage' });
+      pt.textContent = '人脸暂存池'; g.appendChild(pt);
+      var pl1 = mk('text', { x: pxp, y: py + ph + 16, 'text-anchor': 'middle', 'class': 't-count' });
+      pl1.textContent = scanning ? (faces + ' 张') : (faces + ' / ' + total + ' 张'); g.appendChild(pl1);
+      var pl2 = mk('text', { x: pxp, y: py + ph + 30, 'text-anchor': 'middle', 'class': 't-count' });
+      pl2.textContent = scanning ? '已发现（还在涨）' : (Math.round(pct * 1000) / 10) + '%'; g.appendChild(pl2);
+      var pl3 = mk('text', { x: pxp, y: py + ph + 44, 'text-anchor': 'middle', 'class': 't-count' });
+      pl3.textContent = pi.i ? ('趟 ' + pi.i + '/' + pi.n) : ''; g.appendChild(pl3);
+    }
     return true;
   }
-  window.mgPipePoolOverlay = overlay;
+  window.mgPipeFlowDraw = draw;
 
-  var last = '';
   function syncSub(d) {
-    var sub = document.getElementById("mgPipeSub");
+    var sub = document.getElementById('mgPipeSub');
     if (!sub || !d || !d.mode) return;
-    if (d.mode === "passes") sub.textContent = "分趟 · " + (d.mode_why || "") + " · 闸门后才合成";
-    else sub.textContent = "快速导出 · " + (d.mode_why || "");
+    if (d.mode === 'passes') sub.textContent = '分趟 · ' + (d.mode_why || '') + ' · 闸门后才合成';
+    else sub.textContent = '快速导出 · ' + (d.mode_why || '');
   }
+  var last = '';
   function tick() {
-    var svg = document.getElementById("mgPipeSvg");
-    if (!svg || document.visibilityState === "hidden") return;
-    fetch("/api/merge/export/status").then(function (r) { return r.json(); }).then(function (d) {
+    var svg = document.getElementById('mgPipeSvg');
+    if (!svg || document.visibilityState === 'hidden') return;
+    fetch('/api/merge/export/status').then(function (r) { return r.json(); }).then(function (d) {
       syncSub(d);
-      var sig = [d.mode, d.work_phase, (d.pool || {}).faces, (d.pass_info || {}).i].join("|");
+      if (!d || !d.pipeline || d.pipeline.shape !== 'passes') return;
+      var sig = [d.work_phase, (d.pool || {}).faces, (d.pass_info || {}).i].join('|');
       if (sig === last) return;
       last = sig;
-      overlay(d);
+      draw(svg, d);
     }).catch(function () {});
   }
   setInterval(tick, 1000);

@@ -6385,3 +6385,15 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 #p-merge .mgpipe rect.gate.on { stroke: var(--accent, #4ea1ff); stroke-width: 1.6; }
 #p-merge .mgpipe .poolbypass { stroke-dasharray: 3 4; opacity: .5; }
 #p-merge .mgpipe .poolbypass.dim { opacity: .2; }
+
+/* 分趟流程图（等宽列 + 连线 + 帧流光点） */
+#p-merge .mgpipe .fnode { fill: var(--panel-2); stroke: var(--line-strong); stroke-width: 1; }
+#p-merge .mgpipe .fnode.on { stroke: var(--accent, #4ea1ff); stroke-width: 1.6; }
+#p-merge .mgpipe .fnode.off { opacity: .5; }
+#p-merge .mgpipe .fnode.gate.on { fill: rgba(78,161,255,.10); }
+#p-merge .mgpipe .fedge { fill: none; stroke: var(--line-strong); stroke-width: 1.2; }
+#p-merge .mgpipe .farrowhead { fill: var(--line-strong); }
+#p-merge .mgpipe .fdot { fill: var(--accent, #4ea1ff); opacity: .35; }
+#p-merge .mgpipe .fdot.on { opacity: .9; }
+#p-merge .mgpipe .fpool { fill: var(--panel-2); stroke: var(--line-strong); stroke-width: 1.2; }
+#p-merge .mgpipe .fpoolwater { fill: var(--accent, #4ea1ff); opacity: .5; }
