@@ -216,7 +216,12 @@
         window.__mergeExporting = false;
         window.__mgFusedRunning = false;
         mgFusedStopPoll();
-        toast("导出未启动", String((e && e.message) || e).slice(0, 140), "error");
+          if (String((e && e.message) || e).indexOf("已经在导出") >= 0) {
+            toast("已有导出在跑", "界面显示的就是它现在的进度；要重来请先点取消导出", "info");
+            mgFusedStartPoll();
+            return;
+          }
+          toast("导出未启动", String((e && e.message) || e).slice(0, 140), "error");
       });
     }
     window.mgFusedExport = mgFusedExport;

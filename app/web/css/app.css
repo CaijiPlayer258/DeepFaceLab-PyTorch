@@ -6365,3 +6365,15 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   fill: var(--accent, #4ea1ff);
   opacity: .55;
 }
+
+/* 分趟流程图：行带 + 紧凑节点 */
+#p-merge .mgpipe .fband {
+  fill: rgba(255,255,255,.016);
+  stroke: rgba(255,255,255,.05);
+  stroke-width: 1;
+}
+#p-merge .mgpipe .fband.on {
+  fill: rgba(78,161,255,.05);
+  stroke: rgba(78,161,255,.22);
+}
+#p-merge .mgpipe .t-stage.on { fill: #4ea1ff; }

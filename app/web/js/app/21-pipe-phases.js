@@ -20,7 +20,8 @@
   }
 
   /* 一个环节：圆角矩形 + 名字 + 副字 */
-  function node(g, x, y, w, h, label, sub, state) {
+  function node(g, x, y, w, h, label, sub, on) {
+    var state = on ? "on" : "";
     g.appendChild(mk("rect", { x: x, y: y, width: w, height: h, rx: 8,
                               "class": "fnode" + (state ? " " + state : "") }));
     var t = mk("text", { x: x + w / 2, y: y + (sub ? h / 2 - 2 : h / 2 + 4),
@@ -45,97 +46,91 @@
     var fillH = Math.max(0, h * pct);
     g.appendChild(mk("rect", { x: x, y: y + (h - fillH), width: w, height: fillH,
                                rx: 8, "class": "fpoolwater" }));
-    var ttl = mk("text", { x: x + w / 2, y: y - 8, "text-anchor": "middle", "class": "t-stage" });
+    var ttl = mk("text", { x: x + w / 2, y: y - 12, "text-anchor": "middle", "class": "t-stage" });
     ttl.textContent = "人脸暂存池"; g.appendChild(ttl);
-    var l1 = mk("text", { x: x + w / 2, y: y + h + 16, "text-anchor": "middle", "class": "t-count" });
+    var l1 = mk("text", { x: x + w + 12, y: y + 30, "class": "t-count" });
     l1.textContent = scanning ? (faces + " 张") : (faces + " / " + (total || "?") + " 张");
-    var l2 = mk("text", { x: x + w / 2, y: y + h + 30, "text-anchor": "middle", "class": "t-count" });
+    g.appendChild(l1);
+    var l2 = mk("text", { x: x + w + 12, y: y + 48, "class": "t-count" });
     l2.textContent = scanning ? "占比未知" : (total ? (Math.round(pct * 1000) / 10) + "%" : "—");
     g.appendChild(l2);
-    var l3 = mk("text", { x: x + w / 2, y: y + h + 44, "text-anchor": "middle", "class": "t-count" });
+    var l3 = mk("text", { x: x + w + 12, y: y + 66, "class": "t-count" });
     l3.textContent = stageTxt || ""; g.appendChild(l3);
   }
 
   function draw(svg, d) {
-    var W = 1200, H = 340;
     while (svg.firstChild) svg.removeChild(svg.firstChild);
     var defs = mk("defs");
     var m = mk("marker", { id: "fArrow", viewBox: "0 0 8 8", refX: 7, refY: 4,
-                            markerWidth: 6, markerHeight: 6, orient: "auto" });
+                            markerWidth: 5, markerHeight: 5, orient: "auto" });
     m.appendChild(mk("path", { d: "M0,0 L8,4 L0,8 z", "class": "farrowhead" }));
     defs.appendChild(m); svg.appendChild(defs);
     var g = mk("g"); svg.appendChild(g);
 
     var cur = String(d.work_phase || d.phase || "");
-    var maskOn = (d.mask_on !== false);   // 后端说本单没有遮罩模型 -> 遮罩那格整格不画
+    var maskOn = (d.mask_on !== false);
     var pi = d.pass_info || {};
     var nPass = pi.n || 2;
-    var passLabel = pi.label || "模型";
+    var label = pi.label || "模型";
     var poolFaces = (d.pool || {}).faces || 0;
     var poolTotal = (d.pool || {}).faces_total || 0;
     var gateOpen = (cur === "merge" || cur === "encode");
+    var scanning = (cur === "scan") || (d.pool_frozen === false);
 
-    /* 两行固定布局：宽度先算好再画，保证 1200 内放得下（上一版溢出，成片被切掉）。 */
-    var NW = 104, NH = 46, GAP = 24, PAD = 28;
-    var rowY = [58, 168];
-    function rowLabel(y, txt, on) {
-      var t = mk("text", { x: PAD, y: y - 14, "class": "t-stage" });
-      t.textContent = txt;
-      if (on) t.setAttribute("style", "fill:var(--accent,#4ea1ff)");
-      g.appendChild(t);
+    var NW = 92, NH = 40, GAP = 30;
+    var rows = [{ y: 60, label: "① 扫描（每个模型之前只做一次）", on: cur === "scan" },
+                { y: 178, label: "② 逐模型趟（一次只装一个模型，串行）", on: cur === "pass" }];
+    for (var r = 0; r < rows.length; r++) {
+      var band = rows[r];
+      g.appendChild(mk("rect", { x: 20, y: band.y - 30, width: 1160, height: 96, rx: 10,
+                                 "class": "fband" + (band.on ? " on" : "") }));
+      var bt = mk("text", { x: 34, y: band.y - 12, "class": "t-stage" + (band.on ? " on" : "") });
+      bt.textContent = band.label; g.appendChild(bt);
     }
 
-    /* ---- ① 扫描（每个模型之前只做一次） ---- */
-    rowLabel(rowY[0], "① 扫描（一次）", cur === "scan");
-    var x = PAD, y = rowY[0];
-    node(g, x, y, NW, NH, "解码", null, cur === "scan" ? "on" : "");
+    /* ---- ① 扫描 ---- */
+    var y = rows[0].y + 4, x = 40;
+    node(g, x, y, NW, NH, "解码", null, cur === "scan");
     x += NW; arrow(g, x + 2, y + NH / 2, x + GAP - 2, y + NH / 2); x += GAP;
-    node(g, x, y, NW + 12, NH, "TinyMog#0", "检测", cur === "scan" ? "on" : "");
-    x += NW + 12; arrow(g, x + 2, y + NH / 2, x + GAP - 2, y + NH / 2); x += GAP;
-    node(g, x, y, NW, NH, "68 点", "对齐/归组", cur === "scan" ? "on" : "");
-    x += NW; arrow(g, x + 2, y + NH / 2, x + GAP - 2, y + NH / 2); x += GAP;
-    node(g, x, y, NW + 20, NH, "分配表", "index.json", cur === "scan" ? "on" : "");
+    node(g, x, y, NW + 16, NH, "TinyMog#0", "检测", cur === "scan");
+    x += NW + 16; arrow(g, x + 2, y + NH / 2, x + GAP - 2, y + NH / 2); x += GAP;
+    node(g, x, y, NW + 16, NH, "68 点", "对齐 / 归组", cur === "scan");
+    x += NW + 16; arrow(g, x + 2, y + NH / 2, x + GAP - 2, y + NH / 2); x += GAP;
+    node(g, x, y, NW + 26, NH, "分配表", "index.json", cur === "scan");
 
-    /* ---- ② 逐模型趟（串行）→ 池 → 闸门 → 合流 → 成片 ---- */
-    rowLabel(rowY[1], "② 逐模型趟（一次只装一个模型）", cur === "pass");
-    x = PAD; y = rowY[1];
-    node(g, x, y, NW, NH, "解码", null, cur === "pass" ? "on" : "");
+    /* ---- ② 逐模型趟 → 池 → 闸门 → 合流 ---- */
+    y = rows[1].y + 4; x = 40;
+    node(g, x, y, NW, NH, "解码", null, cur === "pass");
     x += NW; arrow(g, x + 2, y + NH / 2, x + GAP - 2, y + NH / 2); x += GAP;
-    node(g, x, y, NW, NH, "对齐", "68 点", cur === "pass" ? "on" : "");
+    node(g, x, y, NW, NH, "对齐", "68 点", cur === "pass");
     x += NW; arrow(g, x + 2, y + NH / 2, x + GAP - 2, y + NH / 2); x += GAP;
-    node(g, x, y, NW + 28, NH, passLabel + "#0", "换脸", cur === "pass" ? "on" : "");
-    x += NW + 28;
+    node(g, x, y, NW + 26, NH, label + "#0", "换脸", cur === "pass");
+    x += NW + 26;
     if (maskOn) {
       arrow(g, x + 2, y + NH / 2, x + GAP - 2, y + NH / 2); x += GAP;
-      node(g, x, y, NW + 16, NH, "XSegLite#0", "遮罩", cur === "pass" ? "on" : "");
+      node(g, x, y, NW + 16, NH, "XSegLite#0", "遮罩", cur === "pass");
       x += NW + 16;
     }
 
-    /* 池：竖着挂在遮罩之后，标签在池子右侧（上一版压在下面，看不清） */
-    var pw = 40, ph = 96, px = x + 18, py = y - 6;
-    arrow(g, x + 2, y + NH / 2, px - 4, y + NH / 2);
-    var scanning = (cur === "scan") || (d.pool_frozen === false);
+    /* 池：竖着，标签在**右侧**三行，闸门再往右让开 */
+    var pw = 34, ph = 72, px = x + 22, py = y + 2;
+    arrow(g, x + 2, y + NH / 2, px - 6, y + NH / 2);
     pool(g, px, py, pw, ph, poolFaces, poolTotal,
-         scanning ? "已发现（还在涨）" : (pi.i ? ("阶段 " + pi.i + "/" + pi.n) : ""),
-         scanning);
+         scanning ? "" : (pi.i ? ("阶段 " + pi.i + "/" + pi.n) : ""), scanning);
 
-    /* 闸门 */
-    var gx = px + pw + 96, gy = y;
-    arrow(g, px + pw + 2, y + NH / 2, gx - 2, gy + NH / 2);
-    node(g, gx, gy, 72, NH, "闸门", gateOpen ? "已开" : "关闭",
-         gateOpen ? "on" : "off");
+    var gx = px + pw + 118, gy = y;
+    arrow(g, px + pw + 2, y + NH / 2, gx - 4, gy + NH / 2);
+    node(g, gx, gy, 58, NH, "闸门", gateOpen ? "已开" : "关闭", gateOpen);
 
-    /* 合流 → 编码 → 成片 */
-    x = gx + 72; arrow(g, x + 2, gy + NH / 2, x + GAP - 2, gy + NH / 2); x += GAP;
-    node(g, x, gy, NW + 16, NH, "Compose#0", "每帧混一次", gateOpen ? "on" : "off");
+    x = gx + 58; arrow(g, x + 2, gy + NH / 2, x + GAP - 2, gy + NH / 2); x += GAP;
+    node(g, x, gy, NW + 16, NH, "Compose#0", "每帧混一次", gateOpen);
     x += NW + 16; arrow(g, x + 2, gy + NH / 2, x + GAP - 2, gy + NH / 2); x += GAP;
-    node(g, x, gy, NW + 40, NH, "h264_nvenc#0", "编码", gateOpen ? "on" : "off");
+    node(g, x, gy, NW + 40, NH, "h264_nvenc#0", "编码", gateOpen);
     x += NW + 40; arrow(g, x + 2, gy + NH / 2, x + GAP - 2, gy + NH / 2); x += GAP;
-    node(g, x, gy, 64, NH, "成片", null, gateOpen ? "on" : "off");
+    node(g, x, gy, 58, NH, "成片", null, gateOpen);
 
-    /* 闸门关着时补一句人话（用户要能看懂「为什么后面不动」） */
     if (!gateOpen) {
-      var tip = mk("text", { x: PAD, y: 306, "class": "t-count" });
+      var tip = mk("text", { x: 40, y: 268, "class": "t-count" });
       tip.textContent = "闸门关着：等 " + nPass + " 趟写完池子才开合流（此刻合成 0 帧是正常的）";
       g.appendChild(tip);
     }
