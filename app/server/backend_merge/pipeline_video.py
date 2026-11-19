@@ -340,6 +340,24 @@ def _vid_encode(cmd: list, part: Path, total: int, on_progress=None,
             "seconds": round(time.time() - t0, 2), "part": str(part), "cmd": list(cmd)}
 
 
+def _merge_job_stale() -> bool:
+    """上一单的 running 是僵尸吗：worker 线程已经不在，或者 10 分钟没有任何进展。
+
+    为什么要它：上一单被看门狗判失败后，如果某个分支忘了把 running 置 False，
+    用户点导出永远收到「已经在导出」—— 只能重启后端。实测踩过（截图里那个 toast）。
+    """
+    try:
+        if not _merge_job.get("running"):
+            return False
+        if _merge_job.get("active"):
+            _t = float(_merge_job.get("updated_at") or _merge_job.get("started_at") or 0)
+            if _t and (time.time() - _t) < 600:
+                return False
+        return True
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
 def _start_video_export(body: dict):
     """POST /api/merge/export 的视频分支。**两条路，按 fused 选**：
 
@@ -452,6 +470,11 @@ def _start_video_export(body: dict):
                             % _STAGE_LABEL.get(_STAGE_JOB.get("stage"), "?"), 409)
     started = time.time()
     with _merge_job_lock:
+        if _merge_job.get("running") and _merge_job_stale():
+            _vid_log("上一单是僵尸 running（线程已死）→ 自动清理，允许新的一单")
+            _merge_job.update({"running": False, "active": False, "ok": False,
+                               "error": "上一单被判定为僵尸（线程已死），已自动清理",
+                               "finished_at": time.time()})
         if _merge_job.get("running"):
             raise _BadInput("已经在导出（%s）—— 等它结束或点取消"
                             % (_merge_job.get("out") or "上一个任务"), 409)
@@ -645,6 +668,11 @@ def _start_passes_export(body: dict):
     # 命名统一交给 _stage_out_path（_fused_cfg 已经算好）；要区分两单用 out_tag，
     # 不要在这里另起一套 —— 那正是上一轮对拍拿不到可信产物原因。
     with _merge_job_lock:
+        if _merge_job.get("running") and _merge_job_stale():
+            _vid_log("上一单是僵尸 running（线程已死）→ 自动清理，允许新的分趟导出")
+            _merge_job.update({"running": False, "active": False, "ok": False,
+                               "error": "上一单被判定为僵尸（线程已死），已自动清理",
+                               "finished_at": time.time()})
         if _merge_job.get("running"):
             raise _BadInput("已经在导出（%s）—— 等它结束或点取消"
                             % (_merge_job.get("out") or "上一个任务"), 409)
@@ -657,6 +685,7 @@ def _start_passes_export(body: dict):
                 with _merge_job_lock:
                     _merge_job["pct"] = int(pct)
                     _merge_job["msg"] = str(msg)
+                    _merge_job["updated_at"] = time.time()
                     if done is not None:
                         _merge_job["frames_done"] = int(done)
                     if total:
