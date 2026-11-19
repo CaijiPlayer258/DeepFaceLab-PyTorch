@@ -658,6 +658,13 @@ def merge_export_status():
             # false（看门狗靠这条），所以「能不能再点一次导出」要看 active。
             "active": bool(snap.get("active")),
             "cancelled": cancelled, "stage": stage, "pct": pct,
+            # 分相位流水线（多模型）：后端声明，前端只画。
+            # 这两个键以前被这里"整个丢掉"—— 前端拿不到 shape/phase，只能照六列画，
+            # 于是「图上六个阶段并发、实际一趟一趟串行」，看起来当然对不上。
+            "pipeline": snap.get("pipeline"),
+            "pool": snap.get("pool"),
+            "pass_info": snap.get("pass"),
+            "work_phase": snap.get("phase"),
             "pct_at_failure": snap.get("pct_at_failure"),
             "msg": str(snap.get("msg") or ""),
             "error": error, "error_detail": detail,

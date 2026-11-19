@@ -1,0 +1,94 @@
+'use strict';
+/* 分相位流水线渲染（多模型换多人脸这条路）。
+
+  为什么单独一个渲染器：fused 那张六列图是**并发视图**（六个阶段同时在跑），
+  而 passes 这条路是**串行相位**：扫描 → 逐模型趟（一次只装一个模型，N 趟）→ 闸门 → 合流。
+  六列图画不出「一次只跑一个模型」「池只写不读/只读不写」这两件事，
+  所以后端发 pipeline.shape=passes 时，这里改画相位图。
+
+  数据全部来自 status：pipeline.phases + phase/pass/pool 三个计数。前端不自己算。 */
+
+(function () {
+  function esc(s) { return String(s == null ? "" : s); }
+
+  function chip(x, y, text, on) {
+    var w = Math.max(56, text.length * 7.2 + 16);
+    var g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    var r = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    r.setAttribute("x", x); r.setAttribute("y", y); r.setAttribute("width", w);
+    r.setAttribute("height", 24); r.setAttribute("rx", 6);
+    r.setAttribute("class", on ? "phchip on" : "phchip");
+    var t = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    t.setAttribute("x", x + w / 2); t.setAttribute("y", y + 16);
+    t.setAttribute("text-anchor", "middle"); t.setAttribute("class", "t-lane");
+    t.textContent = text;
+    g.appendChild(r); g.appendChild(t);
+    return g;
+  }
+
+  function draw(svg, d) {
+    var pl = d.pipeline || {};
+    var phases = pl.phases || [];
+    var cur = String(d.work_phase || d.phase || "");
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    var W = 1200, H = 340;
+    var n = phases.length || 4;
+    var bw = 250, gap = (W - 80 - n * bw) / Math.max(1, n - 1);
+    for (var i = 0; i < phases.length; i++) {
+      var ph = phases[i];
+      var x = 40 + i * (bw + gap);
+      var on = (ph.id === cur) || (ph.id === "pass" && cur === "pass");
+      var g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      var box = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      box.setAttribute("x", x); box.setAttribute("y", 70);
+      box.setAttribute("width", bw); box.setAttribute("height", 150);
+      box.setAttribute("rx", 10);
+      box.setAttribute("class", on ? "phbox on" : "phbox");
+      g.appendChild(box);
+      var t1 = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      t1.setAttribute("x", x + 14); t1.setAttribute("y", 96);
+      t1.setAttribute("class", "t-stage");
+      var lab = esc(ph.label);
+      if (ph.id === "pass" && ph.count) lab += " ×" + ph.count;
+      t1.textContent = lab; g.appendChild(t1);
+      var steps = ph.steps || [];
+      for (var j = 0; j < steps.length; j++) {
+        g.appendChild(chip(x + 14, 112 + j * 24 > 190 ? 190 : 112 + j * 26, esc(steps[j]), on));
+      }
+      /* 该相位的计数：只有当前相位有真实数字，其它显示占位 */
+      var info = "";
+      if (ph.id === "pass" && (d.pass_info || d.pass)) {
+        var _ps = d.pass_info || d.pass;
+        info = "第 " + _ps.i + "/" + _ps.n + " 趟" + (_ps.label ? " · " + _ps.label : "");
+      } else if (ph.id === "merge" && d.vid) {
+        info = (d.vid.frames_done || 0) + "/" + (d.vid.frames_total || 0) + " 帧";
+      } else if (ph.id === "scan") {
+        info = on ? "进行中" : (cur ? "已完成" : "待开始");
+      } else if (ph.id === "gate") {
+        info = (cur === "merge") ? "已打开" : "关闭（等所有趟结束）";
+      }
+      if (info) {
+        var t2 = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        t2.setAttribute("x", x + 14); t2.setAttribute("y", 208);
+        t2.setAttribute("class", "t-count");
+        t2.textContent = info; g.appendChild(t2);
+      }
+      svg.appendChild(g);
+    }
+    /* 人脸池：只在 pass/merge 之间存在，画在闸门下方 */
+    var pool = d.pool;
+    if (pool && pool.faces_total) {
+      var pt = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      pt.setAttribute("x", W / 2); pt.setAttribute("y", 268);
+      pt.setAttribute("text-anchor", "middle"); pt.setAttribute("class", "t-count");
+      pt.textContent = "人脸暂存池（落盘）：" + pool.faces + " / " + pool.faces_total + " 张脸";
+      svg.appendChild(pt);
+    }
+  }
+
+  window.mgPipePhases = function (d) {
+    var svg = document.getElementById("mgPipeSvg");
+    if (!svg) return false;
+    try { draw(svg, d || {}); return true; } catch (e) { return false; }
+  };
+})();

@@ -43,13 +43,14 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
     if not models:
         raise RuntimeError("分趟导出需要至少一个模型")
 
-    def _p(pct, msg, done=None, total=None):
+    def _p(pct, msg, done=None, total=None, meta=None):
         if progress:
-            progress(int(pct), msg, done, total)
+            progress(int(pct), msg, done, total, meta or {})
         log(msg)
 
     # ---- ① 扫描：分母在这一趟里长出来 ----
-    _p(2, "分趟导出：扫描人脸分配表 …")
+    _p(2, "分趟导出：扫描人脸分配表 …", meta={"phase": "scan", "pass_i": 0,
+                                          "pass_n": len(models), "pool": 0})
     idx = scan(video, models=models, start=int(cfg.get("start") or 0),
                end=(int(cfg["end"]) if cfg.get("end") else None), log=log)
     if not idx.get("swap_faces"):
@@ -65,7 +66,10 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
             raise RuntimeError("已取消")
         nm = str(m.get("name") or "")
         _p(2 + int(40 * (k - 1) / max(1, len(models))),
-           "分趟导出：第 %d/%d 趟 · %s" % (k, len(models), nm))
+           "分趟导出：第 %d/%d 趟 · %s" % (k, len(models), nm),
+           meta={"phase": "pass", "pass_i": int(k), "pass_n": len(models),
+                 "pass_label": nm, "faces_done": int(done_faces),
+                 "faces_total": int(total_faces), "pool": int(done_faces)})
         pool_idx = video.parent / (video.stem + "_cache") / "pool" / "index.json"
         # 一律算 XSeg 遮罩：合成要用哪张遮罩由 mask_mode 决定，原料里两张都备着，
         # 合流时才能和导出的遮罩口径一致（只算 dfm 遮罩时会差 34 LSB）。
@@ -77,7 +81,9 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
         raise RuntimeError("没有任何模型产出脸原料")
 
     # ---- ③ 合流：写 PNG，交给生产编码器 ----
-    _p(45, "分趟导出：合流（每帧只混合一次）…")
+    _p(45, "分趟导出：闸门打开，合流（每帧只混合一次）…",
+       meta={"phase": "merge", "pass_i": len(models), "pass_n": len(models),
+             "pool": int(done_faces), "faces_total": int(total_faces)})
     png_dir = Path(tempfile.mkdtemp(prefix="dfl_passes_"))
     try:
         # 和快速导出同一套"有效设置"：knobs 会把 mode/ct/erode/blur 归一化，

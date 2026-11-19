@@ -601,6 +601,19 @@ def _start_passes_export(body: dict):
     cfg["end"] = int(body.get("end_frame") or 0) or None
     cfg["crf"] = int(body.get("crf") or 17)
     cfg["encoder"] = str(body.get("encoder") or "")
+    # 分相位链路：趟是**串行**的，六列（并发视图）表达不了 —— 这是前端缺的那件事。
+    try:
+        _models_n = len([m for m in (cfg.get("single_models") or []) if m.get("dfm")])
+        with _merge_job_lock:
+            _merge_job["pipeline"] = {"shape": "passes", "phases": [
+                {"id": "scan", "label": "扫描", "steps": ["解码", "检测", "68点", "embedding → 分配表"]},
+                {"id": "pass", "label": "逐模型趟", "count": _models_n,
+                 "steps": ["解码", "对齐", "换脸", "遮罩", "写人脸池"]},
+                {"id": "gate", "label": "闸门", "steps": ["等所有趟写完"]},
+                {"id": "merge", "label": "合流", "steps": ["读池", "合成", "编码", "成片"]},
+            ]}
+    except Exception:                                          # noqa: BLE001
+        pass
     # 命名统一交给 _stage_out_path（_fused_cfg 已经算好）；要区分两单用 out_tag，
     # 不要在这里另起一套 —— 那正是上一轮对拍拿不到可信产物原因。
     with _merge_job_lock:
@@ -612,7 +625,7 @@ def _start_passes_export(body: dict):
                            "pct": 0, "msg": "分趟导出：启动 …", "passes": True})
     def _run():
         try:
-            def _prog(pct, msg, done=None, total=None):
+            def _prog(pct, msg, done=None, total=None, meta=None):
                 with _merge_job_lock:
                     _merge_job["pct"] = int(pct)
                     _merge_job["msg"] = str(msg)
@@ -620,6 +633,14 @@ def _start_passes_export(body: dict):
                         _merge_job["frames_done"] = int(done)
                     if total:
                         _merge_job["frames_total"] = int(total)
+                    if meta:
+                        _merge_job["phase"] = str(meta.get("phase") or "")
+                        _merge_job["pass"] = {"i": int(meta.get("pass_i") or 0),
+                                              "n": int(meta.get("pass_n") or 0),
+                                              "label": str(meta.get("pass_label") or "")}
+                        _merge_job["pool"] = {"faces": int(meta.get("pool") or 0),
+                                              "faces_total": int(meta.get("faces_total") or 0),
+                                              "kind": "disk"}
                 try:
                     _stage_progress("fused", int(pct), str(msg),
                                     frames_done=(int(done) if done is not None else None),

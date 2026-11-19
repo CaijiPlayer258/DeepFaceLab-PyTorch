@@ -6321,3 +6321,22 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 #p-merge .mgright .mgval { height: var(--mg-ctl-h); display: flex; align-items: center; }
 #p-merge .mgright .mgsrwrap { height: var(--mg-ctl-h); }
 
+
+/* 相位图（passes）：四块相位 + 池读数。样式沿用六列那套 token，不新造视觉语言。 */
+#p-merge .mgpipe .phbox {
+  fill: var(--panel-2);
+  stroke: var(--line-strong);
+  stroke-width: 1;
+}
+#p-merge .mgpipe .phbox.on {
+  stroke: var(--accent, #4ea1ff);
+  stroke-width: 1.6;
+}
+#p-merge .mgpipe .phchip {
+  fill: transparent;
+  stroke: var(--line);
+  stroke-width: 1;
+}
+#p-merge .mgpipe .phchip.on {
+  stroke: var(--accent, #4ea1ff);
+}
