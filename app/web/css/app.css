@@ -6397,3 +6397,7 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 #p-merge .mgpipe .fdot.on { opacity: .9; }
 #p-merge .mgpipe .fpool { fill: var(--panel-2); stroke: var(--line-strong); stroke-width: 1.2; }
 #p-merge .mgpipe .fpoolwater { fill: var(--accent, #4ea1ff); opacity: .5; }
+
+/* [dead] 分趟自定义图形样式（.fnode/.fpool/.fedge/.fdot/.fband/.phbox/.poolbypass/.mgpipeflow）
+   曾经用来画「另一套」分趟图，已被明确否掉：**图固定走 16-pipe-draw 的经典渲染**。
+   这些选择器当前没有任何元素使用；留着是为了回滚方便，不再扩展。 */
