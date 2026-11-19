@@ -2116,6 +2116,10 @@ def _fused_run(cfg: dict) -> dict:
     _dfm_label = Path(str(cfg.get("dfm") or "")).stem or "dfm"
     try:
         _msrc = _mask_src(cfg.get("settings") or {})
+        # _mask_src 返回的是 dict（source/model/label/model_from/model_note），
+        # 直接 str() 会把这整串 JSON 当车道名画到图上 —— 用户截图里那行糊在图上的文字就是它。
+        if isinstance(_msrc, dict):
+            _msrc = str(_msrc.get("label") or "")
     except Exception:                                      # noqa: BLE001
         _msrc = ""
     _xse_label = str(_msrc or "XSeg")
