@@ -36,6 +36,7 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
     from facelib.FaceType import FaceType
 
     video = Path(str(video))
+    log("[pass] enter model=%s want_xseg=%s limit=%s" % (model_name, want_xseg, limit))
     idx = json.loads(Path(str(index_path)).read_text(encoding="utf-8"))
     mine = [f for f in (idx.get("faces") or []) if str(f.get("model") or "") == str(model_name)]
     if limit:
@@ -50,13 +51,20 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
     # XSeg：mask_mode 走遮罩网络时必须有它，否则合成用的遮罩口径和导出不一致
     # （实测：只有 dfm 遮罩时，合成结果与快速导出差 34 LSB，差异全在脸框内）。
     _xseg = None
+    _mask_src = ""
     if want_xseg:
         try:
+            from .pipeline_stages import _mask_src as _msfn
+            _mask_src = _msfn({})          # 界面选的遮罩来源（XSegLite / XSeg / DFM）
+        except Exception:                                      # noqa: BLE001
+            _mask_src = ""
+        try:
             from .pipeline_stages import _stage_xseg
-            _xseg = _stage_xseg()
+            _xseg, _xs_res = _stage_xseg(str(_mask_src or ""))
             log("[pass:%s] 已装载 XSeg（遮罩来源与导出一致）" % model_name)
         except Exception as _e:                                # noqa: BLE001
-            log("[pass:%s] XSeg 装载失败（%s），这一趟只有 dfm 遮罩" % (model_name, str(_e)[:80]))
+            log("[pass:%s] XSeg 装载失败（%s: %s），这一趟只有 dfm 遮罩"
+                % (model_name, _e.__class__.__name__, str(_e)[:120]))
     t0 = time.time()
     d = Path(str(out_dir)) if out_dir else _pool_dir(video)
     (d / "chunks").mkdir(parents=True, exist_ok=True)

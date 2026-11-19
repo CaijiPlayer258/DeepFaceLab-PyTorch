@@ -51,7 +51,7 @@ def main() -> int:
     idx = scan(v, models=models, start=a.start, end=a.end, log=print)
     metas = []
     for m in models:
-        r = pass_run(v, _pool(v) / "index.json", m["name"], m["dfm"], log=print)
+        r = pass_run(v, _pool(v) / "index.json", m["name"], m["dfm"], log=print, want_xseg=True)
         if r.get("faces"):
             metas.append(r["path"])
     if not metas:
