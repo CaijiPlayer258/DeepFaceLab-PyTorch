@@ -723,5 +723,11 @@ def _start_passes_export(body: dict):
                                    "msg": "分趟导出失败：%s" % str(e)[:160],
                                    "finished_at": time.time()})
     threading.Thread(target=_run, name="passes-export", daemon=True).start()
+    # 立刻可画：把 phase 列表和初始计数一起回给前端（不用等第一次 status 轮询）
+    with _merge_job_lock:
+        _pl = _merge_job.get("pipeline")
     return _ok(ok=True, fused=False, passes=True, mode="passes", out=str(cfg["out"]),
+               pipeline=_pl,
+               phase="scan",
+               pool={"faces": 0, "faces_total": 0, "kind": "disk"},
                vram_plan={}, msg="分趟导出已启动")

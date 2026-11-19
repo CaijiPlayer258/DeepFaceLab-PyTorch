@@ -119,6 +119,22 @@
     if (_realPipe) _realPipe(d);
   }
 
+  /* 真正被进度页调用的入口是 MG_PIPE.paint（19-eff-drawer.js: MG_PIPE.paint(d)），
+     不是 window.mgpPipe —— 之前两轮都挂错了地方，所以「怎么都不生效」。
+     分片共享同一个 IIFE 作用域，这里能直接拿到 MG_PIPE。 */
+  try {
+    if (typeof MG_PIPE !== "undefined" && MG_PIPE && MG_PIPE.paint) {
+      var _origPaint = MG_PIPE.paint;
+      MG_PIPE.paint = function (d) {
+        try { _syncSub(d || {}); } catch (e) { /* 纯展示 */ }
+        try {
+          if (d && d.pipeline && d.pipeline.shape === "passes" && window.mgPipePhases(d)) return;
+        } catch (e) { /* 退回原渲染器 */ }
+        return _origPaint.call(MG_PIPE, d);
+      };
+    }
+  } catch (e) { /* 没有 MG_PIPE 就只保留轮询侧那一道保险 */ }
+
   try {
     Object.defineProperty(window, "mgpPipe", {
       configurable: true,
