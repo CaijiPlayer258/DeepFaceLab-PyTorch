@@ -6377,3 +6377,11 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   stroke: rgba(78,161,255,.22);
 }
 #p-merge .mgpipe .t-stage.on { fill: #4ea1ff; }
+
+/* 分趟旁路叠层：池 / 闸门 / 虚线旁路（都落在经典图同一坐标系里） */
+#p-merge .mgpipe rect.pool { stroke: var(--line-strong); }
+#p-merge .mgpipe .poolwater { fill: var(--accent, #4ea1ff); opacity: .5; }
+#p-merge .mgpipe rect.gate { stroke: var(--line-strong); }
+#p-merge .mgpipe rect.gate.on { stroke: var(--accent, #4ea1ff); stroke-width: 1.6; }
+#p-merge .mgpipe .poolbypass { stroke-dasharray: 3 4; opacity: .5; }
+#p-merge .mgpipe .poolbypass.dim { opacity: .2; }
