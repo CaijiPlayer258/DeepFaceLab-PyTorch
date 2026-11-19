@@ -62,27 +62,7 @@
       mgpFusedSteps(okAll ? "done" : (d.running ? "on" : (wasCancel ? "idle" : "err")));
       /* 流水线实况：这一份 status 就是那张图的唯一输入（stages → lane/曲线/光点） */
 
-/* ---- 真实链路（来自后端的 status.pipeline）----
-   六列图是**线程视图**：它按线程分列，所以看不到「对齐/归组」这种段落，也没法表达
-   「一趟只装一个模型」这种相位。后端把实际跑的链条按顺序发过来，这里照原样铺一行，
-   图和流程不一致时以这一行为准。 */
-function mgPipeFlow(status) {
-  var el = document.getElementById("mgPipeFlow");
-  if (!el) return;
-  var pl = status && status.pipeline;
-  if (!pl || !pl.steps || !pl.steps.length) { el.hidden = true; el.textContent = ""; return; }
-  el.hidden = false;
-  var parts = [];
-  for (var i = 0; i < pl.steps.length; i++) {
-    var st = pl.steps[i];
-    var t = st.label || st.id;
-    if (st.name) t += "（" + st.name + "）";
-    if (st.n > 1) t += " ×" + st.n;
-    parts.push(t);
-  }
-  el.textContent = parts.join("  →  ");
-}
-window.mgPipeFlow = mgPipeFlow;
+
       MG_PIPE.paint(d);
     }
 

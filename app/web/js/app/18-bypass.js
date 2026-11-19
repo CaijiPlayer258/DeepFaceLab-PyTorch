@@ -263,8 +263,6 @@
       /* 喂一拍 status：列标题计数、点亮、光点、卡住，全在这里
          （inflight 后端照给，只是界面不再显示「在飞 N」） */
       function paint(d) {
-        /* 真实链路：后端 status.pipeline 有就铺一行（六列图是线程视图，看不全流程） */
-        try { if (window.mgPipeFlow) window.mgPipeFlow(d); } catch (e) { /* 纯展示，失败不影响画图 */ }
         d = d || {};
         var right = $("mgPipeRight");
         var rate = Number((d.vid || {}).frame_fps || d.frame_fps || 0);

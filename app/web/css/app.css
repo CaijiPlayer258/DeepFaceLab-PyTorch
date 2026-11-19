@@ -6076,14 +6076,14 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   fill: var(--ink-1);
 }
 #p-merge .mgpipe .t-count {
-  font-size: 12px;
-  fill: var(--ink-2);
+  font-size: 10.5px;
+  fill: var(--ink-3);
   font-variant-numeric: tabular-nums;
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
 }
 #p-merge .mgpipe .t-lane {
-  font-size: 11px;
-  fill: var(--ink-1);
+  font-size: 9.5px;
+  fill: var(--ink-3);
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
 }
 /* （列间原来那句「在飞 N」已按用户要求去掉：连线改成「收束到腰点再散开」之后，
@@ -6321,18 +6321,3 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 #p-merge .mgright .mgval { height: var(--mg-ctl-h); display: flex; align-items: center; }
 #p-merge .mgright .mgsrwrap { height: var(--mg-ctl-h); }
 
-/* 真实链路（后端 status.pipeline）：六列图是线程视图，这一行才是后端实际跑的链条。
-   两者不一致时以这一行为准 —— 它由后端按实际顺序生成，前端不猜。 */
-#p-merge .mgpipeflow {
-  margin: 8px 18px 0;
-  padding: 8px 12px;
-  border-radius: 8px;
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  color: var(--ink-1);
-  font-size: 12px;
-  line-height: 1.6;
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
-  word-break: break-all;
-}
-#p-merge .mgpipeflow[hidden] { display: none; }
