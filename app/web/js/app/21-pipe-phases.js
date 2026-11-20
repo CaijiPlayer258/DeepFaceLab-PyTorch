@@ -99,6 +99,23 @@
     svg.appendChild(g);
   }
 
+  /* 分趟：池子必须是**真的一列**，连线才会 遮罩 → 池 → 合成。
+     这里只做两件事：切成列位置、把 pool 当作一个 stage 喂给 paint()（含水位）。 */
+  var poolAt = null;
+  function keepPool(d) {
+    if (!d || d.mode !== 'passes') return;
+    var want = (d.mask_on === false) ? 'dfm' : 'xseg';
+    if (poolAt !== want) {
+      if (typeof window.mgPoolColumn === 'function' && window.mgPoolColumn(want)) poolAt = want;
+    }
+    var faces = (d.pool || {}).faces || 0, total = (d.pool || {}).faces_total || 0;
+    var pi = d.pass_info || {};
+    d.pool = d.pool || {};
+    d.stages = d.stages || {};
+    d.stages.pool = { ticks: faces, lanes: ['池'], inflight: 0,
+                      level: total ? (faces / total) : 0 };
+  }
+
   function syncSub(d) {
     var sub = document.getElementById('mgPipeSub');
     if (!sub || !d || !d.mode) return;
@@ -124,7 +141,8 @@
          否则 lane 永远是「— 帧」、光点一次都不放（用户看到的就是"没动画"）。 */
       if (d && d.mode === 'passes') {
         try {
-          var _painted = false;
+          keepPool(d);
+      var _painted = false;
           if (typeof window.mgPassesPaint === 'function') _painted = window.mgPassesPaint(d);
           if (!_painted && typeof mgpStatusPaint === 'function') mgpStatusPaint(d);
           /* 经典图里未点亮的 lane 用的是 --ink-3，深底上几乎看不见；
@@ -172,8 +190,6 @@
       var sig = [d.mode, d.work_phase, (d.pool || {}).faces, (d.pass_info || {}).i, (d.pass_info || {}).label].join('|');
       if (sig === last) return;
       last = sig;
-      drawPool(d);
-      paintPoolWater(d);
     }).catch(function () {});
   }
   setInterval(tick, 1000);

@@ -112,6 +112,13 @@ class _StageMeter:
                 if v and not self.lanes.get(k):
                     self.lanes[k] = list(v)
 
+    def force_lanes(self, lanes: dict) -> None:
+        """覆盖式设置 lane 名（分趟时每趟换一个模型，名字必须跟着走）。"""
+        with self.lock:
+            for k, v in (lanes or {}).items():
+                if v:
+                    self.lanes[k] = list(v)
+
     def tick(self, key: str, n: int = 1) -> None:
         """交接点 +n（n>1 只给「一次回调跨了好几帧」那种地方用，比如 ffmpeg 编码进度）。"""
         with self.lock:

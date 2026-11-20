@@ -144,6 +144,10 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
                  "pass_label": nm, "faces_done": done_faces,
                  "faces_total": total_faces, "pool": done_faces,
                  "mask_on": bool(_mask_on), "frozen": True})
+        try:
+            _METER.force_lanes({"dfm": [str(nm) + "#0"]})   # 这一趟的模型名，图上要跟着换
+        except Exception:                                     # noqa: BLE001
+            pass
         _live = {"faces": 0}
 
         def _on_face(n, _nm=nm):

@@ -428,6 +428,26 @@
         if (!freezeAt) kick();
       }
 
+      /* 分趟：把「人脸暂存池」插成**真的一列**（不是叠层）——
+         只有变成列，连线才会走 遮罩 → 池 → 合成，而不是绕过池子直接连到合成。
+         afterKey：没选 XSeg 传 'dfm'，选了传 'xseg'。 */
+      window.mgPoolColumn = function (afterKey) {
+        try {
+          var i = KEYS.indexOf("pool");
+          if (afterKey) {
+            if (i < 0) {
+              var at = KEYS.indexOf(String(afterKey));
+              if (at < 0) return false;
+              KEYS.splice(at + 1, 0, "pool");
+            }
+            NAME.pool = "人脸暂存池";
+          } else if (i >= 0) {
+            KEYS.splice(i, 1);
+          }
+          return true;
+        } catch (e) { return false; }
+      };
+
       /* 分趟（passes）也要驱动这张图：stages 摊平后交给同一个 paint()。
          这个位置是**唯一**能拿到 MG_PIPE 的地方 —— 16 号开 IIFE、18 号 433 行收口，
          20/21 都在外面（实测 typeof MG_PIPE === 'undefined'，钩子返回 false）。 */

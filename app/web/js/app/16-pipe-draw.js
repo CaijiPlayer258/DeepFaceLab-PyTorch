@@ -188,7 +188,7 @@ window.mgPipeSetNodes = function (nodes) {
           layers.lbl.appendChild(col);
           geo[k] = { cx: cx, off: off, lanes: [], count: t2, col: col };
           /* 水位只填「缓存帧」这一列 —— 别的列是线程/队列，没有「攒了多少帧」这回事 */
-          var cup = (k === "encode" && !off);
+          var cup = ((k === "encode" || k === "pool") && !off);
           for (j = 0; j < n; j++) {
             var y = y0 + j * (laneH + GAP);
             var rect = mk("rect", { x: cx - BOXW / 2, y: y, width: BOXW, height: laneH,
