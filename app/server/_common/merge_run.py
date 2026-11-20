@@ -526,5 +526,7 @@ def _merge_worker(input_dir: str, out_mp4: str, aligned_dir: str, dfm: str,
             except OSError:
                 pass
 import threading as _th2
-_merge_job_lock = _th2.Lock()
+# RLock：_prog() 会先拿这把锁，再调 _stage_progress() → _stage_mirror() 又拿一次；
+# 用普通 Lock 时那是**自锁死**（同一线程二次 acquire），表现为「进度停在某一句不再动」。
+_merge_job_lock = _th2.RLock()
 _merge_proc = None          # 当前合成子进程，取消时用

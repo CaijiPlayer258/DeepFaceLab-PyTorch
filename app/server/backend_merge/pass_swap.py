@@ -32,7 +32,7 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
     返回 {model, faces, chunks, size, elapsed_s, path}。
     """
     import cv2
-    from .pipeline_stages import _dfm_session, _dfm_run_batch
+    from .pipeline_stages import _dfm_session, _dfm_run_batch, _dfm_release
     from facelib.LandmarksProcessor import get_transform_mat
     from facelib.FaceType import FaceType
 
@@ -54,6 +54,13 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
         return {"model": model_name, "faces": 0, "chunks": 0, "size": 0, "elapsed_s": 0.0,
                 "path": ""}
 
+    # 上一趟的 dfm 会话先放掉：8 GB 卡上两份会话叠着，第二趟装载会慢到分钟级
+    try:
+        _n_gone = _dfm_release(keep=str(dfm_path))
+        if _n_gone:
+            log("[pass:%s] 已释放上一趟的 dfm 会话 %d 份" % (model_name, _n_gone))
+    except Exception as _e:                                # noqa: BLE001
+        log("[pass:%s] 释放上一趟会话失败（%r），继续" % (model_name, _e))
     ent = _dfm_session(str(dfm_path))
     _stage("run")
     size = int(ent[2])

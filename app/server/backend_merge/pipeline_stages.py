@@ -912,6 +912,30 @@ _DFM_SESS = {}          # dfm -> (sess, input_name, size, nchw, providers)
 _INFER_CALLS = collections.Counter()   # 各阶段真正跑了几次推理（验收要断言合成阶段 = 0）
 
 
+def _dfm_release(keep: str = "") -> int:
+    """放掉常驻的 dfm 会话（keep 里那一条除外），把显存还给驱动。
+
+    为什么需要：分趟导出每趟换一个模型，会话是**按路径常驻**的 ——
+    上一趟的会话不放，8 GB 卡上第二趟就要在更紧的显存里加载，
+    表现出来就是「装载模型」几分钟不动（实测 6 分钟仍未进推理）。
+    keep 传这一趟要用的 dfm 路径。
+    """
+    keep = str(keep or "")
+    with _PRED_LOCK:
+        gone = [k for k in list(_DFM_SESS.keys()) if (keep not in k)]
+        for k in gone:
+            _DFM_SESS.pop(k, None)
+    if gone:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+        except Exception:                                     # noqa: BLE001
+            pass
+    return len(gone)
+
+
 def _stage_pred_dir(cache) -> Path:
     return Path(cache) / "pred"
 
