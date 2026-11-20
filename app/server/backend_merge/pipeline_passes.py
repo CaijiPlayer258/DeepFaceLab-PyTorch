@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
+import threading
 import tempfile
 import time
 from pathlib import Path
@@ -57,6 +59,7 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
         enc, preset = "libx264", "medium"
 
     def _p(pct, msg, done=None, total=None, meta=None):
+        _hb['t'] = time.time()
         if progress:
             progress(int(pct), msg, done, total, meta or {})
         log(msg)
@@ -65,6 +68,27 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
     if not models:
         raise RuntimeError("passes: cfg.single_models 为空（这一单没有模型）")
 
+    # ---- 看门狗：45 s 没有任何进度就把所有线程栈写到 <out>.stacks.txt ----
+    # 为什么要它：分趟走 HTTP worker 线程时，第 2 趟会停在「装载模型 …」不动，
+    # 而同一份代码在主线程里 2 s 就跑完 —— 没有栈就只能猜。
+    _hb = {'t': time.time(), 'done': False}
+    _stack_path = Path(str(cfg.get('out') or 'passes_out')).with_suffix('.stacks.txt')
+    def _watchdog():
+        import faulthandler
+        dumped = 0.0
+        while not _hb['done']:
+            time.sleep(2)
+            idle = time.time() - _hb['t']
+            if idle >= 45 and (time.time() - dumped) >= 30:
+                dumped = time.time()
+                try:
+                    with open(str(_stack_path), 'a', encoding='utf-8') as fh:
+                        fh.write('\n==== %s · 空闲 %.0fs ====\n' % (time.strftime('%H:%M:%S'), idle))
+                        faulthandler.dump_traceback(file=fh)
+                    log('[watchdog] %.0fs 没进度，线程栈已写入 %s' % (idle, _stack_path.name))
+                except Exception:                              # noqa: BLE001
+                    pass
+    threading.Thread(target=_watchdog, daemon=True, name='passes-watchdog').start()
     # ① 扫描
     _mm = int((cfg.get("config") or {}).get("mask_mode", 6) or 0)
     _mask_on = _mm >= 6                     # 6/7/8/9 才走遮罩网络；<6 用 dfm 遮罩
@@ -252,11 +276,12 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
         shutil.rmtree(str(png_dir), ignore_errors=True)
 
     try:
-        _METER.tick("encode", max(1, int(res.get("frames") or 1)))
+        _METER.tick("encode", max(0, int(res.get("frames") or 1) - int(_enc_done or 0)))
         _METER.stop()
     except Exception:                                     # noqa: BLE001
         pass
 
+    _hb['done'] = True
     _p(100, "分趟导出完成：%d 帧" % int(res.get("frames") or 0))
     return {"out": str(out), "frames": int(res.get("frames") or 0),
             "faces": int(done_faces), "elapsed_s": round(time.time() - t0, 1)}

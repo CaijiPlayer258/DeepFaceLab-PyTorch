@@ -457,6 +457,31 @@ def _stage_clear_dir(dirp, exts=_STAGE_IMG_EXTS, prefix="") -> int:
 
 
 # ---------------- 进度 / 日志 ----------------
+# stdout 不能同步写：导出 worker 线程里 print(flush=True) 一旦碰上「管道没人读」
+# （Electron / 被测脚本把 stdout 挂在一边），write 会**永久阻塞**，
+# 表现出来就是「装载模型 …」停住几分钟不动、栈停在 print 上（已用看门狗抓到过）。
+# 所以日志走一条独立的写线程：调用方只入队，永不阻塞；队列满了就丢。
+_PRINT_Q = queue.Queue(maxsize=4000)
+
+
+def _print_worker():
+    while True:
+        line = _PRINT_Q.get()
+        try:
+            print(line, flush=True)
+        except Exception:                                     # noqa: BLE001
+            pass
+
+
+threading.Thread(target=_print_worker, daemon=True, name="log-writer").start()
+
+
+def _safe_print(line):
+    try:
+        _PRINT_Q.put_nowait(line)
+    except Exception:                                         # noqa: BLE001
+        pass
+
 def _stage_log(msg):
     line = str(msg)[:300]
     with _STAGE_LOCK:
@@ -470,10 +495,7 @@ def _stage_log(msg):
         chain = bool(_STAGE_JOB.get("chain"))
     if chain:
         _vid_log(line)
-    try:
-        print("[stage] " + line, flush=True)
-    except UnicodeEncodeError:
-        pass
+    _safe_print("[stage] " + line)
 
 
 def _stage_set(**kw):

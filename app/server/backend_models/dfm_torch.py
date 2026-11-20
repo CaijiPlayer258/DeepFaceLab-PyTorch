@@ -806,7 +806,21 @@ class DfmTorch:
     def _log(self, msg):
         line = "[dfm-torch] " + msg
         self.log.append(line)
-        print(line, flush=True)
+        # 不能直接 print：这条日志在导出 worker 线程里跑，stdout 一旦没人读
+        # （Electron/fastapi/被测脚本把管道挂在一边）就会**把线程卡死在 write 上** ——
+        # 实测卡在「装载模型 …」几分钟不动，栈就停在这个 print。
+        # 先进应用的日志缓冲（_stage_log），拿不到才退回 print。
+        try:
+            from ..backend_merge.pipeline_stages import _stage_log as _sl
+            _sl(line)
+            return
+        except Exception:                                  # noqa: BLE001
+            pass
+        try:
+            from ..backend_merge.pipeline_stages import _safe_print as _sp
+            _sp(line)
+        except Exception:                                  # noqa: BLE001
+            pass
 
     def vram_mb(self) -> dict:
         """这个会话在卡上真正占了多少（torch 自己的账本，不是 nvidia-smi）。"""
