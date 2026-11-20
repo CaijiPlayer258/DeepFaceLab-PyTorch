@@ -80,6 +80,11 @@
     /* 趟交界时后端会先发一帧 pool=0（这一趟还没写完）—— 只增不减，别让数字闪。 */
     if (faces < (window.__mgPoolMax || 0)) faces = window.__mgPoolMax;
     else window.__mgPoolMax = faces;
+    /* 闸门开了：池子开始放水 —— 未合成的部分才是「还在池里」。 */
+    var _cmpNow = ((d.stages || {}).compose || {}).ticks || 0;
+    if ((d.work_phase === 'merge' || d.work_phase === 'encode') && total) {
+      faces = Math.max(0, total - _cmpNow);
+    }
     if (!total) return;
     var g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     g.setAttribute('data-pool-water', '1');

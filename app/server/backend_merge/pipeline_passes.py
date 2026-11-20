@@ -214,18 +214,40 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
             raise
         part = Path(str(out)).with_suffix(".part.mp4")
         fps = float(res.get("fps") or 25.0)
-        cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-nostats",
+        cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
                "-framerate", "%.6g" % fps, "-start_number", "1",
                "-i", str(png_dir / "%08d.png"), "-i", str(video),
                "-map", "0:v:0", "-map", "1:a:0?",
                "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
                "-c:v", enc, "-crf", str(int(crf)), "-preset", preset,
-               "-pix_fmt", "yuv420p", "-c:a", "copy", str(part)]
+               "-pix_fmt", "yuv420p", "-c:a", "copy",
+               "-progress", "pipe:1", "-nostats", str(part)]
         import subprocess as sp
-        pr = sp.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        _n_all = max(1, int(res.get("frames") or 1))
+        pr = sp.Popen(cmd, stdout=sp.PIPE, stderr=sp.PIPE, text=True,
+                      encoding="utf-8", errors="replace")
+        _enc_done = 0
+        for _line in (pr.stdout or []):
+            _line = (_line or "").strip()
+            if _line.startswith("frame="):
+                try:
+                    _n = int(_line.split("=", 1)[1])
+                except Exception:                             # noqa: BLE001
+                    continue
+                _step = _n - _enc_done
+                if _step > 0:
+                    _enc_done = _n
+                    try:
+                        _METER.tick("encode", _step)
+                    except Exception:                         # noqa: BLE001
+                        pass
+                    _p(92 + int(7 * min(1.0, _n / _n_all)),
+                       "分趟导出：编码 %d/%d 帧" % (_n, _n_all),
+                       _n, _n_all, meta={"phase": "encode", "mask_on": bool(_mask_on)})
+        _err = (pr.stderr.read() if pr.stderr else "") or ""
+        pr.wait()
         if pr.returncode:
-            raise RuntimeError("编码失败（ffmpeg %s）：%s" % (pr.returncode, (pr.stderr or "")[-400:]))
-        shutil.move(str(part), str(out))
+            raise RuntimeError("编码失败（ffmpeg %s）：%s" % (pr.returncode, _err[-400:]))
     finally:
         shutil.rmtree(str(png_dir), ignore_errors=True)
 
