@@ -115,7 +115,12 @@
     var pi = d.pass_info || {};
     d.pool = d.pool || {};
     d.stages = d.stages || {};
-    d.stages.pool = { ticks: faces, lanes: ['池'], inflight: 0,
+    /* 池的「出库」只在闸门开了之后才算数：
+         · 扫描/换脸阶段：ticks 固定 0 —— 池里在攒，不往合成流（否则会有假光点）；
+         · 合流阶段：ticks 跟 compose 走 —— 每合成一帧才出库一帧。 */
+    var _cmp = ((d.stages || {}).compose || {}).ticks || 0;
+    var _flow = (d.work_phase === 'merge' || d.work_phase === 'encode') ? _cmp : 0;
+    d.stages.pool = { ticks: _flow, lanes: ['池'], inflight: 0,
                       level: total ? (faces / total) : 0 };
     window.__mgPoolStage = d.stages.pool;
   }
@@ -185,6 +190,19 @@
     } catch (e) {}
   }
 
+  /* 模型预热（phase=load）：换脸列蓝色闪烁，告诉用户「在装载，还没开始推理」。 */
+  function paintLoading(d) {
+    var svg = document.getElementById('mgPipeSvg');
+    if (!svg) return;
+    var col = svg.querySelector('g.col[data-k="dfm"]');
+    var lanes = svg.querySelectorAll('rect[data-lane^="dfm#"]');
+    var on = !!(d && d.work_phase === 'load');
+    if (col) { if (on) col.classList.add('loading'); else col.classList.remove('loading'); }
+    [].slice.call(lanes).forEach(function (r) {
+      if (on) r.classList.add('loading'); else r.classList.remove('loading');
+    });
+  }
+
   function syncSub(d) {
     var sub = document.getElementById('mgPipeSub');
     if (!sub || !d || !d.mode) return;
@@ -215,6 +233,7 @@
       var _painted = false;
           if (typeof window.mgPassesPaint === 'function') _painted = window.mgPassesPaint(d);
       paintPoolColumn(d);
+      paintLoading(d);
           setTimeout(function () { paintPoolColumn(d); }, 80);
           if (!_painted && typeof mgpStatusPaint === 'function') mgpStatusPaint(d);
           /* 经典图里未点亮的 lane 用的是 --ink-3，深底上几乎看不见；

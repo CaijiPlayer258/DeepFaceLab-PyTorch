@@ -6401,3 +6401,23 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 /* [dead] 分趟自定义图形样式（.fnode/.fpool/.fedge/.fdot/.fband/.phbox/.poolbypass/.mgpipeflow）
    曾经用来画「另一套」分趟图，已被明确否掉：**图固定走 16-pipe-draw 的经典渲染**。
    这些选择器当前没有任何元素使用；留着是为了回滚方便，不再扩展。 */
+
+/* 分趟：模型预热（phase=load）—— 换脸列蓝色呼吸，说明还在装载、没开始推理 */
+@keyframes mgp-load-blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: .35; }
+}
+#p-merge .mgpipe g.col.loading text.t-stage,
+#p-merge .mgpipe g.col.loading text.t-lane,
+#p-merge .mgpipe g.col.loading rect.lane {
+  stroke: #4ea1ff !important;
+  color: #4ea1ff;
+  fill: rgba(78, 161, 255, .18);
+  animation: mgp-load-blink 1s ease-in-out infinite;
+}
+
+#p-merge .mgpipe rect.lane.loading {
+  stroke: #4ea1ff !important;
+  fill: rgba(78, 161, 255, .18);
+  animation: mgp-load-blink 1s ease-in-out infinite;
+}

@@ -25,7 +25,8 @@ def _pool_dir(video: Path) -> Path:
 
 
 def run(video, index_path, model_name, dfm_path, chunk_frames=16,
-        limit=None, log=print, out_dir=None, want_xseg=False, on_face=None) -> dict:
+        limit=None, log=print, out_dir=None, want_xseg=False, on_face=None,
+        on_stage=None) -> dict:
     """跑一趟：只处理 index.json 里属于 model_name 的脸。
 
     返回 {model, faces, chunks, size, elapsed_s, path}。
@@ -37,6 +38,13 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
 
     video = Path(str(video))
     log("[pass] enter model=%s want_xseg=%s limit=%s" % (model_name, want_xseg, limit))
+    def _stage(what):
+        try:
+            if on_stage:
+                on_stage(what)
+        except Exception:                                     # noqa: BLE001
+            pass
+    _stage("load")
     idx = json.loads(Path(str(index_path)).read_text(encoding="utf-8"))
     mine = [f for f in (idx.get("faces") or []) if str(f.get("model") or "") == str(model_name)]
     if limit:
@@ -47,6 +55,7 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
                 "path": ""}
 
     ent = _dfm_session(str(dfm_path))
+    _stage("run")
     size = int(ent[2])
     # XSeg：mask_mode 走遮罩网络时必须有它，否则合成用的遮罩口径和导出不一致
     # （实测：只有 dfm 遮罩时，合成结果与快速导出差 34 LSB，差异全在脸框内）。

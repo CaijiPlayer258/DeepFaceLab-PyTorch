@@ -168,7 +168,19 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
             except Exception:                                 # noqa: BLE001
                 pass
 
-        r = pass_run(video, pool_idx, nm, str(m["dfm"]), log=log,
+        def _on_stage(what, _k=k, _nm=nm):
+            try:
+                _p(2 + int(40 * (_k - 1) / max(1, len(todo))),
+                   ("分趟导出：第 %d/%d 趟 · %s · %s"
+                    % (_k, len(todo), _nm, "装载模型 …" if what == "load" else "推理中")),
+                   meta={"phase": "load" if what == "load" else "pass",
+                         "pass_i": _k, "pass_n": len(todo), "pass_label": _nm,
+                         "faces_done": done_faces, "faces_total": total_faces,
+                         "pool": done_faces, "mask_on": bool(_mask_on), "frozen": True})
+            except Exception:                                 # noqa: BLE001
+                pass
+
+        r = pass_run(video, pool_idx, nm, str(m["dfm"]), log=log, on_stage=_on_stage,
                      want_xseg=True, on_face=_on_face)
         done_faces += int(r.get("faces") or 0)
         if r.get("faces"):
