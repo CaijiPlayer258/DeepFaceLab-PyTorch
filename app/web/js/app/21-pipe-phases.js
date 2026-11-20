@@ -113,6 +113,12 @@
     fetch('/api/merge/export/status').then(function (r) { return r.json(); }).then(function (d) {
       syncSub(d);
       window.__mgMode = (d && d.mode) || '';
+      /* 分趟这条路以前没人启动 app 自己的轮询（mgFusedPoll），所以 MG_PIPE.paint 一次都没跑过，
+         图上的 lane/曲线/光点全是占位。这里只要它还在跑，就确保那条轮询在跑。 */
+      if (d && d.mode === 'passes' && d.running && !window.__mgFusedRunning) {
+        window.__mgFusedRunning = true;
+        if (typeof window.mgFusedStartPoll === 'function') window.mgFusedStartPoll();
+      }
       if (d && d.mode === 'passes') window.__mgPoolAfter = (d.mask_on === false) ? 'dfm' : 'xseg';
       /* 分趟这条路没有自己的轮询驱动经典图 —— 这里把 status 交给它，
          否则 lane 永远是「— 帧」、光点一次都不放（用户看到的就是"没动画"）。 */

@@ -907,7 +907,16 @@
 window.mgPassesPaint = function (d) {
   try {
     if (typeof MG_PIPE !== "undefined" && MG_PIPE && MG_PIPE.paint) {
-      MG_PIPE.paint(d || {});
+      /* lanesOf(st) 读的是**顶层** key（st.frames / st.det / …），
+         而 /api/merge/export/status 把阶段数据放在 d.stages 下面 ——
+         直接传 d 等于告诉渲染器「一条 lane 都没有」，于是 edges/pulses 全是 0。
+         这里把 stages 摊到顶层再喂，画法一行不改。 */
+      var flat = {};
+      var k;
+      for (k in d) if (Object.prototype.hasOwnProperty.call(d, k)) flat[k] = d[k];
+      var sg = (d && d.stages) || {};
+      for (k in sg) if (Object.prototype.hasOwnProperty.call(sg, k)) flat[k] = sg[k];
+      MG_PIPE.paint(flat);
       return true;
     }
   } catch (e) { /* 画不出来不该打断轮询 */ }

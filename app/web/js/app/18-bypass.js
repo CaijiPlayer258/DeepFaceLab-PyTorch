@@ -428,6 +428,20 @@
         if (!freezeAt) kick();
       }
 
+      /* 分趟（passes）也要驱动这张图：stages 摊平后交给同一个 paint()。
+         这个位置是**唯一**能拿到 MG_PIPE 的地方 —— 16 号开 IIFE、18 号 433 行收口，
+         20/21 都在外面（实测 typeof MG_PIPE === 'undefined'，钩子返回 false）。 */
+      window.mgPassesPaint = function (d) {
+        try {
+          var flat = {}, k;
+          for (k in d) if (Object.prototype.hasOwnProperty.call(d, k)) flat[k] = d[k];
+          var sg = (d && d.stages) || {};
+          for (k in sg) if (Object.prototype.hasOwnProperty.call(sg, k)) flat[k] = sg[k];
+          paint(flat);
+          return true;
+        } catch (e) { return false; }
+      };
+
       return { paint: paint, reset: reset, setStates: setStates, debug: debug,
                freeze: freeze, KEYS: KEYS, isLive: isLive };
     })();

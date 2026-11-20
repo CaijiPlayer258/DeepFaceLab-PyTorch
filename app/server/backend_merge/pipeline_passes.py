@@ -73,6 +73,7 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
     try:
         _METER.begin()
         _METER.reset(lanes={
+            'frames': ['解码'],
             'det': ['TinyMog#0'],
             'dfm': [str((models[0] or {}).get('name') or 'dfm') + '#0'] if models else ['dfm#0'],
             'xseg': ['XSegLite#0'],
