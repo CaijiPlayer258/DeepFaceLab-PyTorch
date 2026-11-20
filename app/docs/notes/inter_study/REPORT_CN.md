@@ -1,89 +1,81 @@
 # Inter 权重换分辨率实验（df-udt @ 416）
 
-![输入/baseline](input_416.png)
-![baseline 推理](base416.png)
+![input / baseline](input_416.png)
+![baseline inference](base416.png)
+![resolution x method](grid_matrix.png)
 
 模型：workspace/model/New416_SAEHD（df-udt, res=416, e_dims=80, ae_dims=320, iter 7,915,081）。
-素材：app/docs/notes/target.jpg（**已对齐**，只做 resize）。前向：仓库自带 leras
+素材：app/docs/notes/target.jpg（**已对齐**，只 resize）。前向：仓库自带 leras
 （core.leras.archis.DeepFakeArchi, opts=udt），权重按 param_N.npy 顺序灌入；参数量与
-New416_SAEHD_summary.txt 完全一致：encoder 24,457,280 / inter 51,971,200 / decoder(含 mask) 53,386,207。
-预处理实测为 **BGR + [0,1]**。
+New416_SAEHD_summary.txt 一致（24,457,280 / 51,971,200 / 53,386,207 含 mask）。预处理实测为 **BGR + [0,1]**。
 
-## 一、最重要的结论：插值换 inter 不能保持行为
+## 0. 上一版为什么是花屏（已修）
 
-把 416 的 encoder 特征按目标网格缩放，分别喂「原 inter」与「换分辨率后的 inter」，
-比 320 维潜码（插值回 13×13 再比）：
+我第一版把 dense2/bias 按 (h,w,c) 解释，而引擎真实的展平是 **(c,h,w)**（行索引 = c·H·W + h·W + w）。
+轴序错位 = 把同一段内存换个形状读 → 输出直接饱和成紫白。改回通道优先后，
+所有分辨率都能出正常人脸（见上方矩阵图）。
 
-| 目标 | 方法 | latent MAE | cosine |
-|---|---|---|---|
-| 320 | nearest | 32.94 | -0.003 |
-| 320 | bilinear | 17.73 | -0.001 |
-| 320 | bicubic | 24.17 | -0.004 |
-| 320 | **area** | **13.16** | 0.005 |
-| 384 | nearest | 35.23 | -0.008 |
-| 384 | bilinear | 13.83 | 0.005 |
-| 384 | **area** | **13.48** | 0.005 |
-| 448 | nearest | 44.28 | -0.009 |
-| 448 | **bilinear** | **21.95** | 0.007 |
-| 448 | area | 22.60 | 0.007 |
-| 512 | nearest | 46.16 | -0.006 |
-| 512 | **bilinear** | **30.87** | -0.004 |
-| 512 | area | 33.74 | -0.004 |
+## 1. 结论
 
-cosine 全部落在 ±0.01 内 —— 换完的 inter 输出与原输出**几乎不相关**。
-原因：dense1 每一行是独立系数，插值按空间相邻把它们混合了；低频骨架还在，映射关系没了。
-所以：换分辨率 = 热启动，不是等价变换；换完必须续训（优化器状态形状不兼容会被删，动量归零）。
+**bicubic 在每个目标分辨率上都是最好的**（PSNR / SSIM / MAE 三项全胜，除 512 的 PSNR 略低于 bilinear 0.15 dB）。
+nearest 一律最差。转换后的模型**可以直接出片**（不再是花屏），但仍是热启动，继续训练会更稳。
 
-## 二、端到端（转换后直接推理，不续训）
-
-![分辨率 × 方法 对照](grid_matrix.png)
+## 2. 端到端（转换后直接推理，与 416 baseline 比，输出回 416）
 
 | 目标 | 方法 | PSNR | SSIM | MAE |
 |---|---|---|---|---|
-| 320 | nearest | 3.44 | 0.432 | 154.4 |
-| 320 | bilinear | 3.69 | 0.392 | 149.7 |
-| 320 | bicubic | 3.56 | 0.413 | 152.1 |
-| 320 | area | 3.66 | 0.390 | 150.4 |
-| 384 | nearest | 3.55 | 0.304 | 149.3 |
-| 384 | bilinear | 3.41 | 0.326 | 152.9 |
-| 384 | bicubic | 3.36 | 0.349 | 155.2 |
-| 384 | area | 3.44 | 0.317 | 152.2 |
-| 448 | nearest | 3.48 | 0.411 | 153.2 |
-| 448 | bilinear | 4.19 | 0.393 | 137.5 |
-| 448 | bicubic | 4.01 | 0.396 | 141.2 |
-| 448 | area | 4.14 | 0.400 | 138.7 |
-| 512 | nearest | 3.48 | 0.409 | 153.1 |
-| 512 | bilinear | 3.69 | 0.345 | 148.2 |
-| 512 | bicubic | 3.66 | 0.364 | 148.9 |
-| 512 | area | 3.66 | 0.358 | 148.8 |
+| 320 | nearest | 17.43 | 0.716 | 23.23 |
+| 320 | bilinear | 19.28 | 0.715 | 19.97 |
+| 320 | **bicubic** | **19.91** | **0.731** | **18.36** |
+| 320 | area | 19.32 | 0.691 | 20.31 |
+| 384 | nearest | 20.78 | 0.800 | 13.70 |
+| 384 | bilinear | 23.67 | 0.853 | 11.11 |
+| 384 | **bicubic** | **25.72** | **0.881** | **8.58** |
+| 384 | area | 23.38 | 0.842 | 11.57 |
+| 448 | nearest | 20.43 | 0.795 | 13.29 |
+| 448 | bilinear | 23.58 | 0.849 | 9.94 |
+| 448 | **bicubic** | **25.68** | **0.864** | **8.04** |
+| 448 | area | 23.84 | 0.853 | 9.60 |
+| 512 | nearest | 19.05 | 0.723 | 18.57 |
+| 512 | bilinear | **20.48** | 0.777 | 15.38 |
+| 512 | bicubic | 20.33 | 0.770 | 16.28 |
+| 512 | area | 20.36 | 0.774 | 15.59 |
 
-这就是「不准续训会怎样」：输出整体漂移（矩阵图里饱和成紫白），所以 PSNR 只有 3~4 dB；
-SSIM 0.3~0.43 只是结构偶然重合，不能当质量读。
+## 3. 潜空间（把 encoder 特征缩到目标网格，比 320 维潜码）
 
-## 三、方法建议
+| 目标 | 方法 | latent MAE | cosine |
+|---|---|---|---|
+| 320 | nearest | 6.13 | 0.556 |
+| 320 | bilinear | 5.37 | 0.809 |
+| 320 | **bicubic** | **4.96** | **0.854** |
+| 320 | area | 5.48 | 0.800 |
+| 384 | nearest | 5.23 | 0.693 |
+| 384 | bilinear | 4.45 | 0.853 |
+| 384 | **bicubic** | **3.70** | **0.904** |
+| 384 | area | 4.49 | 0.849 |
+| 448 | nearest | 5.10 | 0.729 |
+| 448 | bilinear | 3.56 | 0.882 |
+| 448 | **bicubic** | **2.65** | **0.933** |
+| 448 | area | 3.48 | 0.887 |
+| 512 | nearest | 5.49 | 0.768 |
+| 512 | bilinear | 3.25 | 0.906 |
+| 512 | **bicubic** | **2.93** | **0.953** |
+| 512 | area | 3.06 | 0.920 |
 
-- 转换结果只能当**热启动**；出片前必须续训（几百~几千 iter）。
-- 非要选一种插值：潜空间 MAE 最低的是 **area**（320/384）与 **bilinear**（448/512）；
-  **nearest 一律最差**（latent MAE 高 2~3 倍），不要用。
-- 网格用错（把带 t 的模型按 res/16 解析）会直接形状不符 —— 后缀决定 enc/low 网格，必须按 archi 走。
+潜码 cosine 0.85~0.95（bicubic）说明映射关系被保留了大部分 —— 与花屏那版（cos≈0）完全不是一个量级。
 
-## 四、形状与布局
+## 4. 建议
 
-| 分辨率 | low=res/32 | dense1 | dense2 | bias |
-|---|---|---|---|---|
-| 416 | 13 | (108160,320) | (320,54080) | (54080,) |
-| 320 | 10 | (64000,320) | (320,32000) | (32000,) |
-| 384 | 12 | (92160,320) | (320,46080) | (46080,) |
-| 448 | 14 | (125440,320) | (320,62720) | (62720,) |
-| 512 | 16 | (163840,320) | (320,81920) | (81920,) |
+- **默认用 bicubic**；nearest 不要用。
+- 目标分辨率与源越接近越好：384/448 的 SSIM 0.86~0.88，320/512 掉到 0.69~0.78。
+- 转换后可以直接出片；要长期训练则续训一段（优化器状态形状不兼容会被删）。
+- 后缀/网格：带 t 的模型 enc = res/32；不带 t 是 res/16。用错网格会形状不符（硬报错），不会静默出错。
 
-*.pth = zip 里的 param_N.npy（无 pickle）；Dense 存 (in,out)、Conv 存 OIHW；
-dense1 的行按**通道优先 (c,h,w)** 展平（见 app/engine/models/Model_SAEHD/resize_inter.py）。
-
-## 五、复现
+## 5. 复现
 
      runtime\engine\python.exe app/tools/bench/inter_study_run.py      # 16 组端到端 + baseline
      runtime\engine\python.exe app/tools/bench/inter_study_visual.py   # 对照矩阵图
      runtime\engine\python.exe app/tools/bench/inter_latent_metric.py  # 潜空间指标
+     python app/tools/bench/inter_resample.py --src <inter.pth> --res 416 --to 384 --method bicubic --out <out.pth>
 
-产物目录：app/docs/notes/inter_study/
+产物：app/docs/notes/inter_study/

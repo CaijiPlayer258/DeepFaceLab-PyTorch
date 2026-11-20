@@ -2,89 +2,80 @@
 
 ![input / baseline](input_416.png)
 ![baseline inference](base416.png)
+![resolution x method](grid_matrix.png)
 
 Model: workspace/model/New416_SAEHD (df-udt, res=416, e_dims=80, ae_dims=320, iter 7,915,081).
-Input app/docs/notes/target.jpg is an **already aligned** crop (resize only). Forward pass uses the
-repo's own leras (core.leras.archis.DeepFakeArchи, opts=udt) with weights fed in param_N.npy order;
-parameter counts match New416_SAEHD_summary.txt exactly (24,457,280 / 51,971,200 / 53,386,207 incl. mask).
-Preprocessing measured to be **BGR + [0,1]**.
+Input app/docs/notes/target.jpg is an **already aligned** crop (resize only). Forward uses the repo's own
+leras (core.leras.archis.DeepFakeArchi, opts=udt); weights fed in param_N.npy order; parameter counts match
+New416_SAEHD_summary.txt (24,457,280 / 51,971,200 / 53,386,207 incl. mask). Preprocessing: **BGR + [0,1]**.
 
-## 1. Headline: interpolating inter does NOT preserve behaviour
+## 0. Why the previous version was garbage (fixed)
 
-Encode at 416, rescale the feature grid to the target, compare the 320-d latent code of the original
-versus the rescaled inter (both interpolated back to 13x13):
+The first attempt reshaped dense2/bias as (h,w,c), but the engine flattens **channel-major (c,h,w)**
+(row = c*H*W + h*W + w). Wrong axis order reinterprets the same bytes and saturates the output.
+After the fix every resolution produces a valid face (see the matrix above).
 
-| target | method | latent MAE | cosine |
-|---|---|---|---|
-| 320 | nearest | 32.94 | -0.003 |
-| 320 | bilinear | 17.73 | -0.001 |
-| 320 | bicubic | 24.17 | -0.004 |
-| 320 | **area** | **13.16** | 0.005 |
-| 384 | nearest | 35.23 | -0.008 |
-| 384 | bilinear | 13.83 | 0.005 |
-| 384 | **area** | **13.48** | 0.005 |
-| 448 | nearest | 44.28 | -0.009 |
-| 448 | **bilinear** | **21.95** | 0.007 |
-| 448 | area | 22.60 | 0.007 |
-| 512 | nearest | 46.16 | -0.006 |
-| 512 | **bilinear** | **30.87** | -0.004 |
-| 512 | area | 33.74 | -0.004 |
+## 1. Result
 
-Cosine stays within +/-0.01: the rescaled inter output is essentially uncorrelated with the original.
-dense1 rows are independent coefficients; interpolating mixes spatial neighbours, so the low-frequency
-shape survives but the mapping is destroyed. Rescaling is therefore a **warm start only**; retraining is
-mandatory (optimizer state is shape-incompatible and gets dropped).
+**bicubic wins at every target resolution** (best PSNR/SSIM/MAE; only 512 PSNR is 0.15 dB behind bilinear).
+nearest is always worst. Converted weights can produce usable output directly, but it is still a warm start.
 
-## 2. End-to-end (converted weights, no retraining)
-
-![resolution x method](grid_matrix.png)
+## 2. End-to-end (converted weights vs 416 baseline, outputs normalised to 416)
 
 | target | method | PSNR | SSIM | MAE |
 |---|---|---|---|---|
-| 320 | nearest | 3.44 | 0.432 | 154.4 |
-| 320 | bilinear | 3.69 | 0.392 | 149.7 |
-| 320 | bicubic | 3.56 | 0.413 | 152.1 |
-| 320 | area | 3.66 | 0.390 | 150.4 |
-| 384 | nearest | 3.55 | 0.304 | 149.3 |
-| 384 | bilinear | 3.41 | 0.326 | 152.9 |
-| 384 | bicubic | 3.36 | 0.349 | 155.2 |
-| 384 | area | 3.44 | 0.317 | 152.2 |
-| 448 | nearest | 3.48 | 0.411 | 153.2 |
-| 448 | bilinear | 4.19 | 0.393 | 137.5 |
-| 448 | bicubic | 4.01 | 0.396 | 141.2 |
-| 448 | area | 4.14 | 0.400 | 138.7 |
-| 512 | nearest | 3.48 | 0.409 | 153.1 |
-| 512 | bilinear | 3.69 | 0.345 | 148.2 |
-| 512 | bicubic | 3.66 | 0.364 | 148.9 |
-| 512 | area | 3.66 | 0.358 | 148.8 |
+| 320 | nearest | 17.43 | 0.716 | 23.23 |
+| 320 | bilinear | 19.28 | 0.715 | 19.97 |
+| 320 | **bicubic** | **19.91** | **0.731** | **18.36** |
+| 320 | area | 19.32 | 0.691 | 20.31 |
+| 384 | nearest | 20.78 | 0.800 | 13.70 |
+| 384 | bilinear | 23.67 | 0.853 | 11.11 |
+| 384 | **bicubic** | **25.72** | **0.881** | **8.58** |
+| 384 | area | 23.38 | 0.842 | 11.57 |
+| 448 | nearest | 20.43 | 0.795 | 13.29 |
+| 448 | bilinear | 23.58 | 0.849 | 9.94 |
+| 448 | **bicubic** | **25.68** | **0.864** | **8.04** |
+| 448 | area | 23.84 | 0.853 | 9.60 |
+| 512 | nearest | 19.05 | 0.723 | 18.57 |
+| 512 | bilinear | **20.48** | 0.777 | 15.38 |
+| 512 | bicubic | 20.33 | 0.770 | 16.28 |
+| 512 | area | 20.36 | 0.774 | 15.59 |
 
-This is what happens without retraining: outputs drift and saturate (see the matrix), hence PSNR 3-4 dB;
-SSIM 0.3-0.43 is coincidental structural overlap, not quality.
+## 3. Latent space (encoder features rescaled to the target grid, 320-d code compared)
 
-## 3. Practical guidance
+| target | method | latent MAE | cosine |
+|---|---|---|---|
+| 320 | nearest | 6.13 | 0.556 |
+| 320 | bilinear | 5.37 | 0.809 |
+| 320 | **bicubic** | **4.96** | **0.854** |
+| 320 | area | 5.48 | 0.800 |
+| 384 | nearest | 5.23 | 0.693 |
+| 384 | bilinear | 4.45 | 0.853 |
+| 384 | **bicubic** | **3.70** | **0.904** |
+| 384 | area | 4.49 | 0.849 |
+| 448 | nearest | 5.10 | 0.729 |
+| 448 | bilinear | 3.56 | 0.882 |
+| 448 | **bicubic** | **2.65** | **0.933** |
+| 448 | area | 3.48 | 0.887 |
+| 512 | nearest | 5.49 | 0.768 |
+| 512 | bilinear | 3.25 | 0.906 |
+| 512 | **bicubic** | **2.93** | **0.953** |
+| 512 | area | 3.06 | 0.920 |
 
-- Treat the converted model as a **warm start**; fine-tune before producing output.
-- If an interpolation must be chosen: lowest latent MAE is **area** (320/384) and **bilinear** (448/512);
-  **nearest is always worst** (2-3x higher latent MAE).
-- Using the wrong grid (parsing a `t` model as res/16) fails shape checks: the archi suffix decides enc/low.
+Latent cosine 0.85-0.95 for bicubic: most of the mapping is preserved (the broken build had cos~0).
 
-## 4. Shapes and layout
+## 4. Guidance
 
-| res | low=res/32 | dense1 | dense2 | bias |
-|---|---|---|---|---|
-| 416 | 13 | (108160,320) | (320,54080) | (54080,) |
-| 320 | 10 | (64000,320) | (320,32000) | (32000,) |
-| 384 | 12 | (92160,320) | (320,46080) | (46080,) |
-| 448 | 14 | (125440,320) | (320,62720) | (62720,) |
-| 512 | 16 | (163840,320) | (320,81920) | (81920,) |
-
-*.pth are zips of param_N.npy (no pickle); Dense stored (in,out), Conv OIHW; dense1 rows are flattened
-channel-first (c,h,w) - see app/engine/models/Model_SAEHD/resize_inter.py.
+- Default to **bicubic**; never use nearest.
+- Closer target = better: 384/448 reach SSIM 0.86-0.88, 320/512 drop to 0.69-0.78.
+- Converted weights can output directly; for long-term training, fine-tune a while (optimizer state is dropped).
+- Grid: models with `t` use enc = res/32, otherwise res/16; a wrong grid fails loudly.
 
 ## 5. Reproduce
 
      runtime\engine\python.exe app/tools/bench/inter_study_run.py      # 16 combos + baseline
      runtime\engine\python.exe app/tools/bench/inter_study_visual.py   # comparison matrix
      runtime\engine\python.exe app/tools/bench/inter_latent_metric.py  # latent metrics
+     python app/tools/bench/inter_resample.py --src <inter.pth> --res 416 --to 384 --method bicubic --out <out.pth>
 
 Artifacts: app/docs/notes/inter_study/

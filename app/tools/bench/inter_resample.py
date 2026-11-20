@@ -107,78 +107,67 @@ def _grid(n_old: int, n_new: int, method: str) -> np.ndarray:
     raise SystemExit("未知方法：%s" % method)
 
 
-def resample_2d(block: np.ndarray, n_new: int, method: str) -> np.ndarray:
-    """block: (n, n, C) → (n_new, n_new, C)。按轴分别左乘/右乘插值矩阵。"""
-    n = block.shape[0]
-    M = _grid(n, n_new, method)                      # (n_new, n)
-    tmp = np.tensordot(M, block, axes=(1, 0))        # (n_new, n, C)
-    out = np.tensordot(tmp, M, axes=(1, 1))          # (n_new, n_new, C)? 需要转置处理
-    return np.transpose(out, (0, 2, 1))
+CV2_METHODS = {"nearest": 0, "bilinear": 1, "bicubic": 2, "area": 3}
+
+
+def _interp_plane(plane, n_new, method, cv2):
+    import numpy as _np
+    code = {"nearest": cv2.INTER_NEAREST, "bilinear": cv2.INTER_LINEAR,
+            "bicubic": cv2.INTER_CUBIC, "area": cv2.INTER_AREA}[method]
+    return cv2.resize(_np.ascontiguousarray(plane, dtype=_np.float32), (n_new, n_new),
+                      interpolation=code)
 
 
 def convert(src, res_from: int, res_to: int, method: str, out) -> dict:
+    """按 **通道优先 (c,h,w)** 解析后做空间插值（这是引擎真实的展平次序）。
+
+    4.0 的老实现把 bias/dense2 按 (h,w,c) 解释 —— 等于把同一段内存换个形状读，
+    轴序错位，出来就是花屏。这里统一走 (C,h,w)。
+    """
+    import cv2
     arrs = read_pth(src)
     if len(arrs) < 4:
-        raise SystemExit("inter 里只有 %d 个数组，不是期望的 4 个（dense1/dense2 各 w+b）"
-                         % len(arrs))
+        raise SystemExit("inter 里只有 %d 个数组，不是期望的 4 个" % len(arrs))
     d1w, d1b, d2w, d2b = arrs[0], arrs[1], arrs[2], arrs[3]
     ae = int(d1w.shape[1])
-    ldr_from = int(round((d1w.shape[0] / ae) ** 0.5)) if False else None
-    # dense1 行数 = ldr² × C1；C1 由 dense2 的输出通道数推出（df: ae，liae: 2*ae）
+    # 有 t 时 enc = res/32，否则 res/16；本模型是 df-udt → /32
+    enc_hw = max(1, res_from // 32)
+    low_hw = max(1, res_from // 32)
+    enc_new = max(1, res_to // 32)
+    low_new = max(1, res_to // 32)
+
+    # dense1: (enc²*C, ae) → (C, enc, enc, ae)
     rows = int(d1w.shape[0])
-    cols2 = int(d2w.shape[1])
-    # 猜测 C1：rows / ldr² 必须是整数，且 ldr 与 res 的关系 = res/32
-    ldr_from = max(1, res_from // 32)
-    ldr_to = max(1, res_to // 32)
-    if rows % (ldr_from * ldr_from) != 0:
-        raise SystemExit("dense1 行数 %d 不能被 ldr²=%d 整除，模型或许不是 32 倍下采样"
-                         % (rows, ldr_from * ldr_from))
-    c1 = rows // (ldr_from * ldr_from)
-    if cols2 % (ldr_from * ldr_from) != 0:
-        raise SystemExit("dense2 列数 %d 不能被 ldr²=%d 整除" % (cols2, ldr_from * ldr_from))
-    c2 = cols2 // (ldr_from * ldr_from)
+    c1 = rows // (enc_hw * enc_hw)
+    b1 = d1w.reshape(c1, enc_hw, enc_hw, ae)
+    out1 = np.zeros((c1, enc_new, enc_new, ae), np.float32)
+    for c in range(c1):
+        for k in range(ae):
+            out1[c, :, :, k] = _interp_plane(b1[c, :, :, k], enc_new, method, cv2)
+    d1w_new = out1.reshape(-1, ae)
 
-    b1 = d1w.reshape(ldr_from, ldr_from, c1, ae)
-    b2 = d2w.reshape(ae, ldr_from, ldr_from, c2)
+    # dense2: (ae, low²*C) → (ae, C, low, low)
+    cols = int(d2w.shape[1])
+    c2 = cols // (low_hw * low_hw)
+    b2 = d2w.reshape(ae, c2, low_hw, low_hw)
+    out2 = np.zeros((ae, c2, low_new, low_new), np.float32)
+    for a in range(ae):
+        for c in range(c2):
+            out2[a, c] = _interp_plane(b2[a, c], low_new, method, cv2)
+    d2w_new = out2.reshape(ae, -1)
 
-    def _rs4(b, n_old, n_new):
-        """(h,w,c,ae) 或 (ae,h,w,c) 统一处理：把 h,w 两个轴重采样。"""
-        M = _grid(n_old, n_new, method)
-        if b.shape[0] == n_old and b.shape[1] == n_old:
-            t = np.tensordot(M, b, axes=(1, 0))
-            t = np.tensordot(t, M, axes=(1, 0))
-            return np.transpose(t, (0, 1, 2, 3))
-        if b.shape[1] == n_old and b.shape[2] == n_old:
-            t = np.tensordot(b, M.T, axes=(1, 0))     # (ae, n_new, w, c)? 保守写法见下
-            raise RuntimeError("dense2 走专门分支")
-        raise RuntimeError("未知布局")
-
-    # dense1: (ldr, ldr, c1, ae)
-    M = _grid(ldr_from, ldr_to, method)
-    t = np.tensordot(M, b1, axes=(1, 0))              # (n_new, ldr, c1, ae)
-    t = np.einsum("xy,yzca->xzca", M, t.transpose(1, 0, 2, 3))
-    d1w_new = np.ascontiguousarray(t).reshape(-1, ae)
-
-    # dense2: (ae, ldr, ldr, c2)
-    M2 = _grid(ldr_from, ldr_to, method)
-    t2 = np.einsum("ab,bhwd->ahwd", np.eye(ae), b2)   # 占位，保持形状
-    t2 = np.einsum("x h w d -> h x w d", b2)          # (ldr, ae, ldr, c2) 不必要，简化：
-    # 直接对 h 轴：sum_h M[x,h] * b[:, h, w, :]
-    th = np.einsum("xh,ahwd->axwd", M2, b2)           # (ae, n_new, ldr, c2)
-    tw = np.einsum("yw,axwd->axyd", M2, th)           # (ae, n_new, n_new, c2)
-    d2w_new = np.ascontiguousarray(tw).reshape(ae, -1)
-    # bias 与 dense2 的列一一对应 → 同样按 (ldr, ldr, c2) 重采样后展平
-    b2b = d2b.reshape(ldr_from, ldr_from, c2)
-    tb = np.einsum("xh,hwd->xwd", M2, b2b)
-    tb = np.einsum("yw,xwd->xyd", M2, tb)
-    d2b_new = np.ascontiguousarray(tb).reshape(-1)
+    # bias: (low²*C,) → (C, low, low)
+    b3 = d2b.reshape(c2, low_hw, low_hw)
+    out3 = np.zeros((c2, low_new, low_new), np.float32)
+    for c in range(c2):
+        out3[c] = _interp_plane(b3[c], low_new, method, cv2)
+    d2b_new = out3.reshape(-1)
 
     write_pth(out, [d1w_new.astype(np.float32), d1b.astype(np.float32),
                     d2w_new.astype(np.float32), d2b_new.astype(np.float32)])
-    return {"from": (ldr_from, c1, c2, ae), "to": (ldr_to,),
-            "dense1": (d1w.shape, d1w_new.shape),
+    return {"dense1": (d1w.shape, d1w_new.shape),
             "dense2": (d2w.shape, d2w_new.shape),
-            "bias": (d2b.shape, d2b_new.shape)}
+            "bias": (d2b.shape, d2b_new.shape), "grid": (enc_hw, enc_new)}
 
 
 def main():
