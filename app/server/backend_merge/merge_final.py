@@ -47,14 +47,35 @@ def merge(video, passes, out_path=None, cfg=None, frames=None, log=print,
                 names.append(c)
 
     t0 = time.time()
-    cache = {}
-    with ThreadPoolExecutor(max_workers=max(1, int(prefetch))) as pool_ex:
-        futs = {nm: pool_ex.submit(_load_chunks, pool, [nm]) for nm in names}
-        for nm in names:
-            cache.update(futs[nm].result())      # 消费顺序 = 提交顺序 = 帧序（顺序读）
-            futs.pop(nm, None)
+    # ---- 懒加载：按帧序**一块一块**读，不把整池灌进内存 ----
+    # 以前是把所有 chunk 一起 submit、全部读进来再合成。
+    # 4K 一单实测服务端 RSS 峰值 5.0 GB，其中几百 MB 就是池里的脸原料
+    # （416² 的 pred/mask/landmarks/xprd/xdst，每张脸 ~1.5 MB）。
+    # 池本来就是「按帧序抽水」，所以窗口里留 2 块就够；读完即丢。
+    import collections
+    key_chunk = {}                     # "f<frame>_<idx>_pred" -> chunk 名
+    for nm in names or []:
+        try:
+            with np.load(pool / nm) as z:
+                for k in z.files:
+                    key_chunk.setdefault(k, nm)
+        except Exception:                                     # noqa: BLE001
+            continue
+    cache = collections.OrderedDict()
+    _MAX_CHUNKS = 2
 
-    keys = sorted({k.rsplit("_", 1)[0] for k in cache if k.endswith("_pred")})
+    def _chunk_arrays(nm):
+        hit = cache.get(nm)
+        if hit is not None:
+            cache.move_to_end(nm)
+            return hit
+        arrs = _load_chunks(pool, [nm])
+        cache[nm] = arrs
+        while len(cache) > _MAX_CHUNKS:
+            cache.popitem(last=False)
+        return arrs
+
+    keys = sorted({k.rsplit("_", 1)[0] for k in key_chunk if k.endswith("_pred")})
     by_frame = {}
     for k in keys:
         fr, idx = k[1:].split("_")
@@ -91,14 +112,19 @@ def merge(video, passes, out_path=None, cfg=None, frames=None, log=print,
         if not ok or img is None:
             continue
         faces = []
+        _need = {key_chunk.get(k + "_pred") for _i, k in by_frame[frame]}
+        for _nm in _need:
+            if _nm:
+                _chunk_arrays(_nm)
         for _idx, k in sorted(by_frame[frame]):
-            pred = cache.get(k + "_pred")
-            mask = cache.get(k + "_mask")
-            lm = cache.get(k + "_lm")
+            _arr = cache.get(key_chunk.get(k + "_pred")) or {}
+            pred = _arr.get(k + "_pred")
+            mask = _arr.get(k + "_mask")
+            lm = _arr.get(k + "_lm")
             if pred is None or mask is None or lm is None:
                 continue
-            _xp = cache.get(k + "_xprd")
-            _xd = cache.get(k + "_xdst")
+            _xp = _arr.get(k + "_xprd")
+            _xd = _arr.get(k + "_xdst")
             faces.append({"landmarks": np.asarray(lm, np.float32),
                           "pred": np.asarray(pred, np.float32) / 255.0,
                           "prd_dfm": np.asarray(mask, np.float32) / 255.0,
