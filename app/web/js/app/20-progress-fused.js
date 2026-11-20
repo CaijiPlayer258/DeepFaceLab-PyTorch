@@ -63,9 +63,20 @@
       /* 流水线实况：这一份 status 就是那张图的唯一输入（stages → lane/曲线/光点） */
 
 
-      MG_PIPE.paint(d);
+      MG_PIPE.paint(mgPipeFlatten(d));
     }
 
+    /* status 的阶段数据在 d.stages 下面，而 lanesOf() 读的是顶层 —— 摊平一次；
+       分趟那单还要把「池」当成一个 stage 塞进去（窗口里由 21 号维护）。 */
+    function mgPipeFlatten(d) {
+      var flat = {}, k;
+      for (k in d) if (Object.prototype.hasOwnProperty.call(d, k)) flat[k] = d[k];
+      var sg = (d && d.stages) || {};
+      for (k in sg) if (Object.prototype.hasOwnProperty.call(sg, k)) flat[k] = sg[k];
+      if (window.__mgPoolStage) flat.pool = window.__mgPoolStage;
+      return flat;
+    }
+    window.mgPipeFlatten = mgPipeFlatten;
     function mgFusedStopPoll() {
       if (MGP_FUSED_TIMER) { clearInterval(MGP_FUSED_TIMER); MGP_FUSED_TIMER = null; }
     }

@@ -114,8 +114,47 @@
     d.stages = d.stages || {};
     d.stages.pool = { ticks: faces, lanes: ['池'], inflight: 0,
                       level: total ? (faces / total) : 0 };
+    window.__mgPoolStage = d.stages.pool;
   }
 
+  /* 池列自己的读数和的水位：paint 只填 encode 那一杯，池这杯要自己填。
+     几何照抄 17-water 的做法：整列当一个杯子，scaleY(level)。 */
+  /* 池列自己的读数和水位。
+     lane 方块画在 layers.box 那一层（不在 col 里），所以按 data-lane="pool#0" 找；
+     水位就用同一块 rect 的 y/h 再叠一块 scaleY(level) 的蓝面。 */
+  function paintPoolColumn(d) {
+    var svg = document.getElementById('mgPipeSvg');
+    if (!svg) return;
+    var faces = (d.pool || {}).faces || 0;
+    var total = (d.pool || {}).faces_total || 0;
+    var lv = total ? Math.max(0, Math.min(1, faces / total)) : 0;
+    var col = svg.querySelector('g.col[data-k="pool"]');
+    if (col) {
+      var cnt = col.querySelector('text.t-count');
+      if (cnt) cnt.textContent = faces + (total ? ' / ' + total : '') + ' 张';
+      var lt = col.querySelector('text.t-lane');
+      if (lt && (lt.textContent || '').trim() === '—') lt.textContent = '池';
+    }
+    var lane = svg.querySelector('rect[data-lane^="pool#"]');
+    if (!lane) return;
+    var key = 'pool-water';
+    var w = svg.querySelector('rect[data-pool-water="' + key + '"]');
+    if (!w) {
+      w = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      w.setAttribute('data-pool-water', key);
+      w.setAttribute('fill', '#4ea1ff');
+      w.setAttribute('fill-opacity', '0.55');
+      w.setAttribute('rx', lane.getAttribute('rx') || '7');
+      lane.parentNode.insertBefore(w, lane.nextSibling);
+    }
+    w.setAttribute('x', lane.getAttribute('x'));
+    w.setAttribute('y', lane.getAttribute('y'));
+    w.setAttribute('width', lane.getAttribute('width'));
+    w.setAttribute('height', lane.getAttribute('height'));
+    w.style.transformOrigin = 'center bottom';
+    w.style.transformBox = 'fill-box';
+    w.style.transform = 'scaleY(' + (Math.round(lv * 1000) / 1000) + ')';
+  }
   function syncSub(d) {
     var sub = document.getElementById('mgPipeSub');
     if (!sub || !d || !d.mode) return;
@@ -144,6 +183,8 @@
           keepPool(d);
       var _painted = false;
           if (typeof window.mgPassesPaint === 'function') _painted = window.mgPassesPaint(d);
+      paintPoolColumn(d);
+          setTimeout(function () { paintPoolColumn(d); }, 80);
           if (!_painted && typeof mgpStatusPaint === 'function') mgpStatusPaint(d);
           /* 经典图里未点亮的 lane 用的是 --ink-3，深底上几乎看不见；
              分趟这条路把字提亮一档（只改 fill，不动布局）。 */
