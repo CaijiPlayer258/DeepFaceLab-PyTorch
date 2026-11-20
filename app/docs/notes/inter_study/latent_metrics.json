@@ -1,0 +1,98 @@
+[
+  {
+    "res": 320,
+    "method": "nearest",
+    "latent_mae": 32.937557220458984,
+    "latent_cos": -0.00245700147934258
+  },
+  {
+    "res": 320,
+    "method": "bilinear",
+    "latent_mae": 17.733966827392578,
+    "latent_cos": -0.001183300744742155
+  },
+  {
+    "res": 320,
+    "method": "bicubic",
+    "latent_mae": 24.17357063293457,
+    "latent_cos": -0.003548483829945326
+  },
+  {
+    "res": 320,
+    "method": "area",
+    "latent_mae": 13.156685829162598,
+    "latent_cos": 0.004533300641924143
+  },
+  {
+    "res": 384,
+    "method": "nearest",
+    "latent_mae": 35.226131439208984,
+    "latent_cos": -0.007729565724730492
+  },
+  {
+    "res": 384,
+    "method": "bilinear",
+    "latent_mae": 13.830869674682617,
+    "latent_cos": 0.0046925307251513
+  },
+  {
+    "res": 384,
+    "method": "bicubic",
+    "latent_mae": 19.550003051757812,
+    "latent_cos": 0.00532885454595089
+  },
+  {
+    "res": 384,
+    "method": "area",
+    "latent_mae": 13.478647232055664,
+    "latent_cos": 0.005000789649784565
+  },
+  {
+    "res": 448,
+    "method": "nearest",
+    "latent_mae": 44.27799987792969,
+    "latent_cos": -0.008885468356311321
+  },
+  {
+    "res": 448,
+    "method": "bilinear",
+    "latent_mae": 21.951845169067383,
+    "latent_cos": 0.007281307131052017
+  },
+  {
+    "res": 448,
+    "method": "bicubic",
+    "latent_mae": 31.53040885925293,
+    "latent_cos": 0.005875166039913893
+  },
+  {
+    "res": 448,
+    "method": "area",
+    "latent_mae": 22.59801483154297,
+    "latent_cos": 0.006949668284505606
+  },
+  {
+    "res": 512,
+    "method": "nearest",
+    "latent_mae": 46.16378402709961,
+    "latent_cos": -0.006029016803950071
+  },
+  {
+    "res": 512,
+    "method": "bilinear",
+    "latent_mae": 30.86693572998047,
+    "latent_cos": -0.0035474924370646477
+  },
+  {
+    "res": 512,
+    "method": "bicubic",
+    "latent_mae": 39.62181854248047,
+    "latent_cos": -0.002962269587442279
+  },
+  {
+    "res": 512,
+    "method": "area",
+    "latent_mae": 33.74388885498047,
+    "latent_cos": -0.004079511854797602
+  }
+]
