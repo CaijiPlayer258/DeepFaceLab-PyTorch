@@ -77,3 +77,47 @@ absorbs image-content differences; 96 samples cannot constrain 16k-164k dimensio
 
 Code: app/tools/bench/inter_adv.py (interp matrix L, pinv, ls_correct), xseg_mask.py (masked metrics).
 Data: results_adv.json (48), results.json (16), latent_metrics.json.
+## 6. Going further: the blended solution (recommended)
+
+![best methods](best_compare.png)
+
+pinv applies the **full** inverse filter, which over-sharpens weight high frequencies (higher MAE);
+bicubic under-shoots. On the same grid a convex combination W' = a*pinv + (1-a)*bicubic is equivalent
+to **partial inverse filtering** (Wiener shrinkage: full inversion is not optimal under noise/quantisation).
+
+| target | bicubic | pinv | **blend a=0.5** | blend a=0.75 |
+|---|---|---|---|---|
+| 320 | 19.32 / 0.740 / 23.06 | 19.31 / 0.715 / 16.96 | **20.05 / 0.729 / 18.01** | 19.87 / 0.723 / **16.66** |
+| 384 | 23.32 / 0.813 / 13.37 | **24.12 / 0.866 / 11.97** | 23.89 / 0.846 / 12.72 | 24.06 / 0.859 / 12.35 |
+| 448 | 23.41 / 0.834 / 8.80 | 24.98 / 0.872 / 9.20 | **25.69 / 0.886 / 6.58** | 25.67 / 0.887 / 7.62 |
+| 512 | 20.26 / 0.814 / 18.78 | 21.19 / 0.837 / 19.00 | **23.80 / 0.842 / 8.88** | 23.07 / 0.845 / 13.24 |
+
+a=0.5 beats both bicubic and pinv on all three metrics at 448/512 (at 512 MAE drops from ~19 to 8.88).
+At 384 full pinv is still best; at 320 a=0.5-0.75 is the balanced choice.
+
+## 7. A dedicated learned linear map (gradient-trained dense1)
+
+encoder/decoder are resolution-agnostic and dense1 is linear, so W' can be optimised directly on the
+**end-to-end output** (`inter_learn_study.py`: pinv init + Adam + 64 video frames):
+
+| 448 | PSNR | SSIM | MAE |
+|---|---|---|---|
+| bicubic | 23.41 | 0.834 | 8.80 |
+| pinv | 24.98 | 0.872 | 9.20 |
+| **blend a=0.5** | **25.69** | 0.886 | **6.58** |
+| learned (400 steps, ~5 min GPU) | 23.33 | **0.890** | 14.32 |
+
+The learned map has the best SSIM (0.890) but clearly worse PSNR/MAE (underfit: 400 steps, batch 8;
+pixel L1 also favours averaged solutions) at the highest cost. Conclusion: prefer the closed form;
+a learned version only pays off with thousands of steps plus perceptual losses - which is training a
+model, not converting one.
+
+## 8. Final recommendation
+
+    448/512 (upscale): W' = 0.5*pinv(lam=1e-4) + 0.5*bicubic
+    384              : W' = pinv(lam=1e-1)  (or blend a=0.75, nearly identical)
+    320 (downscale)  : W' = blend a=0.5-0.75 (PSNR vs MAE trade-off)
+    avoid            : nearest; plain bicubic (512 MAE is >2x worse)
+
+Implementation: `inter_adv.resample_inter(mode='pinv', lam=...)` plus the convex mix in `inter_blend_study.py`.
+All metrics computed inside the XSegLite mask.
