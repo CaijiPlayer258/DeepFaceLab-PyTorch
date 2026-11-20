@@ -121,6 +121,8 @@
           }
         } catch (e) {}
             if (d.running) return;
+            /* 还没开始的那一拍：running=False 且 ok 尚未写出来 —— 不是失败，别弹「导出失败」。 */
+            if (d.ok === null || d.ok === undefined) return;
             fired = true;
             mgFusedStopPoll();
             window.__mgFusedRunning = false;
