@@ -518,13 +518,34 @@ def compose_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
         out = frame_bgr if roi is False else frame_bgr.copy()
         out[y0:y1, x0:x1] = np.clip(blended * 255.0, 0, 255).astype(np.uint8)
     else:
-        # 多张脸：整帧浮点累加，最后只回一次 u8（和 4.0 完全一致）
-        work = frame_bgr.astype(np.float32) / 255.0
-        for fw, mw, roi_f, roi_u8, (x0, y0, x1, y1) in layers:
-            sub = work[y0:y1, x0:x1]
-            blended = _blend_layer(sub, fw, mw, mode, dst_u8=roi_u8)
-            work[y0:y1, x0:x1] = blended
-        out = np.clip(work * 255.0, 0, 255).astype(np.uint8)
+        # 多张脸。4.0 的做法是「整帧 float32 累加，最后回一次 u8」——
+        # 4K 上这一步实测 190 ms 起（astype 22 + 混合 193 + clip/astype 46），每帧都做。
+        # 关键观察：只要这些脸的 ROI 两两不相交，逐块混合 == 整帧混合（逐字节相同），
+        # 因为每个像素只被一张脸碰过。相交时才退回整帧路径（保 4.0 的舍入）。
+        boxes = [(x0, y0, x1, y1) for (_fw, _mw, _rf, _ru, (x0, y0, x1, y1)) in layers]
+        _disjoint = True
+        for i in range(len(boxes)):
+            ax0, ay0, ax1, ay1 = boxes[i]
+            for j in range(i + 1, len(boxes)):
+                bx0, by0, bx1, by1 = boxes[j]
+                if ax0 < bx1 and bx0 < ax1 and ay0 < by1 and by0 < ay1:
+                    _disjoint = False
+                    break
+            if not _disjoint:
+                break
+        if _disjoint:
+            out = frame_bgr.copy() if roi is False else frame_bgr
+            for fw, mw, roi_f, roi_u8, (x0, y0, x1, y1) in layers:
+                blended = _blend_layer(roi_f, fw, mw, mode, dst_u8=roi_u8)
+                out[y0:y1, x0:x1] = np.clip(blended * 255.0, 0, 255).astype(np.uint8)
+        else:
+            # ROI 相交：这才是必须整帧浮点的那种情况（4.0 的舍入语义）
+            work = frame_bgr.astype(np.float32) / 255.0
+            for fw, mw, roi_f, roi_u8, (x0, y0, x1, y1) in layers:
+                sub = work[y0:y1, x0:x1]
+                blended = _blend_layer(sub, fw, mw, mode, dst_u8=roi_u8)
+                work[y0:y1, x0:x1] = blended
+            out = np.clip(work * 255.0, 0, 255).astype(np.uint8)
     timings["blend_ms"] = timings.get("blend_ms", 0.0) + (time.time() - t_b) * 1000.0
     out = _apply_sr_layers(out, layers, timings)
     return out
