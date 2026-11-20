@@ -111,6 +111,11 @@
      这里只做两件事：切成列位置、把 pool 当作一个 stage 喂给 paint()（含水位）。 */
   var poolAt = null;
   function keepPool(d) {
+    window.__mgPoolDebug = window.__mgPoolDebug || { calls: 0, last: null };
+    window.__mgPoolDebug.calls += 1;
+    window.__mgPoolDebug.last = { mode: d && d.mode, ph: d && d.work_phase,
+                                  faces: d && (d.pool || {}).faces,
+                                  total: d && (d.pool || {}).faces_total };
     if (!d || d.mode !== 'passes') return;
     var want = (d.mask_on === false) ? 'dfm' : 'xseg';
     if (poolAt !== want) {
@@ -124,9 +129,22 @@
          · 扫描/换脸阶段：ticks 固定 0 —— 池里在攒，不往合成流（否则会有假光点）；
          · 合流阶段：ticks 跟 compose 走 —— 每合成一帧才出库一帧。 */
     var _cmp = ((d.stages || {}).compose || {}).ticks || 0;
-    var _flow = (d.work_phase === 'merge' || d.work_phase === 'encode') ? _cmp : 0;
-    d.stages.pool = { ticks: _flow, lanes: ['池'], inflight: 0,
-                      level: total ? (faces / total) : 0 };
+    var _ph = String(d.work_phase || '');
+    var _flow = (_ph === 'merge' || _ph === 'encode') ? _cmp : 0;
+    /* 池列上那个数字只由 paint 写，这里只决定「它该是几」：
+         · 扫描/装载/换脸：只增不减（趟交界后端会发一帧 0，别让数字跳）
+         · 合流/编码：total − compose（放水）
+         · 其它（收工/未开单）：保持上一次的数，不回 0
+       以前我这边也写一遍文字，两边格式不同就变成 457 ⇄ 0 一直闪。 */
+    var _shown = Number(window.__mgPoolShown || 0);
+    if (_ph === 'merge' || _ph === 'encode') {
+      _shown = Math.max(0, total - _cmp);
+    } else if (_ph === 'scan' || _ph === 'load' || _ph === 'pass') {
+      _shown = Math.max(_shown, faces);
+    }
+    window.__mgPoolShown = _shown;
+    d.stages.pool = { ticks: _shown, lanes: ['池'], inflight: 0,
+                      level: total ? (_shown / total) : 0 };
     window.__mgPoolStage = d.stages.pool;
   }
 
@@ -145,9 +163,6 @@
     if (col) {
       var lt = col.querySelector('text.t-lane');
       if (lt && (lt.textContent || '').trim() === '—') lt.textContent = '池';
-      var cnt = col.querySelector('text.t-count');
-      /* 和 paint 写同一个格式（"N 帧"），两边都写也不会闪；数字取单调值 */
-      if (cnt) cnt.textContent = faces + ' 帧';
     }
     var lane = svg.querySelector('rect[data-lane^="pool#"]');
     if (!lane) return;
@@ -218,7 +233,7 @@
   var last = '';
   function tick() {
     var svg = document.getElementById('mgPipeSvg');
-    if (!svg || document.visibilityState === 'hidden') return;
+    if (!svg) return;
     fetch('/api/merge/export/status').then(function (r) { return r.json(); }).then(function (d) {
       syncSub(d);
       finishOnce(d);

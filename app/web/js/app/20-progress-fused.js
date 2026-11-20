@@ -73,7 +73,15 @@
       for (k in d) if (Object.prototype.hasOwnProperty.call(d, k)) flat[k] = d[k];
       var sg = (d && d.stages) || {};
       for (k in sg) if (Object.prototype.hasOwnProperty.call(sg, k)) flat[k] = sg[k];
-      if (window.__mgPoolStage) flat.pool = window.__mgPoolStage;
+      /* 池列：只要这单是分趟，就永远给 paint 一个 pool 阶段 ——
+         以前只在 21 号 tick 之后才有，中间那 1 秒里 paint 会把池列整个重建成「0 帧」。 */
+      if (window.__mgMode === "passes") {
+        flat.pool = { ticks: Number(window.__mgPoolShown || 0),
+                      lanes: ["池"],
+                      inflight: 0 };
+      } else if (window.__mgPoolStage) {
+        flat.pool = window.__mgPoolStage;
+      }
       return flat;
     }
     window.mgPipeFlatten = mgPipeFlatten;
