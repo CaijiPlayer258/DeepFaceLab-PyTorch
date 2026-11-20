@@ -143,7 +143,7 @@
       _shown = Math.max(_shown, faces);
     }
     window.__mgPoolShown = _shown;
-    d.stages.pool = { ticks: _shown, lanes: ['池'], inflight: 0,
+    d.stages.pool = { ticks: _flow, lanes: ['池'], inflight: 0,
                       level: total ? (_shown / total) : 0 };
     window.__mgPoolStage = d.stages.pool;
   }
@@ -188,6 +188,8 @@
   function finishOnce(d) {
     if (!d || d.mode !== 'passes') return;
     if (d.running) { finished = false; return; }
+    /* 刚开单那一拍 running 还是 False、ok 还是 None —— 那不是失败，是还没开始。 */
+    if (d.ok === null || d.ok === undefined) return;
     if (finished) return;
     finished = true;
     var okAll = !!d.ok && !d.cancelled;
