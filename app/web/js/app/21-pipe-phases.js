@@ -77,6 +77,9 @@
     if (old) svg.removeChild(old);
     if (!d || d.mode !== 'passes') return;
     var faces = (d.pool || {}).faces || 0, total = (d.pool || {}).faces_total || 0;
+    /* 趟交界时后端会先发一帧 pool=0（这一趟还没写完）—— 只增不减，别让数字闪。 */
+    if (faces < (window.__mgPoolMax || 0)) faces = window.__mgPoolMax;
+    else window.__mgPoolMax = faces;
     if (!total) return;
     var g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     g.setAttribute('data-pool-water', '1');
@@ -130,10 +133,11 @@
     var lv = total ? Math.max(0, Math.min(1, faces / total)) : 0;
     var col = svg.querySelector('g.col[data-k="pool"]');
     if (col) {
-      var cnt = col.querySelector('text.t-count');
-      if (cnt) cnt.textContent = faces + (total ? ' / ' + total : '') + ' 张';
       var lt = col.querySelector('text.t-lane');
       if (lt && (lt.textContent || '').trim() === '—') lt.textContent = '池';
+      var cnt = col.querySelector('text.t-count');
+      /* 和 paint 写同一个格式（"N 帧"），两边都写也不会闪；数字取单调值 */
+      if (cnt) cnt.textContent = faces + ' 帧';
     }
     var lane = svg.querySelector('rect[data-lane^="pool#"]');
     if (!lane) return;
@@ -155,6 +159,32 @@
     w.style.transformBox = 'fill-box';
     w.style.transform = 'scaleY(' + (Math.round(lv * 1000) / 1000) + ')';
   }
+  var finished = false;
+  function finishOnce(d) {
+    if (!d || d.mode !== 'passes') return;
+    if (d.running) { finished = false; return; }
+    if (finished) return;
+    finished = true;
+    var okAll = !!d.ok && !d.cancelled;
+    try {
+      if (okAll && typeof window.toast === 'function') {
+        toast("导出完成", String(d.out || '').slice(-60), "success");
+      } else if (!okAll && typeof window.toast === 'function') {
+        toast(d.cancelled ? "已取消导出" : "导出失败",
+              String(d.error || d.msg || '').slice(0, 120), d.cancelled ? "info" : "error");
+      }
+    } catch (e) {}
+    try {
+      if (typeof window.mgpResultShow === 'function') {
+        window.mgpResultShow(okAll, {
+          phase: okAll ? "done" : (d.cancelled ? "cancelled" : "failed"),
+          out_video: d.out, out: d.out, fused: false,
+          error: d.error || d.msg || ""
+        });
+      }
+    } catch (e) {}
+  }
+
   function syncSub(d) {
     var sub = document.getElementById('mgPipeSub');
     if (!sub || !d || !d.mode) return;
@@ -168,6 +198,7 @@
     if (!svg || document.visibilityState === 'hidden') return;
     fetch('/api/merge/export/status').then(function (r) { return r.json(); }).then(function (d) {
       syncSub(d);
+      finishOnce(d);
       window.__mgMode = (d && d.mode) || '';
       /* 分趟这条路以前没人启动 app 自己的轮询（mgFusedPoll），所以 MG_PIPE.paint 一次都没跑过，
          图上的 lane/曲线/光点全是占位。这里只要它还在跑，就确保那条轮询在跑。 */
