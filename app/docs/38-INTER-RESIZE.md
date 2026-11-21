@@ -1,7 +1,7 @@
 # 38 · Inter 分辨率转换（模型改分辨率）
 
 > 状态：生产默认 `blend`（按张量分组：dense1 = 伪逆，dense2/bias = lanczos 插值），2026-11 定稿。
-> 实验与数据见 [inter_study/REPORT_CN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/4.1-beta/app/docs/notes/inter_study/REPORT_CN.md)。
+> 实验与数据见 [inter_study/REPORT_CN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/master/app/docs/notes/inter_study/REPORT_CN.md)。
 
 ## 1. 它做什么
 
@@ -88,6 +88,6 @@ app/tools/bench/xseg_mask.py                    XSegLite 遮罩内指标 + ncc /
 并用工具跑一次、比对「实验 vs 工具」数值（曾因漏改 silent 回落到 bilinear）。
 ## 7. 仓库链接
 
-- 分支：<https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/tree/4.1-beta>
-- 实验目录：[app/docs/notes/inter_study](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/4.1-beta/app/docs/notes/inter_study/README.md)
-- 报告：[REPORT_CN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/4.1-beta/app/docs/notes/inter_study/REPORT_CN.md) ／ [REPORT_EN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/4.1-beta/app/docs/notes/inter_study/REPORT_EN.md)
+- 分支：<https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/tree/master>
+- 实验目录：[app/docs/notes/inter_study](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/master/app/docs/notes/inter_study/README.md)
+- 报告：[REPORT_CN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/master/app/docs/notes/inter_study/REPORT_CN.md) ／ [REPORT_EN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/master/app/docs/notes/inter_study/REPORT_EN.md)
