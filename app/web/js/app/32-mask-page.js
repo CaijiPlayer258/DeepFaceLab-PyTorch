@@ -386,7 +386,10 @@
       if (seen[base]) return;
       seen[base] = 1;
       var card = findCardByTitle(box, base);
-      if (card) mergeInto(card, it.g);
+      if (card) {
+        mergeInto(card, it.g);
+        try { if (window.__enhanceSelects) window.__enhanceSelects(card); } catch (e) {}
+      }
       else leftover.push({ base: base, g: it.g });
     });
 
@@ -401,7 +404,10 @@
       var still = [];
       leftover.forEach(function (it) {
         var card = findCardByTitle(box, it.base);
-        if (card) mergeInto(card, it.g);
+        if (card) {
+          mergeInto(card, it.g);
+          try { if (window.__enhanceSelects) window.__enhanceSelects(card); } catch (e) {}
+        }
         else still.push(it.g);
       });
       if (!still.length) return;
