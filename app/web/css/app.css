@@ -2098,10 +2098,18 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
   overflow-x: hidden;
   scrollbar-width: thin;
 }
+/* 两栏共用全局那套（10px 槽 + 2px 内边距收窄 + 9999px 圆角），这里只声明宽度来源 */
 #p-merge .mgleft::-webkit-scrollbar,
-#p-merge .mgright::-webkit-scrollbar { width: 6px; }
+#p-merge .mgright::-webkit-scrollbar { width: 10px; }
 #p-merge .mgleft::-webkit-scrollbar-thumb,
-#p-merge .mgright::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 3px; }
+#p-merge .mgright::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+#p-merge .mgleft::-webkit-scrollbar-thumb:hover,
+#p-merge .mgright::-webkit-scrollbar-thumb:hover { background: var(--ink-3); background-clip: padding-box; }
 #p-merge .mgleft::-webkit-scrollbar-track,
 #p-merge .mgright::-webkit-scrollbar-track { background: transparent; }
 #p-merge .mgsec { padding: 10px 0; }
@@ -6440,4 +6448,17 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   stroke: #4ea1ff !important;
   fill: rgba(78, 161, 255, .18);
   animation: mgp-load-blink 1s ease-in-out infinite;
+}
+
+/* ---------- 合成器右栏：分组标题吸顶（面板标题吸顶） ----------
+   右栏是一个滚动容器，标题原本跟着内容滚，滚一点就会看到半截 “DETEC …”，
+   像是被截断。改成 sticky + 面板底色，滚到哪都完整可见。 */
+#p-merge .mgright { padding-top: 4px; scroll-padding-top: 4px; }
+#p-merge .mgright > .mgsec > .mggrphd,
+#p-merge .mgright > .mgsec > summary.mggrphd {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--panel);
+  padding-top: 2px;
 }
