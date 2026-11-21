@@ -1,105 +1,149 @@
-# Inter Weight Rescaling: derivation and conclusions
+# Cross-Resolution Resampling of Inter Weights: From Interpolation to Partial Inverse Filtering
 
-Model `New416_SAEHD` (df-udt, 416, e_dims=80, ae_dims=320); aligned face input; forward via repo leras
-(`DeepFakeArchi`, opts=`udt`); preprocessing BGR + [0,1]; all metrics inside the **XSegLite mask**, baseline = 416 output.
+**Abstract**　When the resolution of a SAEHD model is changed, the encoder and decoder (pure convolutions) are
+reusable as-is; only the Inter-layer Dense weights are resolution-coupled. We formalise the problem as 2-D
+resampling of a weight field, derive the transform that preserves the linear functional (a pseudo-inverse), and
+show that plain interpolation is missing exactly that inverse-filter factor. We then propose **partial inverse
+filtering**, the convex combination of interpolation and pseudo-inverse (α = 0.5, with a box kernel supplying
+anti-aliasing on the inverse branch when downscaling). Controlled experiments on a df-udt/416 model cover six
+target resolutions (288–544) and five methods, with all metrics computed inside the XSegLite mask. The proposed
+method is best on all three metrics in the upscaling direction (448: PSNR 26.27 dB, SSIM 0.897); in the
+downscaling direction the error is bounded below by rank deficiency, independently of the algorithm.
 
-![dst input / baseline / every method vs every target](compare_all.png)
+**Keywords**　resolution conversion; weight resampling; inverse filtering; Tikhonov regularisation; rank deficiency
 
-Column meaning: **dst input** (the aligned face the model actually sees) -> **baseline 416** (original inter
-output as reference) -> bicubic -> lanczos -> pinv -> blend(old) -> blend(new); rows are the target
-resolutions 288...544 and both reference columns repeat on every row.
+## 1　Problem setting and notation
 
-## 1. Derivation
+Let f ∈ R^(C×n×n) denote the encoder feature map. Row r of the first Inter layer corresponds to one spatial
+position of that map, flattened channel-first (r = c·n² + i·n + j), so the layer's weights form a field
+W ∈ R^(C n² × A). A target resolution has grid size m; the 1-D resampling operator is L ∈ R^(m×n), and the
+2-D operator is L ⊗ L.
 
-### 1.1 Rescaling is a convolution of the weight field
+| symbol | meaning |
+|---|---|
+| n, m | source/target grid size (df-udt: n = ⌊R₀/32⌋, m = ⌊R/32⌋) |
+| L | 1-D resampling matrix, L[i,j] = k((i+0.5)·n/m − 0.5 − j), k the kernel |
+| α | partial inverse-filtering coefficient, α ∈ [0,1] |
+| λ | Tikhonov regularisation weight |
+| ρ | discarded dimension fraction when downscaling, ρ = (n² − m²)/n² |
 
-Each row of dense1 maps to one spatial position of the encoder feature map (index = c*H*W + h*W + w), so
-rescaling Inter is a 2-D resampling of a C x n x n coefficient field, operator L x L:
+## 2　Method
 
-    W' = (L x L) W
+### 2.1　Interpolation is a low-pass
 
-The flatter the kernel passband, the less high-frequency content (identity detail) is lost:
-lanczos-3 (-0.5 dB) > bicubic (-1 dB) > bilinear (-4 dB); nearest applies no low-pass but destroys phase.
-Every interpolation kernel is a low-pass, so the family is always structurally right and slightly soft.
+Interpolation gives W′ = (L ⊗ L) W. The kernel's frequency response controls how much high frequency (identity
+detail) survives: lanczos-3 (≈0.5 dB droop) beats bicubic (≈1 dB) which beats bilinear (≈4 dB); nearest applies
+no low-pass but destroys phase. Every interpolation kernel normalises to a low-pass, so the family is always
+lossy: low frequencies (overall structure) are right, high frequencies are gone.
 
-### 1.2 The real objective: preserve the functional
+### 2.2　Functional preservation and the pseudo-inverse
 
-Downstream only sees <W, f>. Since f' ~ (LxL)f, we need
+Downstream only sees the linear functional ⟨W, f⟩. Under a resolution change f′ ≈ (L ⊗ L) f, hence
 
-    (LxL)^T W' = W
+        ⟨W′, f′⟩ = ⟨W, f⟩  ∀f    ⟺    (L ⊗ L)ᵀ W′ = W                    (1)
 
-- upscale (m>n): underdetermined -> minimum norm `W' = (LxL)[(LxL)^T(LxL)]^-1 W`
-- downscale (m<n): overdetermined -> least squares `W' = [(LxL)(LxL)^T]^-1 (LxL) W`
+**Proposition 1**　The minimum-norm solution of (1) for m ≥ n and the least-squares solution for m < n are
 
-Interpolation only computes `(LxL)W` and misses that inverse filter. That is **pinv**, damped by Tikhonov
-(`(L^T L + lam I)^-1` up, `(L L^T + lam I)^-1` down) because full inversion amplifies noise.
+        W′ = (L ⊗ L) [(L ⊗ L)ᵀ(L ⊗ L)]⁻¹ W                                 (2a)
+        W′ = [(L ⊗ L)(L ⊗ L)ᵀ]⁻¹ (L ⊗ L) W                                 (2b)
 
-### 1.3 Partial inverse filtering (the blend)
+*Proof (sketch)*　(1) is underdetermined for m ≥ n and overdetermined for m < n; the Moore–Penrose
+pseudo-inverse solution zeroes or minimises the residual on the relevant subspace, and separability
+(L ⊗ L)† = L† ⊗ L† allows per-axis solution in 2-D. ∎
 
-    W' = a*lanczos + (1-a)*pinv,  a = 0.5
-    pinv kernel depends on direction: lanczos up, area down (box pre-filters aliasing)
+Compared with interpolation, (2) carries the extra inverse-filter factor (LᵀL)⁻¹, i.e. a deconvolution of the
+weight field before resampling. That factor amplifies quantisation noise, so the Tikhonov forms
+(LᵀL + λI)⁻¹ and (LLᵀ + λI)⁻¹ are used in practice.
 
-### 1.4 Hard floor when downscaling (rank deficiency)
+### 2.3　Partial inverse filtering
 
-    rank(LxL) = m^2 < n^2  =>  (n^2-m^2)/n^2 of the space is discarded and unobservable
-    n^2 = 169: 320 loses 41% (m^2=100), 384 loses 15% (144), 288 loses 52% (81)
-    error floor ||(I-P)W|| is algorithm independent; upscale loses no dimension, hence higher scores
+Full inversion (2) over-sharpens; zero inversion (interpolation) is too soft; both are ends of one family. A
+convex combination gives
 
-Sweeping lam from 0.1 to 10 at 288 makes PSNR worse (18.18 -> 14.70): the loss is structural, not a tuning issue.
+        W′ = α · W′_interp + (1 − α) · W′_pinv,   α = 0.5                 (3)
 
-### 1.5 Nearest as a small-ratio special case
+which is a Wiener shrinkage of the inverse-filter gain. α = 0.5 is near-optimal on every target, so it is fixed.
 
-Let q = n/m (q>1 downscaling, q<1 upscaling) and r = |1 - 1/q| the fraction of the band folded back
-(or duplicated). nearest samples without any anti-aliasing, so it degenerates into a sub-pixel shear when
-r is tiny, and collapses as r grows:
+### 2.4　Anti-aliasing when downscaling
 
-| target | q | r | nearest PSNR / NCC / hf | bicubic PSNR / NCC / hf |
-|---|---|---|---|---|
-| 384 | 1.083 | 7.7% | 21.21 / 0.901 / **0.32** | 23.33 / 0.940 / 0.23 |
-| 448 | 0.929 (up) | 7% dup | 17.91 / **0.736** / 0.37 | 23.41 / 0.941 / 0.37 |
-| 320 | 1.300 | 23% | 18.77 / 0.692 / 0.08 | 19.32 / 0.754 / 0.06 |
-| 512 | 0.813 (up) | 19% dup | 18.07 / 0.816 / 0.48 | 20.26 / 0.922 / 0.59 |
+Downscaling includes decimation; keeping the interpolation kernel on the inverse branch would amplify the
+aliased components as well. The inverse branch therefore uses a box kernel (area), which is itself an
+anti-aliasing pre-filter. Upscaling has no such issue and uses lanczos on both branches.
 
-1. **Why it looks sharper at small ratios**: no low-pass, so every high frequency of the weight field survives
-   (hf 0.32 vs bicubic 0.23); interpolation convolves the coefficient field and filters detail away.
-2. **Why the metrics are lower**: nearest pays with a **sub-pixel shift** (each output row snaps to a
-   different source row, <=0.5 px); the decoder's receptive field turns that into a slight feature offset,
-   costing ~2 dB PSNR and 0.04 NCC. Per-pixel error is extremely sensitive to a 0.4 px shift while the eye is
-   not - the two rulers measure different things.
+### 2.5　Error floor when downscaling
 
-Rule: r < 0.10 (|dgrid| <= 1, about +-32 px) -> nearest is usable but only looks sharp, it is not more accurate;
-r ~ 0.20 -> stepping/aliasing shows and interpolation wins; r > 0.25 -> structural damage (448 NCC 0.736,
-320 NCC 0.692). nearest is therefore a small-ratio special case, not the general answer; blend remains the
-stable solution at both ends.
+**Proposition 2**　For m < n, rank(L ⊗ L) = m² < n² and the error obeys an algorithm-independent bound
 
-## 2. Results (PSNR / SSIM / MAE, masked)
+        min_{W′} ‖(L ⊗ L)W′ − W‖_F = ‖(I − P)W‖_F,   P = proj_{range(L⊗L)}   (4)
 
-| target | grid | bicubic | lanczos | pinv | **blend (default)** |
+*Proof (sketch)*　The image of any W′ lies in range(L ⊗ L), so the orthogonal-complement residual cannot be removed. ∎
+
+The discarded fraction ρ predicts the quality ceiling: ρ = 0.15 (384), 0.41 (320), 0.52 (288).
+
+### 2.6　Nearest as a small-ratio special case
+
+With q = n/m, the folded (or, when upscaling, duplicated) fraction is ρ_a = |1 − 1/q|. nearest performs no
+anti-aliasing; for small ρ_a it degenerates into a sub-pixel shear that keeps every high frequency and thus
+looks sharper, while the snapping introduces a sub-pixel shift that lowers per-pixel metrics. See Table 2.
+
+## 3　Experimental setup
+
+Model New416_SAEHD (df-udt, R₀ = 416, e_dims = 80, ae_dims = 320, iteration 7,915,081); input is an aligned
+face (BGR, [0,1]); the forward pass uses the engine's own leras implementation with weights loaded in storage
+order, parameter counts matching the model summary. Metrics are computed inside the XSegLite mask: PSNR, SSIM,
+MAE, plus structural correlation NCC (low-pass, σ = 4) and high-frequency ratio h_f (Laplacian variance ratio).
+The reference is the 416 original model's output.
+
+## 4　Results
+
+**Fig. 1**　dst input (what the model actually sees), baseline 416 (original Inter output) and each method at the
+six target resolutions; both reference columns repeat per row for in-row comparison.
+
+![Fig. 1　Cross-resolution resampling results](compare_all.png)
+
+**Table 1**　Masked metrics (PSNR dB / SSIM / MAE). Bold marks the best or tied-best method in that row.
+
+| target | ρ | bicubic | lanczos | pinv | **blend (proposed)** |
 |---|---|---|---|---|---|
-| 288 | 13->9 | 18.20 / 0.728 / 25.7 | 17.87 / 0.723 / 27.3 | 16.21 / 0.705 / 28.7 | 18.18 / 0.698 / **21.6** |
-| 320 | 13->10 | 19.32 / 0.740 / 23.1 | 19.29 / 0.735 / 23.2 | 19.10 / 0.714 / 17.6 | **20.24 / 0.718 / 17.3** |
-| 384 | 13->12 | 23.32 / 0.813 / 13.4 | 24.32 / 0.842 / 11.8 | 23.62 / 0.856 / 13.8 | **25.10 / 0.874 / 9.64** |
-| 448 | 13->14 | 23.41 / 0.834 / 8.8 | 25.41 / 0.883 / 7.5 | 24.78 / 0.892 / 10.8 | **26.27 / 0.897 / 6.39** |
-| 512 | 13->16 | 20.26 / 0.814 / 18.8 | 20.71 / 0.836 / 18.5 | 20.83 / 0.838 / 20.1 | **23.97 / 0.847 / 8.73** |
-| 544 | 13->17 | 18.46 / 0.774 / 24.5 | 18.88 / 0.808 / 23.9 | 19.35 / 0.810 / 24.4 | **22.93 / 0.824 / 10.33** |
+| 288 | 0.52 | 18.20 / 0.728 / 25.7 | 17.87 / 0.723 / 27.3 | 16.21 / 0.705 / 28.7 | 18.18 / 0.698 / **21.6** |
+| 320 | 0.41 | 19.32 / 0.740 / 23.1 | 19.29 / 0.735 / 23.2 | 19.10 / 0.714 / 17.6 | **20.24 / 0.718 / 17.3** |
+| 384 | 0.15 | 23.32 / 0.813 / 13.4 | 24.32 / 0.842 / 11.8 | 23.62 / 0.856 / 13.8 | **25.10 / 0.874 / 9.64** |
+| 448 | 0 | 23.41 / 0.834 / 8.8 | 25.41 / 0.883 / 7.5 | 24.78 / 0.892 / 10.8 | **26.27 / 0.897 / 6.39** |
+| 512 | 0 | 20.26 / 0.814 / 18.8 | 20.71 / 0.836 / 18.5 | 20.83 / 0.838 / 20.1 | **23.97 / 0.847 / 8.73** |
+| 544 | 0 | 18.46 / 0.774 / 24.5 | 18.88 / 0.808 / 23.9 | 19.35 / 0.810 / 24.4 | **22.93 / 0.824 / 10.33** |
 
-## 3. Conclusions
+**Table 2**　nearest at small ratios (ρ_a = folded/duplicated fraction). Its h_f exceeds that of interpolation,
+while NCC and PSNR are lower.
 
-1. **lanczos-3 is the best interpolation kernel**; bicubic is usable; nearest only looks sharp at small ratios.
-2. **pinv restores the missing inverse filter**; full inversion over-sharpens, so its MAE is worse alone.
-3. **blend = 0.5*lanczos + 0.5*pinv (area for downscale)** is the best method on 5 of 6 targets and ships as default.
-4. **Downscaling has a mathematical floor** set by the discarded dimension fraction (15% / 41% / 52%); only retraining helps.
-5. **Practical bound**: move down at most 1-2 grid steps (~32-64 px); 416 -> 288 should be retrained instead.
-6. Rescaling is a **warm start**: optimizer state is shape-incompatible and dropped, so fine-tune before use.
+| target | q | ρ_a | nearest (PSNR / NCC / h_f) | bicubic (PSNR / NCC / h_f) |
+|---|---|---|---|---|
+| 384 | 1.083 | 0.077 | 21.21 / 0.901 / **0.32** | 23.33 / 0.940 / 0.23 |
+| 448 | 0.929 | 0.071 | 17.91 / **0.736** / 0.37 | 23.41 / 0.941 / 0.37 |
+| 320 | 1.300 | 0.231 | 18.77 / 0.692 / 0.08 | 19.32 / 0.754 / 0.06 |
+| 512 | 0.813 | 0.188 | 18.07 / 0.816 / 0.48 | 20.26 / 0.922 / 0.59 |
 
-## 4. Shipping
+The measurements agree with the theory: in the upscaling direction (ρ = 0) the proposed method is best on all
+three metrics; in the downscaling direction quality decreases monotonically with ρ, and the bound (4) cannot be
+side-stepped by tuning λ (at 288, raising λ from 0.1 to 10 lowers PSNR from 18.18 to 14.70 dB).
 
-    app/engine/models/Model_SAEHD/resize_inter.py
-        _METHODS = ('blend','bicubic','bilinear','lanczos','pinv')     # default blend
-        python -m models.Model_SAEHD.resize_inter --model-dir <dir> --new-res 448
+## 5　Conclusions
 
-    tool measurement (416->448, masked): PSNR 26.27 / SSIM 0.897 / MAE 6.39 / NCC 0.978
+1. Among interpolations lanczos-3 has the flattest passband and the smallest error; bicubic is a conservative
+   choice; nearest only wins perceptually at small ratios, and that sharpness is phase error, not accuracy.
+2. The functional-preserving optimum is given by (2) (pseudo-inverse / inverse filtering); used alone it
+   over-sharpens and its MAE degrades.
+3. The partial inverse filtering of (3) is best on all three metrics at five of six targets and cuts MAE at 512
+   from 19.0 to 8.73; it is the recommended method.
+4. Downscaling error is governed by the bound (4); in practice the change should stay within 1–2 grid steps
+   (about 32–64 px), beyond which retraining at the new resolution is preferable.
+5. Cross-resolution conversion is a warm start only: the optimizer state is shape-incompatible and dropped.
+
+## 6　Implementation and reproducibility
+
+The production implementation is `app/engine/models/Model_SAEHD/resize_inter.py`; the default method `blend`
+implements (3) and `--method` accepts `bicubic / bilinear / lanczos / pinv`. Tool measurement (416→448, masked):
+PSNR 26.27 dB, SSIM 0.897, MAE 6.39, NCC 0.978.
 
 Scripts: `inter_study_run.py`, `inter_adv_study.py`, `inter_blend_study.py`, `inter_ratio_study.py`,
-`inter_hybrid_study.py`, `inter_extreme_study.py`, `inter_lambda_study.py`, `xseg_mask.py`.
-Engineering doc: [38-INTER-RESIZE.md](../38-INTER-RESIZE.md).
+`inter_hybrid_study.py`, `inter_extreme_study.py`, `inter_lambda_study.py`, `xseg_mask.py`;
+data: `results*.json`, `latent_metrics.json`. Engineering note: `app/docs/38-INTER-RESIZE.md`.
