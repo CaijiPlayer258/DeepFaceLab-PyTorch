@@ -43,6 +43,31 @@ Interpolation only computes `(LxL)W` and misses that inverse filter. That is **p
 
 Sweeping lam from 0.1 to 10 at 288 makes PSNR worse (18.18 -> 14.70): the loss is structural, not a tuning issue.
 
+### 1.5 Nearest as a small-ratio special case
+
+Let q = n/m (q>1 downscaling, q<1 upscaling) and r = |1 - 1/q| the fraction of the band folded back
+(or duplicated). nearest samples without any anti-aliasing, so it degenerates into a sub-pixel shear when
+r is tiny, and collapses as r grows:
+
+| target | q | r | nearest PSNR / NCC / hf | bicubic PSNR / NCC / hf |
+|---|---|---|---|---|
+| 384 | 1.083 | 7.7% | 21.21 / 0.901 / **0.32** | 23.33 / 0.940 / 0.23 |
+| 448 | 0.929 (up) | 7% dup | 17.91 / **0.736** / 0.37 | 23.41 / 0.941 / 0.37 |
+| 320 | 1.300 | 23% | 18.77 / 0.692 / 0.08 | 19.32 / 0.754 / 0.06 |
+| 512 | 0.813 (up) | 19% dup | 18.07 / 0.816 / 0.48 | 20.26 / 0.922 / 0.59 |
+
+1. **Why it looks sharper at small ratios**: no low-pass, so every high frequency of the weight field survives
+   (hf 0.32 vs bicubic 0.23); interpolation convolves the coefficient field and filters detail away.
+2. **Why the metrics are lower**: nearest pays with a **sub-pixel shift** (each output row snaps to a
+   different source row, <=0.5 px); the decoder's receptive field turns that into a slight feature offset,
+   costing ~2 dB PSNR and 0.04 NCC. Per-pixel error is extremely sensitive to a 0.4 px shift while the eye is
+   not - the two rulers measure different things.
+
+Rule: r < 0.10 (|dgrid| <= 1, about +-32 px) -> nearest is usable but only looks sharp, it is not more accurate;
+r ~ 0.20 -> stepping/aliasing shows and interpolation wins; r > 0.25 -> structural damage (448 NCC 0.736,
+320 NCC 0.692). nearest is therefore a small-ratio special case, not the general answer; blend remains the
+stable solution at both ends.
+
 ## 2. Results (PSNR / SSIM / MAE, masked)
 
 | target | grid | bicubic | lanczos | pinv | **blend (default)** |
