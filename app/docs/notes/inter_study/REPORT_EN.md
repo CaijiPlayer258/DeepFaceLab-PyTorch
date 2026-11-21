@@ -127,6 +127,38 @@ can re-fit the model to the new resolution.
 This also explains the ordering in the table: 384 loses 15% (25.1 dB), 320 loses 41% (20.2 dB), while
 upscaling loses no dimension and scores highest.
 
+
+## 5.1 Extreme ratios: +-128 (288 / 544)
+
+![extreme ratios](compare_extreme.png)
+
+| target | grid | nearest | bicubic | lanczos | pinv | blend(old) | **blend(new)** |
+|---|---|---|---|---|---|---|---|
+| **288** (-128) | 13->9 (52% lost) | 18.62 / 0.733 / 23.4 | 18.20 / 0.728 / 25.7 | 17.87 / 0.723 / 27.3 | 16.21 / 0.705 / 28.7 | 18.53 / 0.718 / **21.2** | 18.18 / 0.698 / 21.6 |
+| **544** (+128) | 13->17 (nothing lost) | 19.09 / 0.764 / 22.6 | 18.46 / 0.774 / 24.5 | 18.88 / 0.808 / 23.9 | 19.35 / 0.810 / 24.4 | 22.77 / 0.817 / 10.7 | **22.93 / 0.824 / 10.33** |
+
+(NCC: 288 lands at 0.49-0.54 for every method; at 544 blend(new) is highest at 0.906.)
+
+1. **Upscaling to +128 still wants blend(new)**: 22.93 / 0.824 / 10.33, slightly ahead of blend(old) -
+   the upscale direction is monotone and safe.
+2. **Downscaling to -128 collapses everything**: PSNR 16-18.6, SSIM 0.66-0.73, **NCC only 0.49-0.54**;
+   the ranking stops being meaningful (nearest tops PSNR but bottoms NCC, blends top MAE).
+   This is not a tuning problem: sweeping lambda from 0.1 to 10 makes PSNR worse (18.18 -> 14.70).
+   It is the rank deficiency of §5: 13->9 discards 81/169 = 52% of the dimensions, more than the 41% at 320,
+   so NCC falls from 0.78 to 0.53 - the error floor rises with the discarded fraction.
+
+### 5.2 Practical boundary
+
+| change | grid | best NCC | recommendation |
+|---|---|---|---|
+| +-32 (384/448) | +-1 | 0.97 | safe, use blend(new) |
+| +-96 (320/512) | +-3 | 0.78 / 0.90 | usable, retrain afterwards |
+| +-128 up (544) | +4 | 0.91 | usable (no dimension loss) |
+| +-128 down (288) | -4 | **0.54** | **do not convert** - retrain at 288 instead |
+
+Rule of thumb: **downscaling should move at most 1-2 grid steps (about 32-64 px); beyond that rank
+deficiency dominates and any resampling only smears the loss.**
+
 ## 6. Conclusions
 
 1. Among classical interpolations **bicubic is usable and lanczos-3 is better** (flattest passband):
