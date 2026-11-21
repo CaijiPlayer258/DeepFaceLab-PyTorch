@@ -33,7 +33,7 @@
 |---|---|
 | [REPORT_CN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/REPORT_CN.md) /  | 中文报告（摘要 → 推导 → 实验 → 结论 → 可复现） |
 | [REPORT_EN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/REPORT_EN.md) /  | 英文版 |
-| [compare_all.png](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/compare_all.png) | 总图：dst 输入 / baseline / 5 方法 × 6 档目标分辨率 |
+| [compare_all.png](compare_all.png) | 总图：dst 输入 / baseline / 5 方法 × 6 档目标分辨率 |
 | [results.json](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/results.json) | 16 组（bilinear 系列 × 4 分辨率） |
 | [results_adv.json](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/results_adv.json) | 48 组（插值 / pinv / ls 修正） |
 | [results_ratio.json](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/results_ratio.json) | 32 组（核 × 逆滤波 × 抗混叠） |
