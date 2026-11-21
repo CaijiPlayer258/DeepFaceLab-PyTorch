@@ -285,8 +285,11 @@ table.t tr:last-child td{border-bottom:0}
 .toast .tx{background:none;border:0;color:var(--ink-3);font-size:15px;line-height:1;padding:0 2px;
   margin-left:auto;cursor:pointer;align-self:center;border-radius:6px}
 .toast .tx:hover{color:var(--ink);background:var(--line)}
-.toast .tb{position:absolute;left:0;right:0;bottom:0;height:2px;background:var(--line);overflow:hidden}
-.toast .tb i{display:block;height:100%;background:var(--brand);animation:tbar 3.6s linear forwards}
+/* 进度条内缩到圆角之内：贴着底边通栏的话，两端会被 12px 圆角切掉，看着像断头 */
+.toast .tb{position:absolute;left:10px;right:10px;bottom:5px;height:2px;
+  background:var(--line);border-radius:9999px;overflow:hidden}
+.toast .tb i{display:block;height:100%;background:var(--brand);border-radius:inherit;
+  animation:tbar 3.6s linear forwards}
 @keyframes tbar{from{width:100%}to{width:0%}}
 @keyframes toastIn{from{opacity:0;transform:translateY(14px) scale(.96)}to{opacity:1;transform:none}}
 /* ===== 桌面壳：窗口本身就是应用，页面里不再画一圈"假窗口" ===== */
