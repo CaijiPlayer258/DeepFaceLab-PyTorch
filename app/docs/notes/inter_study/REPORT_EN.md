@@ -3,7 +3,11 @@
 Model `New416_SAEHD` (df-udt, 416, e_dims=80, ae_dims=320); aligned face input; forward via repo leras
 (`DeepFakeArchi`, opts=`udt`); preprocessing BGR + [0,1]; all metrics inside the **XSegLite mask**, baseline = 416 output.
 
-![every resolution vs every method (baseline repeated on the left)](compare_all.png)
+![dst input / baseline / every method vs every target](compare_all.png)
+
+Column meaning: **dst input** (the aligned face the model actually sees) -> **baseline 416** (original inter
+output as reference) -> bicubic -> lanczos -> pinv -> blend(old) -> blend(new); rows are the target
+resolutions 288...544 and both reference columns repeat on every row.
 
 ## 1. Derivation
 

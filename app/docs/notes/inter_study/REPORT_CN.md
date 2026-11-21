@@ -3,7 +3,10 @@
 对象：`New416_SAEHD`（df-udt，416，e_dims=80，ae_dims=320）。素材为已对齐人脸，前向用仓库自带 leras
 （`DeepFakeArchi`, opts=`udt`），预处理 BGR + [0,1]；所有指标在 **XSegLite 遮罩内**，基准是 416 原模型输出。
 
-![各分辨率 × 各方法（最左列重复 baseline 416）](compare_all.png)
+![dst 输入 / baseline / 各方法 × 各目标分辨率](compare_all.png)
+
+列的含义：**dst 输入**（模型吃的那张对齐脸）→ **baseline 416**（原 inter 的输出，作为参照）→
+bicubic → lanczos → pinv → blend(旧) → blend(new)；行是目标分辨率 288…544，每行都重复同样两列参照。
 
 ## 1. 数学推导
 
