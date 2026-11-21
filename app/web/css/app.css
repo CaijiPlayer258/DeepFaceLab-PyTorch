@@ -6431,33 +6431,23 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 
 /* ---------- 统一滚动条（最终覆盖，必须留在文件末尾） ----------
 
-   参考 shadcn/ui 的 ScrollArea（Radix）：
-     · 10px 的槽，thumb 用 2px 透明边框内缩，视觉上是一条 ~6px 的细线
-     · 全圆角（rounded-full）
-     · 轨道透明，没有上下箭头
-     · 默认几乎看不见，鼠标进到容器里才浮现（opacity/颜色过渡）
+   观感参照 shadcn/ui 的 ScrollArea：10px 槽、全圆角、透明轨道、无箭头，
+   thumb 用 2px 透明边框内缩成一条 ~6px 的细线。
 
-   实现上只能走 ::-webkit-scrollbar（Radix 那种自绘 thumb 需要改结构，这里不动 DOM）。
-   注意：**绝不能**再给这些元素写 scrollbar-width / scrollbar-color ——
-   Chromium 一旦看到标准属性，就会整块忽略 ::-webkit-scrollbar 的定制，
-   结果就是“改了没反应”，之前那两次白改都是这个原因。 */
+   这里**不做悬停放大/变亮**：粗细恒定、颜色恒定。
+   （之前用 *:hover 提亮，视觉上像“突然变粗”，很跳。）
+
+   注意：不要给这些元素写 scrollbar-width / scrollbar-color ——
+   Chromium 一见到标准属性就会整块忽略 ::-webkit-scrollbar 的定制。 */
 
 ::-webkit-scrollbar { width: 10px !important; height: 10px !important; }
 ::-webkit-scrollbar-track { background: transparent !important; }
 ::-webkit-scrollbar-button { display: none !important; height: 0 !important; }
 ::-webkit-scrollbar-corner { background: transparent !important; }
-
-/* 默认：细线但很淡 —— 不用纯透明，否则鼠标滑过时看不出可滚动 */
 ::-webkit-scrollbar-thumb {
-  background: rgba(150, 150, 170, .22) !important;
+  background: rgba(150, 150, 170, .30) !important;
   border-radius: 9999px !important;
   border: 2px solid transparent !important;
   background-clip: padding-box !important;
   min-height: 36px;
-  transition: background .15s ease;
 }
-/* 鼠标进入容器：thumb 浮现（shadcn 的 hover 才显形就是这个感觉） */
-*:hover::-webkit-scrollbar-thumb { background: rgba(150, 150, 170, .38) !important; }
-/* 直接悬停在 thumb 上 / 拖动中：再亮一档 */
-::-webkit-scrollbar-thumb:hover { background: rgba(150, 150, 170, .55) !important; }
-::-webkit-scrollbar-thumb:active { background: rgba(150, 150, 170, .72) !important; }

@@ -612,17 +612,15 @@ input[type="range"]::-moz-range-thumb,
   transition: background-color .24s cubic-bezier(.25,.46,.45,.94) !important;
 }
 
-/* ---------- 统一滚动条（与主界面同款：细、全圆角、悬停浮现） ---------- */
+/* ---------- 统一滚动条（与主界面同款：细、全圆角、粗细恒定） ---------- */
 ::-webkit-scrollbar { width: 10px !important; height: 10px !important; }
 ::-webkit-scrollbar-track { background: transparent !important; }
 ::-webkit-scrollbar-thumb {
-  background: rgba(150, 150, 170, .22) !important;
+  background: rgba(150, 150, 170, .30) !important;
   border-radius: 9999px !important;
   border: 2px solid transparent !important;
   background-clip: padding-box !important;
   min-height: 36px;
 }
-*:hover::-webkit-scrollbar-thumb { background: rgba(150, 150, 170, .38) !important; }
-::-webkit-scrollbar-thumb:hover { background: rgba(150, 150, 170, .55) !important; }
 ::-webkit-scrollbar-button { display: none !important; height: 0 !important; }
 ::-webkit-scrollbar-corner { background: transparent !important; }
