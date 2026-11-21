@@ -30,6 +30,27 @@ def _opt_cache_path(dat: Path) -> Path:
     return dat.with_suffix(".opt_cache.json")
 
 
+
+
+def _write_opt_cache(dat: Path, iter_: int, options: dict) -> None:
+    """写回参数边车缓存（模型保存/参数保存后调用，省掉下次的 2.8 s 解析）。"""
+    try:
+        st = dat.stat()
+        payload = {
+            "ver": _OPT_CACHE_VER,
+            "mtime": round(st.st_mtime, 3),
+            "size": st.st_size,
+            "iter": int(iter_ or 0),
+            "options": {k: v for k, v in (options or {}).items()
+                        if not str(k).startswith("_") and k != "loss_history"},
+        }
+        cp = _opt_cache_path(dat)
+        tmp = Path(str(cp) + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
+        tmp.replace(cp)
+    except Exception:
+        pass
+
 def _read_options_cached(dat: Path):
     """先读参数边车缓存；只有缓存过期/缺失才去解整份 dat。
 
@@ -539,6 +560,7 @@ def model_create(body: dict):
                  "choosed_gpu_indexes": None, "loss_count": 0,
                  "src_size": st.st_size, "src_mtime_ns": st.st_mtime_ns}
         Path(str(dat_path) + ".params").write_bytes(_pk.dumps(cache, protocol=4))
+        _write_opt_cache(dat_path, (data or {}).get("iter") or 0, (data or {}).get("options") or {})
     except Exception:
         pass
 

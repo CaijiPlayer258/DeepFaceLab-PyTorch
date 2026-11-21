@@ -82,6 +82,24 @@ def _write_params_cache(dat_path, model):
             'src_size': st.st_size,
             'src_mtime_ns': st.st_mtime_ns,
         }
+        # 同时写一份 JSON 边车：4.1 的参数页/模型列表直接读它，不再解 122 MB 的 dat。
+        # 带 (mtime, size) 指纹，dat 一动就失配，后端会重建。
+        try:
+            import json as _json
+            _side = Path(dat_path).with_suffix('.opt_cache.json')
+            _json_payload = {
+                'ver': 1,
+                'mtime': round(st.st_mtime, 3),
+                'size': st.st_size,
+                'iter': payload['iter'],
+                'options': {k: v for k, v in (model.options or {}).items()
+                            if not str(k).startswith('_') and k != 'loss_history'},
+            }
+            _tmpj = Path(str(_side) + '.tmp')
+            _tmpj.write_text(_json.dumps(_json_payload, ensure_ascii=False, default=str), encoding='utf-8')
+            os.replace(str(_tmpj), str(_side))
+        except Exception:
+            pass
         p = _params_cache_path(dat_path)
         tmp = Path(str(p) + '.tmp')
         tmp.write_bytes(pickle.dumps(payload, protocol=4))

@@ -77,6 +77,11 @@ def train_start(body: dict):
             _tmp = dat.with_suffix(".dat.tmp")
             _tmp.write_bytes(_pk.dumps(_data))
             _tmp.replace(dat)
+            try:
+                from ..backend_models.routes import _write_opt_cache as _woc
+                _woc(dat, _data.get("iter") or 0, _data.get("options") or {})
+            except Exception:
+                pass
         except HTTPException:
             raise
         except Exception as _e:
