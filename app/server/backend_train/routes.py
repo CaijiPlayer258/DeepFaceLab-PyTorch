@@ -101,6 +101,16 @@ def train_start(body: dict):
     if dev_err:
         raise HTTPException(400, dev_err)
 
+    # 训练要独占显存：先把合成器/预览 worker 常驻的 dfm / XSeg 会话放掉，
+    # 否则「没在跑合成，却提示显存不足」或训练峰值被挤爆。
+    try:
+        from ..backend_merge import vram as _vram
+        _r1 = _vram._vram_release_inproc("训练启动")
+        _r2 = _vram._free_preview_sessions("训练启动")
+        print("[trainer] 释放合成会话: %s / %s" % (_r1.get("why") or _r1.get("freed"), _r2.get("did")), flush=True)
+    except Exception as _e:
+        print("[trainer] 释放合成会话失败（忽略）: %s" % str(_e)[:120], flush=True)
+
     threading.Thread(target=_train_worker, args=(name, bool(body.get("cpu_only"))), daemon=True).start()
     return {"ok": True, "name": name, "running": True,
             "device": plan, "device_banner": plan["banner"]}
@@ -213,11 +223,20 @@ def train_stop(body: dict = None):
     graceful = False
     for attempt in range(6):
         try:
-            _webui_post("/request-quit", timeout=4.0)
+            _webui_post("/request-quit", timeout=2.0)
             graceful = True
             break
         except Exception:
-            time.sleep(1.5)
+            # 前两次就够判断它是不是还在加载模型：加载期 WebUI 端口没起，
+            # 以前会连等 6×4 秒再等 90 秒，用户感受就是点了停止没反应。
+            if attempt >= 1:
+                if _app_mod._train_proc is not None and _app_mod._train_proc.poll() is None:
+                    time.sleep(2.0)
+                    _kill_train_tree()
+                    return {"ok": True, "graceful": False,
+                            "msg": "训练还在加载模型（未进入迭代），已直接结束"}
+                break
+            time.sleep(1.0)
 
     # 等它自己收尾（保存 + 退出）；最多 90 秒，然后再强杀
     for _ in range(90):
