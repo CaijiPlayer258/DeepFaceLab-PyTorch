@@ -26,7 +26,7 @@ options['_resize_history'] 审计记录），其它键原样保留。
 用法:
     python -m models.Model_SAEHD.resize_inter --model-dir <dir> --new-res 416
     python -m models.Model_SAEHD.resize_inter --model-dir <dir> --new-res 416 --dry-run
-    python -m models.Model_SAEHD.resize_inter --model-dir <dir> --new-res 256 --method bicubic
+    python -m models.Model_SAEHD.resize_inter --model-dir <dir> --new-res 448 --method blend
 """
 
 from __future__ import annotations
@@ -71,7 +71,8 @@ __all__ = [
     'main',
 ]
 
-_METHODS = ('bilinear', 'bicubic')
+_METHODS = ('blend', 'bicubic', 'bilinear')
+# blend = 0.5·bicubic + 0.5·pinv（部分逆滤波），是本仓库的默认方法
 _BACKUP_TS_FMT = '%Y%m%d-%H%M%S'
 _HISTORY_KEY = '_resize_history'
 _HISTORY_MAX = 50
@@ -218,7 +219,7 @@ def _verify_ckpt(path, expect: Dict[int, Tuple[int, ...]], label: str) -> None:
 # ────────────────────────────── 插值核心 ──────────────────────────────
 
 def _interp_channel_major(mat: np.ndarray, C: int, old_hw: int, new_hw: int,
-                          method: str = 'bilinear') -> np.ndarray:
+                          method: str = 'blend') -> np.ndarray:
     """(C*old_hw^2, N) 按通道优先展平的空间权重 -> (C*new_hw^2, N)。
 
     每一 (通道, 输出列) 组合当成一张 old_hw x old_hw 的图做插值；
@@ -244,7 +245,65 @@ def _interp_channel_major(mat: np.ndarray, C: int, old_hw: int, new_hw: int,
     return out
 
 
-def interpolate_dense_weight(w, old_hw: int, new_hw: int, method: str = 'bilinear') -> np.ndarray:
+def _interp_matrix(n: int, m: int, lam: float = 0.0, inverse: bool = False) -> np.ndarray:
+    """1-D 重采样矩阵（Catmull-Rom，align_corners=False）。
+
+    inverse=True 时返回「部分逆滤波」算子：
+        升采样 (m>=n):  L @ (LᵀL + λI)⁻¹      —— 保泛函的最小范数解
+        降采样 (m< n):  (LLᵀ + λI)⁻¹ L        —— 保泛函的最小二乘解
+    λ→∞ 时退化为插值本身，λ→0 为全量逆滤波。
+    """
+    w_cub = np.zeros((m, n), np.float64)
+    for i in range(m):
+        x = (i + 0.5) * n / m - 0.5
+        x0 = int(np.floor(x))
+        for k in (-1, 0, 1, 2):
+            j = x0 + k
+            t = abs(x - j)
+            if t <= 1:
+                wv = 1.5 * t ** 3 - 2.5 * t ** 2 + 1
+            elif t < 2:
+                wv = -0.5 * t ** 3 + 2.5 * t ** 2 - 4 * t + 2
+            else:
+                wv = 0.0
+            if 0 <= j < n and wv:
+                w_cub[i, j] += wv
+        srow = w_cub[i].sum()
+        if srow:
+            w_cub[i] /= srow
+    if not inverse:
+        return w_cub
+    if m >= n:
+        return w_cub @ np.linalg.inv(w_cub.T @ w_cub + lam * np.eye(n))
+    return np.linalg.inv(w_cub @ w_cub.T + lam * np.eye(m)) @ w_cub
+
+
+def _resample_2d_channel_major(mat: np.ndarray, C: int, old_hw: int, new_hw: int,
+                               mat1d: np.ndarray) -> np.ndarray:
+    """用给定的 1-D 算子（new_hw × old_hw）对 (C*old², N) 做可分离二维重采样。"""
+    rows, out_ch = mat.shape
+    t = mat.reshape(C, old_hw, old_hw, out_ch)
+    L = mat1d.astype(np.float32)
+    x = torch.from_numpy(np.ascontiguousarray(t)).permute(0, 3, 1, 2)      # C,out,h,w
+    x = torch.einsum('ij,ncjk->ncik', torch.from_numpy(L), x)              # 行
+    x = torch.einsum('ij,nckj->ncki', torch.from_numpy(L), x)              # 列
+    out = x.permute(0, 2, 3, 1).reshape(rows // (old_hw * old_hw) * new_hw * new_hw, out_ch)
+    out = out.numpy()
+    if not np.isfinite(out).all():
+        raise ResizeError('重采样结果含 NaN/Inf，已中止（未写盘）')
+    return out
+
+
+def _blend_weight(w: np.ndarray, C: int, old_hw: int, new_hw: int) -> np.ndarray:
+    """0.5·bicubic + 0.5·pinv(λ 按方向取) —— 部分逆滤波（Wiener 收缩）。"""
+    lam = 1e-4 if new_hw >= old_hw else 1e-1
+    bic = _interp_channel_major(w, C, old_hw, new_hw, 'bicubic')
+    pin = _resample_2d_channel_major(w, C, old_hw, new_hw,
+                                     _interp_matrix(old_hw, new_hw, lam, inverse=True))
+    return (0.5 * bic + 0.5 * pin).astype(np.float32)
+
+
+def interpolate_dense_weight(w, old_hw: int, new_hw: int, method: str = 'blend') -> np.ndarray:
     """Dense 权重 (C*H*W, out) 空间插值到 (C*H'*W', out)；行索引 = c*H*W + h*W + w。"""
     w = np.asarray(w)
     if w.ndim != 2:
@@ -254,10 +313,12 @@ def interpolate_dense_weight(w, old_hw: int, new_hw: int, method: str = 'bilinea
         raise ResizeError('权重行数 ' + str(w.shape[0]) + ' 不能被 ' + str(old_hw)
                           + '^2 整除，无法按通道优先解析')
     C = w.shape[0] // cells
+    if method == 'blend':
+        return _blend_weight(w, C, old_hw, new_hw)
     return _interp_channel_major(w, C, old_hw, new_hw, method)
 
 
-def interpolate_bias(b, old_hw: int, new_hw: int, method: str = 'bilinear') -> np.ndarray:
+def interpolate_bias(b, old_hw: int, new_hw: int, method: str = 'blend') -> np.ndarray:
     """Bias (C*H*W,) -> (C*H'*W',)。
 
     修正点：展平索引是 c*H*W + h*W + w，所以必须按 (C, h, w) reshape；
@@ -269,6 +330,9 @@ def interpolate_bias(b, old_hw: int, new_hw: int, method: str = 'bilinear') -> n
         raise ResizeError('bias 长度 ' + str(b.size) + ' 不能被 ' + str(old_hw)
                           + '^2 整除，无法按通道优先解析')
     C = b.size // cells
+    if method == 'blend':
+        col = np.ascontiguousarray(b.astype(np.float32, copy=False)).reshape(-1, 1)
+        return _blend_weight(col, C, old_hw, new_hw).reshape(-1)
     x = torch.from_numpy(b.astype(np.float32, copy=False)).reshape(1, C, old_hw, old_hw)
     x = F.interpolate(x, size=(new_hw, new_hw), mode=method, align_corners=False)
     out = x.reshape(-1).numpy()
@@ -564,7 +628,7 @@ def _plan_inter(path: Path, archi_opts: str, ae_dims: int, e_dims: int,
                      resample=(old_res != new_res))
 
 
-def plan_resize(model_dir, new_res, method: str = 'bilinear') -> ResizePlan:
+def plan_resize(model_dir, new_res, method: str = 'blend') -> ResizePlan:
     """只做检测与校验，不碰磁盘（抛 ResizeError 说明原因）。"""
     model_dir = Path(model_dir).expanduser().resolve()
     if not model_dir.is_dir():
@@ -804,7 +868,7 @@ def apply_plan(plan: ResizePlan, verbose: bool = True) -> List[Path]:
 # ────────────────────────────── 入口 ──────────────────────────────
 
 def resize_model(model_dir, new_res, dry_run: bool = False, verbose: bool = True,
-                 method: str = 'bilinear') -> bool:
+                 method: str = 'blend') -> bool:
     """检测并缩放 Inter 权重到新分辨率。成功返回 True，任何不安全的情况返回 False。"""
     try:
         plan = plan_resize(model_dir, new_res, method=method)

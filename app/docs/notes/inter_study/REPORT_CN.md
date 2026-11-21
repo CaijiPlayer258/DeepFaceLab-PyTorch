@@ -144,5 +144,30 @@ pinv 的逆滤波是**全量**的，会把权重高频放大过头（MAE 偏高�
 - 384：pinv 的细节最完整，blend 紧随；
 - 320：三者都受限，blend 最平衡。
 
-实现：`inter_adv.resample_inter(mode='pinv', lam=...)` 与 `inter_blend_study.py` 的凸组合。
+### 8.1 已落地为唯一默认（blend 0.5）
+
+`app/engine/models/Model_SAEHD/resize_inter.py` 已经改成：
+
+    _METHODS = ('blend', 'bicubic', 'bilinear')     # blend 排第一、且是默认
+    plan_resize / resize_model / interpolate_* 的 method 默认值全部 = 'blend'
+    CLI: python -m models.Model_SAEHD.resize_inter --model-dir <dir> --new-res 448
+
+    blend = 0.5·bicubic(F.interpolate) + 0.5·pinv(λ=1e-4 升 / 1e-1 降)
+
+用真实工具（不是实验脚本）在临时副本上跑 416→448 再推理，遮罩内：
+
+| 来源 | PSNR | SSIM | MAE |
+|---|---|---|---|
+| 实验脚本 blend | 25.69 | 0.886 | 6.58 |
+| **工具 blend（默认路径）** | **26.07** | **0.892** | **5.84** |
+| 旧默认 bilinear（416→448 旧逻辑） | 23.5 左右 | 0.85 左右 | 10+ |
+
+工具路径略好于实验脚本，因为 bicubic 那一半走的是 `F.interpolate`（边界处理更规整），
+而 pinv 那一半用自建的可分离矩阵（行归一化）。两者混合后仍是同一族算子。
+
+验证方式：`resize_inter --model-dir <临时副本> --new-res 448` 后，
+用同一 encoder/decoder 前向 target.jpg，与 416 baseline 在 XSeg 遮罩内比 —— 数字如上。
+
+实现：`inter_adv.resample_inter(mode='pinv', lam=...)` 与 `inter_blend_study.py` 的凸组合；
+生产路径见 `resize_inter.py` 的 `_interp_matrix(inverse=True)` / `_blend_weight`。
 所有指标均在 XSegLite 遮罩内统计。

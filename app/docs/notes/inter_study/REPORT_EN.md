@@ -132,5 +132,26 @@ Visual conclusion (consistent with the metrics):
 - 384: pinv keeps the most detail, blend a close second;
 - 320: all three are limited, blend is the most balanced.
 
-Implementation: `inter_adv.resample_inter(mode='pinv', lam=...)` plus the convex mix in `inter_blend_study.py`.
-All metrics computed inside the XSegLite mask.
+### 8.1 Shipped as the single default (blend 0.5)
+
+`app/engine/models/Model_SAEHD/resize_inter.py` now ships:
+
+    _METHODS = ('blend', 'bicubic', 'bilinear')     # blend first and default
+    default method of plan_resize / resize_model / interpolate_* = 'blend'
+    CLI: python -m models.Model_SAEHD.resize_inter --model-dir <dir> --new-res 448
+
+    blend = 0.5*bicubic(F.interpolate) + 0.5*pinv(lam=1e-4 up / 1e-1 down)
+
+Measured with the real tool (not the experiment script) on a temp model copy, 416->448, masked:
+
+| source | PSNR | SSIM | MAE |
+|---|---|---|---|
+| experiment script blend | 25.69 | 0.886 | 6.58 |
+| **tool blend (default path)** | **26.07** | **0.892** | **5.84** |
+
+The tool path is slightly better than the prototype because the bicubic half uses `F.interpolate`
+(cleaner border handling) while the pinv half uses the separable matrix (row-normalised).
+
+Implementation: `inter_adv.resample_inter(mode='pinv', lam=...)` plus the convex mix in
+`inter_blend_study.py`; production path in `resize_inter.py` (`_interp_matrix(inverse=True)`,
+`_blend_weight`). All metrics inside the XSegLite mask.
