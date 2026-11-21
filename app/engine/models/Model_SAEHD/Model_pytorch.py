@@ -967,7 +967,7 @@ class SAEHDModel(ModelBase):
                 lr = 5e-5
                 io.log_info(f'[WARN] 学习率值异常 ({_lr_raw!r})，已重置为 {lr}')
             # lr_cos 与 lr_dropout **解耦**。
-            # lr_dropout 是 iperov 时代的历史参数（只在那行 lr_masks 加噪上有作用，
+            # lr_dropout 是 早期版本的历史参数（只在那行 lr_masks 加噪上有作用，
             # 对新架构基本没用），以前却把它当"学习率策略"的开关、还会顺手改 lr_cos，
             # 导致选了 y 就莫名其妙开了余弦热重启。现在：lr_cos != 0 就是开启
             # 余弦退火·热重启（SGDR），与 lr_dropout 无关。
@@ -1759,7 +1759,7 @@ class SAEHDModel(ModelBase):
             _ = wrapper(dummy)
 
         # DeepFaceLive / DFMModel.py 在推理时固定使用 'in_face:0' 作为输入名。
-        # 原版 DFL(tf2onnx) 导出也使用带 ':0' 的张量名：
+        #原版 DFL(tf2onnx) 导出也使用带 ':0' 的张量名：
         #   input_names  = ['in_face:0']
         #   output_names = ['out_face_mask:0','out_celeb_face:0','out_celeb_face_mask:0']
         # 为保持兼容性，这里仅对 ONNX 的 I/O 命名对齐，不改变导出内容。

@@ -1,4 +1,4 @@
-"""TF 原版推理验证：用 iperov 原版 DFL 结构 + npy 权重直接前向（TF 原生语义）"""
+"""TF 原版推理验证：用 上游原版 DFL 结构 + npy 权重直接前向（TF 原生语义）"""
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'

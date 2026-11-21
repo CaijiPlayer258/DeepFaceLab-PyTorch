@@ -324,7 +324,7 @@ class XSegModel(ModelBase):
         with torch.no_grad():
             _ = wrapper_cpu(dummy_face)
 
-        # 原版 DFL(tf2onnx) 导出的 XSeg ONNX 使用 ':0' 张量名：
+        #原版 DFL(tf2onnx) 导出的 XSeg ONNX 使用 ':0' 张量名：
         #   input_names=['in_face:0']
         #   output_names=['out_mask:0']
         # 为了保持 DeepFaceLive 侧加载一致，这里仅对齐命名。

@@ -122,6 +122,6 @@ python tools/migrate/convert_dfl_tf_to_torch.py \
 
 ## 版本参考
 
-- 原版 DFL：`iperov/DeepFaceLab`（TF 1.x / lErAs）
+-原版 DFL：`上游 DeepFaceLab`（TF 1.x / lErAs）
 - 权重格式确认源文件：`Conv2D.py:61`、`Conv2DTranspose.py:43`、`Dense.py:47`
 - 对应 DFL 版本：**2.3.0.1**

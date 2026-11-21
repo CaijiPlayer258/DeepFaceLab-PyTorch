@@ -7,7 +7,7 @@
 | | PyTorch (GPU) | ONNX (GPU) | 参数量 | 文件大小 |
 |---|---|---|---|---|
 | 模型 | ONNX (CUDA) | TensorRT FP16 | 参数量 |
-| 原版 XSeg (iperov) | ~10.4ms (96fps) | ~7.0ms (143fps) | 1.8M |
+|原版 XSeg (原版) | ~10.4ms (96fps) | ~7.0ms (143fps) | 1.8M |
 | **XSegLite** | **2.5ms (395fps)** | **1.46ms (684fps)** | **4.75M** |
 
 *GPU: RTX 3080 (CUDA 13)，batch=1，eval 模式（BN 融合）。*

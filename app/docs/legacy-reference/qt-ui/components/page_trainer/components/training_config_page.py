@@ -710,7 +710,7 @@ class TrainingConfigChildPage(SiChildPage):
             self.lr_dropout_card = SiOptionCardLinear(self)
             self.lr_dropout_card.setTitle(
                 "LR dropout（历史参数，建议保持 n）",
-                "iperov 遗留项。在反传之后用 bernoulli 掩码丢弃更新量，前向/反向看到的都是完整模型，"
+                "历史遗留项。在反传之后用 bernoulli 掩码丢弃更新量，前向/反向看到的都是完整模型，"
                 "所以不构成 dropout 那种正则化；期望效应约等于把 lr 乘上掩码保留率。"
                 "实测开关它质量基本无变化，和余弦退火热重启同开还会拖累后期。想减小有效步长请直接调 lr")
             self.lr_dropout_card.load(safe_get_icon("ic_fluent_trending_down_filled"))

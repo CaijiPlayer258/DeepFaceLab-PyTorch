@@ -121,7 +121,7 @@ class Encoder(nn.Module):
             x = x.permute(0, 2, 3, 1).reshape(x.shape[0], -1)
         else:
             x = x.reshape(x.shape[0], -1)
-        # 'u' → pixel_norm（和 iperov 一致，eps=1e-6）
+        # 'u' → pixel_norm（和原版 一致，eps=1e-6）
         if PIXEL_NORM:
             x = x / torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + 1e-6)
         return x

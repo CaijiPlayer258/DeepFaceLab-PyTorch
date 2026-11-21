@@ -7,7 +7,7 @@ ONNX exportable, any resolution.
 
 | Model | ONNX (CUDA) | TensorRT FP16 | Params |
 |---|---|---|---|
-| Original XSeg (iperov) | ~10.4ms (96fps) | ~7.0ms (143fps) | N/A | 1.8M |
+| Original XSeg (原版) | ~10.4ms (96fps) | ~7.0ms (143fps) | N/A | 1.8M |
 | **XSegLite** | **2.5ms (395fps)** | **1.46ms (684fps)** | **4.75M** |
 
 *GPU: RTX 3080 (CUDA 13), batch=1, eval mode (BN fused).*

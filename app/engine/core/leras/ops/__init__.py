@@ -109,7 +109,7 @@ def resize2d_nearest(x, size=2):
     return x
 
 def flatten(x):
-    # 原版 iperov：NHWC→NCHW 后 reshape（通道优先展平），与 DFL 权重布局一致
+    #原版 原版：NHWC→NCHW 后 reshape（通道优先展平），与 DFL 权重布局一致
     return x.reshape(x.size(0), -1)
 
 def max_pool(x, kernel_size=2, strides=2):
@@ -118,7 +118,7 @@ def max_pool(x, kernel_size=2, strides=2):
     return F.max_pool2d(x, kernel_size=kernel_size, stride=strides, padding=0)
 
 def reshape_4D(x, w,h,c):
-    # 原版 iperov：展平按 (c,h,w) 通道优先解释（与原版 NCHW 分支一致）
+    #原版 原版：展平按 (c,h,w) 通道优先解释（与原版 NCHW 分支一致）
     return x.reshape(-1, c, h, w)
 
 def random_normal(shape, mean=0.0, stddev=1.0, dtype=None):
@@ -318,7 +318,7 @@ def dssim(x, y, max_val=1.0, filter_size=11, k1=0.01, k2=0.03):
     c1 = (k1 * max_val) ** 2
     c2 = (k2 * max_val) ** 2
     
-    # 计算均值（padding=VALID，与原版 iperov DFL 一致——滤波器不越界，
+    # 计算均值（padding=VALID，与原版原版 DFL 一致——滤波器不越界，
     # 巨大饱和输入下 SAME 补 0 会扭曲边缘 dssim 数值/梯度导致训练发散）
     def _sep(xx):
         v = F.conv2d(xx, gv, padding=0, groups=channels)

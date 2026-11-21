@@ -43,7 +43,7 @@ whole_face 对齐脸的 landmarks 求均值得到，坐标就是 DFL 512 对齐�
      看到 'none' 就说明这张图没有可信关键点，别再拿它算掩码或排序。
 
 ────────────────────────────────────────────────────────────────────────
-2026-12 起：**终裁矩阵与 iperov 的 get_transform_mat 逐位等价**
+2026-12 起：**终裁矩阵与 原版的 get_transform_mat 逐位等价**
 ────────────────────────────────────────────────────────────────────────
 以前 align_mat_from_68 拿**全部 68 点**去拟合 UNIT_68（33 点 facelib 模板 + 35 点
 经验模板）。真实人脸不是那 35 个点的均值：下颌/下巴落在单位方形外面
@@ -523,7 +523,7 @@ def align_fit(kps68, output_size=SIZE, padding=PADDING,
               whole_face_shift=WHOLE_FACE_SHIFT):
     """68 点 → (mat, T, resid_px, px_per_unit)；算不出来返回 (None, None, None, None)。
 
-    mat        原图 → 对齐图的仿射矩阵（= iperov get_transform_mat 的同一张）
+    mat        原图 → 对齐图的仿射矩阵（=原版 get_transform_mat 的同一张）
     T          原图 → 单位方形的相似变换（3×3）
     resid_px   68 个点各自的残差（芯片像素）：点映射进单位空间后与 UNIT_68 比，
                再乘「芯片像素 / 单位」。33 个拟合点这里是拟合残差，其余 35 个是
@@ -561,7 +561,7 @@ def align_mat_from_68(kps68, output_size=SIZE, padding=PADDING,
     拟合只用 33 点（17..48 + 54）对 facelib 的 landmarks_2D_new —— 和
     facelib.LandmarksProcessor.get_transform_mat 完全同一份模板、同一串几何代码
     （padding 0.40 / 整脸下移 7% / 三对角点求仿射都没动）。所以同一组 68 点，
-    这里算出来的矩阵和 iperov 的 WHOLE_FACE 矩阵是同一个东西（1203 张实测
+    这里算出来的矩阵和 原版的 WHOLE_FACE 矩阵是同一个东西（1203 张实测
     zoom 1.00000 / rot 0.0000° / 四角 0.000 px）。
 
     剩下的 35 个点不参与拟合，只给 align_face_68 做外点检查 —— 为什么以前用

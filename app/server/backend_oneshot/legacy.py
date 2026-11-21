@@ -3,7 +3,7 @@
 
 为什么要有这一层
 ----------------
-界面只认 4.1 的 options 键名。iperov/TF 时代（DFL 1.x / 2.0）的 dat 里是
+界面只认 4.1 的 options 键名。原版/TF 时代（DFL 1.x / 2.0）的 dat 里是
 ``learn_mask`` / ``ed_ch_dims`` / ``face_type='whole_face'`` / ``archi='dfhd'`` 那一套，
 裸 pickle 读出来直接喂给参数页的后果是：一半输入框空着、face_type 下拉框空白，
 点「保存」还会把老键原样写回去。翻译规则（哪个键哪年改的、缺的键缺省多少）只有

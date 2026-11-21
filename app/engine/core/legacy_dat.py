@@ -2,7 +2,7 @@
 
 为什么需要它
 ------------
-iperov 的 TF 版把 iter / options / loss_history / sample_for_preview 一起 pickle 进
+原版的 TF 版把 iter / options / loss_history / sample_for_preview 一起 pickle 进
 ``<name>_data.dat``。4.1 读同一个文件，但 options 的键名和取值在这几年里改过好几轮：
 老 dat 里的 ``face_type='wf'``、``archi='dfhd'``、``learn_mask``、``ed_ch_dims``
 到了 4.1 要么查表 KeyError（``{'h':...}[options['face_type']]``），要么被
@@ -14,7 +14,7 @@ iperov 的 TF 版把 iter / options / loss_history / sample_for_preview 一起 p
 
 键差异从哪来（不是猜的）
 ------------------------
-iperov-dfl 的 git 历史（``models/Model_SAEHD/Model.py``）：
+上游-dfl 的 git 历史（``models/Model_SAEHD/Model.py``）：
 
   2019-10-08 ac77251  learn_mask / optimizer_mode / ed_ch_dims / apply_random_ct /
                       true_face_training；face_type 只有 {h, mf, f}；archi 只有
@@ -63,7 +63,7 @@ LEGACY_ONLY_KEYS = {
     'apply_random_ct': 'TF 的随机色彩迁移开关，4.1 是 ct_mode 字符串',
     'true_face_training': 'TF 的 true face 开关，4.1 是 true_face_power(0..1)',
     'eyes_prio': '旧名，4.1 叫 eyes_mouth_prio',
-    'archi_type': '不是 iperov 原版的键（历史里只是局部变量），部分分支写成了键',
+    'archi_type': '不是 上游原版的键（历史里只是局部变量），部分分支写成了键',
     'target_epoch': 'DFL 1.x 的目标迭代，4.1 叫 target_iter',
     'use_fp16': 'TF 的 fp16 开关，4.1 用 use_bf16',
     'dst_denoise': 'DFL 2.0 早期选项，后来被删掉了',

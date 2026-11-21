@@ -26,7 +26,7 @@ from samplelib import SampleGeneratorBase
 # ============================================================
 # data.dat 参数缓存
 # ============================================================
-# iperov 把 iter / options / loss_history / sample_for_preview 全塞进
+# 原版把 iter / options / loss_history / sample_for_preview 全塞进
 # <model>_data.dat，一次性 pickle。实测一个 300 万次迭代的模型：
 #     文件 122.7 MB —— 读字节 0.06s + 反序列化 0.82s
 #     其中 sample_for_preview 占 55 MB、loss_history 占 67 MB，
@@ -36,7 +36,7 @@ from samplelib import SampleGeneratorBase
 #   · loss_history 交给后台线程从 data.dat 解析后并进来（8M 条约 2s，不挡启动）
 #   · sample_for_preview 不缓存（55MB），置 None 让 update_sample_for_preview() 重取
 # 与此同时 data.dat 仍按老格式【完整】写回（含完整 loss_history），
-# 这样训练完把模型丢回 iperov 的原版也能直接读。
+# 这样训练完把模型丢回上游原版也能直接读。
 _PARAMS_CACHE_SUFFIX = '.params'
 
 # 训练日志 CSV 的默认写盘间隔（步）。10 步一行足够画出收敛曲线，
@@ -766,7 +766,7 @@ class ModelBase(object):
 
     # ---------- 模型卡片用的预览快照 ----------
     # 模型选择页要显示"这个模型练到什么样了"，所以最后一次刷新的预览图必须落盘。
-    # iperov 的 sample_for_preview（那个跨重启固定的预览样本）本身没用，但它
+    # 原版的 sample_for_preview（那个跨重启固定的预览样本）本身没用，但它
     # 55MB 的存在逼得任何想展示预览的程序都得先反序列化整个 data.dat —— 现在
     # 改成训练时把当前预览写成一张小 jpg + 一份 loss 尾巴的小 json：
     #     <models>/<model>_preview.jpg   ~40-120KB

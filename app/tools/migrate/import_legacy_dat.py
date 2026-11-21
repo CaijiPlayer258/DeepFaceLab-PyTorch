@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把 TF 时代（iperov DFL 1.x / 2.0）的 *_data.dat 迁移成 4.1 的新格式。
+"""把 TF 时代（原版 DFL 1.x / 2.0）的 *_data.dat 迁移成 4.1 的新格式。
 
 只搬参数（options / iter），不碰权重：TF 的 .npy 与 torch 的 .pth 张量布局不同，
 只能走 tools/migrate/convert_dfl_tf_to_torch.py。默认只读，打印迁移报告；--apply 才写新文件

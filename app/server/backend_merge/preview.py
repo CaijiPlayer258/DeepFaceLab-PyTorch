@@ -520,9 +520,9 @@ _WORKER = _PreviewWorker()
 
 
 # ------------------------------------------------------------
-# 项目导出的 worker 进程池（对齐 iperov 的分片多进程）
+# 项目导出的 worker 进程池（对齐 原版的分片多进程）
 #
-# iperov 的导出 Stage4（export_pipeline._stage4_swap_faces_mp）是一个
+# 原版的导出 Stage4（export_pipeline._stage4_swap_faces_mp）是一个
 # multiprocessing.Pool：主进程切片下发，每个子进程在 initializer 里建**自己的**
 # dfm/xseg session（_phase_init_all），进程内直接读帧/换脸/融合/落盘，主进程只
 # 顺着 imap_unordered 收回执。这里不重造那套代码 —— _PreviewWorker 本来就是

@@ -8,7 +8,7 @@ from numpy import linalg as npla
 def color_transfer_sot(src,trg, steps=10, batch_size=5, reg_sigmaXY=16.0, reg_sigmaV=5.0):
     """
     Color Transform via Sliced Optimal Transfer
-    ported by @iperov from https://github.com/dcoeurjo/OTColorTransfer
+    ported from https://github.com/dcoeurjo/OTColorTransfer
 
     src         - any float range any channel image
     dst         - any float range any channel image, same shape as src

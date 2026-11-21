@@ -1,4 +1,4 @@
-"""严格对照 iperov 原版（克隆自 GitHub）的 TF2 推理脚本 — 512 liae-udt"""
+"""严格对照 上游原版（克隆自 GitHub）的 TF2 推理脚本 — 512 liae-udt"""
 import os, sys
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
@@ -95,7 +95,7 @@ def main():
 
     e = encoder(enc_w, x[None])
     ab = inter(ia_w, e)
-    cat = tf.concat([ab, ab], -1)  # 原版 AE_merge: inter_AB 双份
+    cat = tf.concat([ab, ab], -1)  #原版 AE_merge: inter_AB 双份
     out = decoder(dec_w, cat).numpy()
 
     out_img = (out[0] * 255).clip(0, 255).astype(np.uint8)

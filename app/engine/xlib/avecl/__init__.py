@@ -10,7 +10,7 @@ Works in python 3.5+. Dependencies: numpy.
 This lib uses relative import, thus you can place it in any subfolder.
 The lib is not thread-safe.
 
-made by @iperov from scratch.
+made from scratch.
 """
 
 from xlib.avecl._internal.initializer.InitConst import InitConst

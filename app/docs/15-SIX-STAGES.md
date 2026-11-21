@@ -39,9 +39,9 @@
 | 反贴回原帧 | 937-943 | fmat = get_transform_mat(lm, sz, WHOLE_FACE)，WARP_INVERSE_MAP 把脸和遮罩一起变回原帧 |
 | 写盘 | 969-975 | PNG 无损；就地覆盖 frames/ |
 
-与 iperov 的差异（以 4.0 为准）：4.0 视频模式的合成**没有** MergeMaskedFace 里那段
+与 原版的差异（以 4.0 为准）：4.0 视频模式的合成**没有** MergeMaskedFace 里那段
 pp（seamless 之后再把结果 warp 回脸空间做二次色彩迁移）；`mt`（match_tone_np）也是
-4.0 自己加的，iperov 没有。这些差异只存在于**单帧预览**那条路（`MergeMaskedFace`），
+4.0 自己加的，原版 没有。这些差异只存在于**单帧预览**那条路（`MergeMaskedFace`），
 六阶段导出不跑它们 —— 两条路的分工见下一节。
 
 ## 预览与导出：两条代码路径（别把它们并回去）

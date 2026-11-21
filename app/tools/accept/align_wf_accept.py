@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-r"""切脸几何**与 iperov facelib 等价**的回归门（单测级，不打模型、不写数据）。
+r"""切脸几何**与原版 facelib 等价**的回归门（单测级，不打模型、不写数据）。
 
 验的五件事（对应这一轮的要求 ②/④）：
 
@@ -7,13 +7,13 @@ r"""切脸几何**与 iperov facelib 等价**的回归门（单测级，不打�
      facelib.get_transform_mat(lm, S, WHOLE_FACE) 比 —— zoom 1.00000±1e-5、
      rot 0.000°±1e-4、画布四角位移 <0.05px。同一份数据把**改前**（68 点拟合）
      的同一组数字也打出来，好对账。
-  B  不动点：4.0 的 aligned 芯片（= iperov 切的）用它自己的 source_landmarks
+  B  不动点：4.0 的 aligned 芯片（=原版 切的）用它自己的 source_landmarks
      重算，结果应当 ≈ 恒等（<0.05px）—— 改前是 3°/13% 级别的差。
   C  外点检查：68 点残差的真实分布（p50/p90/p99/max，按 |yaw| 分桶）+ 两个自检
      —— 真实脸一张都不许被拒；人工把 3 个下颌点推歪必须被拒。
   D  像素：同一帧 + 同一组 68 点，我们的 align_face_68 与「facelib 矩阵 + 同样
      的 warp 参数」逐字节相同（mean 0.000 LSB）；落盘 JPG 再解码 ≤ 1 LSB。
-     顺带量 iperov 真实插值（LANCZOS4）与我们的 CUBIC 的差 —— 纯插值，不改几何。
+     顺带量原版 真实插值（LANCZOS4）与我们的 CUBIC 的差 —— 纯插值，不改几何。
   E  元数据自洽：image_to_face_mat ∘ source_landmarks == landmarks（<0.05px）。
      （E 在重切之后才有意义；重切前跑也过，因为老数据本来就是自洽的。）
 
@@ -171,7 +171,7 @@ def case_a():
 
 # ---------------------------------------------------------------- B
 def case_b(ref_dir=None):
-    head("B  不动点：4.0（iperov）芯片重算应当 ≈ 恒等")
+    head("B  不动点：4.0（原版）芯片重算应当 ≈ 恒等")
     folder = Path(ref_dir or os.environ.get("DFL_ALIGN_REF40") or REF40)
     if not folder.is_dir():
         check(False, "B0 4.0 对齐集", "没有目录 %s（用 --ref40 指定）" % folder)
@@ -212,7 +212,7 @@ def case_b(ref_dir=None):
             % ("", a[:, 5].max(), np.median(a[:, 4]),
                np.percentile(np.abs(a[:, 4]), 95)))
     ex = np.array(groups.get("exact") or [])
-    if not check(len(ex) > 0, "B1 找到 iperov 切的族", "%d 张" % len(ex)):
+    if not check(len(ex) > 0, "B1 找到原版 切的族", "%d 张" % len(ex)):
         return
     check(ex[:, 2].max() <= CORNER_TOL, "B2 该族重算 = 恒等（<0.05px）",
           "n=%d · 四角 max %.4f px" % (len(ex), ex[:, 2].max()))
@@ -329,7 +329,7 @@ def case_d():
         % stats["same_mean"])
     say("写完 JPG（q95 4:4:4）再解码 vs 同一参考：mean ≤ %.3f LSB（只剩编码舍入）"
         % stats["jpg_mean"])
-    say("iperov 实际插值（LANCZOS4）与我们的 CUBIC：mean ≤ %.3f LSB —— 纯插值差，"
+    say("原版 实际插值（LANCZOS4）与我们的 CUBIC：mean ≤ %.3f LSB —— 纯插值差，"
         "几何一样" % stats["lan_mean"])
     check(stats["same_mean"] <= 1e-3, "D1 几何+插值等价（≤1e-3 LSB）",
           "mean %.2e LSB —— 差来自中间量的 float32/float64 舍入" % stats["same_mean"])

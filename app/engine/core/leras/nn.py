@@ -224,7 +224,7 @@ class nn:
 
     @staticmethod
     def flatten(x):
-        # 原版 iperov：通道优先展平（NCHW reshape），与 ops 版本一致
+        #原版 原版：通道优先展平（NCHW reshape），与 ops 版本一致
         return x.view(x.size(0), -1)
 
     @staticmethod
@@ -236,7 +236,7 @@ class nn:
     @staticmethod
     def reshape_4D(x, h, w, c):
         batch_size = x.size(0)
-        # 原版 iperov：通道优先（先按 (c,h,w) 解释），与 ops 版本一致
+        #原版 原版：通道优先（先按 (c,h,w) 解释），与 ops 版本一致
         return x.view(batch_size, c, h, w)
 
     class DeviceConfig:

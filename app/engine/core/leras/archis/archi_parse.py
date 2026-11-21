@@ -23,7 +23,7 @@ __all__ = ['parse_archi_string', 'archi_is_lite', 'build_archi_classes',
 def build_archi_classes(mod, mod_kwargs=None):
     """按修饰符返回 (ArchiClass, 额外 kwargs)。
 
-    mod 为空 -> 原版 DeepFakeArchi（行为与改动前完全一致）。
+    mod 为空 ->原版 DeepFakeArchi（行为与改动前完全一致）。
     mod 含 'l' -> DFLiteArchi，后缀字母的含义：
         '3' -> kernel='3x3'    稠密 3x3 + RepBlock（可折，感受野 3x3）
         '5' -> kernel='repdw5' DW5x5+identity 可折叠加块（可折，感受野 5x5）

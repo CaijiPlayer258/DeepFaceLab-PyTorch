@@ -167,7 +167,7 @@ POST /api/mask/predict|text|bisenet   需要 AI 模型，返回 501
 布局一个字没动（title-bar / toolbar / canvas / right-panel / status-bar 全是 MaskProcessor 原版），
 只加了一层 `mask-editor/css/theme-41.css`（8.5 KB）覆盖配色：
 
-| | 原版 | 4.1 |
+| |原版 | 4.1 |
 |---|---|---|
 | 主色 | #5b5bd6 → #8b5cf6 渐变 | #4F46E5 纯色 |
 | 背景 | #0a0a0b 近黑 | 浅 #f7f7f9 / 深 #121214 |

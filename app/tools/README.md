@@ -6,7 +6,7 @@
 
 | 脚本 | 验什么 | 典型耗时 |
 |---|---|---|
-| `accept/align_wf_accept.py` | 切脸 = iperov WHOLE_FACE（zoom/rot/四角位移 + 4.0 不动点） | 21 s |
+| `accept/align_wf_accept.py` | 切脸 =原版 WHOLE_FACE（zoom/rot/四角位移 + 4.0 不动点） | 21 s |
 | `accept/fused_export_accept.py` | 视频快速导出（fused）全流程 + 与分段逐像素对拍 | 108 s |
 | `accept/stage6_accept.py` | 六阶段导出 + 与 4.0 对拍 | 64 s |
 | `accept/fused_decode_parity.py` | 解码 rawvideo vs frames PNG（8 类素材逐位相同） | 40 s |
@@ -59,7 +59,7 @@
 
 ## 根目录
 
-`align_recut.py` —— **重切芯片**（用 DFLJPG 里已存的 68 点，不重新检测；`--interp lanczos4` 可逐字节复刻 iperov）。
+`align_recut.py` —— **重切芯片**（用 DFLJPG 里已存的 68 点，不重新检测；`--interp lanczos4` 可逐字节复刻原版）。
 
 ## 约定
 

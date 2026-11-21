@@ -1548,7 +1548,7 @@ def merge_export_project(body: dict):
     xseg = _xseg_of(body)
     quality = _int_val("quality", body.get("quality"), 1, 100, _PREVIEW_QUALITY)
     force = bool(body.get("force"))
-    # 并行度：N 个 worker 进程，各持自己的 dfm session（iperov stage4 的同一个语义）；
+    # 并行度：N 个 worker 进程，各持自己的 dfm session（原版 stage4 的同一个语义）；
     # batch = 一条请求里带几帧（= worker 内部同时跑几帧）。
     # 默认值**按模型体量**：大模型（≥1GB 权重）1 个、小模型（≤600MB）2 个（见
     # _proj_workers_default）；线程数 = 4 // workers（见 _proj_batch_default）。

@@ -44,7 +44,7 @@ from ._shared import (
 #   差的那一点全在检测器：retinaface_10g 单帧 47~50ms = 约 20 帧/秒的硬底（它跑在
 #   onnxruntime 上，workspace/_engines 里的 retinaface TRT 引擎 app 层没接上）。
 # 所以视频模式默认走流水线（fused=1）；分段链保留成 fused=0 的对照/排障路径。
-# DFL 项目导出（/api/merge/export-project，iperov 语义、单模型、按 original_name 对帧）
+# DFL 项目导出（/api/merge/export-project，原版 语义、单模型、按 original_name 对帧）
 # 一个字都没动。
 #
 # 这里**不是第二套算法**，每一段调的都是现成的那一个函数：

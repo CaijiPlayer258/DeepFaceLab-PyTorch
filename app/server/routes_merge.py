@@ -44,7 +44,7 @@
      按分配一张一张贴，没分配的用第 0 个。返回体多给 models_used / faces / swaps。
      /api/merge/preview/warm 同样认 models 数组，一次热一组（上限仍是 3）。
 
-  9) 标准 DFL 项目模式（iperov 布局，本文件末尾那一大段）：
+  9) 标准 DFL 项目模式（原版 布局，本文件末尾那一大段）：
      POST /api/merge/export-project —— <项目>/<帧名> + aligned/ → 逐帧合成 →
      <项目>/merged/<帧名>（整帧）→ 按原 fps / 音轨编码成 <项目>.mp4。
      · 逐帧合成不另写一套：复用 _preview_job（检测 → 68 点 → 换脸/遮罩/合成），

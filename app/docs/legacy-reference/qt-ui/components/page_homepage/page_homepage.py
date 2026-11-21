@@ -113,7 +113,7 @@ class ExampleHomepage(SiPage):
         self.option_card_1.adjustSize()
         
         self.option_card_2 = SiOptionCardLinear(self)
-        self.option_card_2.setTitle("iperov", "原DeepFaceLab项目作者")
+        self.option_card_2.setTitle("DeepFaceLab", "上游项目")
         self.option_card_2.load(SiGlobal.siui.iconpack.get("ic_fluent_card_ui_regular"))
         self.option_card_2.setFixedWidth(350)
         self.option_card_2.adjustSize()

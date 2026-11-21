@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-r"""按 68 点重切对齐集（几何 = facelib/iperov，不重新检测）。
+r"""按 68 点重切对齐集（几何 = facelib/原版，不重新检测）。
 
 背景：2026-12 起 align_mat_from_68 只拟合 33 点，和 facelib.get_transform_mat
 逐位等价。这一版之前切出来的芯片是「68 点拟合」的产物：缩放差 0.36% 中位、
@@ -21,7 +21,7 @@ r"""按 68 点重切对齐集（几何 = facelib/iperov，不重新检测）。
 跑法（仓库根，server venv）：
     runtime\server\Scripts\python.exe app\tools\align_recut.py --dry-run
     runtime\server\Scripts\python.exe app\tools\align_recut.py --sets src,proj
-    （--limit 20 试跑；--no-backup 不备份；--interp lanczos4 换成 iperov 实际用的插值）
+    （--limit 20 试跑；--no-backup 不备份；--interp lanczos4 换成原版 实际用的插值）
 
 产物：%TEMP%\dfl_align_ab\recut\  （report.json + 每批 40 张对照图）
 """
@@ -176,7 +176,7 @@ def recut_set(tag, cfg, args, rng):
                                   borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
         st["t_warp"] += time.perf_counter() - t_a
 
-        # ---- 参考：iperov 的矩阵（facelib）+ 同一套 warp ----
+        # ---- 参考：原版的矩阵（facelib）+ 同一套 warp ----
         ref_mat = np.asarray(get_transform_mat(lm, S, FaceType.WHOLE_FACE, scale=1.0), np.float64)
         ref = cv2.warpAffine(frame, ref_mat, (S, S), flags=INTERP[args.interp],
                              borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
@@ -245,9 +245,9 @@ def recut_set(tag, cfg, args, rng):
            "ms_per_face": round(1000.0 * dt / max(1, st["n"]), 1),
            "warp_ms": round(1000.0 * st["t_warp"] / max(1, st["n"]), 3),
            "jpeg_ms": round(1000.0 * st["t_jpeg"] / max(1, st["ok"]), 3),
-           "px_vs_iperov_mean": round(st["px_ref_mean"], 4),
-           "px_vs_iperov_max": round(st["px_ref_max"], 2),
-           "px_vs_iperov_lanczos_mean": round(st["px_lan_mean"], 4),
+           "px_vs_ref_mean": round(st["px_ref_mean"], 4),
+           "px_vs_ref_max": round(st["px_ref_max"], 2),
+           "px_vs_ref_lanczos_mean": round(st["px_lan_mean"], 4),
            "px_vs_old_chip_mean": round(st["px_old_mean"], 3),
            "meta_roundtrip_max_px": round(st["meta_max"], 5),
            "rejected_list": rejected[:20], "missing_list": missing[:20]}
@@ -262,13 +262,13 @@ def recut_set(tag, cfg, args, rng):
 
 
 def plate_image(rows, tag):
-    """每行 3 格：旧芯片 | 新芯片 | iperov（facelib 矩阵 + 同一插值）。"""
+    """每行 3 格：旧芯片 | 新芯片 | 原版（facelib 矩阵 + 同一插值）。"""
     tiles = []
     for name, a, b, c in rows:
         w = 240
         row = np.hstack([cv2.resize(x, (w, w), interpolation=cv2.INTER_AREA) for x in (a, b, c)])
         cv2.putText(row, name, (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-        for i, t in enumerate(("old", "new", "iperov")):
+        for i, t in enumerate(("old", "new", "原版")):
             cv2.putText(row, t, (6 + i * w, w - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                         (0, 255, 255), 1)
         tiles.append(row)

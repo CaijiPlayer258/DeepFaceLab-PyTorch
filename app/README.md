@@ -15,7 +15,7 @@
 ## 二、`engine/` —— 4.0 引擎（原样搬入，尽量别改）
 
 `engine/main.py` 是 4.0 的 CLI 入口，后端用子进程调它做训练/合成/导出。
-下面这些目录**来自 iperov 的 DeepFaceLab 4.0-pytorch**，改它们等于改引擎：
+下面这些目录**来自原版的 DeepFaceLab 4.0-pytorch**，改它们等于改引擎：
 
 ```
 engine/engine/core/           张量/层/优化器（leras）
