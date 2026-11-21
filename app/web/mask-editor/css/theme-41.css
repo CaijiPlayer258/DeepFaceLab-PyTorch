@@ -611,3 +611,17 @@ input[type="range"]::-moz-range-thumb,
 #mask-canvas {
   transition: background-color .24s cubic-bezier(.25,.46,.45,.94) !important;
 }
+
+/* ---------- 统一滚动条（与主界面同一套；!important 压住历史零散定义） ---------- */
+::-webkit-scrollbar { width: 10px !important; height: 10px !important; }
+::-webkit-scrollbar-track { background: transparent !important; }
+::-webkit-scrollbar-thumb {
+  background: #35353f !important;
+  border-radius: 9999px !important;
+  border: 2px solid transparent !important;
+  background-clip: padding-box !important;
+  min-height: 32px;
+}
+::-webkit-scrollbar-thumb:hover { background: #6d6d78 !important; }
+::-webkit-scrollbar-corner { background: transparent !important; }
+::-webkit-scrollbar-button { display: none !important; height: 0 !important; }

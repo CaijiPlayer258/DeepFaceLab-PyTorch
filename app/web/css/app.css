@@ -1,23 +1,4 @@
 
-/* ---------- 滚动条（shadcn 风格：细、圆角、无轨道底色） ----------
-   shadcn 的做法是三件套：透明轨道 + 9999px 圆角的 thumb + 用 border 把 thumb 收窄，
-   视觉上就是一条悬在内容边缘的细线。颜色换成我们的中性灰阶：
-   thumb 用 --line-strong，悬停升到 --ink-3，浅色/深色主题各自跟随变量。 */
-* {
-  scrollbar-width: thin;                                   /* Firefox */
-  scrollbar-color: var(--line-strong) transparent;
-}
-::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb {
-  background: var(--line-strong);
-  border-radius: 9999px;
-  border: 2px solid transparent;                           /* 收窄成细线 */
-  background-clip: padding-box;
-}
-::-webkit-scrollbar-thumb:hover { background: var(--ink-3); background-clip: padding-box; }
-::-webkit-scrollbar-thumb:active { background: var(--ink-2); background-clip: padding-box; }
-::-webkit-scrollbar-corner { background: transparent; }
 /* 中性色：选中态 / 实心按钮（主题色只留给进度与焦点） */
 :root {
   --sel: rgba(0, 0, 0, 0.055);
@@ -6462,3 +6443,21 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   background: var(--panel);
   padding-top: 2px;
 }
+
+/* ---------- 统一滚动条（最终覆盖，必须留在文件末尾） ----------
+   历史上这里零散写过十几处变体：6px / 8px、3px / 999px 圆角、content-box 的裁剪…
+   于是同一个界面能看到两种滚动条。这条用 !important 收口（伪元素选择器被更具体的
+   id 规则覆盖过，只靠顺序压不住），以后要调整只改这一处。 */
+::-webkit-scrollbar { width: 10px !important; height: 10px !important; }
+::-webkit-scrollbar-track { background: transparent !important; }
+::-webkit-scrollbar-thumb {
+  background: var(--line-strong) !important;
+  border-radius: 9999px !important;
+  border: 2px solid transparent !important;   /* 把 thumb 收成细线 */
+  background-clip: padding-box !important;
+  min-height: 32px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--ink-3) !important; }
+::-webkit-scrollbar-thumb:active { background: var(--ink-2) !important; }
+::-webkit-scrollbar-corner { background: transparent !important; }
+::-webkit-scrollbar-button { display: none !important; height: 0 !important; }
