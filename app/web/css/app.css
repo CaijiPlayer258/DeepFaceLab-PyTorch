@@ -6434,11 +6434,9 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
    观感参照 shadcn/ui 的 ScrollArea：10px 槽、全圆角、透明轨道、无箭头，
    thumb 用 2px 透明边框内缩成一条 ~6px 的细线。
 
-   这里**不做悬停放大/变亮**：粗细恒定、颜色恒定。
-   （之前用 *:hover 提亮，视觉上像“突然变粗”，很跳。）
-
-   注意：不要给这些元素写 scrollbar-width / scrollbar-color ——
-   Chromium 一见到标准属性就会整块忽略 ::-webkit-scrollbar 的定制。 */
+   悬停只提亮、不放大：alpha 从 .30 到 .42（差 0.12）。
+   之前 .22 → .55 跨了 0.33，加上 2px 透明边框的裁剪，看起来像“突然变粗”。
+   伪元素没有 transition，所以只能靠小步长让人觉得是“亮了一下”。 */
 
 ::-webkit-scrollbar { width: 10px !important; height: 10px !important; }
 ::-webkit-scrollbar-track { background: transparent !important; }
@@ -6451,3 +6449,6 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   background-clip: padding-box !important;
   min-height: 36px;
 }
+/* 只在自己身上提亮；不做 *:hover（鼠标扫过内容区就整体变亮，太跳） */
+::-webkit-scrollbar-thumb:hover { background: rgba(150, 150, 170, .42) !important; }
+::-webkit-scrollbar-thumb:active { background: rgba(150, 150, 170, .52) !important; }

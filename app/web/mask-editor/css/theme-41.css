@@ -612,7 +612,7 @@ input[type="range"]::-moz-range-thumb,
   transition: background-color .24s cubic-bezier(.25,.46,.45,.94) !important;
 }
 
-/* ---------- 统一滚动条（与主界面同款：细、全圆角、粗细恒定） ---------- */
+/* ---------- 统一滚动条（与主界面同款：细、全圆角、悬停微亮） ---------- */
 ::-webkit-scrollbar { width: 10px !important; height: 10px !important; }
 ::-webkit-scrollbar-track { background: transparent !important; }
 ::-webkit-scrollbar-thumb {
@@ -622,5 +622,6 @@ input[type="range"]::-moz-range-thumb,
   background-clip: padding-box !important;
   min-height: 36px;
 }
+::-webkit-scrollbar-thumb:hover { background: rgba(150, 150, 170, .42) !important; }
 ::-webkit-scrollbar-button { display: none !important; height: 0 !important; }
 ::-webkit-scrollbar-corner { background: transparent !important; }
