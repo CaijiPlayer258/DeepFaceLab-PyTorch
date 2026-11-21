@@ -1,3 +1,23 @@
+
+/* ---------- 滚动条（shadcn 风格：细、圆角、无轨道底色） ----------
+   shadcn 的做法是三件套：透明轨道 + 9999px 圆角的 thumb + 用 border 把 thumb 收窄，
+   视觉上就是一条悬在内容边缘的细线。颜色换成我们的中性灰阶：
+   thumb 用 --line-strong，悬停升到 --ink-3，浅色/深色主题各自跟随变量。 */
+* {
+  scrollbar-width: thin;                                   /* Firefox */
+  scrollbar-color: var(--line-strong) transparent;
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 9999px;
+  border: 2px solid transparent;                           /* 收窄成细线 */
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--ink-3); background-clip: padding-box; }
+::-webkit-scrollbar-thumb:active { background: var(--ink-2); background-clip: padding-box; }
+::-webkit-scrollbar-corner { background: transparent; }
 /* 中性色：选中态 / 实心按钮（主题色只留给进度与焦点） */
 :root {
   --sel: rgba(0, 0, 0, 0.055);

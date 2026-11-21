@@ -1,3 +1,15 @@
+/* ---------- 滚动条：与主界面同一套（细、圆角、透明轨道） ---------- */
+* { scrollbar-width: thin; scrollbar-color: #35353f transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: #35353f;
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: #6d6d78; background-clip: padding-box; }
+::-webkit-scrollbar-corner { background: transparent; }
 /* ==========================================================================
    MaskProcessor UI — Linear Design Language
    Background: #0a0a0b  |  Surface: #0d0d0e  |  Elevated: rgba(255,255,255,0.015)
