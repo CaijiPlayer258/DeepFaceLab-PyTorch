@@ -123,9 +123,10 @@ def trainerThread (s2c, c2s, e,
                     max_iters: int = 0,
                     debug=False,
                     **kwargs):
+    # 控制口：4.1 不再起 4.0 的 WebUI 页面，只保留同形状的 JSON 接口（预览/保存/退出/热更新）
     _webui_trainer = None
     try:
-        from WebUI import page_trainer as _webui_trainer
+        import train_control as _webui_trainer
     except Exception:
         pass
 
@@ -800,37 +801,20 @@ def main(**kwargs):
     thread = threading.Thread(target=trainerThread, args=(s2c, c2s, e), kwargs=kwargs )
     thread.start()
 
-    # Wait until model is loaded before starting WebUI
-    io.log_info("等待模型加载完成后启动 WebUI...")
-    model_ready_event.wait()
-    io.log_info("模型已加载，正在启动 WebUI...")
-
-    # Start WebUI monitor (daemon thread, HTTP on webui_port)
+    # 不再等模型加载：控制口立刻起，加载期间也能响应 /request-quit（以前这里会卡住整个主循环）
     _webui = None
     try:
-        from WebUI import page_trainer as _webui_module
+        import train_control as _webui_module
         _webui_module.start_webui_server(
-            port=int(kwargs.get('webui_port', 6789)),
+            port=int(kwargs.get('webui_port', 6790)),
             model_dir=str(kwargs.get('saved_models_path', '.')),
             password=kwargs.get('webui_password'),
         )
         _webui = _webui_module
     except Exception as exc:
-        print(f'[WebUI] 启动失败: {exc}')
+        print(f'[control] 启动失败: {exc}')
 
-    # 自动在默认浏览器中打开 WebUI
-    try:
-        import webbrowser
-        _port = int(kwargs.get('webui_port', 6789))
-        _password = kwargs.get('webui_password', '')
-        _url = f"http://127.0.0.1:{_port}"
-        if _password:
-            _url += f"?password={_password}"
-        # 延迟 1.5s 等服务器完全就绪后再打开
-        import threading as _thr
-        _thr.Timer(1.5, lambda: webbrowser.open(_url)).start()
-    except Exception:
-        pass
+    # 4.1 不再自动打开浏览器：那个 4.0 WebUI 入口已经移除。
 
     e.wait() #Wait for inital load to occur.
 

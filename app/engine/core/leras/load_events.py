@@ -62,7 +62,7 @@ class LoadResult(object):
 
     __slots__ = ("ok", "reason", "module", "path", "expected_shapes",
                  "found_shapes", "detail", "affected", "candidates",
-                 "fallback_path", "skipped")
+                 "fallback_path", "skipped", "partial")
 
     def __init__(self, module=None, path=None, ok=False, reason=REASON_MISSING,
                  detail="", expected_shapes=None, found_shapes=None,
@@ -80,6 +80,8 @@ class LoadResult(object):
         # .pth/.npy 后缀互换命中时记一笔（这是兼容路径，不算失败）
         self.fallback_path = fallback_path
         self.skipped = False
+        # partial: 只加载了形状对得上的参数（优化器状态跨分辨率复用时会出现）
+        self.partial = False
 
     def __bool__(self):
         return self.ok

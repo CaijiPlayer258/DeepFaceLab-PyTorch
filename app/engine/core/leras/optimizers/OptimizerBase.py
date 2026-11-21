@@ -49,4 +49,13 @@ class OptimizerBase(Saveable):
             return g * (c / n)
         return g
 
+    def load_weights(self, filename):
+        """优化器状态按参数形状存档。分辨率变化后 Inter 的形状对不上，
+        以前会整份丢弃（动量、二阶矩、iterations 全没），曲线出现台阶。
+        这里改成部分加载：能对上的参数照搬，对不上的保持初始化值。"""
+        res = self.load_weights_ex(filename, partial=True)
+        self.last_load_result = res
+        return bool(res)
+
 nn.OptimizerBase = OptimizerBase
+

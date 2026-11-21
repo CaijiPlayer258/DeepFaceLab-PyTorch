@@ -93,7 +93,7 @@ class Saveable():
         """
         return self.load_weights_ex(filename).ok
 
-    def load_weights_ex(self, filename, model_prefix=None):
+    def load_weights_ex(self, filename, model_prefix=None, partial=False):
         """加载权重，返回带**失败原因**的 LoadResult（bool(result) == 是否成功）。
 
         和旧的 load_weights 相比补了三件事：
@@ -160,7 +160,7 @@ class Saveable():
                 print("[WARN] Failed to load zip+npy weights from '%s': %s."
                       % (os.fspath(filepath), e))
                 return res
-            return self._load_pt_weights(d, res)
+            return self._load_pt_weights(d, res, partial=partial)
 
         # Legacy pickle format。
         # 注意 'unknown' 也要走这里：DFL 4.0 的 TF 权重虽然叫 .npy，内容其实是
@@ -265,7 +265,7 @@ class Saveable():
                 out.append(name)
         return out
 
-    def _load_pt_weights(self, d, res=None):
+    def _load_pt_weights(self, d, res=None, partial=False):
         """Load current-format weights (param_0, param_1, ...).
 
         先全量校验（个数/形状），全部通过才写参数；任何一项不过就一个字节都不写。
@@ -327,6 +327,20 @@ class Saveable():
 
         res.expected_shapes = [list(tuple(int(x) for x in w.shape)) for w in weights]
         res.found_shapes = found_shapes
+
+        if problems and partial and entries:
+            # 部分加载：形状对得上的参数照常写入，对不上的保持初始化值。
+            # 分辨率变化时只有 Inter 的几个张量会变形状，没必要整个优化器丢掉 ——
+            # 否则每次换分辨率都会丢光动量，曲线出现一次台阶。
+            for w, src in entries:
+                w.data.copy_(src)
+            res.ok = True
+            res.reason = _lev.REASON_OK
+            res.partial = True
+            res.affected = problems
+            res.detail = ("%d/%d 个参数形状不符，已跳过；其余 %d 个已加载"
+                          % (len(problems), len(weights), len(entries)))
+            return res
 
         if problems:
             res.ok = False
