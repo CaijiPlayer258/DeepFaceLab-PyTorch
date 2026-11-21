@@ -59,6 +59,36 @@ class OptimizerBase(Saveable):
     # ------------------------------------------------------------------
     layout_tag = None
 
+
+    def _weight_keys(self):
+        """优化器自己的名字表：iterations / lr_cur / m#i / v#i / sched#i。
+
+        位置索引对优化器最危险：参数表顺序一变（LIAE 开关 warp 会增减 inter_AB），
+        动量就会读进别的张量，而且形状相同，校验发现不了。名字对齐可以彻底避免。
+        """
+        w = self.get_weights()
+        keys = []
+        i_m = 0
+        i_v = 0
+        i_s = 0
+        ms = list(getattr(self, 'ms', []) or [])
+        vs = list(getattr(self, 'vs', []) or getattr(self, 'accus', []) or [])
+        for x in w:
+            if x is getattr(self, 'iterations', None):
+                keys.append('iterations')
+            elif x is getattr(self, 'lr_cur', None):
+                keys.append('lr_cur')
+            elif i_m < len(ms) and x is ms[i_m]:
+                keys.append('m#%d' % i_m)
+                i_m += 1
+            elif i_v < len(vs) and x is vs[i_v]:
+                keys.append('v#%d' % i_v)
+                i_v += 1
+            else:
+                keys.append('sched#%d' % i_s)
+                i_s += 1
+        return keys
+
     def _layout_path(self, filename):
         from pathlib import Path
         return Path(str(filename) + ".layout.json")

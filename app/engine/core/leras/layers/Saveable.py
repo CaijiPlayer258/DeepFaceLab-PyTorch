@@ -6,6 +6,7 @@ from core import pathex
 import numpy as np
 import torch
 import os
+import json
 import zipfile
 
 from core.leras.nn import nn
@@ -55,6 +56,46 @@ class Saveable():
         np.save(buf, w_val)
         return buf.getvalue()
 
+
+    def _weight_keys(self):
+        """每个权重的唯一名字（层级名 + 同层序号），用于按名字对齐存档。"""
+        weights = self.get_weights()
+        try:
+            owners = self._weight_owner_names(len(weights))
+        except Exception:
+            owners = [self.name or type(self).__name__] * len(weights)
+        seen = {}
+        out = []
+        for nm in owners[:len(weights)]:
+            k = seen.get(nm, 0)
+            seen[nm] = k + 1
+            out.append("%s#%d" % (nm, k))
+        while len(out) < len(weights):
+            out.append("%s#%d" % (self.name or "w", len(out)))
+        return out
+
+    def _name_remap(self, filepath):
+        """读旁挂名字 → {当前索引: 文件内索引}；None=按位置；"MISMATCH"=对不上。"""
+        p = Path(str(filepath) + '.names.json')
+        if not p.is_file():
+            return None
+        try:
+            d = json.loads(p.read_text(encoding='utf-8'))
+        except Exception:
+            return None
+        saved = d.get('keys') or []
+        if not saved:
+            return None
+        try:
+            cur = self._weight_keys()
+        except Exception:
+            return None
+        if saved == cur:
+            return None
+        if len(saved) != len(cur) or set(saved) != set(cur):
+            return "MISMATCH"
+        idx = {k: i for i, k in enumerate(saved)}
+        return {i: idx[k] for i, k in enumerate(cur)}
     def save_weights(self, filename, force_dtype=None):
         if self.name is None:
             raise Exception("name must be defined.")
@@ -68,6 +109,19 @@ class Saveable():
             for i, w in enumerate(weights):
                 npy_bytes = self._weight_to_npy_bytes(w, force_dtype=force_dtype)
                 zf.writestr(f"param_{i}.npy", npy_bytes)
+
+        # 名字旁挂：老 .pth 只有 param_i，位置一变就错配（LIAE 开关 warp 的根因）。
+        # 这里把「每个位置对应哪个参数」写出来，加载时优先按名字对齐；没有旁挂的
+        # 老存档仍走原来的位置索引，行为不变。
+        try:
+            keys = self._weight_keys()
+            shapes = [list(int(x) for x in w.shape) for w in weights]
+            (p.parent / (p.name + '.names.json')).write_text(
+                json.dumps({"ver": 1, "name": self.name, "keys": keys, "shapes": shapes},
+                           ensure_ascii=False),
+                encoding="utf-8")
+        except Exception:
+            pass
 
         if p.exists():
             p.unlink()
@@ -160,7 +214,14 @@ class Saveable():
                 print("[WARN] Failed to load zip+npy weights from '%s': %s."
                       % (os.fspath(filepath), e))
                 return res
-            return self._load_pt_weights(d, res, partial=partial)
+            remap = self._name_remap(filepath)
+            if remap == "MISMATCH":
+                res.ok = False
+                res.reason = _lev.REASON_SHAPE
+                res.detail = ("存档里的参数名字与当前网络对不上（结构变过），已拒绝加载；"
+                              "老存档没有 names.json，仍按位置读取")
+                return res
+            return self._load_pt_weights(d, res, partial=partial, remap=remap)
 
         # Legacy pickle format。
         # 注意 'unknown' 也要走这里：DFL 4.0 的 TF 权重虽然叫 .npy，内容其实是
@@ -201,7 +262,14 @@ class Saveable():
             res.detail = "TF(.npy) 权重无法唯一映射到当前网络（见上面的 [WARN]）"
             return res
 
-        return self._load_pt_weights(d, res)
+        remap = self._name_remap(filepath)
+        if remap == "MISMATCH":
+            res.ok = False
+            res.reason = _lev.REASON_SHAPE
+            res.detail = ("存档里的参数名字与当前网络对不上（结构变过），已拒绝加载；"
+                          "老存档没有 names.json，仍按位置读取")
+            return res
+        return self._load_pt_weights(d, res, partial=partial, remap=remap)
 
     def _weight_owner_names(self, n):
         """返回与 get_weights() 等长的“这个参数属于哪一层”名字列表。"""
@@ -265,7 +333,7 @@ class Saveable():
                 out.append(name)
         return out
 
-    def _load_pt_weights(self, d, res=None, partial=False):
+    def _load_pt_weights(self, d, res=None, partial=False, remap=None):
         """Load current-format weights (param_0, param_1, ...).
 
         先全量校验（个数/形状），全部通过才写参数；任何一项不过就一个字节都不写。
@@ -284,7 +352,7 @@ class Saveable():
         problems = []
         found_shapes = []
         for i, w in enumerate(weights):
-            w_name = "param_%d" % i
+            w_name = "param_%d" % (remap.get(i, i) if isinstance(remap, dict) else i)
             exp_shape = tuple(int(x) for x in w.shape)
             w_val = d.get(w_name, _MISSING)
 
