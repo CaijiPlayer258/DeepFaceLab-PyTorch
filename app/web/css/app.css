@@ -6469,24 +6469,24 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 
 /* ---------- 统一滚动条（最终覆盖，必须留在文件末尾） ----------
 
-   形态：10px 槽 + 2px 透明边框内缩（hex 不透明填充，悬停只换色）。
+   形态：10px 槽 + 2px 透明边框内缩（视觉 6px），不透明填充，悬停只换色。
 
-   为什么槽要 10px 而不是 6px：::-webkit-scrollbar 的『槽宽』同时也是可拖动区域，
-   但它画在滚动容器的**最外沿**，容器有圆角/相邻分隔线时，bar 会顶到边上，
-   看起来像被切掉一截。用 2px 透明边框把 thumb 从四边各缩进 2px 之后：
-     · 顶端、底端各留 2px，不再贴边（圆角容器里也不会被切）
-     · 视觉宽度 = 10 - 2*2 = 6px，正好是想要的手感
-   颜色用不透明色，避免半透明 + 圆角在换色时把边缘像素点亮（那会显得变粗）。 */
+   颜色一律走主题 token：
+     light  --line-strong #d6d6db → 悬停 --ink-3 #8f8f99
+     dark   --line-strong #35353f → 悬停 --ink-3 #6d6d78
+   以前写死 #2c2c34，切到浅色主题就是一条黑杠——这正是那次的 bug。
+
+   注意：不要写 scrollbar-width / scrollbar-color，Chromium 见到标准属性会忽略 ::-webkit- 定制。 */
 
 ::-webkit-scrollbar { width: 10px !important; height: 10px !important; }
 ::-webkit-scrollbar-track { background: transparent !important; }
 ::-webkit-scrollbar-button { display: none !important; height: 0 !important; }
 ::-webkit-scrollbar-corner { background: transparent !important; }
 ::-webkit-scrollbar-thumb {
-  background: #2c2c34 !important;
+  background: var(--line-strong) !important;
   border-radius: 9999px !important;
-  border: 2px solid transparent !important;   /* 四边内缩 2px：不贴边、视觉 6px */
+  border: 2px solid transparent !important;
   background-clip: padding-box !important;
   min-height: 40px;
 }
-::-webkit-scrollbar-thumb:hover { background: #3d3d49 !important; }
+::-webkit-scrollbar-thumb:hover { background: var(--ink-3) !important; }
