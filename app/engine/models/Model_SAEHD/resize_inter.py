@@ -27,7 +27,7 @@ Encoder / Decoder 是纯 Conv，分辨率无关，权重原样复用。
 
     dense1.weight  (e_dims*8*enc^2, ae_dims)    行按 (c,h,w) 展平 -> 按 enc 网格插值
     dense2.weight  (ae_dims, ae_out*low^2)      列按 (c,h,w) 展平 -> 转置后按 low 网格插值
-    dense2.bias    (ae_out*low^2,)              同样按 (c,h,w) 展平（4.0 曾错用 (h,w,c)）
+    dense2.bias    (ae_out*low^2,)              同样按 (c,h,w) 展平（按 (h,w,c) 解析会轴序错位）
     upscale1.*                                  与分辨率无关，原样复制
 
 写盘规则：先备份 <file>.bak.<时间戳>，再写临时文件 -> 校验 -> os.replace；
@@ -378,7 +378,7 @@ def interpolate_bias(b, old_hw: int, new_hw: int, method: str = 'blend') -> np.n
     """Bias (C*H*W,) -> (C*H'*W',)。
 
     修正点：展平索引是 c*H*W + h*W + w，所以必须按 (C, h, w) reshape；
-    4.0 用的是 (h, w, c)，等于把同一段内存按另一种形状重新解释（轴序错）。
+    若按 (h, w, c) 解释，等于把同一段内存按另一种形状重新读取，轴序错位。
     """
     b = np.ascontiguousarray(np.asarray(b).reshape(-1))
     cells = old_hw * old_hw

@@ -676,6 +676,7 @@ Public License instead of this License.  But first, please read
 DeepFaceLab-Torch
 
 本项目基于 DeepFaceLab 移植到 PyTorch，遵循 GPL-3.0 协议。
+上游项目：DeepFaceLab（GPL-3.0）；本仓库新增模块与算法（含 Inter 跨分辨率重采样）由本项目独立设计实现。
 
 ## 说明
 
@@ -684,5 +685,7 @@ DeepFaceLab-Torch
 - PyQt-SiliconUI 采用 LGPL 协议，详见其项目主页
 
 This project is a PyTorch port of DeepFaceLab,
+upstream project: DeepFaceLab (GPL-3.0); new modules and algorithms in this repository
+(including Inter cross-resolution resampling) are independently designed and implemented here.
 licensed under GPL-3.0.
 

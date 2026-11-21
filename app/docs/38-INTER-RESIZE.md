@@ -24,12 +24,14 @@ low = res // 32   （无 d 时 res // 16）          dense2 的输出网格
 
 dense1.weight (e_dims*8*enc^2, ae_dims)   行 = c*H*W 通道优先
 dense2.weight (ae_dims, ae_out*low^2)     列 = 同一展平次序
-dense2.bias   (ae_out*low^2,)             同上（4.0 曾错用 (h,w,c) → 花屏）
+dense2.bias   (ae_out*low^2,)             同上（按 (h,w,c) 解析会因轴序错位而花屏）
 ```
 
 `New416_SAEHD`（df-udt，416，e_dims=80，ae_dims=320）：enc = low = 13，dense1 `(108160, 320)`。
 
 ## 3. 方法：从插值到部分逆滤波
+
+> 本节算法（伪逆变换、部分逆滤波、降采样抗混叠）由本项目独立推导与实现，不依赖外部实现的参数或经验。
 
 | 方法 | 做什么 | 何时用 |
 |---|---|---|
