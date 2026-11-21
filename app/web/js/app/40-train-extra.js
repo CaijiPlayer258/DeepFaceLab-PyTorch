@@ -464,6 +464,10 @@
     document.addEventListener("click", function () { close(); });
     document.addEventListener("keydown", function (e) { if (e.key === "Escape") close(); });
     sel.addEventListener("change", sync);
+    /* 程序化赋值（回填 dat、恢复默认）不会触发 change，
+       标签就会停在上一次的文字上 —— 于是出现「值是 mt、显示还是 same」。
+       把 sync 挂到元素上，回填代码赋值后调一下即可。 */
+    sel.__ddSync = sync;
 
     btn.appendChild(txt);
     wrap.appendChild(btn);
@@ -567,6 +571,7 @@
         sel.appendChild(op);
       });
       sel.value = keep;
+      if (sel.__ddSync) sel.__ddSync();
       if (sel.selectedIndex < 0) sel.selectedIndex = 0;
       /* 旧值不在新列表里：留一条 disabled 的说明，别让下拉框自己换成「自动选择」 */
       devGuard(sel, keep);

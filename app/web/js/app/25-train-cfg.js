@@ -371,6 +371,7 @@
           if (el.selectedIndex < 0 && _ALIAS[sv.toLowerCase()]) el.value = _ALIAS[sv.toLowerCase()];
           /* 设备：必须在下面那句兜底之前过一遍守卫 —— 一旦 selectedIndex<0 被改成 0，
              「存的是 GPU 1 但本机只有 GPU 0」就变成了「用户选了自动」，看不出来了。 */
+          if (el.__ddSync) el.__ddSync();   /* 主题化下拉的标签跟着值走 */
           if (el.dataset.cfg === "device" && window.__devGuard) window.__devGuard(el, sv);
           if (el.selectedIndex < 0) el.selectedIndex = 0;
         }
