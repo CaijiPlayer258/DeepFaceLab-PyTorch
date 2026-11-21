@@ -303,6 +303,11 @@ app.include_router(_mask_router)
 
 from .routes_models import router as _models_router
 app.include_router(_models_router)
+try:
+    from . import routes_update as _update_mod
+    app.include_router(_update_mod.router)
+except Exception:
+    pass
 
 from .routes_train import router as _train_router
 app.include_router(_train_router)

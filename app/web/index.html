@@ -1429,6 +1429,15 @@
           </table>
         </div>
 
+        <div class="card" id="updCard" style="margin-top:14px">
+          <div class="cardhd"><b>版本与更新</b><span class="hint" id="updLocal">—</span></div>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <button class="btn" id="updCheck" type="button">检查更新</button>
+            <button class="btn" id="updApply" type="button" style="display:none">下载并安装</button>
+            <span id="updState" class="hint">—</span>
+          </div>
+          <pre id="updNotes" class="mono" style="display:none;margin-top:10px;max-height:220px;overflow:auto;white-space:pre-wrap"></pre>
+        </div>
         <!-- 里程碑：只记真实发生的事，日期即提交/验收当天 -->
         <div class="card" style="margin-top:14px">
           <div class="cardhd"><b>里程碑</b><span class="hint">按完成时间倒序</span></div>
@@ -1673,6 +1682,7 @@
   <script src="/static/js/i18n.js?v=99"></script>
   <!-- TF 时代 dat 的迁移提示：参数页顶部那一行。单独成文件，Node 里能直接断言 -->
   <script src="/static/js/legacy_notice.js?v=1"></script>
+<script src="/static/js/update.js?v=1"></script>
   <script src="/static/js/loadbanner.js?v=1"></script>
   <script src="/static/js/app.js?v=mwnoij94"></script>
   <script src="/static/js/face_db.js?v=1"></script>
