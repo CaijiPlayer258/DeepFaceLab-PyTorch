@@ -1471,36 +1471,36 @@
     if (m.face_type) params.push(m.face_type);
 
     var kv = [];
-    kv.push('<span class="tag n">iter ' + fmt(m.iter) + "</span>");
+    if (m.iter) kv.push('<span class="tag n">iter ' + fmt(m.iter) + "</span>");
     if (m.batch_size) kv.push('<span class="tag n">bs ' + m.batch_size + "</span>");
     if (m.bf16) kv.push('<span class="tag n">bf16</span>');
     if (m.optimizer) kv.push('<span class="tag n">' + m.optimizer + "</span>");
     if (m.weights === "npy") kv.push('<span class="tag warn">npy · 需转换</span>');
     /* DFM 徽标已按要求去掉 */
 
-    var chart = m.spark && m.spark.src && m.spark.src.length
+    /* 没有 loss 曲线就不画那块占位：空卡片比一行“暂无 loss 记录”干净 */
+    var chart = (m.spark && m.spark.src && m.spark.src.length)
       ? '<div class="lchart">' + sparkSVG(m.spark) +
         '<div class="lg"><span><i style="background:var(--ink-2)"></i>src</span>' +
         '<span><i style="background:var(--ok)"></i>dst</span>' +
         '<span style="margin-left:auto">最近 ' + m.spark.src.length + " iter</span></div></div>"
-      : '<div class="lchart"><div class="lg">暂无 loss 记录</div></div>';
+      : '';
 
     /* 预览图不可点：以前是 <a target="_blank">，在 Electron 壳里会被
        setWindowOpenHandler 丢给 shell.openExternal —— 点一下模型缩略图就弹外部浏览器，
        非常莫名其妙。这里改成纯 <div>，只负责显示。想看大图去「参数」页或训练页。 */
     var prev = m.preview_url
       ? '<div class="mprev"><img loading="lazy" src="' + m.preview_url + '" alt=""></div>'
-      : '<div class="mprev empty">无预览</div>';
+      : '';
 
     el.innerHTML = chart + prev +
       '<div class="mbody">' +
-        '<div class="nm">' + m.name + ' <span class="tag n">' + (m.archi || "—") + "</span></div>" +
-        '<div class="meta">' + (params.join(" · ") || "—") + "</div>" +
-        '<div class="kv">' + kv.join("") + "</div>" +
+        '<div class="nm">' + m.name + ' <span class="tag n">' + (m.archi || (m.dfm_only ? "dfm" : "")) + "</span></div>" +
+        (params.length ? '<div class="meta">' + params.join(" · ") + "</div>" : "") +
+        (kv.length ? '<div class="kv">' + kv.join("") + "</div>" : "") +
         (m.dfm_only
-          /* 只有 .dfm、没有训练目录：训练/参数/导出/删除全都无从下手，别摆假按钮 */
-          ? '<div class="acts">' +
-            '<span class="hint" style="margin-left:8px">只有 .dfm，没有训练目录</span></div>'
+          /* 只有 .dfm：没有训练目录，训练/参数/导出/删除都无从下手，整块不渲染 */
+          ? ''
           : '<div class="acts"><button class="mini pri" data-act="run">训练</button>' +
             '<button class="mini" data-act="cfg">参数</button>' +
             '<button class="mini" data-act="export">导出</button>' +
