@@ -60,9 +60,11 @@ n^2 = 13^2 = 169  -&gt;  m^2 = 10^2 = 100 (320): 69 dims = 41% lost
 <ol><li>Among classical interpolations <strong>bicubic is best</strong> (flattest passband): usable but soft.</li><li><strong>pinv</strong> supplies the missing inverse filter and restores detail; alone it is best for upscaling.</li><li>**blend = 0.5*bicubic + 0.5*pinv** (partial inverse filtering) wins on all three metrics for 3 of 4</li><li>targets and cuts 512 MAE from ~19 to 8.9 - the best method found, now the default.</li><li>Downscaling loss has a <strong>mathematical floor</strong> (rank deficiency 41%/15%); interpolation cannot recover it.</li></ol>
 <h2>7. Shipping</h2>
 <pre>app/engine/models/Model_SAEHD/resize_inter.py
-    _METHODS = ('blend','bicubic','bilinear')   # blend is the default
+    _METHODS = ('blend','bicubic','bilinear','lanczos','pinv')   # blend is the default
+    blend = 0.5*lanczos + 0.5*pinv (lanczos up / area down, lam 1e-4 / 1e-1)
     python -m models.Model_SAEHD.resize_inter --model-dir &lt;dir&gt; --new-res 448
 
 measured with the real tool (416-&gt;448, masked): PSNR 26.27 / SSIM 0.897 / MAE 6.39 (NCC 0.978)</pre>
-<p>Scripts: <code>inter_study_run.py</code> (16 end-to-end), <code>inter_adv_study.py</code> (pinv/ls), <code>inter_blend_study.py</code> (alpha sweep), <code>xseg_mask.py</code> (masked metrics).</p>
+<p>Scripts: <code>inter_study_run.py</code> (16 end-to-end), <code>inter_adv_study.py</code> (pinv/ls), <code>inter_blend_study.py</code> (alpha sweep), <code>inter_ratio_study.py</code> (32 kernel x inverse x AA), <code>inter_hybrid_study.py</code> (AA-aware blend), <code>xseg_mask.py</code> (masked + ncc/hf metrics).</p>
+<p>Engineering doc: <a href="../38-INTER-RESIZE.md">app/docs/38-INTER-RESIZE.md</a>.</p>
 </main></body></html>

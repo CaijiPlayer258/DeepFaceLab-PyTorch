@@ -134,10 +134,14 @@ upscaling loses no dimension and scores highest.
 ## 7. Shipping
 
     app/engine/models/Model_SAEHD/resize_inter.py
-        _METHODS = ('blend','bicubic','bilinear')   # blend is the default
+        _METHODS = ('blend','bicubic','bilinear','lanczos','pinv')   # blend is the default
+        blend = 0.5*lanczos + 0.5*pinv (lanczos up / area down, lam 1e-4 / 1e-1)
         python -m models.Model_SAEHD.resize_inter --model-dir <dir> --new-res 448
 
     measured with the real tool (416->448, masked): PSNR 26.27 / SSIM 0.897 / MAE 6.39 (NCC 0.978)
 
 Scripts: `inter_study_run.py` (16 end-to-end), `inter_adv_study.py` (pinv/ls),
-`inter_blend_study.py` (alpha sweep), `xseg_mask.py` (masked metrics).
+`inter_blend_study.py` (alpha sweep), `inter_ratio_study.py` (32 kernel x inverse x AA),
+`inter_hybrid_study.py` (AA-aware blend), `xseg_mask.py` (masked + ncc/hf metrics).
+
+Engineering doc: [app/docs/38-INTER-RESIZE.md](../38-INTER-RESIZE.md).

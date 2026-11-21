@@ -130,10 +130,14 @@ blend(new) 在两者之间且都接近 1（448：hf 0.65–0.70、ncc 0.978）�
 ## 7. 落地
 
     app/engine/models/Model_SAEHD/resize_inter.py
-        _METHODS = ('blend','bicubic','bilinear')   # blend 为默认
+        _METHODS = ('blend','bicubic','bilinear','lanczos','pinv')   # blend 为默认
+        blend = 0.5·lanczos + 0.5·pinv（升 lanczos / 降 area，λ=1e-4 / 1e-1）
         python -m models.Model_SAEHD.resize_inter --model-dir <dir> --new-res 448
 
-    工具实测（416→448，遮罩内）：PSNR 26.07 / SSIM 0.892 / MAE 5.84
+    工具实测（416→448，遮罩内）：PSNR 26.27 / SSIM 0.897 / MAE 6.39（NCC 0.978）
 
 复现脚本：`inter_study_run.py`（16 组端到端）、`inter_adv_study.py`（pinv/ls）、
-`inter_blend_study.py`（α 扫描）、`xseg_mask.py`（遮罩内指标）。
+`inter_blend_study.py`（α 扫描）、`inter_ratio_study.py`（核×逆滤波×抗混叠 32 组）、
+`inter_hybrid_study.py`（AA 感知混合）、`xseg_mask.py`（遮罩内 + ncc/hf 指标）。
+
+工程文档：[app/docs/38-INTER-RESIZE.md](../38-INTER-RESIZE.md)。

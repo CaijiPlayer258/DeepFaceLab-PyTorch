@@ -63,9 +63,11 @@ n² = 13² = 169  →  m² = 10² = 100（320）  丢掉 69 维 = 41%
 <ol><li>常规插值中 <strong>bicubic 最好</strong>（通带最平），够用但偏软。</li><li><strong>pinv</strong> 补回插值缺的逆滤波，细节明显回来；单独用在高分辨率上最优。</li><li><strong>blend = 0.5·bicubic + 0.5·pinv</strong>（部分逆滤波）在 4 个目标里 3 个全面最优，</li><li>512 的 MAE 从 ~19 降到 8.9 —— 这是本次实验找到的最好算法，已设为默认。</li><li>降分辨率的损失有<strong>数学下界</strong>（秩亏 41%/15%），插值类方法无从挽回，必须续训。</li></ol>
 <h2>7. 落地</h2>
 <pre>app/engine/models/Model_SAEHD/resize_inter.py
-    _METHODS = ('blend','bicubic','bilinear')   # blend 为默认
+    _METHODS = ('blend','bicubic','bilinear','lanczos','pinv')   # blend 为默认
+    blend = 0.5·lanczos + 0.5·pinv（升 lanczos / 降 area，λ=1e-4 / 1e-1）
     python -m models.Model_SAEHD.resize_inter --model-dir &lt;dir&gt; --new-res 448
 
-工具实测（416→448，遮罩内）：PSNR 26.07 / SSIM 0.892 / MAE 5.84</pre>
-<p>复现脚本：<code>inter_study_run.py</code>（16 组端到端）、<code>inter_adv_study.py</code>（pinv/ls）、 <code>inter_blend_study.py</code>（α 扫描）、<code>xseg_mask.py</code>（遮罩内指标）。</p>
+工具实测（416→448，遮罩内）：PSNR 26.27 / SSIM 0.897 / MAE 6.39（NCC 0.978）</pre>
+<p>复现脚本：<code>inter_study_run.py</code>（16 组端到端）、<code>inter_adv_study.py</code>（pinv/ls）、 <code>inter_blend_study.py</code>（α 扫描）、<code>inter_ratio_study.py</code>（核×逆滤波×抗混叠 32 组）、 <code>inter_hybrid_study.py</code>（AA 感知混合）、<code>xseg_mask.py</code>（遮罩内 + ncc/hf 指标）。</p>
+<p>工程文档：<a href="../38-INTER-RESIZE.md">app/docs/38-INTER-RESIZE.md</a>。</p>
 </main></body></html>

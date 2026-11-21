@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""Inter 分辨率扩缩容工具（A_fix 版：网格与轴序已修正，原子写 + 回滚）。
+"""Inter 分辨率扩缩容工具（网格/轴序已修正，原子写 + 回滚）。
+
+方法（默认 blend）：
+    blend     0.5·lanczos + 0.5·pinv（部分逆滤波；降采样时 pinv 用 area 抗混叠）★默认
+    lanczos   Lanczos-3 插值（纯插值里最好）
+    pinv      保泛函伪逆：升 L(LᵀL+λI)⁻¹ / 降 (LLᵀ+λI)⁻¹L
+    bicubic   Catmull-Rom 插值（旧默认，稳但糊）
+    bilinear  三角核插值（兼容旧行为）
+
+    数学要点：换分辨率后 f' ≈ (L⊗L)f，保 ⟨W,f⟩ 需要 (L⊗L)ᵀW' = W；
+    插值只给了 (L⊗L)W，缺逆滤波，全量逆滤波过锐 → 取一半即 blend。
+    实测（416→448，XSegLite 遮罩内）：bicubic 23.41/0.834，blend 26.27/0.897。
 
 把一个已训练模型的 Inter 低分辨率网格权重做空间插值，使其匹配新的 resolution；
 Encoder / Decoder 是纯 Conv，分辨率无关，权重原样复用。
