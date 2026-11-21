@@ -266,7 +266,9 @@ def _load_optimizer(opt, filename, iter_=0, emit=True, stream=None, forced_reaso
                               ok=False, reason=forced_reason, detail=forced_detail)
     else:
         try:
-            res = opt.load_weights_ex(filename)
+            # 优化器状态按形状逐参数存：换过分辨率后只有 Inter 那几个张量对不上，
+            # 其余（动量 / 二阶矩 / iterations）都该保留 —— 所以这里一律部分加载。
+            res = opt.load_weights_ex(filename, partial=True)
         except Exception as e:
             res = _lev.LoadResult(module=optimizer_label(opt), path=str(filename),
                                   ok=False, reason=_lev.REASON_CORRUPT,
