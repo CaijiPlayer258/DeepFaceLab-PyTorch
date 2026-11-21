@@ -40,18 +40,9 @@
       btn = "继续训练"; act = function () { openCfg(latest); };
     }
     if ($("hello")) $("hello").textContent = greeting() + (AUTH.logged_in && AUTH.name ? "，" + AUTH.name : "");
-    if ($("helloSub")) $("helloSub").textContent = desc;
-    if ($("nextHint")) $("nextHint").textContent = label;
     var nb = $("nextBtn");
     if (nb) { nb.textContent = btn; nb.onclick = act; }
 
-    /* 成绩单 */
-    var totalIter = 0;
-    list.forEach(function (m) { totalIter += (m.iter || 0); });
-    if ($("stIter")) $("stIter").textContent = fmt(totalIter);
-    if ($("stModels")) $("stModels").textContent = list.length;
-    if ($("stFaces")) $("stFaces").textContent = fmt(src + dst);
-    if ($("stExports")) $("stExports").textContent = exported;
 
     /* 流水线 */
     if ($("pvData")) $("pvData").innerHTML = "<b>" + fmt(src) + "</b> src · <b>" + fmt(dst) + "</b> dst";
