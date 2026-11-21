@@ -21,6 +21,63 @@ from ..app import (MODEL_DIR, WORKSPACE, _CFG_STRUCTURAL, _DFL_PY, _DFL_TOOL, _H
 
 router = APIRouter()
 
+
+
+_OPT_CACHE_VER = 1
+
+
+def _opt_cache_path(dat: Path) -> Path:
+    return dat.with_suffix(".opt_cache.json")
+
+
+def _read_options_cached(dat: Path):
+    """先读参数边车缓存；只有缓存过期/缺失才去解整份 dat。
+
+    为什么不每次解 dat：122 MB 的 pickle 读一次约 0.85 s，而参数页要的只是 70 来个键。
+    缓存键是 (mtime, size)，文件一动就失配，所以不会读到旧值。
+    返回 {"iter": int, "options": dict}，与 describe() 同形。
+    """
+    try:
+        st = dat.stat()
+        cp = _opt_cache_path(dat)
+        if cp.exists():
+            j = json.loads(cp.read_text(encoding="utf-8"))
+            if (j.get("ver") == _OPT_CACHE_VER
+                    and j.get("mtime") == round(st.st_mtime, 3)
+                    and j.get("size") == st.st_size):
+                return {"iter": j.get("iter", 0), "options": j.get("options") or {}}
+    except Exception:
+        pass
+
+    # 引擎保存时会顺手写一份 <dat>.meta_cache.json（里面没有 mtime/size，只能按时间比）。
+    # 它比 dat 新，就说明是最近一次保存写的，直接拿来用，连解 dat 都省了。
+    try:
+        mc = dat.with_suffix(".meta_cache.json")
+        if mc.exists() and mc.stat().st_mtime >= dat.stat().st_mtime:
+            jm = json.loads(mc.read_text(encoding="utf-8"))
+            if jm.get("options"):
+                stm = dat.stat()
+                info_m = {"iter": jm.get("iter", 0), "options": jm["options"]}
+                _opt_cache_path(dat).write_text(json.dumps({
+                    "ver": _OPT_CACHE_VER, "mtime": round(stm.st_mtime, 3), "size": stm.st_size,
+                    "iter": info_m["iter"], "options": info_m["options"],
+                }, ensure_ascii=False, default=str), encoding="utf-8")
+                return info_m
+    except Exception:
+        pass
+
+    from .._legacy import describe
+    info = describe(dat)
+    try:
+        st = dat.stat()
+        _opt_cache_path(dat).write_text(json.dumps({
+            "ver": _OPT_CACHE_VER, "mtime": round(st.st_mtime, 3), "size": st.st_size,
+            "iter": info.get("iter", 0), "options": info.get("options") or {},
+        }, ensure_ascii=False, default=str), encoding="utf-8")
+    except Exception:
+        pass
+    return info
+
 @router.get("/api/models/{name}/config")
 def model_config_get(name: str):
     """读一个模型当前保存的训练参数。
@@ -64,7 +121,7 @@ def model_detail(name: str):
         raise HTTPException(500, "读取模型失败: " + str(e))
     from .._legacy import describe
     try:
-        info = describe(dat)               # 只要 options：不为了 50 个键去解整份 dat
+        info = _read_options_cached(dat)   # 同上，但走 JSON 边车缓存（冷启动也是毫秒级）
     except Exception:
         info = {"options": {}, "iter": entry.get("iter", 0)}
     opts = info.get("options") or {}
