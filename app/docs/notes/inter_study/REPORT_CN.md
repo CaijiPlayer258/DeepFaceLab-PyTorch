@@ -94,6 +94,13 @@
 
 ![最优方案对比](best_compare.png)
 
+逐分辨率的肉眼对照（每行一个目标分辨率，列为 bicubic / pinv / blend）：
+
+![各分辨率算法对照](algo_by_res.png)
+
+一眼能读出的差异：320 三列都偏软、384 起 pinv 与 blend 的眼睛和发丝明显更清楚、
+448 的 blend 最接近 baseline、512 的 bicubic 已经糊成一片而 blend 仍保住五官。
+
 pinv 的逆滤波是**全量**的，会把权重高频放大过头（MAE 偏高）；bicubic 则不足。
 两者在同一网格上，凸组合 W' = α·pinv + (1-α)·bicubic 等价于**部分逆滤波**
 （Wiener 收缩的思想：全量逆滤波在噪声/量化下不是最优，取一部分更好）。实测：
@@ -131,6 +138,11 @@ pinv 的逆滤波是**全量**的，会把权重高频放大过头（MAE 偏高�
     384            ：W' = pinv(λ=1e-1)（或 blend α=0.75，差距很小）
     320            ：W' = blend α=0.5~0.75（看更在意 PSNR 还是 MAE）
     不要用         ：nearest；纯 bicubic（在 512 上 MAE 差一倍以上）
+
+看图结论（与指标一致）：
+- 448 / 512：bicubic 明显发糊，pinv 略“发脆”（边缘硬、MAE 高），blend α=0.5 最像 baseline；
+- 384：pinv 的细节最完整，blend 紧随；
+- 320：三者都受限，blend 最平衡。
 
 实现：`inter_adv.resample_inter(mode='pinv', lam=...)` 与 `inter_blend_study.py` 的凸组合。
 所有指标均在 XSegLite 遮罩内统计。

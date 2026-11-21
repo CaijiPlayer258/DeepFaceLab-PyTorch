@@ -81,6 +81,14 @@ Data: results_adv.json (48), results.json (16), latent_metrics.json.
 
 ![best methods](best_compare.png)
 
+Per-resolution visual (one row per target, columns = bicubic / pinv / blend):
+
+![per-resolution comparison](algo_by_res.png)
+
+What the eye reads immediately: 320 is soft in all three; from 384 on, pinv and blend keep the eyes and
+hair strands much better; at 448 blend is closest to the baseline; at 512 bicubic has smeared away while
+blend still holds the features.
+
 pinv applies the **full** inverse filter, which over-sharpens weight high frequencies (higher MAE);
 bicubic under-shoots. On the same grid a convex combination W' = a*pinv + (1-a)*bicubic is equivalent
 to **partial inverse filtering** (Wiener shrinkage: full inversion is not optimal under noise/quantisation).
@@ -118,6 +126,11 @@ model, not converting one.
     384              : W' = pinv(lam=1e-1)  (or blend a=0.75, nearly identical)
     320 (downscale)  : W' = blend a=0.5-0.75 (PSNR vs MAE trade-off)
     avoid            : nearest; plain bicubic (512 MAE is >2x worse)
+
+Visual conclusion (consistent with the metrics):
+- 448 / 512: bicubic is visibly soft, pinv looks slightly brittle (hard edges, higher MAE), blend a=0.5 is closest to baseline;
+- 384: pinv keeps the most detail, blend a close second;
+- 320: all three are limited, blend is the most balanced.
 
 Implementation: `inter_adv.resample_inter(mode='pinv', lam=...)` plus the convex mix in `inter_blend_study.py`.
 All metrics computed inside the XSegLite mask.
