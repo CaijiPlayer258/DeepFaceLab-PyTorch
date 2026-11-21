@@ -49,10 +49,61 @@ class OptimizerBase(Saveable):
             return g * (c / n)
         return g
 
+
+    # ------------------------------------------------------------------
+    # 存档布局标记：优化器状态是按**位置**存的，一旦训练时的参数列表变了
+    # （LIAE 的 random_warp 开关决定 inter_AB 在不在列表里），位置就会整体错位；
+    # inter_AB / inter_B 形状完全相同，形状校验根本发现不了，于是动量被写进
+    # 另一条支路 —— 表现就是「开关几次 warp 之后模型越来越糊」。
+    # 这里把构造时的布局名字写进旁挂 json，加载时对不上就整份作废（不会串味）。
+    # ------------------------------------------------------------------
+    layout_tag = None
+
+    def _layout_path(self, filename):
+        from pathlib import Path
+        return Path(str(filename) + ".layout.json")
+
+    def save_weights(self, filename, force_dtype=None):
+        super().save_weights(filename, force_dtype=force_dtype)
+        try:
+            import json
+            Path = __import__("pathlib").Path
+            self._layout_path(filename).write_text(
+                json.dumps({"tag": self.layout_tag,
+                            "n": len(self.get_weights())}, ensure_ascii=False),
+                encoding="utf-8")
+        except Exception:
+            pass
+
+    def layout_matches(self, filename):
+        """旁挂缺失 -> True（老存档，没得比）；存在则必须一致。"""
+        p = self._layout_path(filename)
+        try:
+            if not p.is_file():
+                return True
+            import json
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return True
+        if d.get("tag") is None or self.layout_tag is None:
+            return True
+        return str(d.get("tag")) == str(self.layout_tag)
+
     def load_weights(self, filename):
         """优化器状态按参数形状存档。分辨率变化后 Inter 的形状对不上，
         以前会整份丢弃（动量、二阶矩、iterations 全没），曲线出现台阶。
         这里改成部分加载：能对上的参数照搬，对不上的保持初始化值。"""
+        if not self.layout_matches(filename):
+            # 布局变了（典型：LIAE 开关 random_warp 让 inter_AB 进出参数列表）。
+            # 位置索引已不可信，宁可清空状态，也不要把动量串到另一条支路。
+            from core.leras import load_events as _lev
+            res = _lev.LoadResult(module=getattr(self, "name", "optimizer"))
+            res.ok = False
+            res.reason = _lev.REASON_SHAPE
+            res.detail = ("训练时的参数布局与本次不同（warp / freeze 开关变过），"
+                          "优化器状态已作废并重置")
+            self.last_load_result = res
+            return False
         res = self.load_weights_ex(filename, partial=True)
         self.last_load_result = res
         return bool(res)

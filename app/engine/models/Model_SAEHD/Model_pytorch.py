@@ -1049,15 +1049,14 @@ class SAEHDModel(ModelBase):
                     + list(self.inter_B.get_weights())
                     + list(self.decoder.get_weights())
                 )
-                # random_warp关闭时，按原逻辑只训练 encoder+inter_B+decoder
-                if random_warp:
-                    self.src_dst_trainable_weights = self.src_dst_saveable_weights
-                else:
-                    self.src_dst_trainable_weights = (
-                        list(self.encoder.get_weights())
-                        + list(self.inter_B.get_weights())
-                        + list(self.decoder.get_weights())
-                    )
+                # ★ 以前 random_warp=False 时优化器参数表会**少掉 inter_AB**：
+                #   warp 一开一关，src_dst_opt.pth 里的位置整体错一格，而 inter_AB 和
+                #   inter_B 形状完全一样，形状校验发现不了 —— 动量被写进另一条支路，
+                #   表现就是「开关几次 warp 之后模型越来越糊」。
+                #   现在两条支路都留在参数表里：不开 warp 时 inter_AB 没有梯度，
+                #   优化器那一步自然跳过它（p.grad is None -> continue），
+                #   但状态槽位不再移动，存档布局与 warp 开关无关。
+                self.src_dst_trainable_weights = self.src_dst_saveable_weights
 
             self.src_dst_opt = OptimizerClass(
                 self.src_dst_trainable_weights,
@@ -1075,6 +1074,14 @@ class SAEHDModel(ModelBase):
                 state_bf16=state_bf16,
                 name='src_dst_opt',
             )
+            # 布局指纹：写进 src_dst_opt.pth.layout.json，加载时和本次训练的参数
+            # 表比对；不一致就整份作废（见 OptimizerBase.layout_matches）。
+            self.src_dst_opt.layout_tag = '|'.join([
+                'enc%d' % len(self.encoder.get_weights()),
+                ('inter_AB%d' % len(self.inter_AB.get_weights())) if hasattr(self, 'inter_AB') else ('inter%d' % len(self.inter.get_weights())),
+                ('inter_B%d' % len(self.inter_B.get_weights())) if hasattr(self, 'inter_B') else 'nodec',
+                'decsrc%d' % len(self.decoder_src.get_weights()) if hasattr(self, 'decoder_src') else 'dec%d' % len(self.decoder.get_weights()),
+            ])
             self.model_filename_list += [(self.src_dst_opt, 'src_dst_opt.pth')]
 
             if float(self.options['true_face_power']) != 0.0 and 'df' in archi_type:

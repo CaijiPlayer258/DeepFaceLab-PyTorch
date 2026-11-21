@@ -52,6 +52,7 @@ class AdaBelief(nn.OptimizerBase):
         lr_plateau_min_ratio: float = 0.1,
         lr_plateau_partitions: int = 1,
         clipnorm: float = 0.0,
+        eps: float = 1e-8,
         state_bf16: bool = False,
         name: Optional[str] = None,
         **kwargs,
@@ -89,6 +90,9 @@ class AdaBelief(nn.OptimizerBase):
         self._lr_last_check = 0      # 上次平台判定的 iter（冷却用）
         self._lr_best_base = None    # 判定基准：只前移不回退
         self._best_loss = {}
+        # eps: AdaBelief paper uses 1e-16; 1e-8 is the practical default on fp32.
+        # <=0 keeps the legacy machine-resolution behavior.
+        self.eps = float(eps)
         self.clipnorm = float(clipnorm)
         # 状态存储精度：bf16 时 ms/vs 各占 2B/参数（fp32 是 4B）。
         self._state_dtype = torch.bfloat16 if state_bf16 else torch.float32
@@ -287,6 +291,12 @@ class AdaBelief(nn.OptimizerBase):
         if rest and rest[0].numel() > 1:
             self._loss_hist = [float(v) for v in rest[0].detach().cpu().tolist()]
 
+
+    def _eps_of(self, p):
+        if self.eps and self.eps > 0.0:
+            return self.eps
+        return float(np.finfo(_torch_to_numpy_dtype(p.dtype)).resolution)
+
     def zero_grad(self):
         for p in self.params:
             if p.grad is None:
@@ -312,6 +322,10 @@ class AdaBelief(nn.OptimizerBase):
 
         b1 = self.beta_1
         b2 = self.beta_2
+        # AdaBelief bias correction: same missing terms as Adam had.
+        t = float(self.iterations.item())
+        bc1 = 1.0 - b1 ** t
+        bc2 = 1.0 - b2 ** t
 
         with torch.no_grad():
             for i, p in enumerate(self.params):
@@ -328,7 +342,7 @@ class AdaBelief(nn.OptimizerBase):
                     # ★ bf16 状态分块原地更新（见 _chunked.py 的说明）
                     mp = _ch.flat(m); vp = _ch.flat(v)
                     gp = _ch.flat(g); pp = _ch.flat(p)
-                    eps_c = float(np.finfo(_torch_to_numpy_dtype(p.dtype)).resolution)
+                    eps_c = self._eps_of(p)
                     for s, e in _ch.chunks(gp.numel()):
                         gs = gp[s:e]
                         if scale != 1.0:
@@ -336,7 +350,9 @@ class AdaBelief(nn.OptimizerBase):
                         mc = mp[s:e].float(); vc = vp[s:e].float()
                         mt = b1 * mc + (1.0 - b1) * gs
                         vt = b2 * vc + (1.0 - b2) * (gs - mt).pow(2)
-                        sd = (-lr) * mt / (torch.sqrt(vt) + eps_c)
+                        mt_c = mt / bc1
+                        vt_c = vt / bc2
+                        sd = (-lr) * mt_c / (torch.sqrt(vt_c) + eps_c)
                         if self.lr_dropout != 1.0:
                             sd = sd * torch.bernoulli(torch.full_like(sd, self.lr_dropout))
                         pp[s:e].add_(sd)
@@ -347,8 +363,9 @@ class AdaBelief(nn.OptimizerBase):
                 m_t = b1 * m + (1.0 - b1) * g
                 v_t = b2 * v + (1.0 - b2) * (g - m_t).pow(2)
 
-                resolution = float(np.finfo(_torch_to_numpy_dtype(p.dtype)).resolution)
-                step_delta = (-lr) * m_t / (torch.sqrt(v_t) + resolution)
+                m_hat = m_t / bc1
+                v_hat = v_t / bc2
+                step_delta = (-lr) * m_hat / (torch.sqrt(v_hat) + self._eps_of(p))
 
                 # lr_dropout：每步重新独立采样（原语义是「每次更新丢弃一部分参数」）。
                 # 这是在**反传之后**对更新量做掩码 —— 前向和反向看到的都是完整模型，
