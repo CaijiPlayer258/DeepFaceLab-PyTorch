@@ -1,57 +1,63 @@
 # Cross-Resolution Resampling of Inter Weights
 
-Model `New416_SAEHD` (df-udt, 416, e_dims=80, ae_dims=320); aligned face input (BGR, [0,1]); all metrics
-inside the XSegLite mask, baseline = the 416 original model. Everything below (pseudo-inverse transform,
-per-tensor grouping, anti-aliasing) is derived and implemented independently in this repository.
+Model New416_SAEHD (df-udt, 416, e_dims=80, ae_dims=320). Input is an aligned face, BGR, values in [0,1].
+Metrics are computed inside the XSegLite mask, against the output of the 416 original model. The pseudo-inverse
+transform, per-tensor grouping and anti-aliasing treatment below are derived and implemented here.
 
-**Method in one line**　**blend = dense1 with inverse filtering (pseudo-inverse); dense2 and its bias with**
-**plain interpolation (lanczos)**. The two tensors play different roles, hence different operators
-(Proposition 2): dense1 preserves a functional and needs the (LᵀL)⁻¹ step, while dense2/bias resample an
-output field, where interpolation itself is the correct operator.
+blend means dense1 with inverse filtering and dense2 with its bias under plain interpolation. The two tensors
+sit at different places in the graph, so their optimal operators differ; see Proposition 2.
 
-![Fig. 1　dst input / baseline 416 / each method at six target resolutions](compare_all.png)
+![Fig. 1　dst input, baseline 416 and each method at six target resolutions](compare_all.png)
 
 ## 1　Propositions and proofs
 
-**Notation**　encoder feature map f ∈ R^(C×n²) (channel-first), Inter weight field W ∈ R^(C n²×A);
-grid n → m; 1-D resampling operator L ∈ R^(m×n), 2-D is L⊗L; λ Tikhonov weight, ρ = (n²−m²)/n².
+Notation. The encoder feature map is f ∈ R^(C×n²), flattened channel-first; the first Inter weight field is
+W ∈ R^(C n²×A). The grid changes from n to m; the 1-D resampling operator is L ∈ R^(m×n), the 2-D one is L⊗L.
+λ is the Tikhonov weight and ρ = (n²−m²)/n².
 
-**Proposition 1 (interpolation lacks the inverse filter)**　Downstream only sees the functional <W,f>;
-after rescaling f′ ≈ (L⊗L)f, hence
+**Proposition 1 (interpolation lacks the inverse filter)**　Downstream uses only the functional <W,f>.
+After rescaling f′ ≈ (L⊗L)f, so
 
         (L⊗L)ᵀ W′ = W                                                      (1)
 
-with minimum-norm solution (m ≥ n) and least-squares solution (m < n)
+with minimum-norm and least-squares solutions
 
         W′ = (L⊗L)[(L⊗L)ᵀ(L⊗L)]⁻¹W ,   W′ = [(L⊗L)(L⊗L)ᵀ]⁻¹(L⊗L)W        (2)
 
-*Proof*　(1) is underdetermined for m ≥ n and overdetermined for m < n; the Moore–Penrose solution zeroes or
-minimises the residual on the relevant subspace, and separability (L⊗L)† = L†⊗L† allows per-axis solution.
-Interpolation only gives (L⊗L)W and misses the factor (LᵀL)⁻¹ (a deconvolution of the weight field), which
-amplifies quantisation noise; in practice (LᵀL+λI)⁻¹ and (LLᵀ+λI)⁻¹. ∎
+the first for m ≥ n, the second for m < n.
 
-**Proposition 2 (per-tensor grouping)**　dense1 wants (2), dense2/bias wants interpolation itself:
+Proof. (1) is underdetermined for m ≥ n and overdetermined for m < n; the Moore–Penrose solution zeroes or
+minimises the residual on the relevant subspace. Separability (L⊗L)† = L†⊗L† allows per-axis solution.
+Interpolation gives only (L⊗L)W and misses the factor (LᵀL)⁻¹, a deconvolution of the weight field. That factor
+amplifies quantisation noise, so (LᵀL+λI)⁻¹ and (LLᵀ+λI)⁻¹ are used in practice. ∎
 
-        blend: dense1  <- pinv (inverse filter; lanczos base up, area anti-aliased down; λ = 1e-4 / 1e-1)
-               dense2  <- lanczos (plain interpolation)
-               bias    <- lanczos (plain interpolation, same grid as dense2)   (3)
+**Proposition 2 (per-tensor grouping)**　The optimal operator for dense1 is (2); for dense2 and bias it is
+interpolation itself.
 
-*Proof*　dense1 consumes f and emits z = Wᵀf, preserving a functional value → (2). dense2 consumes z
-(resolution independent) and emits the field g = W₂ᵀz on the low grid; the decoder is convolutional, so it
-expects the same field sampled on the new grid, g′ = (L⊗L)g, i.e. W₂′ = (L⊗L)W₂ — interpolation itself.
-Applying (LᵀL)⁻¹ here sharpens the field, moves it off the training distribution and amplifies aliasing.
-bias is a per-position offset of that field and must use the same operator. ∎
+        blend:  dense1  <- pinv, inverse filtering; lanczos base up, area anti-aliasing down; λ = 1e-4 / 1e-1
+                dense2  <- lanczos, plain interpolation
+                bias    <- lanczos, plain interpolation, same grid as dense2                (3)
 
-**Proposition 3 (downscaling floor)**　For m < n, rank(L⊗L) = m² < n² and
+Proof. dense1 consumes f and emits z = Wᵀf; the preserved quantity is a functional value, hence (2).
+dense2 consumes z, which is resolution independent, and emits the field g = W₂ᵀz over the low grid. The decoder
+is convolutional and at a new resolution expects the same field sampled on the new grid, g′ = (L⊗L)g, so
+W₂′ = (L⊗L)W₂ and interpolation is exact in this sense. Applying (LᵀL)⁻¹ here sharpens the field, which is
+neither a resampling of g nor inside the training distribution, and it amplifies aliasing. bias corresponds
+position by position to that field and must use the same operator. ∎
+
+**Proposition 3 (downscaling floor)**　For m < n, rank(L⊗L) = m² < n² and the error obeys a bound independent
+of the algorithm,
 
         min ‖(L⊗L)W′ − W‖_F = ‖(I − P)W‖_F ,   P = proj_{range(L⊗L)}       (4)
 
-*Proof*　The image of any W′ lies in range(L⊗L); the orthogonal-complement residual cannot be removed. ∎
-The discarded fraction bounds quality: ρ = 0.15 (384), 0.41 (320), 0.52 (288); upscaling has ρ = 0.
+Proof. The image of any W′ lies in range(L⊗L), so the orthogonal-complement residual cannot be removed. ∎
+
+The discarded fraction ρ sets the ceiling: ρ = 0.15 at 384, 0.41 at 320, 0.52 at 288. Upscaling has ρ = 0
+and no such loss.
 
 ## 2　Comparison data
 
-**Table 1**　Masked metrics at six target resolutions (PSNR dB / SSIM / MAE); bold = best per row.
+Table 1　Masked metrics at six target resolutions, PSNR dB / SSIM / MAE; bold marks the best value in a row.
 
 | target | ρ | bicubic | lanczos | pinv (all tensors) | **blend (ours)** |
 |---|---|---|---|---|---|
@@ -62,22 +68,23 @@ The discarded fraction bounds quality: ρ = 0.15 (384), 0.41 (320), 0.52 (288); 
 | 512 | 0 | 20.26 / 0.814 / 18.8 | 20.71 / 0.836 / 18.5 | 20.83 / 0.838 / 20.1 | **24.22 / 0.857 / 9.21** |
 | 544 | 0 | 18.46 / 0.774 / 24.5 | 18.88 / 0.808 / 23.9 | 19.35 / 0.810 / 24.4 | **23.02 / 0.830 / 11.2** |
 
-**Table 2**　Ablation for Proposition 2 (448, PSNR / SSIM), the other side held fixed.
+Table 2　Ablation for Proposition 2 at 448, PSNR / SSIM; the other side is held fixed in each pair of columns.
 
-| dense1 only (dense2/bias = bicubic) | PSNR / SSIM | dense2/bias only (dense1 = earlier mix) | PSNR / SSIM |
+| dense1 only, dense2/bias = bicubic | PSNR / SSIM | dense2/bias only, dense1 = earlier mix | PSNR / SSIM |
 |---|---|---|---|
 | nearest | 17.52 / 0.645 | nearest | 18.48 / 0.688 |
 | bicubic | 23.41 / 0.834 | bicubic | 24.12 / 0.848 |
 | lanczos | 23.29 / 0.831 | **lanczos** | **26.84 / 0.905** |
 | **pinv** | **24.55 / 0.867** | pinv | 25.22 / 0.883 |
 
-Grouped: dense1 = pinv with dense2 = lanczos gives 26.33 / 27.38 / 24.22 dB at 384 / 448 / 512,
-above the earlier one-operator-for-all 25.10 / 26.27 / 23.97 dB. Remaining knobs confirmed: area on dense2
-costs 4 dB when downscaling, λ has a plateau over 1e-5..1e-4, and adding inverse filtering to dense2
-(α = 0.15 / 0.30) degrades monotonically.
+With dense1 on pinv and dense2 on lanczos the scores are 26.33, 27.38 and 24.22 dB at 384, 448 and 512,
+above the single-operator figures of 25.10, 26.27 and 23.97 dB. The remaining parameters were checked as well:
+area on dense2 costs about 4 dB when downscaling, λ has a plateau between 1e-5 and 1e-4, and adding inverse
+filtering to dense2 degrades monotonically at α = 0.15 and 0.30.
 
 ## 3　Implementation
 
-`app/engine/models/Model_SAEHD/resize_inter.py`, default method `blend` (eq. 3); `--method` falls back to
-`bicubic / bilinear / lanczos / pinv`. Tool measurement (416→448): PSNR 27.38 / SSIM 0.920 / MAE 6.06 /
-NCC 0.983. Conversion is a warm start only — fine-tune before use (optimizer state is dropped).
+Implementation: `app/engine/models/Model_SAEHD/resize_inter.py`, default method blend; `--method` falls back to
+bicubic, bilinear, lanczos or pinv. Measured through the tool, 416 to 448: PSNR 27.38, SSIM 0.920, MAE 6.06,
+NCC 0.983. A converted model is a warm start only; fine-tune before use, since the optimizer state is dropped
+for shape incompatibility.
