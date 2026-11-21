@@ -102,3 +102,6 @@ app/engine/MergeStudio/workspace/
 
 # 验收脚本自己生成的调试产物（截图 / 对齐队列 dump）—— 不入库，每次跑自动重建
 /app/tools/accept/_probe/
+
+# 交叉分辨率实验的中间权重目录（脚本可重跑，勿入库）
+app/docs/notes/inter_study/cand*/
