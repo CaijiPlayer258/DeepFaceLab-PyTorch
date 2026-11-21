@@ -82,7 +82,7 @@ __all__ = [
     'main',
 ]
 
-_METHODS = ('blend', 'bicubic', 'bilinear', 'lanczos', 'pinv')
+_METHODS = ('blend', 'pinv', 'lanczos', 'bicubic', 'bilinear')
 # blend = 0.5·bicubic + 0.5·pinv（部分逆滤波），是本仓库的默认方法
 _BACKUP_TS_FMT = '%Y%m%d-%H%M%S'
 _HISTORY_KEY = '_resize_history'
@@ -344,7 +344,7 @@ def _resample_2d_channel_major(mat: np.ndarray, C: int, old_hw: int, new_hw: int
 
 
 def _blend_weight(w: np.ndarray, C: int, old_hw: int, new_hw: int) -> np.ndarray:
-    """0.5·lanczos + 0.5·pinv —— 部分逆滤波（Wiener 收缩）。
+    """blend：按张量分组的算子——dense1 用 pinv（保泛函），dense2/bias 用 lanczos（输出场插值）。
 
     基座核用 lanczos-3（通带最平、比 bicubic 更接近理想低通）；
     逆滤波那一支按方向选核：升采样用 lanczos，降采样用 area（box 自带抗混叠，
@@ -359,6 +359,22 @@ def _blend_weight(w: np.ndarray, C: int, old_hw: int, new_hw: int) -> np.ndarray
                                                     lam=lam, inverse=True))
     return (0.5 * base + 0.5 * pin).astype(np.float32)
 
+def _pinv_weight(w: np.ndarray, C: int, old_hw: int, new_hw: int) -> np.ndarray:
+    """dense1 专用：保泛函伪逆（升最小范数 / 降最小二乘，λ 抑制噪声）。
+
+    降采样时基座核取 area（box 自带抗混叠），升采样取 lanczos。
+    """
+    lam = 1e-4 if new_hw >= old_hw else 1e-1
+    kind = 'lanczos' if new_hw >= old_hw else 'area'
+    return _resample_2d_channel_major(w, C, old_hw, new_hw,
+                                     _interp_matrix(old_hw, new_hw, kind, lam=lam, inverse=True))
+
+
+def _lanczos_weight(w: np.ndarray, C: int, old_hw: int, new_hw: int) -> np.ndarray:
+    """dense2 / bias 专用：纯 lanczos 插值（把输出场重采样，不做逆滤波）。"""
+    return _resample_2d_channel_major(w, C, old_hw, new_hw,
+                                      _interp_matrix(old_hw, new_hw, 'lanczos'))
+
 def interpolate_dense_weight(w, old_hw: int, new_hw: int, method: str = 'blend') -> np.ndarray:
     """Dense 权重 (C*H*W, out) 空间插值到 (C*H'*W', out)；行索引 = c*H*W + h*W + w。"""
     w = np.asarray(w)
@@ -371,6 +387,10 @@ def interpolate_dense_weight(w, old_hw: int, new_hw: int, method: str = 'blend')
     C = w.shape[0] // cells
     if method == 'blend':
         return _blend_weight(w, C, old_hw, new_hw)
+    if method == 'pinv':
+        return _pinv_weight(w, C, old_hw, new_hw)
+    if method == 'lanczos':
+        return _lanczos_weight(w, C, old_hw, new_hw)
     return _interp_channel_major(w, C, old_hw, new_hw, method)
 
 
@@ -388,7 +408,13 @@ def interpolate_bias(b, old_hw: int, new_hw: int, method: str = 'blend') -> np.n
     C = b.size // cells
     if method == 'blend':
         col = np.ascontiguousarray(b.astype(np.float32, copy=False)).reshape(-1, 1)
-        return _blend_weight(col, C, old_hw, new_hw).reshape(-1)
+        return _lanczos_weight(col, C, old_hw, new_hw).reshape(-1)
+    if method == 'pinv':
+        col = np.ascontiguousarray(b.astype(np.float32, copy=False)).reshape(-1, 1)
+        return _pinv_weight(col, C, old_hw, new_hw).reshape(-1)
+    if method == 'lanczos':
+        col = np.ascontiguousarray(b.astype(np.float32, copy=False)).reshape(-1, 1)
+        return _lanczos_weight(col, C, old_hw, new_hw).reshape(-1)
     x = torch.from_numpy(b.astype(np.float32, copy=False)).reshape(1, C, old_hw, old_hw)
     x = F.interpolate(x, size=(new_hw, new_hw), mode=method, align_corners=False)
     out = x.reshape(-1).numpy()
@@ -838,11 +864,14 @@ def _build_resized_data(plan: ResizePlan, ip: InterPlan):
         kind = ip.kinds.get(i)
         dtype = p.dtype
         if kind == 'dense1':
-            new = interpolate_dense_weight(p, ip.old_enc, ip.new_enc, plan.method)
+            op = 'pinv' if plan.method == 'blend' else plan.method
+            new = interpolate_dense_weight(p, ip.old_enc, ip.new_enc, op)
         elif kind == 'dense2':
-            new = interpolate_dense_weight(p.T, ip.old_low, ip.new_low, plan.method).T
+            op = 'lanczos' if plan.method == 'blend' else plan.method
+            new = interpolate_dense_weight(p.T, ip.old_low, ip.new_low, op).T
         elif kind == 'bias':
-            new = interpolate_bias(p, ip.old_low, ip.new_low, plan.method)
+            op = 'lanczos' if plan.method == 'blend' else plan.method
+            new = interpolate_bias(p, ip.old_low, ip.new_low, op)
         else:
             new = p
         new = np.ascontiguousarray(new.astype(dtype, copy=False))

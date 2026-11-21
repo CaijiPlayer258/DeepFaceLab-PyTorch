@@ -141,7 +141,7 @@ About 页把「版本 / UI / 推理后端 / 已装模型 / 后端进程与端口
 | **Engine build** | TensorRT 引擎的编译与状态（MD5 / 原始大小 / 引擎大小 / Ready） | ![](app/docs/readme/06-engine.png) |
 | **Bilibili** | 扫码登录、视频列表、下载队列（下载来的片子可直接进 Extractor） | ![](app/docs/readme/10-bili.png) |
 | **Colour transfer** | 换脸前后色调对齐的调参预览 | ![](app/docs/readme/11-color.png) |
-| **Resolution change** | 改模型分辨率：只重采样 Inter 权重，默认 `blend`（0.5·lanczos + 0.5·pinv），越界给提示；[说明](app/docs/38-INTER-RESIZE.md) · [实验](app/docs/notes/inter_study/README.md) | — |
+| **Resolution change** | 改模型分辨率：只重采样 Inter 权重，默认 `blend`（dense1 伪逆 + dense2/bias lanczos），越界给提示；[说明](app/docs/38-INTER-RESIZE.md) · [实验](app/docs/notes/inter_study/README.md) | — |
 | **Angle view** | 数据集的角度分布（坐标轴 + 散点 / 格子图），900 点实时算 | ![](app/docs/readme/12-angle.png) |
 
 **Engine build 不是必需的**：没有引擎时走 onnxruntime 一样能跑；编译引擎只是把检测 / 特征点 / xseg

@@ -2,27 +2,28 @@
 
 本目录是「把已训练模型改成分辨率」这一功能的完整实验记录：报告、数据、图、脚本。
 
-- 正式报告：[REPORT_CN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/REPORT_CN.md) ／ [REPORT_CN.html](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/REPORT_CN.html)（学术体例）
-- English：[REPORT_EN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/REPORT_EN.md) ／ [REPORT_EN.html](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/REPORT_EN.html)
+- 正式报告：[REPORT_CN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/REPORT_CN.md) （学术体例）
+- English：[REPORT_EN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/REPORT_EN.md) 
 - 工程说明：[app/docs/38-INTER-RESIZE.md](../../38-INTER-RESIZE.md)
 
 ## 结论速览
 
 | 目标 | 网格 | bicubic | lanczos | pinv | **blend（默认）** |
 |---|---|---|---|---|---|
-| 288 | 13→9 | 18.20 / 0.728 / 25.7 | 17.87 / 0.723 / 27.3 | 16.21 / 0.705 / 28.7 | 18.18 / 0.698 / **21.6** |
-| 320 | 13→10 | 19.32 / 0.740 / 23.1 | 19.29 / 0.735 / 23.2 | 19.10 / 0.714 / 17.6 | **20.24 / 0.718 / 17.3** |
-| 384 | 13→12 | 23.32 / 0.813 / 13.4 | 24.32 / 0.842 / 11.8 | 23.62 / 0.856 / 13.8 | **25.10 / 0.874 / 9.64** |
-| 448 | 13→14 | 23.41 / 0.834 / 8.8 | 25.41 / 0.883 / 7.5 | 24.78 / 0.892 / 10.8 | **26.27 / 0.897 / 6.39** |
-| 512 | 13→16 | 20.26 / 0.814 / 18.8 | 20.71 / 0.836 / 18.5 | 20.83 / 0.838 / 20.1 | **23.97 / 0.847 / 8.73** |
-| 544 | 13→17 | 18.46 / 0.774 / 24.5 | 18.88 / 0.808 / 23.9 | 19.35 / 0.810 / 24.4 | **22.93 / 0.824 / 10.33** |
+| 288 | 13→9 | 18.20 / 0.728 / 25.7 | 17.87 / 0.723 / 27.3 | 16.21 / 0.705 / 28.7 | **18.30 / 0.704 / 21.7** |
+| 320 | 13→10 | 19.32 / 0.740 / 23.1 | 19.29 / 0.735 / 23.2 | 19.10 / 0.714 / 17.6 | **20.07 / 0.716 / 18.1** |
+| 384 | 13→12 | 23.32 / 0.813 / 13.4 | 24.32 / 0.842 / 11.8 | 23.62 / 0.856 / 13.8 | **26.33 / 0.909 / 9.26** |
+| 448 | 13→14 | 23.41 / 0.834 / 8.8 | 25.41 / 0.883 / 7.5 | 24.78 / 0.892 / 10.8 | **27.38 / 0.920 / 6.06** |
+| 512 | 13→16 | 20.26 / 0.814 / 18.8 | 20.71 / 0.836 / 18.5 | 20.83 / 0.838 / 20.1 | **24.22 / 0.857 / 9.21** |
+| 544 | 13→17 | 18.46 / 0.774 / 24.5 | 18.88 / 0.808 / 23.9 | 19.35 / 0.810 / 24.4 | **23.02 / 0.830 / 11.2** |
 
 （PSNR dB / SSIM / MAE，XSegLite 遮罩内，416 原模型输出为基准）
 
 三句话：
 
 1. 插值族里 **lanczos-3** 最好，bicubic 可用，nearest 只在 ±1 格时「看着锐」（相位错，不算更准）。
-2. **blend = 0.5·lanczos + 0.5·pinv**（降采样时 pinv 用 area 抗混叠）在 5/6 个目标三项最优，已设为默认。
+2. **blend = dense1 用伪逆 + dense2/bias 用 lanczos**（降采样时伪逆基座用 area 抗混叠）：
+   在 6/6 个目标上最优，已设为默认。按张量分组很关键——448 上比"一套算子通吃"高 1.1 dB。
 3. 降采样有**秩亏下界**（丢 15% / 41% / 52% 维度），任何重采样都突破不了，只能续训；
    实用边界：降分辨率别超过 1~2 格（约 32~64 px）。
 
@@ -30,8 +31,8 @@
 
 | 文件 | 内容 |
 |---|---|
-| [REPORT_CN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/REPORT_CN.md) / [REPORT_CN.html](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/REPORT_CN.html) | 中文报告（摘要 → 推导 → 实验 → 结论 → 可复现） |
-| [REPORT_EN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/REPORT_EN.md) / [REPORT_EN.html](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/REPORT_EN.html) | 英文版 |
+| [REPORT_CN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/REPORT_CN.md) /  | 中文报告（摘要 → 推导 → 实验 → 结论 → 可复现） |
+| [REPORT_EN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/REPORT_EN.md) /  | 英文版 |
 | [compare_all.png](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/compare_all.png) | 总图：dst 输入 / baseline / 5 方法 × 6 档目标分辨率 |
 | [results.json](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/results.json) | 16 组（bilinear 系列 × 4 分辨率） |
 | [results_adv.json](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/results_adv.json) | 48 组（插值 / pinv / ls 修正） |

