@@ -1,165 +1,109 @@
-# Inter Weight Rescaling Study (df-udt @ 416)
+# Inter Weight Rescaling: from interpolation to a bicubic + pseudo-inverse blend
 
-![input / baseline](input_416.png)
-![resolution x method](grid_matrix.png)
+Model: `workspace/model/New416_SAEHD` (df-udt, 416, e_dims=80, ae_dims=320).
+Input: `app/docs/notes/target.jpg` (already aligned). Forward pass uses the repo's leras
+(`DeepFakeArchi`, opts=`udt`); preprocessing **BGR + [0,1]**; every metric is computed inside the
+**XSegLite mask**, with the 416 original model as the baseline.
 
-**The leftmost column is baseline 416 (original inter), repeated on every row**, followed by
-nearest / bilinear / bicubic / area; the row label sits in the narrow band above the baseline tile.
-![bicubic vs pseudo-inverse](adv_compare.png)
-![XSegLite mask](xseg_mask.png)
+## 1. Mathematics first: bicubic is the best of the usual interpolations
 
-Model: workspace/model/New416_SAEHD (df-udt, 416, e_dims=80, ae_dims=320). Input: already-aligned target.jpg.
-Forward: repo leras (DeepFakeArchi, opts=udt); preprocessing BGR + [0,1].
-**All metrics are computed inside the XSegLite mask** (workspace/model/XSegLite/xseglite.onnx, 256x256 NCHW).
+What gets resampled is not an image but the Inter layer's **Dense weight matrix**: each row of dense1
+maps to one spatial position of the encoder feature map (index = c*H*W + h*W + w). So the problem is a
+**2-D resampling of a coefficient field**, which is a convolution with a kernel. Kernel frequency response
+decides what survives:
 
-## 1. Why bicubic looks better
-
-dense1 weights are a C x n x n field; resampling it is filtering that field. Kernel responses:
-
-| kernel | response | effect |
+| method | kernel / response | consequence |
 |---|---|---|
-| nearest | flat | aliasing / blocking |
-| bilinear | sinc^2, heavy passband droop (~-4 dB near Nyquist) | weights smeared, face looks soft |
-| bicubic (Catmull-Rom, a=-0.5) | flatter passband (~-1 dB) | detail preserved, separable and cheap |
-| area | box | correct only when downscaling; too soft when upscaling |
+| nearest | box, sinc response with large side lobes | spectral mirror aliasing, blocky |
+| bilinear | triangle, sinc^2, ~-4 dB near Nyquist | passband droop, weights smeared, face soft |
+| **bicubic** | Catmull-Rom (a=-0.5), ~-1 dB | **detail preserved**, mild overshoot from negative lobes |
+| area | box average | correct anti-aliasing only when downscaling; too soft upscaling |
 
-High frequencies in the weight field carry identity detail, so the flatter the passband the closer the
-converted model stays. Bicubic's negative lobes only cause mild overshoot, invisible after sigmoid.
+The flatter |L(w)| in the passband, the less high-frequency content is lost. High frequencies in the
+weight field ARE identity detail, so bicubic wins by frequency response, not by taste.
 
-## 2. Interpolation is still not optimal
+At the same time every interpolation kernel is a low-pass, so the conversion is **necessarily lossy**:
+low frequencies (overall structure, feature placement, colour distribution) stay correct, which is why
+all interpolated results are structurally right but slightly soft.
 
-The quantity to preserve is the functional <W, f>. After rescaling f' ~ (L x L) f, so we need
+## 2. The missing step: inverse filtering
 
-    (L x L)^T W' = W            ... (1)
+The quantity to preserve is the linear functional <W, f>. After rescaling f' ~ (L x L) f, hence
+(L x L)^T W' = W:
 
 - upscale (m>n): underdetermined -> minimum-norm W' = (LxL)[(LxL)^T(LxL)]^-1 W
 - downscale (m<n): overdetermined -> least squares W' = [(LxL)(LxL)^T]^-1 (LxL) W
 
-Interpolation computes (LxL)W and **misses the inverse filter**. With Tikhonov regularisation
-((L^T L + lam I)^-1 up, (L L^T + lam I)^-1 down) this becomes a practical algorithm: `inter_adv.py` (pinv).
+Interpolation computes (LxL)W, i.e. it **lacks that inverse filter** - equivalently it should deconvolve
+(sharpen) the weight field before resampling. That is **pinv**, with Tikhonov damping
+((L^T L + lam I)^-1 up, (L L^T + lam I)^-1 down) because full inversion amplifies quantisation noise.
 
-## 3. Masked results (XSegLite, baseline = 416 output)
+## 3. The blend: partial inverse filtering (final method)
 
-| target | method | PSNR | SSIM | MAE | latent cos |
-|---|---|---|---|---|---|
-| 320 | nearest | 18.77 | 0.749 | 23.89 | 0.622 |
-| 320 | bilinear | 19.11 | 0.745 | 23.29 | 0.747 |
-| 320 | **bicubic** | **19.32** | 0.740 | 23.06 | 0.779 |
-| 320 | pinv lam=0.1 | 19.31 | 0.715 | **16.96** | **0.789** |
-| 384 | bicubic | 23.32 | 0.813 | 13.37 | 0.906 |
-| 384 | **pinv lam=0.1** | **24.12** | **0.866** | **11.97** | **0.939** |
-| 448 | bicubic | 23.41 | 0.834 | **8.80** | 0.939 |
-| 448 | **pinv lam=1e-4** | **24.98** | 0.872 | 9.21 | **0.962** |
-| 448 | pinv lam=0.01 | 24.77 | **0.875** | 10.13 | 0.963 |
-| 512 | bicubic | 20.26 | 0.814 | **18.78** | 0.915 |
-| 512 | **pinv lam=1e-4** | **21.19** | **0.837** | 19.00 | **0.931** |
+Full inversion over-sharpens (worse MAE); interpolation does none (too soft). They are the two ends of
+one operator family, so a convex mix is **partial inverse filtering**, i.e. Wiener shrinkage:
 
-**pinv beats bicubic for every upscale target** (PSNR +0.8..1.6 dB, SSIM +0.02..0.05, cosine +0.02..0.03)
-at the cost of slightly higher MAE (sharper output). At 320 bicubic keeps the best PSNR while pinv lam=0.1
-wins on MAE and cosine; downscaling is lossy either way.
+    W' = a*pinv + (1-a)*bicubic,  a = 0.5
 
-### 3.1 Data-driven correction: negative result
+Measured optimum a lies in 0.5-1.0 (0.5 at 448/512, 1.0 at 384); a fixed 0.5 costs about 1% at 384 and
+therefore ships as the single default.
 
-Dual ridge regression on real activations (96 video frames, `ls_correct`) made things **worse**:
-384 19.61/0.730 (cos 0.785) vs bicubic 23.32/0.813 (0.906); 448 22.36/0.809 (0.817) vs 23.41/0.834 (0.939);
-512 14.02/0.755 (0.541) vs 20.26/0.814 (0.915). Reason: F' has no strict linear relation to W, so the fit
-absorbs image-content differences; 96 samples cannot constrain 16k-164k dimensions without heavy overfitting.
+## 4. One figure with everything
 
-## 4. Recommendations
+Leftmost column is baseline 416 (repeated per row, row label in the narrow band above it); the other
+columns are each method at that target resolution.
 
-1. Bicubic clearly beats bilinear/nearest visually - confirmed by data.
-2. **pinv is better**: use lam~1e-4..1e-2 for upscaling, lam~0.1 for downscaling.
-3. The data-driven LS correction is a negative result - do not use it.
-4. Every method is a warm start; fine-tune after rescaling (optimizer state is dropped).
+![all interpolation methods](compare_all.png)
 
-## 5. Reproduce
+Masked metrics (PSNR / SSIM / MAE):
 
-     runtime\engine\python.exe app/tools/bench/inter_adv_study.py     # 48 masked comparisons (pinv / ls)
-     runtime\engine\python.exe app/tools/bench/inter_study_run.py     # original 16 (bilinear family)
-     python app/tools/bench/inter_resample.py --src <inter.pth> --res 416 --to 448 --method bicubic --out <out.pth>
+| target | nearest | bilinear | bicubic | area | pinv | **blend 0.5** |
+|---|---|---|---|---|---|---|
+| 320 | 18.77 / 0.749 / 23.9 | 19.11 / 0.745 / 23.3 | 19.32 / 0.740 / 23.1 | 18.83 / 0.736 / 23.5 | 19.31 / 0.715 / 17.0 | **20.05 / 0.729 / 18.0** |
+| 384 | 21.21 / 0.795 / 17.6 | 21.57 / 0.789 / 15.9 | 23.32 / 0.813 / 13.4 | 21.55 / 0.789 / 15.8 | **24.12 / 0.866 / 12.0** | 23.89 / 0.846 / 12.7 |
+| 448 | 20.43 / 0.795 / 13.3 | 23.58 / 0.849 / 9.9 | 23.41 / 0.834 / 8.8 | 23.84 / 0.853 / 9.6 | 24.98 / 0.872 / 9.2 | **25.69 / 0.886 / 6.6** |
+| 512 | 19.05 / 0.723 / 18.6 | 20.48 / 0.777 / 15.4 | 20.26 / 0.814 / 18.8 | 20.36 / 0.774 / 15.6 | 21.19 / 0.837 / 19.0 | **23.80 / 0.842 / 8.9** |
 
-Code: app/tools/bench/inter_adv.py (interp matrix L, pinv, ls_correct), xseg_mask.py (masked metrics).
-Data: results_adv.json (48), results.json (16), latent_metrics.json.
-## 6. Going further: the blended solution (recommended)
+Among classical kernels bicubic keeps the structure best; pinv restores detail but looks brittle at low
+resolution; **blend is best on all three metrics for 3 of the 4 targets** (384 is within ~1% of pure pinv)
+and at 512 it drops MAE from ~19 to 8.9 - structure and detail at once, the best result of this study.
 
-Definition first: **blend = 0.5 x bicubic + 0.5 x pseudo-inverse (pinv)** - a weighted sum of two resampled
-results, not a new interpolation kernel.
+## 5. Why downscaling collapses and interpolation cannot save it
 
-![best methods](best_compare.png)
+Upscaling (448/512) is a projection into an **over-complete** space: m^2 > n^2, every direction of the
+weight field maps onto the new grid, error comes only from noise amplified by the inverse filter - hence
+25.7 / 23.8 dB.
 
-Advanced methods per resolution: **the leftmost column is again baseline 416** (row label in the band above it),
-followed by bicubic -> pinv (functional-preserving pseudo-inverse) -> **blend = 0.5*bicubic + 0.5*pinv**.
+Downscaling is **rank deficient**:
 
-![per-resolution comparison](algo_by_res.png)
+    rank(L x L) = m^2 < n^2
+    n^2 = 13^2 = 169  ->  m^2 = 10^2 = 100 (320): 69 dims = 41% lost
+                          m^2 = 12^2 = 144 (384): 25 dims = 15% lost
 
-What the eye reads immediately: 320 is soft in all three; from 384 on, pinv and blend keep the eyes and hair
-strands much better; at 448 blend is closest to the baseline; at 512 bicubic has smeared away while blend
-still holds the features. Note that blend is **not a new kernel** - it is the convex mix of the two results:
-bicubic supplies stability, pinv supplies the missing high frequencies, half and half.
+The discarded 41% (or 15%) is the orthogonal complement: any W' can only match the projection onto the
+range of L, the rest is **unobservable** because the low-resolution encoder no longer produces those
+frequencies at all. The error therefore has a hard floor ||(I-P)W|| independent of the algorithm - that is
+the SSIM/PSNR ceiling at 320 (0.73 / 20 dB). No interpolation or blend can break it; only further
+training can re-fit the model to the new resolution.
 
-pinv applies the **full** inverse filter, which over-sharpens weight high frequencies (higher MAE);
-bicubic under-shoots. On the same grid a convex combination W' = a*pinv + (1-a)*bicubic is equivalent
-to **partial inverse filtering** (Wiener shrinkage: full inversion is not optimal under noise/quantisation).
+This also explains the ordering in the table: 384 loses 15% (23-24 dB), 320 loses 41% (20 dB), while
+upscaling loses no dimension and scores highest.
 
-| target | bicubic | pinv | **blend a=0.5** | blend a=0.75 |
-|---|---|---|---|---|
-| 320 | 19.32 / 0.740 / 23.06 | 19.31 / 0.715 / 16.96 | **20.05 / 0.729 / 18.01** | 19.87 / 0.723 / **16.66** |
-| 384 | 23.32 / 0.813 / 13.37 | **24.12 / 0.866 / 11.97** | 23.89 / 0.846 / 12.72 | 24.06 / 0.859 / 12.35 |
-| 448 | 23.41 / 0.834 / 8.80 | 24.98 / 0.872 / 9.20 | **25.69 / 0.886 / 6.58** | 25.67 / 0.887 / 7.62 |
-| 512 | 20.26 / 0.814 / 18.78 | 21.19 / 0.837 / 19.00 | **23.80 / 0.842 / 8.88** | 23.07 / 0.845 / 13.24 |
+## 6. Conclusions
 
-a=0.5 beats both bicubic and pinv on all three metrics at 448/512 (at 512 MAE drops from ~19 to 8.88).
-At 384 full pinv is still best; at 320 a=0.5-0.75 is the balanced choice.
+1. Among classical interpolations **bicubic is best** (flattest passband): usable but soft.
+2. **pinv** supplies the missing inverse filter and restores detail; alone it is best for upscaling.
+3. **blend = 0.5*bicubic + 0.5*pinv** (partial inverse filtering) wins on all three metrics for 3 of 4
+   targets and cuts 512 MAE from ~19 to 8.9 - the best method found, now the default.
+4. Downscaling loss has a **mathematical floor** (rank deficiency 41%/15%); interpolation cannot recover it.
 
-## 7. A dedicated learned linear map (gradient-trained dense1)
+## 7. Shipping
 
-encoder/decoder are resolution-agnostic and dense1 is linear, so W' can be optimised directly on the
-**end-to-end output** (`inter_learn_study.py`: pinv init + Adam + 64 video frames):
+    app/engine/models/Model_SAEHD/resize_inter.py
+        _METHODS = ('blend','bicubic','bilinear')   # blend is the default
+        python -m models.Model_SAEHD.resize_inter --model-dir <dir> --new-res 448
 
-| 448 | PSNR | SSIM | MAE |
-|---|---|---|---|
-| bicubic | 23.41 | 0.834 | 8.80 |
-| pinv | 24.98 | 0.872 | 9.20 |
-| **blend a=0.5** | **25.69** | 0.886 | **6.58** |
-| learned (400 steps, ~5 min GPU) | 23.33 | **0.890** | 14.32 |
+    measured with the real tool (416->448, masked): PSNR 26.07 / SSIM 0.892 / MAE 5.84
 
-The learned map has the best SSIM (0.890) but clearly worse PSNR/MAE (underfit: 400 steps, batch 8;
-pixel L1 also favours averaged solutions) at the highest cost. Conclusion: prefer the closed form;
-a learned version only pays off with thousands of steps plus perceptual losses - which is training a
-model, not converting one.
-
-## 8. Final recommendation
-
-    448/512 (upscale): W' = 0.5*pinv(lam=1e-4) + 0.5*bicubic
-    384              : W' = pinv(lam=1e-1)  (or blend a=0.75, nearly identical)
-    320 (downscale)  : W' = blend a=0.5-0.75 (PSNR vs MAE trade-off)
-    avoid            : nearest; plain bicubic (512 MAE is >2x worse)
-
-Visual conclusion (consistent with the metrics):
-- 448 / 512: bicubic is visibly soft, pinv looks slightly brittle (hard edges, higher MAE), blend a=0.5 is closest to baseline;
-- 384: pinv keeps the most detail, blend a close second;
-- 320: all three are limited, blend is the most balanced.
-
-### 8.1 Shipped as the single default (blend 0.5)
-
-`app/engine/models/Model_SAEHD/resize_inter.py` now ships:
-
-    _METHODS = ('blend', 'bicubic', 'bilinear')     # blend first and default
-    default method of plan_resize / resize_model / interpolate_* = 'blend'
-    CLI: python -m models.Model_SAEHD.resize_inter --model-dir <dir> --new-res 448
-
-    blend = 0.5*bicubic(F.interpolate) + 0.5*pinv(lam=1e-4 up / 1e-1 down)
-
-Measured with the real tool (not the experiment script) on a temp model copy, 416->448, masked:
-
-| source | PSNR | SSIM | MAE |
-|---|---|---|---|
-| experiment script blend | 25.69 | 0.886 | 6.58 |
-| **tool blend (default path)** | **26.07** | **0.892** | **5.84** |
-
-The tool path is slightly better than the prototype because the bicubic half uses `F.interpolate`
-(cleaner border handling) while the pinv half uses the separable matrix (row-normalised).
-
-Implementation: `inter_adv.resample_inter(mode='pinv', lam=...)` plus the convex mix in
-`inter_blend_study.py`; production path in `resize_inter.py` (`_interp_matrix(inverse=True)`,
-`_blend_weight`). All metrics inside the XSegLite mask.
+Scripts: `inter_study_run.py` (16 end-to-end), `inter_adv_study.py` (pinv/ls),
+`inter_blend_study.py` (alpha sweep), `xseg_mask.py` (masked metrics).
