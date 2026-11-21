@@ -177,6 +177,10 @@ def _fast_model_entry(dat_path: Path) -> dict:
         model_name, archi_from_name = name, ""
 
     opt = params.get("options") or {}
+    # 参数缓存偶尔是「半份」的：早期写入路径只塞了几个键，或者被外部脚本覆盖过。
+    # 这种缓存不足以画卡片（会显示成“只有分辨率”），直接放弃快路、回落到解析 dat。
+    if len(opt) < 10 or "ae_dims" not in opt:
+        return None
     pj = _read_preview_json(dat_path)
     spark = {"src": [], "dst": []}
     if pj:
@@ -214,6 +218,11 @@ def _fast_model_entry(dat_path: Path) -> dict:
     }
 
 
+# 缓存里必须带版本：卡片字段是逐步加的（ae_dims / e_dims / d_dims 就是后补的），
+# 老缓存没有这些键，命中后会一直显示“只有分辨率”，直到 dat 的 mtime 变化才刷新。
+_ENTRY_VER = 2
+
+
 def _model_entry(dat_path: Path) -> dict:
     fast = _fast_model_entry(dat_path)
     if fast is not None:
@@ -234,7 +243,8 @@ def _model_entry(dat_path: Path) -> dict:
         cached = json.loads(cache_json.read_text(encoding="utf-8"))
     except Exception:
         cached = None
-    if cached and abs(float(cached.get("mtime", 0)) - mtime) < 1 and preview.exists():
+    if (cached and cached.get("ver") == _ENTRY_VER
+            and abs(float(cached.get("mtime", 0)) - mtime) < 1 and preview.exists()):
         entry = dict(cached)
         entry.pop("mtime", None)
         entry["preview_url"] = "/api/models/" + model_name + "/preview.png"
@@ -285,6 +295,7 @@ def _model_entry(dat_path: Path) -> dict:
     try:
         payload = dict(entry)
         payload["mtime"] = mtime
+        payload["ver"] = _ENTRY_VER
         cache_json.write_text(json.dumps(payload), encoding="utf-8")
     except Exception:
         pass
