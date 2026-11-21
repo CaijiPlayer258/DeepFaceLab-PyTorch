@@ -3,6 +3,10 @@
 模型 `New416_SAEHD`（df-udt，416，e_dims=80，ae_dims=320）；输入为已对齐人脸（BGR，[0,1]）；
 指标在 XSegLite 掩码内统计，参照为 416 原模型输出。本文方法（伪逆变换、按张量分组、抗混叠）由本项目独立推导与实现。
 
+**方法（一句话）**　**blend = dense1 用逆滤波（伪逆）；dense2 及其 bias 用纯插值（lanczos）**。
+两种张量角色不同，算子也就不同（理由见命题 2）：dense1 保的是泛函，需要 (LᵀL)⁻¹ 这一步逆滤波；
+dense2/bias 属于输出场重采样，插值本身就是正解。
+
 ![图 1　dst 输入 / baseline 416 / 各方法 × 六档目标分辨率](compare_all.png)
 
 ## 1　命题与证明
@@ -24,8 +28,9 @@
 
 **命题 2（按张量分组）**　dense1 的最优算子是式 (2)，dense2/bias 是插值本身：
 
-        blend = dense1 : pinv（升 lanczos 基座 / 降 area 抗混叠，λ = 1e-4 / 1e-1）
-                dense2, bias : lanczos 插值                                  (3)
+        blend: dense1  ← pinv（逆滤波；升采样 lanczos 基座，降采样 area 抗混叠；λ = 1e-4 / 1e-1）
+               dense2  ← lanczos（纯插值）
+               bias    ← lanczos（纯插值，与 dense2 同网格）                   (3)
 
 *证明*　dense1 输入是 f、输出潜码 z = Wᵀf，要保的是泛函值 → 需式 (2)。dense2 输入是 z（与分辨率无关），
 输出 low×low×C 的特征图场 g = W₂ᵀz；decoder 为卷积网络，换分辨率后期望的是同一场在新网格上的采样

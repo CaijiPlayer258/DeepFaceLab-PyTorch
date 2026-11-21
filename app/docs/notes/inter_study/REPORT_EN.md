@@ -4,6 +4,11 @@ Model `New416_SAEHD` (df-udt, 416, e_dims=80, ae_dims=320); aligned face input (
 inside the XSegLite mask, baseline = the 416 original model. Everything below (pseudo-inverse transform,
 per-tensor grouping, anti-aliasing) is derived and implemented independently in this repository.
 
+**Method in one line**　**blend = dense1 with inverse filtering (pseudo-inverse); dense2 and its bias with**
+**plain interpolation (lanczos)**. The two tensors play different roles, hence different operators
+(Proposition 2): dense1 preserves a functional and needs the (LᵀL)⁻¹ step, while dense2/bias resample an
+output field, where interpolation itself is the correct operator.
+
 ![Fig. 1　dst input / baseline 416 / each method at six target resolutions](compare_all.png)
 
 ## 1　Propositions and proofs
@@ -27,8 +32,9 @@ amplifies quantisation noise; in practice (LᵀL+λI)⁻¹ and (LLᵀ+λI)⁻¹.
 
 **Proposition 2 (per-tensor grouping)**　dense1 wants (2), dense2/bias wants interpolation itself:
 
-        blend = dense1 : pinv (lanczos base up / area anti-aliased down, λ = 1e-4 / 1e-1)
-                dense2, bias : lanczos interpolation                          (3)
+        blend: dense1  <- pinv (inverse filter; lanczos base up, area anti-aliased down; λ = 1e-4 / 1e-1)
+               dense2  <- lanczos (plain interpolation)
+               bias    <- lanczos (plain interpolation, same grid as dense2)   (3)
 
 *Proof*　dense1 consumes f and emits z = Wᵀf, preserving a functional value → (2). dense2 consumes z
 (resolution independent) and emits the field g = W₂ᵀz on the low grid; the decoder is convolutional, so it

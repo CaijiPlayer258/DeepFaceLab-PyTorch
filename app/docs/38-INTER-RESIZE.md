@@ -43,7 +43,7 @@ dense2.bias   (ae_out*low^2,)             同上（按 (h,w,c) 解析会因轴�
 | `bicubic` | Catmull-Rom 插值 | 想稳、不想动时 |
 | `lanczos` | Lanczos-3 插值 | 纯插值里最好（448：25.4 dB） |
 | `pinv` | 保泛函伪逆（逆滤波） | 升分辨率单独用也不错 |
-| **`blend`（默认）** | 按张量分组：**dense1 = pinn 逆滤波**（升 lanczos 基座 / 降 area 抗混叠），**dense2/bias = lanczos 插值** | 通用最优 |
+| **`blend`（默认）** | 按张量分组：**dense1 = pinv 逆滤波**（升 lanczos 基座 / 降 area 抗混叠），**dense2/bias = lanczos 插值** | 通用最优 |
 
 ### 为什么是这三个要素
 
