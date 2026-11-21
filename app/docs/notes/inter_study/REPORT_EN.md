@@ -43,10 +43,44 @@ Interpolation computes (LxL)W, i.e. it **lacks that inverse filter** - equivalen
 Full inversion over-sharpens (worse MAE); interpolation does none (too soft). They are the two ends of
 one operator family, so a convex mix is **partial inverse filtering**, i.e. Wiener shrinkage:
 
-    W' = a*pinv + (1-a)*bicubic,  a = 0.5
+    W' = a*lanczos + (1-a)*pinv,  a = 0.5   (pinv kernel depends on direction: lanczos up / area down)
 
-Measured optimum a lies in 0.5-1.0 (0.5 at 448/512, 1.0 at 384); a fixed 0.5 costs about 1% at 384 and
-therefore ships as the single default.
+The second round separates two degrees of freedom: the **base kernel** (used for interpolation) and the
+**inverse-filter kernel**.
+
+- **lanczos-3 beats bicubic everywhere**: 448 gives 25.41 vs 23.41 (+2 dB), NCC 0.973 vs 0.941;
+- when downscaling, the inverse branch must be **anti-aliased first**: `pinv(area)` has the lowest MAE at
+  320/384 (16.50 / 9.73), while `pinv(bicubic)` amplifies the aliasing as well;
+- half and half -> **0.5*lanczos + 0.5*pinv (lanczos up / area down)**, best at all four targets.
+
+Masked measurements:
+
+| target | bicubic | lanczos | pinv(area) | blend(old) | **blend(new)** |
+|---|---|---|---|---|---|
+| 320 | 19.32 / 0.740 / 23.1 | 19.29 / 0.735 / 23.2 | 19.45 / 0.696 / **16.5** | 20.05 / 0.729 / 18.0 | **20.24 / 0.718 / 17.3** |
+| 384 | 23.33 / 0.813 / 13.4 | 24.32 / 0.842 / 11.8 | 24.05 / 0.863 / 9.7 | 23.89 / 0.846 / 12.7 | **25.10 / 0.874 / 9.64** |
+| 448 | 23.41 / 0.834 / 8.8 | 25.41 / 0.883 / 7.5 | n/a (upscale) | 25.69 / 0.886 / 6.6 | **26.27 / 0.897 / 6.39** |
+| 512 | 20.26 / 0.814 / 18.8 | 20.71 / 0.836 / 18.5 | n/a | 23.80 / 0.842 / 8.9 | **23.97 / 0.847 / 8.73** |
+
+pinv(area) is only meaningful when downscaling: on upscale, a box kernel is not a valid low-pass base.
+
+### 3.1 Why nearest looks good at +-1 grid step and pinv keeps structure at large jumps
+
+- **The ratio decides the first impression**: 384/448 are grid ratios 13/12 and 13/14, so nearest's sampling
+  offset is <=0.04 px - almost no aliasing - and it applies no low-pass, so the high frequencies survive and
+  the eye reads "sharper". The phase is still wrong: at 448 nearest scores SSIM 0.740 / NCC 0.736 versus
+  lanczos 0.883 / 0.973.
+- **pinv is the optimal projection**: when downscaling it solves the least squares ||(LxL)W' - W||, i.e. it
+  projects W onto the range of L, so the geometry does not drift (320: NCC 0.78 vs bicubic 0.75, nearest 0.69).
+  Its error is noise-like, not structure-like.
+
+Hence two rulers in `xseg_mask.structure_metrics`:
+
+- `ncc` (low-frequency structural correlation): insensitive to blur, answers "are the features in the right place";
+- `hf_ratio` (high-frequency energy ratio): answers "is it sharp enough" (>1 = sharper than baseline).
+
+nearest is typically hf high / ncc low (sharp but misplaced), bicubic is hf low / ncc high (stable but soft),
+blend(new) sits in between with both close to 1 (448: hf 0.65-0.70, ncc 0.978).
 
 ## 4. One figure with everything
 
@@ -103,7 +137,7 @@ upscaling loses no dimension and scores highest.
         _METHODS = ('blend','bicubic','bilinear')   # blend is the default
         python -m models.Model_SAEHD.resize_inter --model-dir <dir> --new-res 448
 
-    measured with the real tool (416->448, masked): PSNR 26.07 / SSIM 0.892 / MAE 5.84
+    measured with the real tool (416->448, masked): PSNR 26.27 / SSIM 0.897 / MAE 6.39 (NCC 0.978)
 
 Scripts: `inter_study_run.py` (16 end-to-end), `inter_adv_study.py` (pinv/ls),
 `inter_blend_study.py` (alpha sweep), `xseg_mask.py` (masked metrics).

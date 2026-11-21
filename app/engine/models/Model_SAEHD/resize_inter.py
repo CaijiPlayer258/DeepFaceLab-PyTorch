@@ -71,7 +71,7 @@ __all__ = [
     'main',
 ]
 
-_METHODS = ('blend', 'bicubic', 'bilinear')
+_METHODS = ('blend', 'bicubic', 'bilinear', 'lanczos', 'pinv')
 # blend = 0.5·bicubic + 0.5·pinv（部分逆滤波），是本仓库的默认方法
 _BACKUP_TS_FMT = '%Y%m%d-%H%M%S'
 _HISTORY_KEY = '_resize_history'
@@ -245,37 +245,75 @@ def _interp_channel_major(mat: np.ndarray, C: int, old_hw: int, new_hw: int,
     return out
 
 
-def _interp_matrix(n: int, m: int, lam: float = 0.0, inverse: bool = False) -> np.ndarray:
-    """1-D 重采样矩阵（Catmull-Rom，align_corners=False）。
+def _interp_matrix(n: int, m: int, kind: str = 'bicubic', lam: float = 0.0,
+                    inverse: bool = False) -> np.ndarray:
+    """1-D 重采样矩阵 L ∈ R^{m×n}（align_corners=False 的坐标映射）。
 
-    inverse=True 时返回「部分逆滤波」算子：
-        升采样 (m>=n):  L @ (LᵀL + λI)⁻¹      —— 保泛函的最小范数解
-        降采样 (m< n):  (LLᵀ + λI)⁻¹ L        —— 保泛函的最小二乘解
-    λ→∞ 时退化为插值本身，λ→0 为全量逆滤波。
+    kind: nearest / bilinear / bicubic / lanczos / area
+    inverse=True 返回「部分逆滤波」算子：
+        升采样 (m>=n):  L (LᵀL + λI)⁻¹   —— 保泛函的最小范数解
+        降采样 (m< n):  (LLᵀ + λI)⁻¹ L   —— 保泛函的最小二乘解
+    λ→∞ 退化为插值本身，λ→0 为全量逆滤波。
     """
-    w_cub = np.zeros((m, n), np.float64)
-    for i in range(m):
-        x = (i + 0.5) * n / m - 0.5
-        x0 = int(np.floor(x))
-        for k in (-1, 0, 1, 2):
-            j = x0 + k
-            t = abs(x - j)
+    if kind == 'area':
+        L = np.zeros((m, n))
+        for i in range(m):
+            a, b = i * n / m, (i + 1) * n / m
+            j0, j1 = int(np.floor(a)), min(int(np.ceil(b)), n)
+            for j in range(j0, j1):
+                lo, hi = max(a, j), min(b, j + 1)
+                if hi > lo:
+                    L[i, j] += hi - lo
+            s_row = L[i].sum()
+            if s_row:
+                L[i] /= s_row
+    elif kind == 'nearest':
+        idx = np.clip(((np.arange(m) + 0.5) * n / m - 0.5).round().astype(int), 0, n - 1)
+        L = np.zeros((m, n))
+        L[np.arange(m), idx] = 1.0
+    else:
+        def w_lin(t):
+            return max(0.0, 1.0 - abs(t))
+
+        def w_cub(t):
+            t = abs(t)
             if t <= 1:
-                wv = 1.5 * t ** 3 - 2.5 * t ** 2 + 1
-            elif t < 2:
-                wv = -0.5 * t ** 3 + 2.5 * t ** 2 - 4 * t + 2
-            else:
-                wv = 0.0
-            if 0 <= j < n and wv:
-                w_cub[i, j] += wv
-        srow = w_cub[i].sum()
-        if srow:
-            w_cub[i] /= srow
+                return 1.5 * t ** 3 - 2.5 * t ** 2 + 1
+            if t < 2:
+                return -0.5 * t ** 3 + 2.5 * t ** 2 - 4 * t + 2
+            return 0.0
+
+        def w_lan(t, a=3.0):
+            t = abs(t)
+            if t < 1e-8:
+                return 1.0
+            if t >= a:
+                return 0.0
+            return a * np.sin(np.pi * t) * np.sin(np.pi * t / a) / (np.pi ** 2 * t ** 2)
+
+        if kind == 'lanczos':
+            wf, R = w_lan, 3
+        elif kind == 'bicubic':
+            wf, R = w_cub, 2
+        else:
+            wf, R = w_lin, 1
+        L = np.zeros((m, n))
+        for i in range(m):
+            x = (i + 0.5) * n / m - 0.5
+            x0 = int(np.floor(x))
+            for k in range(-R + 1, R + 1):
+                j = x0 + k
+                wv = wf(x - j)
+                if 0 <= j < n and wv:
+                    L[i, j] += wv
+            s_row = L[i].sum()
+            if s_row:
+                L[i] /= s_row
     if not inverse:
-        return w_cub
+        return L
     if m >= n:
-        return w_cub @ np.linalg.inv(w_cub.T @ w_cub + lam * np.eye(n))
-    return np.linalg.inv(w_cub @ w_cub.T + lam * np.eye(m)) @ w_cub
+        return L @ np.linalg.inv(L.T @ L + lam * np.eye(n))
+    return np.linalg.inv(L @ L.T + lam * np.eye(m)) @ L
 
 
 def _resample_2d_channel_major(mat: np.ndarray, C: int, old_hw: int, new_hw: int,
@@ -295,13 +333,20 @@ def _resample_2d_channel_major(mat: np.ndarray, C: int, old_hw: int, new_hw: int
 
 
 def _blend_weight(w: np.ndarray, C: int, old_hw: int, new_hw: int) -> np.ndarray:
-    """0.5·bicubic + 0.5·pinv(λ 按方向取) —— 部分逆滤波（Wiener 收缩）。"""
-    lam = 1e-4 if new_hw >= old_hw else 1e-1
-    bic = _interp_channel_major(w, C, old_hw, new_hw, 'bicubic')
-    pin = _resample_2d_channel_major(w, C, old_hw, new_hw,
-                                     _interp_matrix(old_hw, new_hw, lam, inverse=True))
-    return (0.5 * bic + 0.5 * pin).astype(np.float32)
+    """0.5·lanczos + 0.5·pinv —— 部分逆滤波（Wiener 收缩）。
 
+    基座核用 lanczos-3（通带最平、比 bicubic 更接近理想低通）；
+    逆滤波那一支按方向选核：升采样用 lanczos，降采样用 area（box 自带抗混叠，
+    避免把混叠一起逆滤波放大）。两者各取一半。
+    """
+    lam = 1e-4 if new_hw >= old_hw else 1e-1
+    inv_kind = 'lanczos' if new_hw >= old_hw else 'area'
+    base = _resample_2d_channel_major(w, C, old_hw, new_hw,
+                                      _interp_matrix(old_hw, new_hw, 'lanczos'))
+    pin = _resample_2d_channel_major(w, C, old_hw, new_hw,
+                                     _interp_matrix(old_hw, new_hw, inv_kind,
+                                                    lam=lam, inverse=True))
+    return (0.5 * base + 0.5 * pin).astype(np.float32)
 
 def interpolate_dense_weight(w, old_hw: int, new_hw: int, method: str = 'blend') -> np.ndarray:
     """Dense 权重 (C*H*W, out) 空间插值到 (C*H'*W', out)；行索引 = c*H*W + h*W + w。"""
@@ -910,8 +955,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument('--new-res', required=True, type=int)
     p.add_argument('--dry-run', action='store_true',
                    help='只打印将要改动的内容，不写盘')
-    p.add_argument('--method', choices=_METHODS, default='bilinear',
-                   help='dense 空间插值方法（默认 bilinear）')
+    p.add_argument('--method', choices=_METHODS, default='blend',
+                   help='dense 空间重采样方法（默认 blend = 0.5·lanczos + 0.5·pinv）')
     args = p.parse_args(argv)
     ok = resize_model(args.model_dir, args.new_res, dry_run=args.dry_run, method=args.method)
     return 0 if ok else 1

@@ -67,8 +67,20 @@ def interp_matrix(n: int, m: int, kind: str = "bicubic") -> np.ndarray:
         if t < 2:
             return -0.5 * t ** 3 + 2.5 * t ** 2 - 4 * t + 2
         return 0.0
-    wf = w_cub if kind == "bicubic" else w_lin
-    R = 2 if kind == "bicubic" else 1
+    def w_lan(t, a=3.0):
+        t = abs(t)
+        if t < 1e-8:
+            return 1.0
+        if t >= a:
+            return 0.0
+        return a * np.sin(np.pi * t) * np.sin(np.pi * t / a) / (np.pi ** 2 * t ** 2)
+
+    if kind == "lanczos":
+        wf, R = w_lan, 3
+    elif kind == "bicubic":
+        wf, R = w_cub, 2
+    else:
+        wf, R = w_lin, 1
     L = np.zeros((m, n))
     for i in range(m):
         x = (i + 0.5) * n / m - 0.5

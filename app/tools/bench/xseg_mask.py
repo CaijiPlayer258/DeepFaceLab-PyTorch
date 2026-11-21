@@ -52,3 +52,25 @@ def masked(a: np.ndarray, b: np.ndarray, m: np.ndarray):
     smap = ((2 * mu1 * mu2 + C1) * (2 * s12 + C2)) / ((mu1 ** 2 + mu2 ** 2 + C1) * (s1 + s2 + C2))
     ssim = float((smap * m).sum() / (m.sum() + 1e-9))
     return dict(psnr=psnr, ssim=ssim, mae=mae * 255.0)
+
+
+def structure_metrics(a: np.ndarray, b: np.ndarray, m: np.ndarray, sigma: float = 4.0):
+    """把「结构」和「锐度」分开量。
+
+    structure: 双方都做 sigma=4 低通后的 NCC（对模糊不敏感，只看几何/明暗分布是否一致）
+    hf_ratio : 高频能量比 E_hf(b)/E_hf(a)（Laplacian 方差），>1 表示比基准更锐
+    """
+    w = m[..., None]
+    msum = float(w.sum() * a.shape[2]) + 1e-9
+    ga = cv2.cvtColor((a * 255).astype(np.uint8), cv2.COLOR_BGR2GRAY).astype(np.float32)
+    gb = cv2.cvtColor((b * 255).astype(np.uint8), cv2.COLOR_BGR2GRAY).astype(np.float32)
+    la = cv2.GaussianBlur(ga, (0, 0), sigma)
+    lb = cv2.GaussianBlur(gb, (0, 0), sigma)
+    ma = float((la * m).sum() / (m.sum() + 1e-9))
+    mb = float((lb * m).sum() / (m.sum() + 1e-9))
+    da = (la - ma) * m
+    db = (lb - mb) * m
+    ncc = float((da * db).sum() / (np.sqrt((da * da).sum() * (db * db).sum()) + 1e-9))
+    hfa = float((cv2.Laplacian(ga, cv2.CV_32F) ** 2 * m).sum() / (msum))
+    hfb = float((cv2.Laplacian(gb, cv2.CV_32F) ** 2 * m).sum() / (msum))
+    return dict(ncc=ncc, hf_ratio=(hfb / (hfa + 1e-9)))
