@@ -6431,12 +6431,12 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 
 /* ---------- 统一滚动条（最终覆盖，必须留在文件末尾） ----------
 
-   观感参照 shadcn/ui 的 ScrollArea：10px 槽、全圆角、透明轨道、无箭头，
-   thumb 用 2px 透明边框内缩成一条 ~6px 的细线。
+   参照 shadcn/ui ScrollArea：10px 槽、全圆角、透明轨道、无箭头；
+   thumb 由 2px 透明边框内缩，视觉上是一条 ~6px 的细线。
 
-   悬停只提亮、不放大：alpha 从 .30 到 .42（差 0.12）。
-   之前 .22 → .55 跨了 0.33，加上 2px 透明边框的裁剪，看起来像“突然变粗”。
-   伪元素没有 transition，所以只能靠小步长让人觉得是“亮了一下”。 */
+   悬停只**换颜色**，alpha 恒定（.30 → .30）：
+   抗锯齿边缘的深浅由 alpha 决定，alpha 一变，边上那圈半透明像素就跟着变，
+   眼睛读到的就是“变粗了”。保持 alpha 不变、只提 RGB，粗细就绝对不会变。 */
 
 ::-webkit-scrollbar { width: 10px !important; height: 10px !important; }
 ::-webkit-scrollbar-track { background: transparent !important; }
@@ -6449,6 +6449,5 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   background-clip: padding-box !important;
   min-height: 36px;
 }
-/* 只在自己身上提亮；不做 *:hover（鼠标扫过内容区就整体变亮，太跳） */
-::-webkit-scrollbar-thumb:hover { background: rgba(150, 150, 170, .42) !important; }
-::-webkit-scrollbar-thumb:active { background: rgba(150, 150, 170, .52) !important; }
+/* 同 alpha、只换颜色 —— 只会在悬停时“亮一点”，几何完全不变 */
+::-webkit-scrollbar-thumb:hover { background: rgba(205, 205, 240, .30) !important; }
