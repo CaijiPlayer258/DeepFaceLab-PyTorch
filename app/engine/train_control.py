@@ -110,9 +110,11 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):                 # noqa: N802
         path = self.path.split("?")[0]
         if path == "/preview":
+            # 与 4.0 的 /preview 同形：{"previews": {名字: jpg bytes}, "labels": {...}}
             with _lock:
-                data = _cache.pop("preview", None)
-            return self._send({"ok": True, "preview": data})
+                previews = _cache.pop("previews", None)
+                labels = _cache.pop("preview_labels", {}) or {}
+            return self._send({"previews": previews or {}, "labels": labels})
         if path == "/status":
             with _lock:
                 return self._send({"ok": True, "iter": _cache.get("iter", 0),

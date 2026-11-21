@@ -485,6 +485,14 @@
   window.pollTrain = pollTrain;
 
   function startTraining(name) {
+    /* 先把界面切到训练页并打回「启动中」，再发请求：
+       /api/train/start 里要释放合成会话、写 dat、探测设备，可能好几秒，
+       以前要等它返回才跳转，用户会以为按钮没反应。 */
+    try {
+      window.__trainStarting = Date.now();
+      if (window.go) window.go("run");
+      if (window.trainStartingUi) window.trainStartingUi();
+    } catch (e) {}
     return fetch("/api/train/start", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: name })

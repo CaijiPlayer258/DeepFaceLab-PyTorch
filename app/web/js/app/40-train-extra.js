@@ -541,9 +541,13 @@
       h.className = "devhint";
       (sel.parentNode || row).appendChild(h);
     }
-    var txt = devAvailableText(d);
+    /* 只有一张卡时，下拉框里已经写着「GPU 0 · 型号 · 显存」，再挂一条“可用: …”就是重复。
+       多卡才需要这行（帮用户确认另一张卡也在）。 */
+    var _many = !!(d && d.devices && d.devices.length > 1);
+    var txt = _many ? devAvailableText(d) : "";
     h.textContent = txt;
     h.title = txt;
+    h.style.display = txt ? "" : "none";
   }
   window.__devGuard = devGuard;
 
