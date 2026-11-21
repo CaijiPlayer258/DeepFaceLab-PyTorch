@@ -343,7 +343,10 @@
       if (!opts) return 0;
       var filled = 0;
       box.querySelectorAll("[data-cfg]").forEach(function (el) {
-        if (onlyNew && el.dataset.v0 !== undefined) return;
+        /* 以前判据是 v0：补充块的行在建的时候就写了 v0（来自写死的默认值），
+           于是晚到的那次 onlyNew 回填把它们整批跳过 —— 表现就是「重启后仍是默认值」。
+           现在按「有没有真的被 dat 填过」判断。 */
+        if (onlyNew && el.dataset.filled === "1") return;
         var k = el.dataset.cfg, v = opts[k];
         if (k === "target_batch" && (v === undefined || v === null || Number(v) === 0)) {
           var _b0 = Number(opts.batch_size) || 1, _a0 = Number(opts.accum_steps) || 1;
@@ -397,6 +400,7 @@
             });
           }
         }
+        el.dataset.filled = "1";
       });
 
       /* 「已读入 N 项」按当前页面上真实填上的行数算：补充块（TrainExtra）的行
