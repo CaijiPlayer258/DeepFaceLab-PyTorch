@@ -1,0 +1,68 @@
+# inter_study · Inter 权重跨分辨率重采样
+
+本目录是「把已训练模型改成分辨率」这一功能的完整实验记录：报告、数据、图、脚本。
+
+- 正式报告：[REPORT_CN.md](REPORT_CN.md) ／ [REPORT_CN.html](REPORT_CN.html)（学术体例）
+- English：[REPORT_EN.md](REPORT_EN.md) ／ [REPORT_EN.html](REPORT_EN.html)
+- 工程说明：[app/docs/38-INTER-RESIZE.md](../../38-INTER-RESIZE.md)
+
+## 结论速览
+
+| 目标 | 网格 | bicubic | lanczos | pinv | **blend（默认）** |
+|---|---|---|---|---|---|
+| 288 | 13→9 | 18.20 / 0.728 / 25.7 | 17.87 / 0.723 / 27.3 | 16.21 / 0.705 / 28.7 | 18.18 / 0.698 / **21.6** |
+| 320 | 13→10 | 19.32 / 0.740 / 23.1 | 19.29 / 0.735 / 23.2 | 19.10 / 0.714 / 17.6 | **20.24 / 0.718 / 17.3** |
+| 384 | 13→12 | 23.32 / 0.813 / 13.4 | 24.32 / 0.842 / 11.8 | 23.62 / 0.856 / 13.8 | **25.10 / 0.874 / 9.64** |
+| 448 | 13→14 | 23.41 / 0.834 / 8.8 | 25.41 / 0.883 / 7.5 | 24.78 / 0.892 / 10.8 | **26.27 / 0.897 / 6.39** |
+| 512 | 13→16 | 20.26 / 0.814 / 18.8 | 20.71 / 0.836 / 18.5 | 20.83 / 0.838 / 20.1 | **23.97 / 0.847 / 8.73** |
+| 544 | 13→17 | 18.46 / 0.774 / 24.5 | 18.88 / 0.808 / 23.9 | 19.35 / 0.810 / 24.4 | **22.93 / 0.824 / 10.33** |
+
+（PSNR dB / SSIM / MAE，XSegLite 遮罩内，416 原模型输出为基准）
+
+三句话：
+
+1. 插值族里 **lanczos-3** 最好，bicubic 可用，nearest 只在 ±1 格时「看着锐」（相位错，不算更准）。
+2. **blend = 0.5·lanczos + 0.5·pinv**（降采样时 pinv 用 area 抗混叠）在 5/6 个目标三项最优，已设为默认。
+3. 降采样有**秩亏下界**（丢 15% / 41% / 52% 维度），任何重采样都突破不了，只能续训；
+   实用边界：降分辨率别超过 1~2 格（约 32~64 px）。
+
+## 文件地图
+
+| 文件 | 内容 |
+|---|---|
+| `REPORT_CN.md` / `REPORT_CN.html` | 中文报告（摘要 → 推导 → 实验 → 结论 → 可复现） |
+| `REPORT_EN.md` / `REPORT_EN.html` | 英文版 |
+| `compare_all.png` | 总图：dst 输入 / baseline / 5 方法 × 6 档目标分辨率 |
+| `results.json` | 16 组（bilinear 系列 × 4 分辨率） |
+| `results_adv.json` | 48 组（插值 / pinv / ls 修正） |
+| `results_ratio.json` | 32 组（核 × 逆滤波 × 抗混叠） |
+| `results_hybrid.json` | AA 感知混合候选 |
+| `results_extreme.json` | 288 / 544（±128） |
+| `results_lambda288.json` | 288 上 λ 扫描（0.1 → 10） |
+| `latent_metrics.json` | 潜空间（320 维码）对照 |
+
+图目录：`cand/`（旧混合）、`cand2/`（核对比）、`cand3/`（AA 混合）、`cand128/`（极端比值）。
+
+## 复现
+
+```
+# 单次转换（生产工具，默认 blend）
+python -m models.Model_SAEHD.resize_inter --model-dir <模型目录> --new-res 448
+
+# 全量指标（需要 runtime\engine 的 python）
+runtime\engine\python.exe app/tools/bench/inter_ratio_study.py    # 32 组核/逆滤波/抗混叠
+runtime\engine\python.exe app/tools/bench/inter_extreme_study.py  # 288 / 544
+runtime\engine\python.exe app/tools/bench/inter_hybrid_study.py   # AA 混合
+runtime\engine\python.exe app/tools/bench/inter_lambda_study.py   # 288 λ 扫描
+```
+
+脚本集合：`app/tools/bench/inter_resample.py`（转换）、`inter_adv.py`（插值矩阵/pinv/ls）、
+`xseg_mask.py`（掩码内指标 + ncc/hf）、`inter_study_run.py`、`inter_adv_study.py`、
+`inter_blend_study.py`、`inter_ratio_study.py`、`inter_hybrid_study.py`、`inter_extreme_study.py`、
+`inter_lambda_study.py`。
+
+## 注意
+
+- 指标都在 **XSegLite 遮罩内**统计；整图指标会被背景拉平，不要混用。
+- 参照是 **baseline 416**（原 Inter 输出），不是 dst 输入 —— 该模型 dst 侧本身有风格偏移。
+- 转换只是热启动：`data.dat` 的 optimizer state 形状不兼容会被丢弃，投产前需续训。
