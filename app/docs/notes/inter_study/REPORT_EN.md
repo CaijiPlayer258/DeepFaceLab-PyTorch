@@ -144,6 +144,23 @@ The production implementation is `app/engine/models/Model_SAEHD/resize_inter.py`
 implements (3) and `--method` accepts `bicubic / bilinear / lanczos / pinv`. Tool measurement (416→448, masked):
 PSNR 26.27 dB, SSIM 0.897, MAE 6.39, NCC 0.978.
 
-Scripts: `inter_study_run.py`, `inter_adv_study.py`, `inter_blend_study.py`, `inter_ratio_study.py`,
-`inter_hybrid_study.py`, `inter_extreme_study.py`, `inter_lambda_study.py`, `xseg_mask.py`;
+Scripts: [inter_study_run.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_study_run.py), [inter_adv_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_adv_study.py), [inter_blend_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_blend_study.py), [inter_ratio_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_ratio_study.py),
+[inter_hybrid_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_hybrid_study.py), [inter_extreme_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_extreme_study.py), [inter_lambda_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_lambda_study.py), [xseg_mask.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/xseg_mask.py);
 data: `results*.json`, `latent_metrics.json`. Engineering note: `app/docs/38-INTER-RESIZE.md`.
+## 7　Code and data (GitHub)
+
+Branch: <https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/tree/feature/inter-weight-resample>
+
+| kind | files |
+|---|---|
+| production | [resize_inter.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/engine/models/Model_SAEHD/resize_inter.py) |
+| conversion / inverse filter | [inter_resample.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_resample.py), [inter_adv.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_adv.py) |
+| main experiments | [inter_study_run.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_study_run.py), [inter_study_visual.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_study_visual.py) |
+| latent space | [inter_latent_metric.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_latent_metric.py) |
+| method comparison | [inter_adv_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_adv_study.py), [inter_blend_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_blend_study.py), [inter_ratio_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_ratio_study.py), [inter_hybrid_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_hybrid_study.py) |
+| extremes and ridge | [inter_extreme_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_extreme_study.py), [inter_lambda_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_lambda_study.py) |
+| metrics | [xseg_mask.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/xseg_mask.py) |
+| reports | [REPORT_CN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/REPORT_CN.md), [REPORT_EN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/REPORT_EN.md) |
+| figure | [compare_all.png](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/compare_all.png) |
+| data | [results_ratio.json](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/results_ratio.json) and the other `results*.json` |
+| engineering note | [38-INTER-RESIZE.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/38-INTER-RESIZE.md) |

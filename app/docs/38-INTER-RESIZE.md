@@ -81,3 +81,8 @@ app/tools/bench/xseg_mask.py                    XSegLite 遮罩内指标 + ncc /
 
 注意：`--method` 的 **argparse 默认值**与 `_METHODS` 是两处，改默认值必须同时改，
 并用工具跑一次、比对「实验 vs 工具」数值（曾因漏改 silent 回落到 bilinear）。
+## 7. 仓库链接
+
+- 分支：<https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/tree/feature/inter-weight-resample>
+- 实验目录：[app/docs/notes/inter_study](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/README.md)
+- 报告：[REPORT_CN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/REPORT_CN.md) ／ [REPORT_EN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/REPORT_EN.md)

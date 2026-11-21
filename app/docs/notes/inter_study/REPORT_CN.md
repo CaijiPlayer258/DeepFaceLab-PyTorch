@@ -128,6 +128,23 @@ lanczos-3（通带衰减约 0.5 dB）优于 bicubic（约 1 dB）优于 bilinear
 `--method` 可取 `bicubic / bilinear / lanczos / pinv`。工具实测（416→448，掩码内）：
 PSNR 26.27 dB、SSIM 0.897、MAE 6.39、NCC 0.978。
 
-实验脚本：`inter_study_run.py`、`inter_adv_study.py`、`inter_blend_study.py`、`inter_ratio_study.py`、
-`inter_hybrid_study.py`、`inter_extreme_study.py`、`inter_lambda_study.py`、`xseg_mask.py`；
+实验脚本：[inter_study_run.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_study_run.py)、[inter_adv_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_adv_study.py)、[inter_blend_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_blend_study.py)、[inter_ratio_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_ratio_study.py)、
+[inter_hybrid_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_hybrid_study.py)、[inter_extreme_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_extreme_study.py)、[inter_lambda_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_lambda_study.py)、[xseg_mask.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/xseg_mask.py)；
 数据：`results*.json`、`latent_metrics.json`。工程说明见 `app/docs/38-INTER-RESIZE.md`。
+## 7　代码与数据（GitHub）
+
+仓库分支：<https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/tree/feature/inter-weight-resample>
+
+| 类别 | 文件 |
+|---|---|
+| 生产实现 | [resize_inter.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/engine/models/Model_SAEHD/resize_inter.py) |
+| 转换 / 逆滤波 | [inter_resample.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_resample.py)、[inter_adv.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_adv.py) |
+| 主实验 | [inter_study_run.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_study_run.py)、[inter_study_visual.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_study_visual.py) |
+| 潜空间 | [inter_latent_metric.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_latent_metric.py) |
+| 方法对比 | [inter_adv_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_adv_study.py)、[inter_blend_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_blend_study.py)、[inter_ratio_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_ratio_study.py)、[inter_hybrid_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_hybrid_study.py) |
+| 极端与正则 | [inter_extreme_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_extreme_study.py)、[inter_lambda_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_lambda_study.py) |
+| 指标 | [xseg_mask.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/xseg_mask.py) |
+| 报告 | [REPORT_CN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/REPORT_CN.md)、[REPORT_EN.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/REPORT_EN.md) |
+| 总图 | [compare_all.png](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/compare_all.png) |
+| 数据 | [results_ratio.json](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/notes/inter_study/results_ratio.json) 等 `results*.json` |
+| 工程说明 | [38-INTER-RESIZE.md](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/docs/38-INTER-RESIZE.md) |
