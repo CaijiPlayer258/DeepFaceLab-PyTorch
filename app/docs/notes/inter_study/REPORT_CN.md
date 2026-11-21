@@ -92,14 +92,18 @@
 数据：results_adv.json（48 组）、results.json（16 组）、latent_metrics.json。
 ## 6. 再进一步：混合解（本报告最推荐的算法）
 
+定义先说清楚：**blend = 0.5 × 双三次（bicubic）+ 0.5 × 保泛函伪逆（pinv）**，是把两个重采样结果按权重相加，不是新的插值核。
+
 ![最优方案对比](best_compare.png)
 
-逐分辨率的肉眼对照（每行一个目标分辨率，列为 bicubic / pinv / blend）：
+逐分辨率的肉眼对照。**每一行都放同一张 baseline 416（原 inter）作为参照**，这样不用往上看：
+列依次为 baseline → bicubic（双三次）→ pinv（保泛函伪逆）→ **blend = 0.5·bicubic + 0.5·pinv**。
 
 ![各分辨率算法对照](algo_by_res.png)
 
-一眼能读出的差异：320 三列都偏软、384 起 pinv 与 blend 的眼睛和发丝明显更清楚、
-448 的 blend 最接近 baseline、512 的 bicubic 已经糊成一片而 blend 仍保住五官。
+一眼能读出的差异：320 三列都偏软；384 起 pinv 与 blend 的眼睛、发丝明显更清楚；
+448 的 blend 最接近 baseline；512 的 bicubic 已经糊成一片，而 blend 仍保住五官。
+注意 blend 不是新插值核，而是**两个结果的凸组合**：双三次（bicubic）负责稳、伪逆（pinv）负责补高频，各取一半。
 
 pinv 的逆滤波是**全量**的，会把权重高频放大过头（MAE 偏高）；bicubic 则不足。
 两者在同一网格上，凸组合 W' = α·pinv + (1-α)·bicubic 等价于**部分逆滤波**

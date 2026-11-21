@@ -79,15 +79,20 @@ Code: app/tools/bench/inter_adv.py (interp matrix L, pinv, ls_correct), xseg_mas
 Data: results_adv.json (48), results.json (16), latent_metrics.json.
 ## 6. Going further: the blended solution (recommended)
 
+Definition first: **blend = 0.5 x bicubic + 0.5 x pseudo-inverse (pinv)** - a weighted sum of two resampled
+results, not a new interpolation kernel.
+
 ![best methods](best_compare.png)
 
-Per-resolution visual (one row per target, columns = bicubic / pinv / blend):
+Per-resolution visual. **Every row repeats the same baseline 416 (original inter)** so comparisons need no scrolling:
+columns are baseline -> bicubic -> pinv (functional-preserving pseudo-inverse) -> **blend = 0.5*bicubic + 0.5*pinv**.
 
 ![per-resolution comparison](algo_by_res.png)
 
-What the eye reads immediately: 320 is soft in all three; from 384 on, pinv and blend keep the eyes and
-hair strands much better; at 448 blend is closest to the baseline; at 512 bicubic has smeared away while
-blend still holds the features.
+What the eye reads immediately: 320 is soft in all three; from 384 on, pinv and blend keep the eyes and hair
+strands much better; at 448 blend is closest to the baseline; at 512 bicubic has smeared away while blend
+still holds the features. Note that blend is **not a new kernel** - it is the convex mix of the two results:
+bicubic supplies stability, pinv supplies the missing high frequencies, half and half.
 
 pinv applies the **full** inverse filter, which over-sharpens weight high frequencies (higher MAE);
 bicubic under-shoots. On the same grid a convex combination W' = a*pinv + (1-a)*bicubic is equivalent
