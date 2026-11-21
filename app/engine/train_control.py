@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import base64
 import json
 import threading
 import time
@@ -110,11 +111,22 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):                 # noqa: N802
         path = self.path.split("?")[0]
         if path == "/preview":
-            # 与 4.0 的 /preview 同形：{"previews": {名字: jpg bytes}, "labels": {...}}
+            # 与前端约定同形：previews 是 [{name, data(base64)}] 列表，不是字典。
+            # （Trainer 往缓存里塞的是 {名字: jpeg bytes}，这里负责转成 JSON 可传的形状。）
             with _lock:
-                previews = _cache.pop("previews", None)
+                previews = _cache.pop("previews", None) or {}
                 labels = _cache.pop("preview_labels", {}) or {}
-            return self._send({"previews": previews or {}, "labels": labels})
+            if not previews:
+                # 空手而归时顺手替调用方排一次队：下一次请求通常就有图了
+                _set("preview")
+            items = []
+            for name, blob in previews.items():
+                try:
+                    data = base64.b64encode(bytes(blob)).decode("ascii")
+                except Exception:
+                    continue
+                items.append({"name": name, "data": data})
+            return self._send({"previews": items, "labels": labels})
         if path == "/status":
             with _lock:
                 return self._send({"ok": True, "iter": _cache.get("iter", 0),
