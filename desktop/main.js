@@ -10,6 +10,10 @@ const fs = require("fs");
 
 const ROOT = path.resolve(__dirname, "..");
 const PY_CANDIDATES = [
+  // 合并后的单环境优先（venv 的 python.exe 在根上，不在 Scripts 里）
+  path.join(ROOT, "runtime", "unified", "pythonw.exe"),
+  path.join(ROOT, "runtime", "unified", "python.exe"),
+  // 旧的双环境布局
   path.join(ROOT, "runtime", "server", "Scripts", "pythonw.exe"),
   path.join(ROOT, "runtime", "server", "Scripts", "python.exe")
 ];

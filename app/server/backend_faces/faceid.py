@@ -34,9 +34,20 @@ import numpy as np
 #     但如果解码是串行的，整体会被拖到 4.3 ms/张（解码 ~0.5 ms/张 × 8 线程不并行）。
 #   * 所以这里用线程池解码（cv2 释放 GIL），主线程只负责攒批推理。
 
+def _rt_dll_dirs():
+    """TensorRT / torch 的 DLL 目录。合并环境里 TensorRT 由 tensorrt_libs 提供，
+    cuda_dlls 只是它的旧副本（已删），两个都试一遍即可。"""
+    try:
+        from .._paths import runtime_root
+        rt = runtime_root()
+    except Exception:
+        rt = Path(__file__).resolve().parents[3] / "runtime" / "engine"
+    sp = rt / "Lib" / "site-packages"
+    return [rt / "cuda_dlls", sp / "tensorrt_libs", sp / "torch" / "lib"]
+
+
 def _load_dll_dirs():
-    eng = Path(__file__).resolve().parents[3] / "runtime" / "engine"
-    dirs = [eng / "cuda_dlls", eng / "Lib" / "site-packages" / "torch" / "lib"]
+    dirs = _rt_dll_dirs()
     for d in dirs:
         if d.is_dir():
             try:
@@ -61,7 +72,7 @@ def make_session(name: str | None = None, cache_dir: str | None = None):
 
     so = ort.SessionOptions()
     so.log_severity_level = 3
-    eng = Path(__file__).resolve().parents[3] / "runtime" / "engine"
+    eng = _rt_dll_dirs()[0].parent
     cache = cache_dir or str(eng / "trt_cache")
     os.makedirs(cache, exist_ok=True)
     opts = {"trt_engine_cache_enable": True, "trt_engine_cache_path": cache,
@@ -478,8 +489,7 @@ def group_stats(labels: np.ndarray):
 # 不重复构建。
 
 def _dll_dirs():
-    eng = Path(__file__).resolve().parents[3] / "runtime" / "engine"
-    dirs = [eng / "cuda_dlls", eng / "Lib" / "site-packages" / "torch" / "lib"]
+    return _rt_dll_dirs()
     for d in dirs:
         if d.is_dir():
             try:
@@ -505,7 +515,7 @@ class TrtEmbedder:
         src = Path(onnx_path)
         # 复用「引擎编译」页那套命名（workspace/_engines/<name>_<md5>_sm<SM>_trt<ver>.bf16.engine），
         # 这样编译页里能看到它、也能重建；构建完成后两边共用同一份文件。
-        eng_dir = Path(cache_dir or (Path(__file__).resolve().parents[3] / "runtime" / "engine" / "trt_direct"))
+        eng_dir = Path(cache_dir or (_rt_dll_dirs()[0].parent / "trt_direct"))
         eng_dir.mkdir(parents=True, exist_ok=True)
         logger = trt.Logger(trt.Logger.WARNING)
         t_all = time.time()

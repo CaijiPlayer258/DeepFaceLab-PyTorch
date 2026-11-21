@@ -36,7 +36,7 @@ engine/assets/         引擎自带素材
 
 ```bat
 RunGUI.bat                      :: 桌面端（Electron + 本地后端）
-runtime\server\Scripts\python.exe app\serve.py   :: 只起后端，浏览器开日志里那个端口
+runtime\unified\python.exe app\serve.py   :: 只起后端，浏览器开日志里那个端口
 ```
 
 ## 四、几处容易踩的约定

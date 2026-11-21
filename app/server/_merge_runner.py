@@ -542,7 +542,7 @@ def _resolve_ffmpeg(explicit_ffmpeg: str, explicit_ffprobe: str, dfl_root: Path)
     for root in (here.parents[2] if len(here.parents) > 2 else here.parent,
                  here.parents[1] if len(here.parents) > 1 else here.parent,
                  here.parent):
-        for sub in ("server", "engine"):
+        for sub in ("unified", "server", "engine"):   # unified = 合并后的单环境
             d = root / "runtime" / sub / "Lib" / "site-packages" / "imageio_ffmpeg" / "binaries"
             if d.is_dir():
                 cands.extend(sorted(d.glob("ffmpeg*.exe"), reverse=True))

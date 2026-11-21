@@ -152,7 +152,8 @@ def _fetch_ready():
     if engine is None:
         tried = "、".join(str(ROOT / "app" / "engine" / "modelhub" / "fetch.py"),)
         return None, None, "找不到下载器 modelhub/fetch.py（找过 %s）" % tried
-    pys = [ROOT / "runtime" / "engine" / "python.exe",
+    pys = [ROOT / "runtime" / "unified" / "python.exe",      # 合并后的单环境
+           ROOT / "runtime" / "engine" / "python.exe",
            ROOT / "runtime" / "engine" / "Scripts" / "python.exe",
            ROOT / "runtime" / "server" / "Scripts" / "python.exe"]
     for py in pys:

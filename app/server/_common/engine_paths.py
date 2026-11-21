@@ -75,7 +75,8 @@ def engine_root() -> Path:
 
 def engine_python() -> Path:
     """引擎运行时：runtime/engine/python.exe（旧的 app/python 也认）。"""
-    for cand in (ROOT / "runtime" / "engine" / "python.exe",
+    for cand in (ROOT / "runtime" / "unified" / "python.exe",   # 合并后的单环境优先
+                 ROOT / "runtime" / "engine" / "python.exe",
                  engine_root() / "python" / "python.exe"):
         if cand.is_file():
             return cand
@@ -117,3 +118,20 @@ def modelhub_dir() -> Path:
         if (cand / "onnx").is_dir():
             return cand
     return ROOT / "app" / "engine" / "modelhub"
+
+
+def runtime_root() -> Path:
+    """本机运行时根目录：优先 runtime/unified（合并后的单环境），否则 runtime/engine。
+
+    双环境时代 engine / server 各有一份 torch + tensorrt_libs（重复约 7 GB），
+    合并后统一指向统一环境；保留 engine 分支只为兼容老安装。
+    """
+    uni = ROOT / "runtime" / "unified"
+    if (uni / "python.exe").is_file():
+        return uni
+    return ROOT / "runtime" / "engine"
+
+
+def runtime_site_packages() -> Path:
+    """运行时里的 site-packages（拿 imageio_ffmpeg 之类的随包二进制）。"""
+    return runtime_root() / "Lib" / "site-packages"
