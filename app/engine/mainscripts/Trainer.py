@@ -367,7 +367,7 @@ def trainerThread (s2c, c2s, e,
                                     old = getattr(spo, k)
                                     if old != v:
                                         setattr(spo, k, v)
-                                        logs.append(f'[WebUI] {side_name} SP.{k}: {old} -> {v}')
+                                        logs.append(f'[control] {side_name} SP.{k}: {old} -> {v}')
                         otypes = updates.get('output_sample_types', {})
                         if otypes:
                             key_order = ('warp', 'transform', 'ct_mode', 'random_hsv_shift_amount')
@@ -385,7 +385,7 @@ def trainerThread (s2c, c2s, e,
                                                 lk = f'OT.{k}'
                                                 if lk not in logged:
                                                     logged.add(lk)
-                                                    logs.append(f'[WebUI] OT.{k}: {old} -> {v}')
+                                                    logs.append(f'[control] OT.{k}: {old} -> {v}')
                         ld = updates.get('loader', {})
                         if ld and hasattr(g, 'loader') and g.loader is not None:
                             for k, v in ld.items():
@@ -396,7 +396,7 @@ def trainerThread (s2c, c2s, e,
                                         lk = f'LD.{k}'
                                         if lk not in logged:
                                             logged.add(lk)
-                                            logs.append(f'[WebUI] LD.{k}: {old} -> {v}')
+                                            logs.append(f'[control] LD.{k}: {old} -> {v}')
                     if 'src' in params:
                         _apply_to_gen(gl[0], params['src'], 'SRC')
                     if 'dst' in params:
@@ -440,7 +440,7 @@ def trainerThread (s2c, c2s, e,
             def _apply_model_options(model, updates):
                 for k, v in updates.items():
                     if k not in _HOT_KEYS:
-                        io.log_info(f'[WebUI] 跳过不可热更新参数: {k}')
+                        io.log_info(f'[control] 跳过不可热更新参数: {k}')
                         continue
                     try:
                         old = model.options.get(k)
@@ -452,17 +452,17 @@ def trainerThread (s2c, c2s, e,
                             try:
                                 v = float(v)
                             except (ValueError, TypeError):
-                                io.log_info(f'[WebUI] 忽略无效学习率: {v!r}')
+                                io.log_info(f'[control] 忽略无效学习率: {v!r}')
                                 continue
                             model.options[k] = v
-                            io.log_info(f'[WebUI] Model option {k}: {old} -> {v}')
+                            io.log_info(f'[control] Model option {k}: {old} -> {v}')
                             try:
                                 model.src_dst_opt.lr = v
                             except Exception:
                                 pass
                         else:
                             model.options[k] = v
-                            io.log_info(f'[WebUI] Model option {k}: {old} -> {v}')
+                            io.log_info(f'[control] Model option {k}: {old} -> {v}')
 
                         # 余弦退火·热重启周期（Cosine Annealing with Warm Restarts）
                         if k == 'lr_cos':
@@ -519,9 +519,9 @@ def trainerThread (s2c, c2s, e,
                                     model.random_color_power = float(_val)
                                 elif k == 'random_color_alg':
                                     model.random_color_alg = str(v)
-                                io.log_info(f'[WebUI] {k} -> {_val}（已更新 {_n} 个样本项）')
+                                io.log_info(f'[control] {k} -> {_val}（已更新 {_n} 个样本项）')
                             except Exception as _we:
-                                io.log_info(f'[WebUI] {k} 热更新失败: {_we}')
+                                io.log_info(f'[control] {k} 热更新失败: {_we}')
                         # 刚性形变范围：生成器里存的是 [-v, v] 区间，
                         # 参数页填的是单边幅值（旋转 20 度 / 缩放 0.15 / 平移 0.05）
                         elif k in ('rotation_range', 'scale_range', 't_range'):
@@ -546,9 +546,9 @@ def trainerThread (s2c, c2s, e,
                                                 _gen.loader.clear_cache()
                                         except Exception:
                                             pass
-                                io.log_info(f'[WebUI] {k} -> ±{_amp}（已更新 {_n} 处）')
+                                io.log_info(f'[control] {k} -> ±{_amp}（已更新 {_n} 处）')
                             except Exception as _we:
-                                io.log_info(f'[WebUI] {k} 热更新失败: {_we}')
+                                io.log_info(f'[control] {k} 热更新失败: {_we}')
 
                         # 均匀偏航：采样开关在 loader 上，只改 model 属性不生效
                         elif k == 'uniform_yaw':
@@ -561,9 +561,9 @@ def trainerThread (s2c, c2s, e,
                                     if _ld is not None and hasattr(_ld, 'use_yaw_sampling'):
                                         _ld.use_yaw_sampling = _uv
                                         _n += 1
-                                io.log_info(f'[WebUI] uniform_yaw -> {_uv}（已更新 {_n} 个 loader）')
+                                io.log_info(f'[control] uniform_yaw -> {_uv}（已更新 {_n} 个 loader）')
                             except Exception as _we:
-                                io.log_info(f'[WebUI] uniform_yaw 热更新失败: {_we}')
+                                io.log_info(f'[control] uniform_yaw 热更新失败: {_we}')
 
                         # 翻转——更新对应生成器的 sample_process_options
                         elif k in ('random_src_flip', 'random_dst_flip'):
@@ -578,7 +578,7 @@ def trainerThread (s2c, c2s, e,
                         elif hasattr(model, k):
                             setattr(model, k, bool(v) if isinstance(v, bool) else type(old)(v) if old is not None else v)
                     except Exception as e:
-                        io.log_info(f'[WebUI] 更新参数 {k} 失败: {e}')
+                        io.log_info(f'[control] 更新参数 {k} 失败: {e}')
 
             # Push initial generator settings to WebUI cache
             if _webui_trainer is not None:
