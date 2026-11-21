@@ -1,5 +1,7 @@
 # DeepFaceLab 4.1 · 图形化人脸替换（Windows）
 
+[English](README_EN.md) | 中文
+
 > 打开就能用的换脸工具：**没有命令行、没有一堆用不上的模型**，每个页面只有一个主按钮。
 > 后端是本地 FastAPI，界面是 Web（跑在 Electron 壳里），所有推理都在本机，不联网。
 
