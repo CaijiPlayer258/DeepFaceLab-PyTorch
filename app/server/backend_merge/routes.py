@@ -147,6 +147,34 @@ def _sr_apply_resp(resp: dict, payload: dict) -> dict:
         return resp
 
 
+_SKIP_SCAN_DIRS = {"model", "data_src", "data_dst", "merged", "_engines", ".git",
+                   "node_modules", "__pycache__", "runtime"}
+
+
+def _walk_videos(root: Path):
+    """逐层走目录，跳过模型 / 数据 / 缓存等大目录；顺序稳定，便于前端展示。"""
+    stack = [root]
+    while stack:
+        d = stack.pop()
+        try:
+            children = sorted(d.iterdir())
+        except OSError:
+            continue
+        subdirs = []
+        for p in children:
+            try:
+                if p.is_dir():
+                    name = p.name
+                    if name in _SKIP_SCAN_DIRS or name.endswith("_cache") or ".merge_" in name:
+                        continue
+                    subdirs.append(p)
+                elif p.suffix.lower() in _VIDEO_EXT:
+                    yield p
+            except OSError:
+                continue
+        stack.extend(reversed(subdirs))
+
+
 @router.get("/api/merge/videos")
 @_api
 def merge_videos(dir: str = ""):
@@ -157,24 +185,20 @@ def merge_videos(dir: str = ""):
     roots = [root] if root is not None else [Path(WORKSPACE)]
 
     out, seen = [], set()
-    limit, budget, truncated = 200, 20000, False
+    limit, truncated = 200, False
+    # 只按“视频文件个数”限流，不按“扫过多少条目”限流：
+    # workspace 里有几千个 json / 日志 / 中间帧，按条目计数会在大目录里提前截断，
+    # 表现就是排在后面的素材（尤其名字以非 ASCII 开头的）整段消失。
     for r in roots:
         if not r.is_dir():
             continue
-        try:
-            entries = sorted(r.rglob("*"))
-        except OSError:
-            entries = []
-        for f in entries:
-            budget -= 1
-            if budget <= 0 or len(out) >= limit:
+        for f in _walk_videos(r):
+            if len(out) >= limit:
                 truncated = True
                 break
             try:
-                if not f.is_file() or f.suffix.lower() not in _VIDEO_EXT:
-                    continue
                 # 合成产物 / 缓存目录不作为素材列出来（否则列表里全是自己的输出）
-                if f.name.endswith("_merged.mp4") or ".merge_" in str(f.parent):
+                if "_merged" in f.stem or ".merge_" in str(f.parent):
                     continue
                 key = os.path.normcase(str(f))
                 if key in seen:
