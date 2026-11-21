@@ -2077,7 +2077,6 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  scrollbar-width: thin;
 }
 /* 两栏共用全局那套（10px 槽 + 2px 内边距收窄 + 9999px 圆角），这里只声明宽度来源 */
 #p-merge .mgleft::-webkit-scrollbar,
@@ -2334,8 +2333,6 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
   overflow-x: auto;
   overflow-y: hidden;
   min-width: 0;
-  scrollbar-width: thin;
-  scrollbar-color: var(--line-strong) transparent;
 }
 .mtl-scroll::-webkit-scrollbar { height: var(--mtl-sb-h); }
 .mtl-scroll::-webkit-scrollbar-track { background: transparent; }
@@ -2545,7 +2542,6 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
   background: var(--panel);
   box-sizing: border-box;
   container-type: inline-size;     /* 供下方 6 列规则按容器宽度判断 */
-  scrollbar-width: thin;
   scrollbar-gutter: stable;
 }
 .mgp-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -3015,8 +3011,6 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
 #p-merge .mgright,
 #p-merge .mgstage,
 #mergeTracks {
-  scrollbar-width: thin;
-  scrollbar-color: var(--line-strong) transparent;
 }
 #p-merge .mgleft::-webkit-scrollbar,
 #p-merge .mgright::-webkit-scrollbar,
@@ -3070,8 +3064,6 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
 }
 /* 视频列表的滚动条在深色下别用浅灰 */
 #p-merge #mgVideos {
-  scrollbar-width: thin;
-  scrollbar-color: var(--line-strong) transparent;
 }
 #p-merge #mgVideos::-webkit-scrollbar { width: 6px; }
 #p-merge #mgVideos::-webkit-scrollbar-track { background: transparent; }
@@ -4729,8 +4721,6 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
   min-height: 0;
   overflow-x: auto;
   overflow-y: hidden;
-  scrollbar-width: thin;
-  scrollbar-color: var(--line-strong) transparent;
 }
 .fdb-groups::-webkit-scrollbar { height: 7px; }
 .fdb-groups::-webkit-scrollbar-track { background: transparent; }
@@ -4810,8 +4800,6 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
   min-height: 0;
   padding: 9px;
   overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--line-strong) transparent;
 }
 .fdb-group-grid::-webkit-scrollbar { width: 6px; }
 .fdb-group-grid::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 999px; }
@@ -4950,8 +4938,6 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
   min-height: 0;
   padding: 8px;
   overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--line-strong) transparent;
 }
 .fdb-trash-list::-webkit-scrollbar { width: 6px; }
 .fdb-trash-list::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 999px; }
@@ -5588,7 +5574,6 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   flex-direction: column;
   gap: 14px;
   padding: 1px;
-  scrollbar-width: thin;
 }
 .mgset-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
 .mgset-scroll::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 3px; }
@@ -6445,19 +6430,34 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 }
 
 /* ---------- 统一滚动条（最终覆盖，必须留在文件末尾） ----------
-   历史上这里零散写过十几处变体：6px / 8px、3px / 999px 圆角、content-box 的裁剪…
-   于是同一个界面能看到两种滚动条。这条用 !important 收口（伪元素选择器被更具体的
-   id 规则覆盖过，只靠顺序压不住），以后要调整只改这一处。 */
+
+   参考 shadcn/ui 的 ScrollArea（Radix）：
+     · 10px 的槽，thumb 用 2px 透明边框内缩，视觉上是一条 ~6px 的细线
+     · 全圆角（rounded-full）
+     · 轨道透明，没有上下箭头
+     · 默认几乎看不见，鼠标进到容器里才浮现（opacity/颜色过渡）
+
+   实现上只能走 ::-webkit-scrollbar（Radix 那种自绘 thumb 需要改结构，这里不动 DOM）。
+   注意：**绝不能**再给这些元素写 scrollbar-width / scrollbar-color ——
+   Chromium 一旦看到标准属性，就会整块忽略 ::-webkit-scrollbar 的定制，
+   结果就是“改了没反应”，之前那两次白改都是这个原因。 */
+
 ::-webkit-scrollbar { width: 10px !important; height: 10px !important; }
 ::-webkit-scrollbar-track { background: transparent !important; }
-::-webkit-scrollbar-thumb {
-  background: var(--line-strong) !important;
-  border-radius: 9999px !important;
-  border: 2px solid transparent !important;   /* 把 thumb 收成细线 */
-  background-clip: padding-box !important;
-  min-height: 32px;
-}
-::-webkit-scrollbar-thumb:hover { background: var(--ink-3) !important; }
-::-webkit-scrollbar-thumb:active { background: var(--ink-2) !important; }
-::-webkit-scrollbar-corner { background: transparent !important; }
 ::-webkit-scrollbar-button { display: none !important; height: 0 !important; }
+::-webkit-scrollbar-corner { background: transparent !important; }
+
+/* 默认：细线但很淡 —— 不用纯透明，否则鼠标滑过时看不出可滚动 */
+::-webkit-scrollbar-thumb {
+  background: rgba(150, 150, 170, .22) !important;
+  border-radius: 9999px !important;
+  border: 2px solid transparent !important;
+  background-clip: padding-box !important;
+  min-height: 36px;
+  transition: background .15s ease;
+}
+/* 鼠标进入容器：thumb 浮现（shadcn 的 hover 才显形就是这个感觉） */
+*:hover::-webkit-scrollbar-thumb { background: rgba(150, 150, 170, .38) !important; }
+/* 直接悬停在 thumb 上 / 拖动中：再亮一档 */
+::-webkit-scrollbar-thumb:hover { background: rgba(150, 150, 170, .55) !important; }
+::-webkit-scrollbar-thumb:active { background: rgba(150, 150, 170, .72) !important; }
