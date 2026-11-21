@@ -133,9 +133,14 @@ def apply(asset_name: Optional[str] = None) -> Dict[str, Any]:
         _download(url, zip_path)
         with zipfile.ZipFile(zip_path) as zf:
             names = zf.namelist()
+            # 只有"外层包了一层目录"时（GitHub 源码包形式）才剥掉这一层；
+            # 自己的代码包是直接从 app/ 开始的，不能剥。
             root_dir = ""
-            if names and names[0].split("/")[0]:
-                root_dir = names[0].split("/")[0] + "/"
+            tops = {n.split("/")[0] for n in names if n and not n.startswith("/")}
+            if len(tops) == 1:
+                top = next(iter(tops))
+                if f"{top}/app/" in names or f"{top}/version.txt" in names:
+                    root_dir = top + "/"
             staged = tmp / "staged"
             staged.mkdir()
             for n in names:
