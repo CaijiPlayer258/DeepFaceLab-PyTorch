@@ -818,7 +818,10 @@
   "需要 select": "Needs a select",
   "预览调色": "Preview grading",
   "只影响「合并预览」第 5 列的显示，不影响训练和真正的合成": "Only affects column 5 of the merge preview — training and final merging are untouched",
-  "自动更新走这个代理。留空则直连 —— 国内直连通常连不上，建议用 Steam++ 的系统代理并填这里。": "Auto-update goes through this proxy. Leave empty to connect directly — usually unreachable from mainland China; use the Steam++ system proxy and fill it in here."
+  "自动更新走这个代理。留空则直连 —— 国内直连通常连不上，建议用 Steam++ 的系统代理并填这里。": "Auto-update goes through this proxy. Leave empty to connect directly — usually unreachable from mainland China; use the Steam++ system proxy and fill it in here.",
+  /* 下面这句在页面上被 <a> 拆成两段（Steam++ 做成外链），逐段给译文，否则英文界面回落到中文 */
+  "自动更新走这个代理。留空则直连 —— 国内直连通常连不上，建议用 ": "Auto-update goes through this proxy. Leave empty to connect directly — direct connections usually fail in mainland China; use ",
+  "的系统代理并填这里。": "'s system proxy and fill it in here.",
 });
 
   Object.assign(DICT, {
