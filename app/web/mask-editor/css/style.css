@@ -789,16 +789,15 @@ html, body {
 
 }
 
-/* ---------- 统一滚动条（与主界面同款：细、全圆角、悬停只换色） ---------- */
+/* ---------- 统一滚动条（与主界面同款：不透明填充，悬停只换色） ---------- */
 ::-webkit-scrollbar { width: 10px !important; height: 10px !important; }
 ::-webkit-scrollbar-track { background: transparent !important; }
 ::-webkit-scrollbar-thumb {
-  background: rgba(150, 150, 170, .30) !important;
+  background: #2c2c34 !important;
   border-radius: 9999px !important;
-  border: 2px solid transparent !important;
-  background-clip: padding-box !important;
+  border: 0 !important;
   min-height: 36px;
 }
-::-webkit-scrollbar-thumb:hover { background: rgba(205, 205, 240, .30) !important; }
+::-webkit-scrollbar-thumb:hover { background: #3d3d49 !important; }
 ::-webkit-scrollbar-button { display: none !important; height: 0 !important; }
 ::-webkit-scrollbar-corner { background: transparent !important; }

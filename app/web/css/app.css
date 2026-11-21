@@ -6431,23 +6431,25 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 
 /* ---------- 统一滚动条（最终覆盖，必须留在文件末尾） ----------
 
-   参照 shadcn/ui ScrollArea：10px 槽、全圆角、透明轨道、无箭头；
-   thumb 由 2px 透明边框内缩，视觉上是一条 ~6px 的细线。
+   参照 shadcn ScrollArea 的形态：10px 槽、全圆角、透明轨道、无箭头。
 
-   悬停只**换颜色**，alpha 恒定（.30 → .30）：
-   抗锯齿边缘的深浅由 alpha 决定，alpha 一变，边上那圈半透明像素就跟着变，
-   眼睛读到的就是“变粗了”。保持 alpha 不变、只提 RGB，粗细就绝对不会变。 */
+   这里**不用** border + background-clip 的内缩技巧，也不用半透明色：
+   半透明填充在圆角边缘会有一圈混合像素，鼠标悬停换色时那圈像素跟着变亮，
+   视觉上就是“突然变粗”。改成不透明填充 + 固定形状，悬停只换背景色，
+   几何完全一致 —— 这样才真的只变颜色。
+
+   注意：不要写 scrollbar-width / scrollbar-color，
+   Chromium 见到标准属性会整块忽略 ::-webkit-scrollbar 的定制。 */
 
 ::-webkit-scrollbar { width: 10px !important; height: 10px !important; }
 ::-webkit-scrollbar-track { background: transparent !important; }
 ::-webkit-scrollbar-button { display: none !important; height: 0 !important; }
 ::-webkit-scrollbar-corner { background: transparent !important; }
 ::-webkit-scrollbar-thumb {
-  background: rgba(150, 150, 170, .30) !important;
+  background: #2c2c34 !important;          /* 不透明：边缘不会再混出一圈 */
   border-radius: 9999px !important;
-  border: 2px solid transparent !important;
-  background-clip: padding-box !important;
+  border: 0 !important;
+  background-clip: border-box !important;
   min-height: 36px;
 }
-/* 同 alpha、只换颜色 —— 只会在悬停时“亮一点”，几何完全不变 */
-::-webkit-scrollbar-thumb:hover { background: rgba(205, 205, 240, .30) !important; }
+::-webkit-scrollbar-thumb:hover { background: #3d3d49 !important; }
