@@ -4,7 +4,7 @@
 本文将该问题形式化为权重场上的二维重采样，给出保持线性泛函的最优变换（伪逆），证明单次插值缺失逆滤波项；
 进而提出取插值与伪逆凸组合的**部分逆滤波**方法（α = 0.5，降采样时逆滤波分支改用盒式核抗混叠）。
 在 df-udt / 416 模型上对 288–544 六档目标分辨率、五种方法做受控实验，指标在 XSegLite 掩码内统计。
-结果表明：升采样方向所提方法三项指标均最优（448：PSNR 26.27 dB、SSIM 0.897）；
+结果表明：升采样方向所提方法三项指标均最优（448：PSNR 27.38 dB、SSIM 0.920）；
 降采样误差存在由秩亏决定的下界，与算法无关。
 
 **关键词**　分辨率转换；权重重采样；逆滤波；Tikhonov 正则化；秩亏
@@ -130,9 +130,9 @@ lanczos-3（通带衰减约 0.5 dB）优于 bicubic（约 1 dB）优于 bilinear
 | 组合 | 384 | 448 | 512 |
 |---|---|---|---|
 | **d1=pinv, d2=lanczos（本文 blend）** | **26.33 / 0.909 / 9.26** | **27.38 / 0.920 / 6.06** | **24.22 / 0.857 / 9.21** |
-| d1=pinv, d2=blend旧 | 25.30 / 0.887 / 8.90 | 26.14 / 0.909 / 8.30 | 22.91 / 0.851 / 14.0 |
-| d1=blend旧, d2=lanczos | 25.48 / 0.882 / 10.3 | 26.84 / 0.905 / 5.31 | 23.11 / 0.848 / 11.1 |
-| d1=blend旧, d2=blend旧 | 25.10 / 0.874 / 9.64 | 26.27 / 0.897 / 6.39 | 23.97 / 0.847 / 8.73 |
+| d1=pinv, d2=早期方案 | 25.30 / 0.887 / 8.90 | 26.14 / 0.909 / 8.30 | 22.91 / 0.851 / 14.0 |
+| d1=早期方案, d2=lanczos | 25.48 / 0.882 / 10.3 | 26.84 / 0.905 / 5.31 | 23.11 / 0.848 / 11.1 |
+| d1=早期方案, d2=早期方案 | 25.10 / 0.874 / 9.64 | 26.27 / 0.897 / 6.39 | 23.97 / 0.847 / 8.73 |
 
 **图 2**　按张量分组的消融结果（行=分辨率，列=四种组合）。
 
@@ -155,7 +155,7 @@ lanczos-3（通带衰减约 0.5 dB）优于 bicubic（约 1 dB）优于 bilinear
 
 生产实现位于 `app/engine/models/Model_SAEHD/resize_inter.py`，默认方法 `blend` 对应式 (3)，
 `--method` 可取 `bicubic / bilinear / lanczos / pinv`。工具实测（416→448，掩码内）：
-PSNR 26.27 dB、SSIM 0.897、MAE 6.39、NCC 0.978。
+PSNR 27.38 dB、SSIM 0.920、MAE 6.06、NCC 0.983。
 
 实验脚本：[inter_study_run.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_study_run.py)、[inter_adv_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_adv_study.py)、[inter_blend_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_blend_study.py)、[inter_ratio_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_ratio_study.py)、
 [inter_hybrid_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_hybrid_study.py)、[inter_extreme_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_extreme_study.py)、[inter_lambda_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_lambda_study.py)、[xseg_mask.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/xseg_mask.py)；

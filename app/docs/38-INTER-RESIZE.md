@@ -1,6 +1,6 @@
 # 38 · Inter 分辨率转换（模型改分辨率）
 
-> 状态：生产默认 `blend`（0.5·lanczos + 0.5·pinv），2026-11 定稿。
+> 状态：生产默认 `blend`（按张量分组：dense1 = 伪逆，dense2/bias = lanczos 插值），2026-11 定稿。
 > 实验与数据见 [inter_study/REPORT_CN.md](notes/inter_study/REPORT_CN.md)。
 
 ## 1. 它做什么

@@ -7,7 +7,7 @@ show that plain interpolation is missing exactly that inverse-filter factor. We 
 filtering**, the convex combination of interpolation and pseudo-inverse (α = 0.5, with a box kernel supplying
 anti-aliasing on the inverse branch when downscaling). Controlled experiments on a df-udt/416 model cover six
 target resolutions (288–544) and five methods, with all metrics computed inside the XSegLite mask. The proposed
-method is best on all three metrics in the upscaling direction (448: PSNR 26.27 dB, SSIM 0.897); in the
+method is best on all three metrics in the upscaling direction (448: PSNR 27.38 dB, SSIM 0.920); in the
 downscaling direction the error is bounded below by rank deficiency, independently of the algorithm.
 
 **Keywords**　resolution conversion; weight resampling; inverse filtering; Tikhonov regularisation; rank deficiency
@@ -142,9 +142,9 @@ Best of each side combined (384 / 448 / 512):
 | combination | 384 | 448 | 512 |
 |---|---|---|---|
 | **d1=pinv, d2=lanczos (ours)** | **26.33 / 0.909 / 9.26** | **27.38 / 0.920 / 6.06** | **24.22 / 0.857 / 9.21** |
-| d1=pinv, d2=old blend | 25.30 / 0.887 / 8.90 | 26.14 / 0.909 / 8.30 | 22.91 / 0.851 / 14.0 |
-| d1=old blend, d2=lanczos | 25.48 / 0.882 / 10.3 | 26.84 / 0.905 / 5.31 | 23.11 / 0.848 / 11.1 |
-| d1=old blend, d2=old blend | 25.10 / 0.874 / 9.64 | 26.27 / 0.897 / 6.39 | 23.97 / 0.847 / 8.73 |
+| d1=pinv, d2=earlier scheme | 25.30 / 0.887 / 8.90 | 26.14 / 0.909 / 8.30 | 22.91 / 0.851 / 14.0 |
+| d1=earlier scheme, d2=lanczos | 25.48 / 0.882 / 10.3 | 26.84 / 0.905 / 5.31 | 23.11 / 0.848 / 11.1 |
+| d1=earlier scheme, d2=earlier scheme | 25.10 / 0.874 / 9.64 | 26.27 / 0.897 / 6.39 | 23.97 / 0.847 / 8.73 |
 
 **Fig. 2**　Ablation results (rows = resolution, columns = the four combinations).
 
@@ -170,7 +170,7 @@ interpolation (lanczos); splitting the operators beats one-operator-for-all at e
 
 The production implementation is `app/engine/models/Model_SAEHD/resize_inter.py`; the default method `blend`
 implements (3) and `--method` accepts `bicubic / bilinear / lanczos / pinv`. Tool measurement (416→448, masked):
-PSNR 26.27 dB, SSIM 0.897, MAE 6.39, NCC 0.978.
+PSNR 27.38 dB, SSIM 0.920, MAE 6.06, NCC 0.983.
 
 Scripts: [inter_study_run.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_study_run.py), [inter_adv_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_adv_study.py), [inter_blend_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_blend_study.py), [inter_ratio_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_ratio_study.py),
 [inter_hybrid_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_hybrid_study.py), [inter_extreme_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_extreme_study.py), [inter_lambda_study.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/inter_lambda_study.py), [xseg_mask.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/feature/inter-weight-resample/app/tools/bench/xseg_mask.py);
