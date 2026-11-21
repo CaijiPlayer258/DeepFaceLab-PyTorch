@@ -377,7 +377,13 @@
       if (!el) {
         el = document.createElement('div');
         el.id = HINT_ID;
-        el.textContent = HINT_TEXT;
+        /* 这里注入的节点在 i18n 首轮之后才出现，主动翻一次；语言切换时由 apply() 再扫到 */
+        var _hint = HINT_TEXT;
+        try {
+          var _D = window.I18N && window.I18N.dict;
+          if (_D && window.I18N.get && window.I18N.get() !== 'zh' && _D[HINT_TEXT]) _hint = _D[HINT_TEXT];
+        } catch (e) {}
+        el.textContent = _hint;
         el.style.cssText =
           'position:absolute;top:10px;left:12px;z-index:50;pointer-events:none;' +
           'padding:3px 8px;border-radius:99px;' +
