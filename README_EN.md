@@ -1,9 +1,10 @@
-# DeepFaceLab 4.1 · GUI face swapping for Windows
+# DeepFaceLab 4.1 · A face-swap pipeline optimised end to end (Windows)
 
 English | [中文](README.md)
 
-> No command line, no unused models, one primary button per page. The backend is a local FastAPI service,
-> the UI is web running inside an Electron shell, and every inference runs on your own machine.
+> Extraction, training, merging and export were each rebuilt: GPU paths, pipelined stages, bit-exact checks where
+> correctness matters. The UI is only the shell — no command line, one primary button per page, but nothing here is
+> a UI with the engine left untouched. The backend is a local FastAPI service and every inference runs on your machine.
 
 ![home](app/docs/readme/01-home.png)
 
