@@ -745,6 +745,15 @@
     el.querySelector(".tx").addEventListener("click", function () { dismissToast(el); });
     el.querySelector(".tb i").style.animationDuration = life + "ms";
     root.appendChild(el);
+    /* shadcn 的 toast 有 TOAST_LIMIT（默认只留 1~3 条），不会无限堆——
+       这里同样只保留最新 3 条，更早的直接退场，避免铺满右下角挡住界面。 */
+    var TOAST_LIMIT = 3;
+    var alive = root.querySelectorAll(".toast:not([data-leaving])");
+    if (alive.length > TOAST_LIMIT) {
+      for (var _i = 0; _i < alive.length - TOAST_LIMIT; _i++) {
+        dismissToast(alive[_i]);
+      }
+    }
     if (window.I18N) window.I18N.refresh();
     setTimeout(function () { dismissToast(el); }, life);
     return el;
