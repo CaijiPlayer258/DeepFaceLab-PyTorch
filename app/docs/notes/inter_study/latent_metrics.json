@@ -1,0 +1,98 @@
+[
+  {
+    "res": 320,
+    "method": "nearest",
+    "latent_mae": 6.131054878234863,
+    "latent_cos": 0.556323230266571
+  },
+  {
+    "res": 320,
+    "method": "bilinear",
+    "latent_mae": 5.365970611572266,
+    "latent_cos": 0.8088362216949463
+  },
+  {
+    "res": 320,
+    "method": "bicubic",
+    "latent_mae": 4.96183967590332,
+    "latent_cos": 0.8539323210716248
+  },
+  {
+    "res": 320,
+    "method": "area",
+    "latent_mae": 5.481542587280273,
+    "latent_cos": 0.7999455332756042
+  },
+  {
+    "res": 384,
+    "method": "nearest",
+    "latent_mae": 5.230340003967285,
+    "latent_cos": 0.6928226351737976
+  },
+  {
+    "res": 384,
+    "method": "bilinear",
+    "latent_mae": 4.446436405181885,
+    "latent_cos": 0.8526913523674011
+  },
+  {
+    "res": 384,
+    "method": "bicubic",
+    "latent_mae": 3.6957669258117676,
+    "latent_cos": 0.9036306142807007
+  },
+  {
+    "res": 384,
+    "method": "area",
+    "latent_mae": 4.493844985961914,
+    "latent_cos": 0.8494499921798706
+  },
+  {
+    "res": 448,
+    "method": "nearest",
+    "latent_mae": 5.102535724639893,
+    "latent_cos": 0.7287320494651794
+  },
+  {
+    "res": 448,
+    "method": "bilinear",
+    "latent_mae": 3.5560576915740967,
+    "latent_cos": 0.8820546269416809
+  },
+  {
+    "res": 448,
+    "method": "bicubic",
+    "latent_mae": 2.6548805236816406,
+    "latent_cos": 0.9327248930931091
+  },
+  {
+    "res": 448,
+    "method": "area",
+    "latent_mae": 3.4811837673187256,
+    "latent_cos": 0.8871727585792542
+  },
+  {
+    "res": 512,
+    "method": "nearest",
+    "latent_mae": 5.487706184387207,
+    "latent_cos": 0.7682420611381531
+  },
+  {
+    "res": 512,
+    "method": "bilinear",
+    "latent_mae": 3.25101637840271,
+    "latent_cos": 0.9062138795852661
+  },
+  {
+    "res": 512,
+    "method": "bicubic",
+    "latent_mae": 2.9279372692108154,
+    "latent_cos": 0.9531575441360474
+  },
+  {
+    "res": 512,
+    "method": "area",
+    "latent_mae": 3.0605618953704834,
+    "latent_cos": 0.9205403923988342
+  }
+]
