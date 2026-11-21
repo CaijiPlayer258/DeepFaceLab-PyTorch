@@ -974,6 +974,11 @@ class ModelBase(object):
 
         self._ensure_disk_space()
 
+        # 先落权重、再写 dat。反过来的话，正好在两次写之间断电/崩溃，
+        # dat 里的 iter 会比权重新一拍 —— 恢复后从更大的 iter 接着跑，
+        # 曲线看着像“白跑了一段”，而且不会有任何报错。
+        self.onSave()
+
         # encoding 必须显式给：Path.write_text 的默认值是这个进程的 locale（Windows 上
         # 是 cp936），摘要里只要有 cp936 编不出的字符就直接抛 UnicodeEncodeError，
         # 整个 save()（权重 + dat）跟着一起失败；而且同一份摘要换台机器读出来是乱码。
@@ -1032,8 +1037,6 @@ class ModelBase(object):
                     if not dat_dest.exists():
                         shutil.copy2(str(dat_path), str(dat_dest))
                 io.log_info(f"  {len(npy_files)} old .npy files archived to old/")
-
-        self.onSave()
 
     def create_backup(self):
         if self._crash_detected:
