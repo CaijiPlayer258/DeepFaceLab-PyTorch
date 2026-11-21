@@ -3,3 +3,5 @@
 *.npz
 *.stack*
 
+# 生成的 HTML 手册（内容以 .md 为准）
+REPORT_*.html
