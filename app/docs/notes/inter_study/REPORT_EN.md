@@ -7,7 +7,7 @@ transform, per-tensor grouping and anti-aliasing treatment below are derived and
 blend means dense1 with inverse filtering and dense2 with its bias under plain interpolation. The two tensors
 sit at different places in the graph, so their optimal operators differ; see Proposition 2.
 
-![Fig. 1　dst input, baseline 416 and each method at six target resolutions](compare_all.png)
+![Fig. 1　dst input, baseline 416 and each method at six target resolutions](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/4.1-beta/app/docs/notes/inter_study/compare_all.png)
 
 ## 1　Propositions and proofs
 
@@ -84,7 +84,7 @@ filtering to dense2 degrades monotonically at α = 0.15 and 0.30.
 
 ## 3　Implementation
 
-Implementation: `app/engine/models/Model_SAEHD/resize_inter.py`, default method blend; `--method` falls back to
+Implementation: [resize_inter.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/4.1-beta/app/engine/models/Model_SAEHD/resize_inter.py), default method blend; `--method` falls back to
 bicubic, bilinear, lanczos or pinv. Measured through the tool, 416 to 448: PSNR 27.38, SSIM 0.920, MAE 6.06,
 NCC 0.983. A converted model is a warm start only; fine-tune before use, since the optimizer state is dropped
 for shape incompatibility.

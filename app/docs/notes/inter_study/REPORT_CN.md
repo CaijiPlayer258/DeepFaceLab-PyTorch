@@ -6,7 +6,7 @@
 blend 的定义是 dense1 用逆滤波、dense2 及其 bias 用纯插值。两类张量在计算图中的位置不同，
 最优算子也不同，理由见命题 2。
 
-![图 1　dst 输入、baseline 416 与各方法在六档目标分辨率下的结果](compare_all.png)
+![图 1　dst 输入、baseline 416 与各方法在六档目标分辨率下的结果](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/4.1-beta/app/docs/notes/inter_study/compare_all.png)
 
 ## 1　命题与证明
 
@@ -74,6 +74,6 @@ dense1 取 pinv、dense2 取 lanczos 时，384 / 448 / 512 分别为 26.33 / 27.
 
 ## 3　实现
 
-实现位于 `app/engine/models/Model_SAEHD/resize_inter.py`，默认方法为 blend，`--method` 可回退到
+实现位于 [resize_inter.py](https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/blob/4.1-beta/app/engine/models/Model_SAEHD/resize_inter.py)，默认方法为 blend，`--method` 可回退到
 bicubic、bilinear、lanczos 或 pinv。工具实测，416 转 448：PSNR 27.38、SSIM 0.920、MAE 6.06、NCC 0.983。
 转换结果只是热启动，投产前需要续训，优化器状态因形状不兼容会被丢弃。
