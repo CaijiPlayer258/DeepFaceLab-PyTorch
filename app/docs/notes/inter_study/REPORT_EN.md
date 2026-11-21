@@ -2,6 +2,9 @@
 
 ![input / baseline](input_416.png)
 ![resolution x method](grid_matrix.png)
+
+**The leftmost column is baseline 416 (original inter), repeated on every row**, followed by
+nearest / bilinear / bicubic / area; the row label sits in the narrow band above the baseline tile.
 ![bicubic vs pseudo-inverse](adv_compare.png)
 ![XSegLite mask](xseg_mask.png)
 
@@ -84,8 +87,8 @@ results, not a new interpolation kernel.
 
 ![best methods](best_compare.png)
 
-Per-resolution visual. **Every row repeats the same baseline 416 (original inter)** so comparisons need no scrolling:
-columns are baseline -> bicubic -> pinv (functional-preserving pseudo-inverse) -> **blend = 0.5*bicubic + 0.5*pinv**.
+Advanced methods per resolution: **the leftmost column is again baseline 416** (row label in the band above it),
+followed by bicubic -> pinv (functional-preserving pseudo-inverse) -> **blend = 0.5*bicubic + 0.5*pinv**.
 
 ![per-resolution comparison](algo_by_res.png)
 

@@ -2,6 +2,9 @@
 
 ![input / baseline](input_416.png)
 ![分辨率 × 方法](grid_matrix.png)
+
+**最左列是 baseline 416（原 inter），每一行都重复放一次**，右边依次是 nearest / bilinear / bicubic / area；
+行标签写在最左列顶部的窄条里，不占画面。
 ![bicubic vs 伪逆](adv_compare.png)
 ![XSegLite 遮罩](xseg_mask.png)
 
@@ -96,8 +99,8 @@
 
 ![最优方案对比](best_compare.png)
 
-逐分辨率的肉眼对照。**每一行都放同一张 baseline 416（原 inter）作为参照**，这样不用往上看：
-列依次为 baseline → bicubic（双三次）→ pinv（保泛函伪逆）→ **blend = 0.5·bicubic + 0.5·pinv**。
+进阶方法的逐分辨率对照：**最左列同样是 baseline 416**（行标签印在该列顶部窄条里），
+右边依次是 bicubic（双三次）→ pinv（保泛函伪逆）→ **blend = 0.5·bicubic + 0.5·pinv**。
 
 ![各分辨率算法对照](algo_by_res.png)
 
