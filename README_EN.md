@@ -2,6 +2,8 @@
 
 English | [中文](README.md)
 
+> This is a **PyTorch port of DeepFaceLab**, and it **loads original DeepFaceLab models** (`.pth` and `.dfm`)
+> without conversion.
 > Extraction, training, merging and export were each rebuilt: GPU paths, pipelined stages, bit-exact checks where
 > correctness matters. The UI is only the shell — no command line, one primary button per page, but nothing here is
 > a UI with the engine left untouched. The backend is a local FastAPI service and every inference runs on your machine.

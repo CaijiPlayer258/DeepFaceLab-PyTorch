@@ -2,6 +2,8 @@
 
 [English](README_EN.md) | 中文
 
+> 这是 **DeepFaceLab 的 PyTorch 移植版**（PyTorch port of DeepFaceLab），**兼容原版模型**：
+> 可直接加载原版 `.pth` 与 `.dfm`，无需转换。
 > 提取、训练、合成、导出，每一段都重做过：GPU 化、流水线并行、关键处做逐位校验。
 > 界面只是外壳——没有命令行，每个页面一个主按钮，但没有一处是“只做了个界面”。
 > 后端是本地 FastAPI，界面是 Web（跑在 Electron 壳里），所有推理都在本机，不联网。

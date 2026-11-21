@@ -8,6 +8,7 @@
 - Repository: https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch
 - Default branch: 4.1-beta
 - Language: Python 3.11, PyTorch 2.x, CUDA, TensorRT (optional), ONNX Runtime
+- This is a PyTorch port of DeepFaceLab, compatible with original DeepFaceLab models (.pth and .dfm load without conversion)
 - Licence: GPL-3.0. Upstream project: iperov/DeepFaceLab
 - Chinese README: README.md; English README: README_EN.md
 
