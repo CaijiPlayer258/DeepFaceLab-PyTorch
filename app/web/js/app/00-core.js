@@ -479,7 +479,7 @@
       ],
       { duration: 640, easing: "cubic-bezier(0.25, 0.46, 0.45, 0.94)", fill: "forwards" }
     );
-    anim.onfinish = function () { el.remove(); };
+    anim.onfinish = function () { el.remove(); try { layoutToasts(); } catch (e) {} };
     return el;
   }
   window.spawnRipple = spawnRipple;
@@ -707,6 +707,7 @@
   function dismissToast(el) {
     if (!el || el.__leaving) return;
     el.__leaving = true;
+    try { el.setAttribute("data-leaving", "1"); } catch (e) {}
     var cs = getComputedStyle(el);
     var h = el.getBoundingClientRect().height;
     var pt = parseFloat(cs.paddingTop) || 0;
@@ -725,9 +726,40 @@
     );
     el.style.overflow = "hidden";
     el.style.minHeight = "0";
-    anim.onfinish = function () { el.remove(); };
+    anim.onfinish = function () { el.remove(); try { layoutToasts(); } catch (e2) {} };
   }
   window.dismissToast = dismissToast;
+
+  /* ---- 3D 堆叠布局 ----
+     toast 高度不一，位移只能在运行时算：
+       收起：最新一条在底，其余每条向上错开 14px、缩小 5%、变淡 22%
+       悬停：按真实高度累加，展开成完整列表（间距 8px） */
+  var TOAST_STACK_STEP = 14;
+  var TOAST_STACK_GAP = 8;
+  function layoutToasts() {
+    var root = $("toastroot");
+    if (!root) return;
+    var items = [].slice.call(root.querySelectorAll(".toast:not([data-leaving])"));
+    var hover = root.matches(":hover");
+    // DOM 顺序是「旧 → 新」，从最新往回排
+    var offset = 0;
+    for (var k = items.length - 1, i = 0; k >= 0; k--, i++) {
+      var el = items[k];
+      var h = el.offsetHeight || 56;
+      el.style.zIndex = String(100 - i);
+      if (hover) {
+        el.style.bottom = offset + "px";
+        el.style.transform = "none";
+        el.style.opacity = "1";
+        offset += h + TOAST_STACK_GAP;
+      } else {
+        el.style.bottom = (i * TOAST_STACK_STEP) + "px";
+        el.style.transform = "scale(" + (1 - i * 0.05).toFixed(3) + ")";
+        el.style.opacity = String(Math.max(0.35, 1 - i * 0.22));
+      }
+    }
+  }
+  window.layoutToasts = layoutToasts;
 
   function toast(title, sub, type, ms) {
     var root = $("toastroot");
@@ -745,20 +777,26 @@
     el.querySelector(".tx").addEventListener("click", function () { dismissToast(el); });
     el.querySelector(".tb i").style.animationDuration = life + "ms";
     root.appendChild(el);
-    /* shadcn 的 toast 有 TOAST_LIMIT（默认只留 1~3 条），不会无限堆——
-       这里同样只保留最新 3 条，更早的直接退场，避免铺满右下角挡住界面。 */
-    var TOAST_LIMIT = 3;
+    /* shadcn 的 toast 有 TOAST_LIMIT（默认只留最新几条），不会无限堆 */
     var alive = root.querySelectorAll(".toast:not([data-leaving])");
-    if (alive.length > TOAST_LIMIT) {
-      for (var _i = 0; _i < alive.length - TOAST_LIMIT; _i++) {
-        dismissToast(alive[_i]);
-      }
+    if (alive.length > 3) {
+      for (var _i = 0; _i < alive.length - 3; _i++) dismissToast(alive[_i]);
     }
+    // 先按收起态排一次，随后 measure 完再排一次（新节点刚插入时 offsetHeight 可能为 0）
+    layoutToasts();
+    requestAnimationFrame(layoutToasts);
     if (window.I18N) window.I18N.refresh();
     setTimeout(function () { dismissToast(el); }, life);
     return el;
   }
   window.toast = toast;
+
+  (function () {
+    var root = $("toastroot");
+    if (!root) return;
+    root.addEventListener("mouseenter", layoutToasts);
+    root.addEventListener("mouseleave", layoutToasts);
+  })();
 
   var MODULES = [
     { n: "过滤器", d: "模糊 · 身份 · 重复 · 错脸 · 遮挡 · 合并",

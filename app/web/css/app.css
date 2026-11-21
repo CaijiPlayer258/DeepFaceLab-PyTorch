@@ -263,32 +263,32 @@ table.t tr:last-child td{border-bottom:0}
 }
 /* 减少动效偏好：不闪，只留静态灰块 */
 @media (prefers-reduced-motion: reduce) { .sk { animation: none; } }
-/* ===== Toast ===== */
-#toastroot{position:fixed;right:26px;bottom:26px;display:flex;flex-direction:column-reverse;gap:8px;
-  align-items:flex-end;z-index:99}
-.toast{background:var(--surface-raised);border:1px solid var(--border-strong);border-radius:12px;
-  padding:12px 14px 12px;position:relative;overflow:hidden;display:flex;align-items:flex-start;gap:10px;
-  box-shadow:var(--shadow-high);min-width:220px;max-width:360px;
-  /* 堆叠：默认后面的收成一条边，悬停整组展开（shadcn toast 的观感） */
-  max-height: 220px;
-  transition: max-height .22s cubic-bezier(.2,.8,.2,1), opacity .22s ease, transform .22s ease;
-  animation:toastIn .22s cubic-bezier(.2,.8,.2,1)}
-/* 非悬停时：除最新一条外的其它 toast 只露出顶部一小截，像叠起来的卡片 */
-#toastroot:not(:hover) .toast:not(:last-child){
-  max-height: 14px;
-  opacity: .55;
-  transform: scale(.98);
+/* ===== Toast（shadcn / sonner 那种 3D 堆叠） =====
+   前沿一条完整可见，后面两条向上错位、缩小、变淡，读起来是「一叠卡片」；
+   悬停时展开成完整列表。位置与缩放由 JS 计算（toast 高度不一致，CSS 算不准）。 */
+#toastroot{position:fixed;right:26px;bottom:26px;width:360px;height:0;z-index:99}
+.toast{
+  position:absolute;right:0;bottom:0;width:100%;
+  display:flex;align-items:flex-start;gap:10px;
+  padding:12px 14px;border-radius:12px;overflow:hidden;
+  background:var(--panel);
+  border:1px solid var(--line-strong);
+  box-shadow:0 10px 30px -6px rgba(0,0,0,.55), 0 2px 8px -2px rgba(0,0,0,.4);
+  transform-origin:bottom center;
+  transition:bottom .24s cubic-bezier(.2,.8,.2,1), transform .24s cubic-bezier(.2,.8,.2,1), opacity .24s ease;
+  will-change:bottom,transform,opacity;
+  animation:toastIn .22s cubic-bezier(.2,.8,.2,1)
 }
 .toast .ti{width:16px;height:16px;flex:none;margin-top:1px;color:var(--ok)}
-.toast .tt{font-size:13px;font-weight:600;color:var(--ink)}
-.toast .ts{font-size:11.5px;color:var(--ink-3);margin-top:2px}
+.toast .tt{font-size:13px;font-weight:600;color:var(--ink);letter-spacing:-.01em}
+.toast .ts{font-size:11.5px;color:var(--ink-3);margin-top:2px;line-height:1.45}
 .toast .tx{background:none;border:0;color:var(--ink-3);font-size:15px;line-height:1;padding:0 2px;
-  margin-left:auto;cursor:pointer;align-self:center}
-.toast .tb{position:absolute;left:0;right:0;bottom:0;height:3px;background:var(--line);overflow:hidden}
+  margin-left:auto;cursor:pointer;align-self:center;border-radius:6px}
+.toast .tx:hover{color:var(--ink);background:var(--line)}
+.toast .tb{position:absolute;left:0;right:0;bottom:0;height:2px;background:var(--line);overflow:hidden}
 .toast .tb i{display:block;height:100%;background:var(--brand);animation:tbar 3.6s linear forwards}
 @keyframes tbar{from{width:100%}to{width:0%}}
-@keyframes toastIn{from{opacity:0;transform:translateY(12px) scale(.98)}to{opacity:1;transform:none}}
-
+@keyframes toastIn{from{opacity:0;transform:translateY(14px) scale(.96)}to{opacity:1;transform:none}}
 /* ===== 桌面壳：窗口本身就是应用，页面里不再画一圈"假窗口" ===== */
 body { padding: 0; margin: 0; background: var(--panel); overflow: hidden; }
 .app {
