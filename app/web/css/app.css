@@ -6441,7 +6441,7 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
    注意：不要写 scrollbar-width / scrollbar-color，
    Chromium 见到标准属性会整块忽略 ::-webkit-scrollbar 的定制。 */
 
-::-webkit-scrollbar { width: 8px !important; height: 8px !important; }
+::-webkit-scrollbar { width: 3.5px !important; height: 3.5px !important; }
 ::-webkit-scrollbar-track { background: transparent !important; }
 ::-webkit-scrollbar-button { display: none !important; height: 0 !important; }
 ::-webkit-scrollbar-corner { background: transparent !important; }
