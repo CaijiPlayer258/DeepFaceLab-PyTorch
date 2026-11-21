@@ -55,7 +55,7 @@ Compared with interpolation, (2) carries the extra inverse-filter factor (LᵀL)
 weight field before resampling. That factor amplifies quantisation noise, so the Tikhonov forms
 (LᵀL + λI)⁻¹ and (LLᵀ + λI)⁻¹ are used in practice.
 
-#### 2.3　Per-tensor grouping: dense1 needs the inverse filter, dense2/bias does not
+### 2.3　Per-tensor grouping: dense1 needs the inverse filter, dense2/bias does not
 
 **Proposition 2**　dense1 and dense2 have different optimal resampling operators: (2) for the former,
 plain interpolation for the latter.
@@ -87,7 +87,7 @@ anti-aliasing pre-filter. Upscaling has no such issue and uses lanczos on both b
 
 ### 2.5　Error floor when downscaling
 
-**Proposition 2**　For m < n, rank(L ⊗ L) = m² < n² and the error obeys an algorithm-independent bound
+**Proposition 3**　For m < n, rank(L ⊗ L) = m² < n² and the error obeys an algorithm-independent bound
 
         min_{W′} ‖(L ⊗ L)W′ − W‖_F = ‖(I − P)W‖_F,   P = proj_{range(L⊗L)}   (4)
 
@@ -130,7 +130,7 @@ The reference is the 416 original model's output.
 
 Hold one side fixed, vary the other (448, masked):
 
-| dense1 only (dense2/bias=bicubic) | PSNR | SSIM | MAE | dense2/bias only (dense1=old blend) | PSNR | SSIM | MAE |
+| dense1 only (dense2/bias=bicubic) | PSNR | SSIM | MAE | dense2/bias only (dense1=earlier scheme) | PSNR | SSIM | MAE |
 |---|---|---|---|---|---|---|---|
 | nearest | 17.52 | 0.645 | 23.4 | nearest | 18.48 | 0.688 | 19.6 |
 | bicubic | 23.41 | 0.834 | 8.80 | bicubic | 24.12 | 0.848 | 7.72 |
@@ -154,6 +154,24 @@ Consistent with Proposition 2: dense1 wants the inverse filter (pinv), dense2/bi
 interpolation (lanczos); splitting the operators beats one-operator-for-all at every resolution
 (448: 26.27 → 27.38 dB).
 
+### 4.2　Remaining knobs
+
+| knob | value | 320 | 384 | 448 | 512 |
+|---|---|---|---|---|---|
+| dense2 kernel (down) | **lanczos** | **20.04 / 0.715** | **26.36 / 0.909** | — | — |
+| | area | 19.49 / 0.720 | 22.42 / 0.804 | — | — |
+| | bicubic | 20.03 / 0.718 | 23.05 / 0.816 | — | — |
+| dense1 lam (up) | 1e-5 | — | — | 27.42 / 0.919 | 24.28 / 0.857 |
+| | **1e-4 (default)** | — | — | **27.42 / 0.919** | **24.28 / 0.857** |
+| | 1e-2 | — | — | 27.24 / 0.918 | 24.22 / 0.857 |
+| dense2 inverse ratio a | **0 (default)** | — | — | **27.42 / 0.919** | **24.28 / 0.857** |
+| | 0.15 | — | — | 27.07 / 0.916 | 24.04 / 0.856 |
+| | 0.30 | — | — | 26.69 / 0.913 | 23.66 / 0.854 |
+
+Downscaling needs no anti-aliased kernel on dense2 (its output field is already smooth; area costs 4 dB);
+dense1's lam has a plateau at 1e-5..1e-4 so 1e-4 is the safe pick; adding any inverse filtering to dense2
+degrades monotonically, consistent with Proposition 2.
+
 ## 5　Conclusions
 
 1. Among interpolations lanczos-3 has the flattest passband and the smallest error; bicubic is a conservative
@@ -162,7 +180,7 @@ interpolation (lanczos); splitting the operators beats one-operator-for-all at e
    over-sharpens and its MAE degrades.
 3. The partial inverse filtering of (3) is best on all three metrics at five of six targets and cuts MAE at 512
    from 19.0 to 8.73; it is the recommended method.
-4. Downscaling error is governed by the bound (4); in practice the change should stay within 1–2 grid steps
+4. Downscaling error is governed by the bound of Proposition 3 (4); in practice the change should stay within 1–2 grid steps
    (about 32–64 px), beyond which retraining at the new resolution is preferable.
 5. Cross-resolution conversion is a warm start only: the optimizer state is shape-incompatible and dropped.
 
