@@ -1965,7 +1965,12 @@ class SAEHDModel(ModelBase):
         target_src_masked_opt = target_src * target_srcm_blur if self.masked_training else target_src
         target_dst_masked_opt = target_dst_masked if self.masked_training else target_dst
         pred_src_src_masked_opt = pred_src_src * target_srcm_blur if self.masked_training else pred_src_src
-        pred_dst_dst_masked_opt = pred_dst_dst * target_dstm_blur if (self.masked_training and not skip_dst) else target_dst
+        # 注意这里是 pred 侧的回退：masked_training 关闭时要退回**预测**。
+        # 写成 target_dst 会让 dst 的 DSSIM/MSE 恒等于 dssim(t,t)=0，
+        # dst 支路只剩遮罩损失在学 —— 不报错，只是悄悄不训练。
+        pred_dst_dst_masked_opt = (pred_dst_dst * target_dstm_blur
+                                   if (self.masked_training and not skip_dst)
+                                   else (pred_dst_dst if not skip_dst else target_dst))
 
         def dssim_loss(a, b, fs, w):
             v = nn.dssim(a, b, max_val=1.0, filter_size=fs)
