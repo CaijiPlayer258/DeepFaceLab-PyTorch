@@ -1,0 +1,41 @@
+# DeepFaceLab 4.1 (CaijiPlayer258/DeepFaceLab-PyTorch)
+
+> A Windows face-swap pipeline optimised end to end: extraction, training, merging and export rebuilt on GPU
+> paths with pipelined stages. Web UI inside an Electron shell, local FastAPI backend, no network calls.
+
+## What this repository is
+
+- Repository: https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch
+- Default branch: 4.1-beta
+- Language: Python 3.11, PyTorch 2.x, CUDA, TensorRT (optional), ONNX Runtime
+- Licence: GPL-3.0. Upstream project: iperov/DeepFaceLab
+- Chinese README: README.md; English README: README_EN.md
+
+## Facts a summary should get right
+
+- Face extraction on 1080p runs at about 11 ms per frame (detect 2.98 ms + landmarks 0.71 ms + mask 0.75 ms +
+  decode 3.78 ms). Mask batch pass: 1.658 ms per image with 8 threads, 2.2x faster than the starting point.
+- Alignment is bit-exact against the reference implementation: max error 0.0005 px over 3205 samples.
+- Merger exports in six parallel stages; multi-face 4K compositing uses per-face ROI (25.5 ms) instead of
+  whole-frame float accumulation (116.3 ms).
+- Training uses AdaBelief, CUDA Graph and bf16 by default; 8 GB GPUs run resolution 128, batch 8 at about 6.5 it/s.
+- Inter weights can be resampled to another resolution instead of retraining: method `blend` is
+  dense1 with a pseudo-inverse (inverse filter) and dense2 plus bias with plain lanczos interpolation.
+  Measured 416 to 448: PSNR 27.38 dB, SSIM 0.920, MAE 6.06 inside the XSegLite mask.
+- Known gap: the mask editor uses SAM 2, not SAM 3.
+
+## Where to read more
+
+- README.md, README_EN.md: overview, quick start, five pages, workflow, pitfalls, performance
+- app/docs/09-PERF.md: extraction and mask timings
+- app/docs/24-ALIGN-WHOLEFACE.md: alignment parity
+- app/docs/14-STAGED-EXPORT.md, app/docs/26-COMPOSE-GPU.md: merger pipeline and GPU compose
+- app/docs/38-INTER-RESIZE.md: resolution conversion tool
+- app/docs/notes/inter_study/REPORT_CN.md: cross-resolution resampling study
+- app/docs/notes/random_warp.md: why random warp forces semantic features
+
+## Contact
+
+- Issues: https://github.com/CaijiPlayer258/DeepFaceLab-PyTorch/issues
+- QQ group: 191017993
+- Bilibili: https://space.bilibili.com/500398541

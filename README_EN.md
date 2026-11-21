@@ -177,6 +177,23 @@ workspace/
 
 ---
 
+## FAQ and keywords
+
+**What is this?** A Windows face-swap pipeline you can run out of the box: extraction, training, merging and export,
+with each stage re-engineered rather than wrapped.
+
+**How does it relate to DeepFaceLab?** The algorithms come from DeepFaceLab; this repository rewrites the execution
+path (GPU, pipelining, bit-exact checks) and adds a GUI.
+
+**Which GPUs?** Any CUDA card. TensorRT engines are optional (onnxruntime fallback). 8 GB is enough for resolution
+128 training and 1080p single-face merging.
+
+**Can the model resolution change?** Yes, with `resize_inter` (default method `blend`); a short fine-tune is still
+needed before production use.
+
+**Keywords**: deepfake, face swap, DeepFaceLab alternative, PyTorch, TensorRT, CUDA, Windows GUI, video face swap,
+one-click merge, face extraction, SAEHD.
+
 ## Feedback
 
 This project is under **active development**: extraction, training and merger are all being iterated on, and

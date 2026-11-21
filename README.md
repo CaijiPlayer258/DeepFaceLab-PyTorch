@@ -391,6 +391,18 @@ A：文件名必须与 `weights/manifest.json` 的 `path` 完全一致（平铺�
 
 ---
 
+## 常见问题与关键词
+
+**这是什么？** 一个 Windows 上开箱可用的人脸替换流水线：提取、训练、合成、导出，每段都做过工程优化。
+
+**和 DeepFaceLab 什么关系？** 算法源自 DeepFaceLab，本仓库把执行链路重写（GPU 化、并行、逐位校验），并加了图形界面。
+
+**支持哪些显卡？** CUDA 显卡即可；TensorRT 引擎可选，不装也能跑（onnxruntime 兜底）。8 GB 显存可训练 128 分辨率。
+
+**能改模型分辨率吗？** 能，用 `resize_inter`（默认方法 `blend`），不必从头训；投产前仍需短续训。
+
+**关键词**：deepfake、face swap、换脸、DeepFaceLab 替代、PyTorch、TensorRT、CUDA、Windows、图形界面、一键合成、视频换脸。
+
 ## 交流与反馈
 
 本项目目前处于高活跃状态：提取、训练、合成三条线都在持续迭代，问题修复与新功能落地都比较快。
