@@ -4487,7 +4487,7 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
   margin:14px 0 0;border-radius:12px;padding:12px 14px;
   border:1px solid var(--line);background:var(--surface-2);
 }
-.alert.danger{border-color:rgba(220,80,80,.42);background:rgba(220,80,80,.08)}
+.alert.danger{border-color:rgba(255,100,103,.34);background:rgba(255,100,103,.07)}
 .alert .alhd{display:flex;align-items:center;gap:8px}
 .alert .alhd b{font-size:13px;color:var(--ink);font-weight:700}
 .alert.danger .alhd b{color:var(--bad,#e05555)}
@@ -6506,10 +6506,14 @@ html:not(.dark) .loadbanner.info .lbico{color:#4e5bbb}
 .loadbanner.warn .alhd b{color:var(--ink)}
 .loadbanner .albd{color:var(--ink-2)}
 
-/* danger 是唯一例外：标题和正文整条都用红色 */
-.loadbanner.danger .lbico{color:var(--bad,#e05555)}
+/* danger 是唯一例外：标题和正文整条都用红色。
+   取值参照设计稿：#ff6467（90% = #ff6467e6），比原来的 #e05555 浅一档，
+   底色/边框也一起降到 .34 / .07 —— 之前那条边太重，整块像警告条而不是说明。 */
+.loadbanner.danger .lbico,
 .loadbanner.danger .alhd b,
-.loadbanner.danger .albd{color:var(--bad,#e05555)}
+.loadbanner.danger .albd{color:#ff6467}
+/* 浅色主题：#ff6467 在白底上只有 2.9:1，读不清，降到 #dc2626（5.9:1） */
+html:not(.dark) .alert.danger{border-color:rgba(220,38,38,.26);background:rgba(220,38,38,.05)}
 html:not(.dark) .loadbanner.danger .lbico,
 html:not(.dark) .loadbanner.danger .alhd b,
-html:not(.dark) .loadbanner.danger .albd{color:#b91c1c}
+html:not(.dark) .loadbanner.danger .albd{color:#dc2626}
