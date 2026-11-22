@@ -16,6 +16,9 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 
 from ..app import WORKSPACE, _NO_WINDOW
+# WEB 在 _common/paths.py：这个模块以前直接用 WEB 却没导入，/api/build 一直 500
+# （前端读不到构建时间就算了，但排查「改了没生效」时正好少了这个凭据）
+from .._common.paths import WEB
 
 router = APIRouter()
 
@@ -49,7 +52,9 @@ def api_build():
     用途是把"你看到的到底是哪一版"变成可核对的事实 —— 之前排查样式问题时
     反复在猜客户端有没有重载。页面右下角会显示这个时间。
     """
-    files = [WEB / "index.html", WEB / "js" / "app.js", WEB / "css" / "app.css"]
+    # app.js 已经拆成 js/app/*.js 由后端拼接：构建时间必须取这些分片的**最大** mtime，
+    # 否则只改 JS 不会动这个时间戳 —— 正好是排查「改了没生效」时最需要它准的地方。
+    files = [WEB / "index.html", WEB / "css" / "app.css"]
     best = 0.0
     names = {}
     for f in files:
@@ -59,6 +64,14 @@ def api_build():
             continue
         names[f.name] = int(m)
         best = max(best, m)
+    try:
+        js_dir = WEB / "js" / "app"
+        js_best = max((q.stat().st_mtime for q in js_dir.glob("*.js")), default=0.0)
+        if js_best:
+            names["js/app/*.js"] = int(js_best)
+            best = max(best, js_best)
+    except Exception:
+        pass
     return {"ts": int(best),
             "iso": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(best)) if best else "",
             "files": names}
