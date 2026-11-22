@@ -448,19 +448,22 @@
           sub = [d.elapsed_s ? ("已等 " + _hms(d.elapsed_s)) : "", hint].filter(Boolean).join(" · ");
         }
 
-        /* 引擎的常驻提示（[notice]，比如预训练结束重置了 inter）：蓝色信息条，
-           训练结束后仍然保留，直到下次开训或手动关掉。 */
+        /* 引擎的常驻提示（[notice]，例如预训练结束重置了 inter）：
+           复用模块加载横幅那套 .alert.loadbanner（这里挂 info 蓝色变体），
+           状态型 —— 训练还在跑就一直挂着，点 × 只在本次挂载内收起。 */
         var nEl = document.getElementById("trainNotice");
         if (nEl) {
           var nTxt = d && d.notice ? String(d.notice) : "";
-          if (nTxt) {
-            nEl.textContent = nTxt;
-            nEl.style.display = "";
-          } else if (!d || !d.running) {
-            nEl.style.display = "none";
+          if (!nTxt) {
+            nEl.classList.add("hide");
+            nEl.hidden = true;
+          } else if (!window.__trainNoticeDismissed) {
+            var nBody = document.getElementById("trainNoticeBody");
+            if (nBody) nBody.textContent = nTxt;
+            nEl.classList.remove("hide");
+            nEl.hidden = false;
           }
         }
-
         var strip = document.getElementById("runStat");
         if (strip) {
           strip.className = "runstat " + cls;
@@ -959,3 +962,19 @@
     return out;
   }
 
+/* 蓝色提示条的 × ：只在本次挂载内收起（刷新/重进训练页会重新出现），
+   和 loadbanner 的行为保持一致 —— 它是状态，不是一次性提示。 */
+(function () {
+  function bind() {
+    var x = document.getElementById("trainNoticeX");
+    if (!x || x.__bound) return;
+    x.__bound = true;
+    x.addEventListener("click", function () {
+      window.__trainNoticeDismissed = true;
+      var el = document.getElementById("trainNotice");
+      if (el) { el.classList.add("hide"); el.hidden = true; }
+    });
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", bind);
+  else bind();
+})();

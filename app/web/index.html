@@ -593,8 +593,13 @@
               <b id="runStatText">连接中…</b>
               <span id="runStatSub"></span>
             </div>
-            <!-- 引擎常驻提示（[notice]）：预训练结束重置 inter 之类，蓝色信息条 -->
-            <div class="trainNotice" id="trainNotice" style="display:none"></div>
+            <!-- 引擎常驻提示（[notice]）：复用模块加载横幅那一套 .alert.loadbanner，
+                 只换成 info 色调。状态型提示 —— 训练还在跑就一直挂着，可以点 × 收起。 -->
+            <div class="alert info loadbanner hide" id="trainNotice" hidden aria-live="polite">
+              <div class="alhd"><span class="lbico">i</span><b id="trainNoticeTitle">训练提示</b>
+                <button class="alx" id="trainNoticeX" type="button" title="收起">×</button></div>
+              <div class="albd" id="trainNoticeBody"></div>
+            </div>
             <div class="chartfoot">
               <span><i class="sw-src"></i>src <b id="runLossSrc">—</b></span>
               <span><i class="sw-dst"></i>dst <b id="runLossDst">—</b></span>
