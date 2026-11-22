@@ -68,8 +68,20 @@ def _frames_run(src: str, dst: str, fps: float = 2.0, rotate: int = 0,
         except Exception:
             pass
         # 异常不在这里收：_frames_worker 是唯一收口（ok=False + error + traceback）。
-        return _align_stream(str(src), out_dir, fps, rotate, quality, skip, src_fps,
-                             strict_align)
+        n = _align_stream(str(src), out_dir, fps, rotate, quality, skip, src_fps,
+                          strict_align)
+        # 收尾必须在这里做：下面那段（149 行）只属于「抽帧写盘」分支，
+        # align 分支直接 return 会把它整段跳过 —— JOB.running 永远 True，
+        # 界面就停在 98%「正在提取」不动，看着像假死（实测 576 帧跑完不结束）。
+        with JOB.lock:
+            JOB.running = False
+            JOB.done = JOB.done or JOB.total
+            JOB.total = max(JOB.total, JOB.done)
+            JOB.pct = 100
+            JOB.ok = True
+            JOB.error = ""
+            JOB.msg = "完成：对齐 %d 张人脸 → %s" % (n or 0, str(out_dir))
+        return n
 
     # 不对齐：保留原来的"抽成 jpg"路径（给只想拆帧的场景用）
     exe = imageio_ffmpeg.get_ffmpeg_exe()
