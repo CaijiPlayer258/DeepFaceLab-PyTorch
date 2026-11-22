@@ -54,6 +54,8 @@ body { font-family: var(--font); }
   --surface-raised:#ffffff; --surface-hover:#f2f2f4;
   --accent-rgb:23,23,26;
   --ok:#0f9d58; --warn:#c2740b; --bad:#dc2626;
+  /* 状态色的 rgb 分量：徽章/标签的淡底要用它，不能写死某个主题的色值 */
+  --ok-rgb:15,157,88; --warn-rgb:194,116,11; --bad-rgb:220,38,38;
   /* 辅助色盘（8 色）：只做点缀 —— 状态点、进度条、渐变、滑块高亮、提示标签。
      不进大面积背景，语义固定见 UI设计规范.md §1.5 */
   --aux-amber:#eab308; --aux-red:#ef4444; --aux-green:#22c55e;
@@ -71,6 +73,8 @@ body { font-family: var(--font); }
   --surface-raised:#ffffff; --surface-hover:#f2f2f4;
   --accent-rgb:23,23,26;
   --ok:#0f9d58; --warn:#c2740b; --bad:#dc2626;
+  /* 状态色的 rgb 分量：徽章/标签的淡底要用它，不能写死某个主题的色值 */
+  --ok-rgb:15,157,88; --warn-rgb:194,116,11; --bad-rgb:220,38,38;
   --shadow:0 1px 2px rgba(0,0,0,.05),0 10px 30px rgba(0,0,0,.07);
   --shadow-high:0 12px 34px rgba(20,20,40,.16);
 }
@@ -83,6 +87,7 @@ body { font-family: var(--font); }
   --surface-raised:#1e1e24; --surface-hover:#232329;
   --accent-rgb:242,242,244;
   --ok:#3ddc84; --warn:#f0b429; --bad:#ff6467;
+  --ok-rgb:61,220,132; --warn-rgb:240,180,41; --bad-rgb:255,100,103;
   --shadow:0 1px 2px rgba(0,0,0,.5),0 12px 36px rgba(0,0,0,.55);
   --shadow-high:0 14px 40px rgba(0,0,0,.66);
 }
@@ -153,13 +158,13 @@ label.f{display:block;font-size:12px;color:var(--ink-2);margin-bottom:6px;font-w
 .stat .v{font-size:21px;font-weight:680;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
 .stat .v small{font-size:11.5px;font-weight:500;color:var(--ink-3);margin-left:4px}
 .tag{display:inline-block;font-size:10.5px;padding:2px 8px;border-radius:999px;font-weight:650;white-space:nowrap}
-.tag.ok{background:rgba(15,157,88,.13);color:var(--ok)}
+.tag.ok{background:rgba(var(--ok-rgb),.14);color:var(--ok)}
 .tag.n{background:var(--line);color:var(--ink-2)}
 /* 训练状态的徽章：和左上角圆点同一套色（蓝=连接/加载，绿=训练，黄=暂停，红=停止中/失败，灰=已停止） */
 .tag.t-blue  { background: rgba(93,108,207,.14); color: var(--brand); }
-.tag.t-green { background: rgba(15,157,88,.13);  color: var(--ok); }
-.tag.t-yellow{ background: rgba(194,116,11,.15); color: var(--warn); }
-.tag.t-red   { background: rgba(211,58,58,.13);  color: var(--bad); }
+.tag.t-green { background: rgba(var(--ok-rgb),.14);  color: var(--ok); }
+.tag.t-yellow{ background: rgba(var(--warn-rgb),.15); color: var(--warn); }
+.tag.t-red   { background: rgba(var(--bad-rgb),.14);  color: var(--bad); }
 .tag.t-gray  { background: var(--line);          color: var(--ink-3); }
 .kbd{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;background:var(--line);padding:1px 6px;border-radius:5px}
 .hint{font-size:11.5px;color:var(--ink-3)}
@@ -175,7 +180,7 @@ label.f{display:block;font-size:12px;color:var(--ink-2);margin-bottom:6px;font-w
 #p-extract[data-pos="c"] #bA, #p-extract[data-pos="c"] #bB{display:none!important}
 .svcdot{width:9px;height:9px;border-radius:50%;background:var(--line-strong);flex:none;
   box-shadow:0 0 0 3px color-mix(in srgb,var(--line-strong) 30%,transparent);transition:.2s}
-.svcdot.on{background:var(--ok);box-shadow:0 0 0 3px rgba(15,157,88,.18)}
+.svcdot.on{background:var(--ok);box-shadow:0 0 0 3px rgba(var(--ok-rgb),.18)}
 .recent{font-size:11.5px;color:var(--ink-3);margin-top:14px}
 .ds-path{max-height:0;opacity:0;overflow:hidden;
   transition:max-height .32s cubic-bezier(.2,.8,.2,1), opacity .24s ease, margin .32s}
@@ -4647,7 +4652,7 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
 }
 .occcell img { display: block; width: 100%; height: 100%; object-fit: cover; }
 /* 超阈值的那批：描一圈品牌色，一眼看出"移走的是哪些" */
-.occcell.hit { border-color: var(--bad); box-shadow: 0 0 0 2px rgba(211,58,58,.28) inset; }
+.occcell.hit { border-color: var(--bad); box-shadow: 0 0 0 2px rgba(var(--bad-rgb),.28) inset; }
 .occcell .occb {
   position: absolute; right: 4px; bottom: 4px;
   font-variant-numeric: tabular-nums;
