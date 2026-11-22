@@ -714,6 +714,9 @@
 
     function sync() {
       /* 协议在**扫码登录之后**才弹：没登录时先好好扫码，别一进来就堵着。 */
+      /* 预览模式（serve.py --preview）一律不弹：设计工作台的画布会话没有登录态，
+         弹出来会把整页盖住，等于看不见界面。 */
+      if (window.__preview) { if (gate.style.display !== "none") close(); return; }
       var must = !!window.__loggedIn && !accepted();
       if (must && gate.style.display === "none") open();
       if (!must && gate.style.display !== "none") close();

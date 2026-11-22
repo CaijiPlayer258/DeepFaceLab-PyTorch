@@ -72,6 +72,13 @@
   function loadState() {
     fetch("/api/state").then(function (r) { return r.json(); }).then(function (s) {
       STATE = s;
+      /* 预览模式：后端带 preview=true 时，协议门和登录校验都放行，
+         好让设计工作台那种独立会话直接看到真实界面。 */
+      if (s && s.preview) {
+        window.__preview = true;
+        window.__loggedIn = true;
+        if (window.__legalSync) window.__legalSync();
+      }
       var v = el("aboutVer");
       if (v) v.textContent = s.version;
       renderDatasets(s.datasets || { src: { count: 0, exists: false }, dst: { count: 0, exists: false } });

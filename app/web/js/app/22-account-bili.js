@@ -31,7 +31,7 @@
        以前无参会把 __loggedIn 打成 false，于是又弹回扫码页。 */
     if (a) AUTH = a;
     a = AUTH;
-    window.__loggedIn = !!(a && a.logged_in);
+    window.__loggedIn = !!(a && a.logged_in) || !!window.__preview;
     window.__userName = (a && a.name) || "";
     /* 始终用保存的偏好：默认值是 auto，等价于"没选过就跟随系统" */
     var want = THEME.saved;
@@ -55,7 +55,9 @@
          协议现在长在欢迎页里，藏在主页面后面等于没给用户看。 */
       var needLegal = !!AUTH.logged_in && !(window.__legalAccepted && window.__legalAccepted());
       /* 未登录看扫码页；已登录但还没同意协议的，也先停在这里（协议卡盖在扫码页上） */
-      var show = !AUTH.logged_in || needLegal;
+      /* 预览模式（设计工作台画布）直接把欢迎页藏掉：那个会话没有登录态，
+         停在扫码页就看不到任何真实界面。 */
+      var show = window.__preview ? false : (!AUTH.logged_in || needLegal);
       w.style.display = show ? "grid" : "none";
       /* 欢迎页一藏起来就停 shader，否则它会在后台空转、拖慢整机 */
       if (!show && window.__welcome3d && window.__welcome3d.stop) {

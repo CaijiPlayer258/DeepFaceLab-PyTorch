@@ -42,6 +42,14 @@ def _apply_flags(argv) -> None:
 def main() -> int:
     import uvicorn
 
+    # --preview（或 DFL_PREVIEW=1）：给「设计工作台」这类独立浏览器会话用。
+    # 那个会话没有登录态、也没在本地同意过协议，页面会被协议门整块盖住，
+    # 看不到真实界面。这个开关只做两件事：跳过协议门、把登录态当已登录；
+    # 数据仍从本机真实后端读，改代码照样热更新。
+    if "--preview" in sys.argv or os.environ.get("DFL_PREVIEW") == "1":
+        os.environ["DFL_PREVIEW"] = "1"
+        print("[preview] 预览模式：跳过协议门与登录校验，仅供本机画布查看", flush=True)
+
     _apply_flags(sys.argv[1:])
 
     from server.app import app as fastapi_app

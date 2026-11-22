@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import os
+
 import threading
 
 from fastapi import APIRouter, HTTPException
@@ -28,6 +30,9 @@ def state():
         "models": _models(),
         "ports": _ports(),
         "capabilities": _capabilities(),
+        # 预览模式（serve.py --preview）：给设计工作台那类独立浏览器会话用，
+        # 前端据此跳过协议门、把登录态当已登录，好让画布直接看到真实界面。
+        "preview": os.environ.get("DFL_PREVIEW") == "1",
     }
 
 

@@ -22,6 +22,8 @@ from .app import _train_worker 这类老写法、以及 app_mod._merge_proc 这�
 """
 from __future__ import annotations
 
+import os
+
 import json
 
 # 导入即打补丁：Windows 上这套补丁必须在任何子进程被拉起之前生效（原 app.py 第 50 行）
@@ -100,6 +102,15 @@ def index():
     """
     import re as _re
     html = (WEB / "index.html").read_text(encoding="utf-8")
+
+    # 预览模式（serve.py --preview）：在任何脚本之前把标志打进去。
+    # 放到前端脚本里判断已经太晚了 —— 协议门在 41-*.js 里同步执行，
+    # 那时 /api/state 还没回来，__preview 仍是 undefined，门照样弹。
+    if os.environ.get("DFL_PREVIEW") == "1":
+        html = html.replace("<head>",
+                            "<head>" + chr(10) +
+                            "<script>window.__preview=true;window.__loggedIn=true;</script>",
+                            1)
 
     def _bust(m):
         sub, name = m.group(1), m.group(2)
