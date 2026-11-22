@@ -4509,9 +4509,11 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
 .loadbanner{margin:14px 0 0;position:relative;overflow:hidden}
 .loadbanner.hide{display:none}
 /* 左侧强调条已移除：只靠边框/淡底色/图标/标题色区分状态，不再画那条 3px 竖线 */
-.loadbanner .lbico{display:inline-grid;place-items:center;width:16px;height:16px;flex:none;
-  border-radius:50%;background:rgba(220,170,60,.18);color:var(--warn,#f0b429);
-  font-size:11px;font-weight:800;line-height:1;font-style:normal}
+/* 图标盒：内容由 sprite 提供（i-info 圆+i / i-warn 三角+! / i-alert 圆+!），
+   这里只管尺寸和继承色；不再画那个底色圆，否则三角形图标会显得很怪。 */
+.loadbanner .lbico{display:inline-flex;align-items:center;justify-content:center;
+  width:16px;height:16px;flex:none;color:var(--warn,#f0b429);font-style:normal}
+.loadbanner .lbico svg,.loadbanner .lbico.ic{width:16px;height:16px;display:block}
 .loadbanner .alhd b{color:var(--warn,#f0b429)}
 .loadbanner .albd{white-space:pre-line}
 .loadbanner .lblist{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
@@ -6496,17 +6498,17 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
    只换配色。用于「状态型提示」：预训练结束重置了 inter、之后按新设置继续训练等。
    与 .warn（黄，异常）区分开：蓝 = 正常但需要知道的事。 */
 .alert.info{border-color:rgba(91,140,255,.40);background:rgba(91,140,255,.08)}
-.loadbanner.info .lbico{background:rgba(91,140,255,.18);color:var(--accent,#5b8cff)}
+.loadbanner.info .lbico{color:var(--accent,#5b8cff)}
 .loadbanner.info .alhd b{color:var(--accent,#5b8cff)}
 html:not(.dark) .alert.info{border-color:rgba(37,99,235,.30);background:rgba(37,99,235,.06)}
 html:not(.dark) 
-html:not(.dark) .loadbanner.info .lbico{background:rgba(37,99,235,.14);color:#1d4ed8}
+html:not(.dark) .loadbanner.info .lbico{color:#1d4ed8}
 html:not(.dark) .loadbanner.info .alhd b{color:#1d4ed8}
 
 /* danger 变体补齐：圆点和标题都要跟着变红。
    之前只给 info 写了覆盖，danger 的图标会退回 .loadbanner 的默认黄色，
    于是出现“红色卡片配黄色感叹号”的混搭。 */
-.loadbanner.danger .lbico{background:rgba(220,80,80,.18);color:var(--bad,#e05555)}
+.loadbanner.danger .lbico{color:var(--bad,#e05555)}
 .loadbanner.danger .alhd b{color:var(--bad,#e05555)}
-html:not(.dark) .loadbanner.danger .lbico{background:rgba(185,28,28,.12);color:#b91c1c}
+html:not(.dark) .loadbanner.danger .lbico{color:#b91c1c}
 html:not(.dark) .loadbanner.danger .alhd b{color:#b91c1c}
