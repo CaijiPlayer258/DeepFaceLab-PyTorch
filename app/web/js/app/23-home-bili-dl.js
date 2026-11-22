@@ -80,7 +80,23 @@
         if (window.__legalSync) window.__legalSync();
       }
       var v = el("aboutVer");
-      if (v) v.textContent = s.version;
+      if (v) {
+        /* 4.1-1122 / 4.1-1122-b2：大版本留在正文，日期做成蓝色标签挂在右边，
+           和引擎编译页的状态标签一个样式（.tag.t-blue）。 */
+        var _raw = String(s.version || "");
+        var _m = _raw.match(/^(\d+\.\d+)-(\d{2})(\d{2})(?:-b(\d+))?/);
+        if (_m) {
+          v.textContent = _m[1];
+          var _tag = el("aboutVerTag");
+          if (_tag) {
+            _tag.textContent = _m[2] + "-" + _m[3] + (_m[4] ? " · B" + _m[4] : "");
+            _tag.classList.remove("hide");
+            _tag.title = "构建日期 " + _m[2] + "-" + _m[3];
+          }
+        } else {
+          v.textContent = _raw || "—";
+        }
+      }
       renderDatasets(s.datasets || { src: { count: 0, exists: false }, dst: { count: 0, exists: false } });
       loadModels();
       renderMerge(s.models || []);

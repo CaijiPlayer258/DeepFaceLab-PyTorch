@@ -14,6 +14,13 @@ from .._common.paths import ROOT, SETTINGS_FILE, WORKSPACE
 
 # ---------------- 数据访问 ----------------
 def _version() -> str:
+    # 唯一来源是项目根的 version.txt（4.1-1122 这种）。
+    # 以前这里读 app/docs/VERSION（不存在）再退回 desktop/package.json 的 4.1.0 ——
+    # 于是关于页永远显示 4.1.0，和实际版本对不上。
+    try:
+        return (ROOT / "version.txt").read_text(encoding="utf-8-sig").strip().splitlines()[0].strip()
+    except Exception:
+        pass
     try:
         return (ROOT / "app" / "docs" / "..").resolve().joinpath("VERSION").read_text().strip()
     except Exception:
