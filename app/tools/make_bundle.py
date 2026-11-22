@@ -7,7 +7,8 @@ r"""把「代码 + 统一运行时 + 模型」打成一个可直接解压运行�
 为什么用 Python 的 zipfile 而不是 tar/7z：
   · bsdtar 写 zip 时按本地代码页写文件名，中文模型名到别的机器会变乱码；
     Python 写非 ASCII 名会置 UTF-8 标志位（0x800），解压端能正确还原。
-  · 权重是已压缩的浮点数据，再压没意义 —— 用 STORED，打包/解包都快。
+  · 权重/onnx 基本压不动（~93%），但 dll/pyd/exe 能压到 35~65%，整体仍划算：
+  默认 deflate；要最快打包就加 --store。
 
 默认排除：__pycache__/*.pyc/*.tmp、模型目录里的 *.zip 备份、autobackups、old/。
 """
@@ -22,7 +23,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
-KEEP_TOP = ["version.txt", "app", "desktop", "tools", "runtime/unified"]
+KEEP_TOP = ["version.txt", "app", "desktop", "tools", "runtime/unified", "weights"]
 
 # workspace 只带 XSegLite 这一个模型（遮罩推理要用），其余模型/数据集/缓存一概不带。
 WORKSPACE_KEEP = ["workspace/model/XSegLite"]
@@ -66,8 +67,8 @@ def wanted(rel: Path) -> bool:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
-    ap.add_argument("--compress", action="store_true",
-                    help="默认 store（快）；加这个用 deflate（慢，权重几乎压不动）")
+    ap.add_argument("--store", action="store_true",
+                    help="不压缩直接存（快，包体大近一倍）；默认 deflate")
     args = ap.parse_args()
 
     out = Path(args.out)
@@ -75,7 +76,7 @@ def main() -> int:
     if out.exists():
         out.unlink()
 
-    mode = zipfile.ZIP_DEFLATED if args.compress else zipfile.ZIP_STORED
+    mode = zipfile.ZIP_STORED if args.store else zipfile.ZIP_DEFLATED
     n = 0
     total = 0
     t0 = time.time()
@@ -90,7 +91,8 @@ def main() -> int:
     if missing:
         print("[warn] 跳过不存在的条目：%s" % ", ".join(missing), flush=True)
 
-    with zipfile.ZipFile(out, "w", mode, allowZip64=True) as zf:
+    with zipfile.ZipFile(out, "w", mode, allowZip64=True,
+                         compresslevel=None if args.store else 6) as zf:
         for d in WORKSPACE_SKELETON:
             zf.writestr(zipfile.ZipInfo(d + "/"), b"")
         for src in sources:
