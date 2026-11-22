@@ -105,3 +105,6 @@ app/engine/MergeStudio/workspace/
 
 # 交叉分辨率实验的中间权重目录（脚本可重跑，勿入库）
 app/docs/notes/inter_study/cand*/
+
+# 更新程序的覆盖前备份（历史上放在项目根，已改到 workspace/）
+.backup-*

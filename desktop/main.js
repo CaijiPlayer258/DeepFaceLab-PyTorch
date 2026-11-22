@@ -118,6 +118,14 @@ ipcMain.handle("win:shot", async () => {
   }
 });
 
+/* 更新安装完成后重启：先杀掉后端，再 relaunch 自己 */
+ipcMain.handle("app:restart", async () => {
+  try { killBackend(); } catch (e) {}
+  try { app.relaunch(); } catch (e) {}
+  setTimeout(() => { try { app.exit(0); } catch (e) {} }, 300);
+  return true;
+});
+
 ipcMain.handle("win:open", (_e, url) => {
   try {
     if (typeof url === "string" && /^https?:\/\//i.test(url)) shell.openExternal(url);

@@ -84,6 +84,20 @@ def check() -> Dict[str, Any]:
     }
 
 
+# 安装进度：前端轮询 /api/update/progress 画进度条。
+# 22 MB 的代码包 + 1600 个文件，光靠一句「正在下载并安装…」用户不知道要等多久。
+_PROGRESS: Dict[str, Any] = {"running": False, "phase": "", "pct": 0,
+                              "done": 0, "total": 0, "msg": ""}
+
+
+def progress() -> Dict[str, Any]:
+    return dict(_PROGRESS)
+
+
+def _set_progress(**kw) -> None:
+    _PROGRESS.update(kw)
+
+
 def _download(url: str, dst: Path, on_progress=None) -> Path:
     req = urllib.request.Request(url, headers={"User-Agent": "DeepFaceLab-4.1-Updater"})
     with urllib.request.urlopen(req, timeout=60) as resp, open(dst, "wb") as fh:
@@ -127,10 +141,17 @@ def apply(asset_name: Optional[str] = None) -> Dict[str, Any]:
     if not url:
         return {"ok": False, "error": "该 release 既没有代码资产也没有源码包"}
 
+    _set_progress(running=True, phase="download", pct=0, done=0, total=0,
+                  msg="正在下载 %s" % str(picked["name"] if picked else "源码包"))
     tmp = Path(tempfile.mkdtemp(prefix="dfl-update-"))
     zip_path = tmp / "pkg.zip"
     try:
-        _download(url, zip_path)
+        def _dl(done, total):
+            pct = int(done * 100 / total) if total else 0
+            _set_progress(phase="download", pct=min(99, pct), done=done, total=total,
+                          msg="正在下载 %d%%" % min(99, pct))
+        _download(url, zip_path, on_progress=_dl)
+        _set_progress(phase="unzip", pct=99, msg="正在解包…")
         with zipfile.ZipFile(zip_path) as zf:
             names = zf.namelist()
             # 只有"外层包了一层目录"时（GitHub 源码包形式）才剥掉这一层；
@@ -155,7 +176,11 @@ def apply(asset_name: Optional[str] = None) -> Dict[str, Any]:
                     shutil.copyfileobj(src, dst)
 
         installed: List[str] = []
-        backup = ROOT / f".backup-{int(time.time())}"
+        # 备份放 workspace/ 下：放项目根会被 git 当成未跟踪文件，
+    # 更糟的是「全盘 add」时被一起提交（实测把 1328 个文件塞进了提交）。
+    # 用户数据区本来就被 .gitignore 整个忽略，也符合「备份是用户资产」的语义。
+    _ws = ROOT / "workspace"
+    backup = (_ws if _ws.is_dir() else ROOT) / f".backup-{int(time.time())}"
         for path in sorted(staged.rglob("*")):
             if not path.is_file():
                 continue
@@ -175,5 +200,6 @@ def apply(asset_name: Optional[str] = None) -> Dict[str, Any]:
                 "package": info.get("package"), "restart_required": True}
     except Exception as exc:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        _set_progress(running=False, phase="done", pct=100, msg="已安装，重启后生效")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

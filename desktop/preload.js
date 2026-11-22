@@ -29,5 +29,7 @@ contextBridge.exposeInMainWorld("desktop", {
   },
   /* 截图（主题切换的圆形揭幕用） */
   snapshot: () => ipcRenderer.invoke("win:shot"),
+  /* 更新装完后「立刻重启」：交给主进程 relaunch，自己再退出 */
+  restart: () => ipcRenderer.invoke("app:restart"),
   isDesktop: true
 });

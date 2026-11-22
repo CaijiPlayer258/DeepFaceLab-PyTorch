@@ -11,6 +11,11 @@ from . import backend_update as U
 
 router = APIRouter(prefix="/api/update", tags=["update"])
 
+@router.get("/progress")
+def update_progress():
+    """安装进度（下载 % / 解包 / 覆盖）。前端在 apply 期间轮询这个接口。"""
+    return U.progress()
+
 
 class ApplyBody(BaseModel):
     asset: Optional[str] = None
