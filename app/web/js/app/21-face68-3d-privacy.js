@@ -46,7 +46,16 @@
 
   /* ---------- 路径框拖放 ---------- */
   function pathOfFile(f) {
-    if (window.desktop && window.desktop.pathForFile) return window.desktop.pathForFile(f);
+    /* 空字符串不要当结果用：contextBridge 会把 File 序列化，webUtils 拿到拷贝就返回空。
+       这时退回 preload 在 drop 捕获阶段记下的那次路径。 */
+    if (window.desktop && window.desktop.pathForFile) {
+      var p = window.desktop.pathForFile(f);
+      if (p) return p;
+    }
+    if (window.desktop && window.desktop.lastDropPath) {
+      var q = window.desktop.lastDropPath();
+      if (q) return q;
+    }
     return f.path || "";                      /* 浏览器兜底（普通网页无路径） */
   }
 

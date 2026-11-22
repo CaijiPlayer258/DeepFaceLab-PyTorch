@@ -512,7 +512,12 @@
 
     if (reduced()) { applyTheme(next); return; }
 
-    var shot = (window.desktop && window.desktop.snapshot) ? window.desktop.snapshot : null;
+    /* 圆形揭幕是桌面壳独有的（浏览器拿不到整页位图），默认关掉：
+       同一套主题在 WebGUI 和桌面壳里应该长得一样，而不是一边扩散一边直切。
+       想要扩散就在控制台 `localStorage.setItem('dfl-theme-wipe','1')`。 */
+    var wantWipe = false;
+    try { wantWipe = window.localStorage.getItem("dfl-theme-wipe") === "1"; } catch (e) {}
+    var shot = (wantWipe && window.desktop && window.desktop.snapshot) ? window.desktop.snapshot : null;
     if (!shot) { applyTheme(next); return; }
 
     var root = document.documentElement;
