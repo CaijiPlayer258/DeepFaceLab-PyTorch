@@ -54,7 +54,7 @@
     var m = v.match(/^(\d+\.\d+)-(\d{2})(\d{2})(?:-b(\d+))?/);
     if (!m) return "v" + v;
     return "v" + m[1] + ' <span class="tag t-blue" style="margin-left:6px;vertical-align:1px">' +
-           m[2] + "-" + m[3] + (m[4] ? " · B" + m[4] : "") + "</span>";
+           m[2] + m[3] + (m[4] ? " · B" + m[4] : "") + "</span>";
   }
 
   fetch("/api/update/version").then(function (r) { return r.json(); })

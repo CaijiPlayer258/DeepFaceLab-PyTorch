@@ -94,9 +94,9 @@
           v.textContent = "v" + _m[1];
           var _tag = el("aboutVerTag");
           if (_tag) {
-            _tag.textContent = _m[2] + "-" + _m[3] + (_m[4] ? " · B" + _m[4] : "");
+            _tag.textContent = _m[2] + _m[3] + (_m[4] ? " · B" + _m[4] : "");
             _tag.classList.remove("hide");
-            _tag.title = "构建日期 " + _m[2] + "-" + _m[3];
+            _tag.title = "构建日期 " + _m[2] + " 月 " + _m[3] + " 日";
           }
         } else {
           v.textContent = _raw ? ("v" + _raw.replace(/^v/, "")) : "—";
