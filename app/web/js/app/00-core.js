@@ -512,13 +512,23 @@
 
     if (reduced()) { applyTheme(next); return; }
 
-    /* 圆形揭幕是桌面壳独有的（浏览器拿不到整页位图），默认关掉：
-       同一套主题在 WebGUI 和桌面壳里应该长得一样，而不是一边扩散一边直切。
-       想要扩散就在控制台 `localStorage.setItem('dfl-theme-wipe','1')`。 */
-    var wantWipe = false;
-    try { wantWipe = window.localStorage.getItem("dfl-theme-wipe") === "1"; } catch (e) {}
+    /* 圆形揭幕默认开。桌面壳用整页位图（capturePage），浏览器没有这能力，
+       退回 View Transition 的 clip-path 圆形（同样是以点击处为圆心扩散），
+       所以两边看到的是同一个效果，只是实现不同。
+       关掉：localStorage.setItem('dfl-theme-wipe','0')。 */
+    var wantWipe = true;
+    try { if (window.localStorage.getItem("dfl-theme-wipe") === "0") wantWipe = false; } catch (e) {}
     var shot = (wantWipe && window.desktop && window.desktop.snapshot) ? window.desktop.snapshot : null;
-    if (!shot) { applyTheme(next); return; }
+    if (!shot) {
+      /* 浏览器：没有整页位图可裁，但 View Transition 能从点击点裁一个圆出来，
+         效果和桌面壳那套一致（同一个缓动、同样 520ms）。 */
+      if (wantWipe && window.circleReveal) {
+        circleReveal(btn, function () { applyTheme(next, { instant: true }); }, 520, 15);
+        return;
+      }
+      applyTheme(next);
+      return;
+    }
 
     var root = document.documentElement;
     var my = ++SHOT_TOKEN;
