@@ -448,6 +448,19 @@
           sub = [d.elapsed_s ? ("已等 " + _hms(d.elapsed_s)) : "", hint].filter(Boolean).join(" · ");
         }
 
+        /* 引擎的常驻提示（[notice]，比如预训练结束重置了 inter）：蓝色信息条，
+           训练结束后仍然保留，直到下次开训或手动关掉。 */
+        var nEl = document.getElementById("trainNotice");
+        if (nEl) {
+          var nTxt = d && d.notice ? String(d.notice) : "";
+          if (nTxt) {
+            nEl.textContent = nTxt;
+            nEl.style.display = "";
+          } else if (!d || !d.running) {
+            nEl.style.display = "none";
+          }
+        }
+
         var strip = document.getElementById("runStat");
         if (strip) {
           strip.className = "runstat " + cls;

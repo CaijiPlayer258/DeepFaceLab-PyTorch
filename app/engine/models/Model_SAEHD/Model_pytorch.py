@@ -153,6 +153,15 @@ class SAEHDModel(ModelBase):
         default_nan_guard = self.options['nan_guard'] = bool(_ng)
         default_pretrain = self.options['pretrain'] = self.load_or_def_option('pretrain', False)
 
+        # 预训练转正时是否重置 inter（DF 的 inter / LIAE 的 inter_AB+inter_B）。
+        # iperov 的做法是重置：预训练把 warp 强制关掉、src/dst 用同一份多身份集，
+        # inter 学到的是「那套分布的 code 标定」，直接拿来正式训练会和 encoder/decoder
+        # 互相拉扯。重置前会把原权重备份成 *.pretrain-backup.pth。
+        _pri = self.load_or_def_option('pretrain_reset_inter', True)
+        if isinstance(_pri, str):
+            _pri = _pri.strip().lower() in ('1', 'y', 'yes', 'true', 'on')
+        default_pretrain_reset_inter = self.options['pretrain_reset_inter'] = bool(_pri)
+
         # Freeze layer options
         default_freeze_encoder = self.options['freeze_encoder'] = self.load_or_def_option('freeze_encoder', False)
         default_freeze_inter = self.options['freeze_inter'] = self.load_or_def_option('freeze_inter', False)
@@ -610,6 +619,7 @@ class SAEHDModel(ModelBase):
 
         self.gan_model_changed = (default_gan_patch_size != self.options['gan_patch_size']) or (default_gan_dims != self.options['gan_dims'])
         self.pretrain_just_disabled = (default_pretrain is True and self.options['pretrain'] is False)
+        self.pretrain_reset_inter = bool(self.options.get('pretrain_reset_inter', True))
 
     # --- helpers ---
     def _select_device(self):
@@ -1148,6 +1158,8 @@ class SAEHDModel(ModelBase):
         def _do_init_of(model, filename):
             """这次该不该读存档（True = 不读，直接初始化）。逻辑与改动前完全一致。"""
             if _pretrain_just_disabled:
+                if not getattr(self, 'pretrain_reset_inter', True):
+                    return False          # 保留 inter：不清空、继续读存档
                 if 'df' in archi_type:
                     return model is getattr(self, 'inter', None)
                 if 'liae' in archi_type:
@@ -1161,6 +1173,15 @@ class SAEHDModel(ModelBase):
                     and getattr(self, 'gan_model_changed', False)):
                 return True
             return False
+
+        # 预训练转正：重置前先备份 inter，并在训练界面打一条蓝色提示。
+        if _pretrain_just_disabled:
+            if getattr(self, 'pretrain_reset_inter', True):
+                _bks = self._backup_pretrain_inter()
+                io.log_info('[notice] 预训练结束：inter 已重置为随机初始化'
+                            + ('，原权重已备份（%s）' % '、'.join(_bks) if _bks else ''))
+            else:
+                io.log_info('[notice] 预训练结束：已按设置保留 inter（pretrain_reset_inter=false）')
 
         # 加载循环（权重模块 + 优化器）：
         #   任何一个模块加载失败 → 该模块权重重置 + 绑定的优化器状态清空 + 一条结构化事件。
@@ -1607,6 +1628,31 @@ class SAEHDModel(ModelBase):
 
         # Build merge fn
         self._build_merge_fns()
+
+    def _backup_pretrain_inter(self):
+        """把 inter（DF）或 inter_AB/inter_B（LIAE）的存档复制一份，返回备份文件名列表。
+
+        预训练转正会重新初始化这几个模块；iperov 的做法是直接覆盖，出了问题没处找。
+        这里在重置前留 *.pretrain-backup，想回退直接改名即可。
+        """
+        import shutil
+        targets = [x for x in (getattr(self, 'inter', None),
+                               getattr(self, 'inter_AB', None),
+                               getattr(self, 'inter_B', None)) if x is not None]
+        out = []
+        for model, filename in self.model_filename_list:
+            if not any(model is t for t in targets):
+                continue
+            src = Path(self.get_strpath_storage_for_file(filename))
+            if not src.is_file():
+                continue
+            dst = src.with_name(src.name + '.pretrain-backup')
+            try:
+                shutil.copy2(src, dst)
+                out.append(dst.name)
+            except Exception as e:
+                io.log_info('[notice] 备份 %s 失败：%s' % (src.name, e))
+        return out
 
     def get_model_filename_list(self):
         return self.model_filename_list

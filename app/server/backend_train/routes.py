@@ -332,6 +332,15 @@ def train_preview(wait: float = 0.0):
     return _pack(b'{"previews":[],"labels":{}}', False)
 
 
+
+
+def _last_notice(lines):
+    """从引擎日志里取最后一条 [notice] 提示（常驻信息条用）。"""
+    for line in reversed(list(lines or [])):
+        text = str(line or "").strip()
+        if text.startswith("[notice]"):
+            return text[len("[notice]"):].strip()
+    return None
 @router.get("/api/train/status")
 def train_status():
     """训练状态。
@@ -355,6 +364,9 @@ def train_status():
         return {"running": j["running"], "name": j["name"],
                 "iter": it, "ok": j["ok"],
                 "error": j["error"], "log": j["log"][-80:],
+                # 引擎打 [notice] 前缀的常驻提示（预训练 inter 重置等），
+                # 前端用它渲染一条蓝色信息条；没有就是 None。
+                "notice": _last_notice(j["log"]),
                 "it_s": rate, "elapsed_s": int(elapsed),
                 "target_iter": target, "eta_s": eta,
                 "iter_seen": bool(j.get("iter_seen")),

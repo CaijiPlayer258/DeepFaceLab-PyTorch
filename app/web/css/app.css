@@ -6490,3 +6490,20 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
   min-height: 40px;
 }
 ::-webkit-scrollbar-thumb:hover { background: var(--ink-3) !important; }
+
+/* ===== 训练页常驻提示（引擎 [notice]，蓝色信息条） ===== */
+.trainNotice {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  background: rgba(91, 140, 255, .12);
+  border: 1px solid rgba(91, 140, 255, .38);
+  color: #8fb0ff;
+}
+html:not(.dark) .trainNotice {
+  background: rgba(37, 99, 235, .07);
+  border-color: rgba(37, 99, 235, .28);
+  color: #1d4ed8;
+}
