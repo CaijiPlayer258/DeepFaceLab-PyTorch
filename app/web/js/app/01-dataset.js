@@ -1409,6 +1409,15 @@
         btnEx.disabled = false;
         btnEx.textContent = "开始提取";
         showProgress(false);
+        /* 启动失败时后端根本没有任务：那颗「中断提取」必须一起收掉。
+           以前只复位了主按钮，页面上会留一个红按钮，点了没有任何反应。 */
+        var sbx = document.getElementById("btnExStop");
+        if (sbx) {
+          sbx.dataset.mode = "stop";
+          sbx.classList.add("hide");
+          sbx.classList.remove("danger");
+          sbx.textContent = "中断提取";
+        }
         toast("启动失败", String((e && e.message) || e), "error");
       });
     });
