@@ -1551,6 +1551,26 @@
         <div class="card" style="margin-top:14px">
           <div class="cardhd"><b>里程碑</b><span class="hint">按完成时间倒序</span></div>
           <div class="msrow">
+            <span class="msdate">2026-11-22</span>
+            <span>版本体系定稿 + 自动更新闭环：版本号改日期制（4.1-1122，同日多版 -b2），检查更新 → 下载 → 进度条 → 立刻重启整条链路打通；覆盖前备份落到 workspace/ 不再污染仓库</span>
+          </div>
+          <div class="msrow">
+            <span class="msdate">2026-11-22</span>
+            <span>提取器修掉三个真 bug：恢复图片目录 / DFL 项目目录输入（曾只认视频文件）、粘贴路径自动去引号（带引号时 exists() 恒假）、对齐分支跑完不收尾导致界面停在 98% 假死</span>
+          </div>
+          <div class="msrow">
+            <span class="msdate">2026-11-22</span>
+            <span>工具组新增视频切帧：ffmpeg 全帧导出 + 速度曲线与四格统计的二级界面；合成器导入视频改为只复制到工作区，不再空跑一遍抽帧 + 对齐</span>
+          </div>
+          <div class="msrow">
+            <span class="msdate">2026-11-22</span>
+            <span>状态接口提速：/api/state 2227 ms → 4 ms、单张素材列表 1797 ms → 2 ms（按目录 mtime 缓存 + 启动预热），首屏不再卡在目录扫描</span>
+          </div>
+          <div class="msrow">
+            <span class="msdate">2026-11-21</span>
+            <span>自动更新上线：只拉 GitHub Release 的纯代码包，覆盖 app / desktop / tools，workspace 与 runtime 一个字节不动；关于页新增「版本与更新」</span>
+          </div>
+          <div class="msrow">
             <span class="msdate">2026-10-25</span>
             <span>界面布局与交互设计完成：参数页四段式（标签 · 说明 · 控件）、吸顶搜索、吸底操作条、下拉框主题化、按架构过滤冻结层、设备下拉直显 GPU 型号</span>
           </div>
