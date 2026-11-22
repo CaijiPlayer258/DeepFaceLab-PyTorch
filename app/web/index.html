@@ -443,24 +443,34 @@
           <button class="btn pri" id="btnFrames" style="width:100%;margin-top:16px;height:38px">开始切帧</button>
         </div>
 
-        <div class="card hide" id="frProg" style="margin-top:14px">
+      </div>
+
+      <!-- ================= 工具：视频切帧（运行中，二级界面） ================= -->
+      <div class="page" id="p-tool-frames-run">
+        <div class="title">视频切帧</div>
+
+        <div class="card hide" id="frRunCard">
           <div class="xferhd">
             <b id="frTitle">正在切帧</b>
-            <span class="hint" id="frPctTxt">0%</span>
           </div>
-          <div class="mgprep"><div class="bar"><i id="frBar"></i></div></div>
+
+          <canvas id="frGraph" style="width:100%;height:170px"></canvas>
+
           <div class="xferft">
             <span id="frMsg">准备中…</span>
-            <span id="frSpeed"></span>
+            <span id="frPctTxt">0%</span>
           </div>
+
           <div class="stats4" style="margin-top:14px">
             <div class="stat"><div class="k">已输出</div><div class="v"><span id="frDone">0</span><small id="frTotal">/ 0</small></div></div>
             <div class="stat"><div class="k">速度</div><div class="v"><span id="frFps">0</span><small>帧/秒</small></div></div>
             <div class="stat"><div class="k">已用</div><div class="v"><span id="frElapsed">0</span><small>秒</small></div></div>
             <div class="stat"><div class="k">剩余</div><div class="v"><span id="frEta">—</span><small></small></div></div>
           </div>
-          <button class="btn danger hide" id="frStop" style="width:100%;height:36px;margin-top:14px">中断</button>
         </div>
+
+        <button class="btn danger hide" id="frStop" style="width:100%;height:38px;margin-top:14px">中断切帧</button>
+        <button class="btn hide" id="frBack" style="width:100%;height:38px;margin-top:14px">返回</button>
       </div>
       <!-- ================= 工具：引擎编译 ================= -->
       <div class="page" id="p-tool-engine">
