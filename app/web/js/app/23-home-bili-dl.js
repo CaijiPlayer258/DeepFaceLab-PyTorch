@@ -65,7 +65,12 @@
           }).join("")
         : '<div class="empty-note">还没有任何训练记录</div>';
     }
-    if ($("homeVer")) $("homeVer").textContent = "v" + (s.version || "");
+    if ($("homeVer")) {
+      /* 首页右下角只放大版本：v4.1-1122 那串日期留在关于页的标签里 */
+      var _hv = String(s.version || "");
+      var _hm = _hv.match(/^(\d+\.\d+)-/);
+      $("homeVer").textContent = "v" + (_hm ? _hm[1] : _hv.replace(/^v/, ""));
+    }
     if (window.I18N) window.I18N.refresh();
   }
 
@@ -86,7 +91,7 @@
         var _raw = String(s.version || "");
         var _m = _raw.match(/^(\d+\.\d+)-(\d{2})(\d{2})(?:-b(\d+))?/);
         if (_m) {
-          v.textContent = _m[1];
+          v.textContent = "v" + _m[1];
           var _tag = el("aboutVerTag");
           if (_tag) {
             _tag.textContent = _m[2] + "-" + _m[3] + (_m[4] ? " · B" + _m[4] : "");
@@ -94,7 +99,7 @@
             _tag.title = "构建日期 " + _m[2] + "-" + _m[3];
           }
         } else {
-          v.textContent = _raw || "—";
+          v.textContent = _raw ? ("v" + _raw.replace(/^v/, "")) : "—";
         }
       }
       renderDatasets(s.datasets || { src: { count: 0, exists: false }, dst: { count: 0, exists: false } });
