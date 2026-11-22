@@ -87,8 +87,23 @@ def extract_start(payload: dict | None = None):
     if not src:
         raise HTTPException(400, "缺少输入视频路径")
     p = Path(src)
+    # 输入框以前提示「源视频文件或源图片目录」，但这里只吃视频 —— 拖一个切帧输出目录进来
+    # 会得到「视频不存在」，看着像路径写错，其实是选错了东西。分开报，并说清楚该去哪。
+    if p.is_dir():
+        _exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+        try:
+            _n = sum(1 for x in p.iterdir() if x.is_file() and x.suffix.lower() in _exts)
+        except OSError:
+            _n = 0
+        if _n:
+            raise HTTPException(400,
+                "这是图片目录（%d 张），不是视频：%s\n" % (_n, p) +
+                "要给人脸做对齐请用「数据处理」，或把这里的帧合成回视频后再提取。")
+        raise HTTPException(400, "这是文件夹，不是视频文件：%s" % p)
+    if not p.exists():
+        raise HTTPException(404, "路径不存在：%s" % p)
     if not p.is_file():
-        raise HTTPException(404, "视频不存在: " + src)
+        raise HTTPException(400, "不是普通文件：%s" % p)
     face_dir = _resolve_dir(dst) if dst else (WORKSPACE / "_frames")
     face_dir.mkdir(parents=True, exist_ok=True)
     dst = str(face_dir)
