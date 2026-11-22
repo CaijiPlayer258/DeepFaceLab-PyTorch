@@ -12,6 +12,7 @@ import base64 as _b64
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -230,6 +231,28 @@ def merge_prepare(body: dict):
         target = Path(WORKSPACE) / "merge" / _safe_dirname(video.stem)
     if target.exists() and not target.is_dir():
         raise _BadInput("dir 是一个已存在的文件，要目录：%s" % target)
+    # ---- 快速导入：只把视频复制进工作区，不抽帧、不对齐 ----
+    # 合成本身是「视频模式」：_start_video_export 会自己逐帧解 → 检测 → 合成（见 merge_export），
+    # 这里再抽一遍帧 + 对齐纯属重复劳动，还要求目标目录一尘不染。
+    # 需要在准备阶段就落盘对齐结果的，传 align=true 走老路径。
+    _align = bool(body.get("align"))
+    if not _align:
+        target.mkdir(parents=True, exist_ok=True)
+        dest = target / video.name
+        try:
+            if not dest.exists() or dest.stat().st_size != video.stat().st_size:
+                if video.resolve() != dest.resolve():
+                    shutil.copy2(str(video), str(dest))
+        except OSError as e:
+            raise _BadInput("复制视频失败：%s（%s）" % (dest, e))
+        with _merge_prep_lock:
+            _merge_prep.update({"running": False, "ok": True, "error": "", "pct": 100,
+                                "msg": "已复制到 %s" % dest, "stage": "copied",
+                                "frames": 0, "aligned": 0, "video": str(dest),
+                                "project": str(target), "started_at": time.time(),
+                                "finished_at": time.time(), "success": True})
+        return _ok(project=str(target), video=str(dest), copied=True)
+
     _guard_prepare_target(target)
 
     with _merge_prep_lock:
@@ -264,7 +287,9 @@ def _guard_prepare_target(target: Path):
     for e in entries:
         try:
             if e.is_dir():
-                if e.name.lower() != "aligned":
+                # aligned 是产物；aligned.bak_* / aligned_* 是备份 —— 一律不算杂物，
+                # 否则备份过一次就再也准备不了这个目录（报「里面已经有别的东西」）。
+                if not e.name.lower().startswith("aligned"):
                     bad.append(e.name + "/")
                 continue
         except OSError:

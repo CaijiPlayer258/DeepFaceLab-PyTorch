@@ -334,8 +334,12 @@
     st.fails = 0;
     /* 这里不再清 st.project / window.__mergeInputDir：上一次已就绪的项目要留着，
        准备失败时用户还得回到它。只有下面成功分支才覆盖。 */
-    mgPrepLine("抽帧…", 0);
-    toast("准备素材", String(video).split(/[\\/]/).pop() + " · 抽帧 + 对齐", "info");
+    mgPrepLine("复制视频…", 0);
+    /* 视频名可能是 encodeURIComponent 过的（拖入/URL 带过来的），先解一次再显示，
+       否则 toast 里是一串 %E4%B9%9D… */
+    var _nm = String(video).split(/[\\/]/).pop();
+    try { _nm = decodeURIComponent(_nm); } catch (e) {}
+    toast("导入视频", _nm + " · 复制到工作区", "info");
 
     fetch("/api/merge/prepare", {
       method: "POST", headers: { "Content-Type": "application/json" },
