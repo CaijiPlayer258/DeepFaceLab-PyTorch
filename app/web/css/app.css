@@ -4421,6 +4421,9 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
 
 .legalBody {
   padding: 0 26px 4px; overflow-y: auto; flex: 1;
+  /* flex 子项默认 min-height:auto：内容一长就把卡片顶高，overflow 不生效，
+     底部 .legalFt（复选框区）就压到正文上。必须显式给 0。 */
+  min-height: 0;
 }
 /* 细滚动条：不要设 scrollbar-width，否则 Chromium 会忽略下面的 ::-webkit- 规则 */
 .legalBody::-webkit-scrollbar { width: 5px; height: 5px; }
@@ -4444,7 +4447,9 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
 }
 .legalBody p:last-child { margin-bottom: 0; }
 
-.legalFt { padding: 14px 26px 22px; }
+/* flex-shrink 默认 1：卡片高度不够时底部会被压缩，内容溢出盖到正文上。
+   固定住，让 .legalBody 单独承担滚动。 */
+.legalFt { padding: 14px 26px 22px; flex: 0 0 auto; }
 .legalChks { display: flex; flex-direction: column; gap: 9px; }
 .legalChk {
   display: flex; align-items: flex-start; gap: 8px;
@@ -4452,8 +4457,10 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
   cursor: pointer; user-select: none;
 }
 .legalChk input {
-  width: 14px; height: 14px; margin-top: 2px; flex: none;
+  /* 点击区 24×24（低于这个尺寸手指/鼠标都难点准），视觉靠 scale 收回 16 */
+  width: 24px; height: 24px; margin: -2px 0 0 -4px; flex: none;
   accent-color: var(--brand, #5d6ccf); cursor: pointer;
+  transform: scale(.66); transform-origin: center;
 }
 .legalChk b { color: var(--ink, #f2f2f4); font-weight: 600; }
 
@@ -4558,7 +4565,9 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
   max-height:calc(100% - 40px); max-width:760px; width:100%; overflow:hidden;
   display:flex; flex-direction:column;
 }
-#welcome .legal .legalBody{overflow:auto; flex:1 1 auto}
+/* flex-basis 必须是 0（flex:1），写成 auto 会以内容高度为准：
+   卡片被 max-height 截住后，body 不缩、内容继续往下画，底部复选框区就压上去了。 */
+#welcome .legal .legalBody{overflow:auto; flex:1 1 0%; min-height:0}
 
 /* 协议卡片：和登录页的毛玻璃条同一套语言（同一组 blur/brightness 参数），
    这样它浮在扫码背景上时，看起来是"同一块玻璃"，而不是另贴上去的深色板子。 */
