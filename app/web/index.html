@@ -521,6 +521,33 @@
             <button class="mini" id="dbgClear">全部清空</button>
           </div>
         </div>
+
+        <!-- ================= 横幅调试 ================= -->
+        <div class="title" style="font-size:16px;margin-top:8px">横幅调试</div>
+
+        <div class="card">
+          <div class="cardhd"><b>Alert / Banner</b><span class="hint">训练页常驻横幅（预训练提示那条）</span></div>
+          <div class="dbgrow">
+            <label class="f">标题</label>
+            <input class="inp" id="bnTitle" value="训练提示">
+          </div>
+          <div class="dbgrow">
+            <label class="f">正文</label>
+            <input class="inp" id="bnBody" value="预训练结束：inter 已重置为随机初始化，原权重已备份（New416_SAEHD_inter.pth.pretrain-backup）">
+          </div>
+          <div class="dbgrow">
+            <label class="f">配色</label>
+            <div class="seg" id="bnKind">
+              <b class="on" data-k="info">蓝色 info</b><b data-k="warn">黄色 warn</b><b data-k="danger">红色 danger</b>
+            </div>
+          </div>
+          <div id="bnHost" style="margin-top:10px"></div>
+          <div class="dbgacts">
+            <button class="btn" id="bnShow">显示</button>
+            <button class="mini" id="bnHide">收起</button>
+            <button class="mini" id="bnLong">长正文</button>
+          </div>
+        </div>
       </div>
 
 

@@ -49,6 +49,57 @@
     setInterval(updateDbgCount, 600);
   }
 
+  /* ---------- 横幅调试（Alert / Banner） ---------- */
+  /* 复用的是训练页那条常驻横幅的同款类名：.alert + 配色 + .loadbanner。
+     这里只是把节点插进调试页的容器，行为（左侧强调条 / 圆点 i / 标题 / ×）与真实一致。 */
+  function bnKind() {
+    var el = document.querySelector("#bnKind > b.on");
+    return el ? el.getAttribute("data-k") : "info";
+  }
+
+  function bnRender() {
+    var host = $("bnHost");
+    if (!host) return;
+    var title = ($("bnTitle") || {}).value || "训练提示";
+    var body = ($("bnBody") || {}).value || "";
+    var kind = bnKind();
+    host.innerHTML = "";
+    var el = document.createElement("div");
+    el.className = "alert " + kind + " loadbanner";
+    el.setAttribute("aria-live", "polite");
+    var head = document.createElement("div");
+    head.className = "alhd";
+    head.innerHTML = '<span class="lbico">' + (kind === "info" ? "i" : "!") + '</span>'
+      + "<b></b>"
+      + '<button class="alx" type="button" title="收起">×</button>';
+    head.querySelector("b").textContent = title;
+    head.querySelector(".alx").addEventListener("click", function () { host.innerHTML = ""; });
+    var bd = document.createElement("div");
+    bd.className = "albd";
+    bd.textContent = body;
+    el.appendChild(head);
+    el.appendChild(bd);
+    host.appendChild(el);
+  }
+
+  if ($("bnShow")) {
+    $("bnShow").addEventListener("click", bnRender);
+    $("bnHide").addEventListener("click", function () { var h = $("bnHost"); if (h) h.innerHTML = ""; });
+    $("bnLong").addEventListener("click", function () {
+      var el = $("bnBody");
+      if (el) el.value = "预训练结束：inter 已重置为随机初始化，原权重已备份（New416_SAEHD_inter.pth.pretrain-backup、New416_SAEHD_inter_B.pth.pretrain-backup）。"
+        + "这次训练的前 2000 步会明显比之前抖，属于正常现象；不想重置可以在参数里把 pretrain_reset_inter 关掉。";
+      bnRender();
+    });
+    document.querySelectorAll("#bnKind > b").forEach(function (b) {
+      b.addEventListener("click", function () {
+        document.querySelectorAll("#bnKind > b").forEach(function (x) { x.classList.remove("on"); });
+        b.classList.add("on");
+        bnRender();
+      });
+    });
+  }
+
   /* ---------- 侧边栏「工具」分组 ---------- */
   var toolGrp = document.getElementById("toolgrp");
   var toolHd = document.getElementById("toolgrpHd");
