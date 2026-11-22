@@ -6498,8 +6498,8 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
    之前用的是亮青蓝 rgba(91,140,255)，放在深色面板上发紫、跟其它控件不搭，所以改成品牌色。 */
 .alert.info{border-color:rgba(93,108,207,.45);background:rgba(93,108,207,.10)}
 .loadbanner.info .lbico{color:#8b98e8}
-html:not(.dark) .alert.info{border-color:rgba(93,108,207,.28);background:rgba(93,108,207,.07)}
-html:not(.dark) .loadbanner.info .lbico{color:#4e5bbb}
+:root[data-theme="light"] .alert.info{border-color:rgba(93,108,207,.28);background:rgba(93,108,207,.07)}
+:root[data-theme="light"] .loadbanner.info .lbico{color:#4e5bbb}
 
 /* 状态色只用在边框 / 底色 / 图标上；info 和 warn 的标题与正文保持灰白，别染色 */
 .loadbanner.info .alhd b,
@@ -6513,7 +6513,7 @@ html:not(.dark) .loadbanner.info .lbico{color:#4e5bbb}
 .loadbanner.danger .alhd b,
 .loadbanner.danger .albd{color:#ff6467}
 /* 浅色主题：#ff6467 在白底上只有 2.9:1，读不清，降到 #dc2626（5.9:1） */
-html:not(.dark) .alert.danger{border-color:rgba(220,38,38,.26);background:rgba(220,38,38,.05)}
-html:not(.dark) .loadbanner.danger .lbico,
-html:not(.dark) .loadbanner.danger .alhd b,
-html:not(.dark) .loadbanner.danger .albd{color:#dc2626}
+:root[data-theme="light"] .alert.danger{border-color:rgba(220,38,38,.26);background:rgba(220,38,38,.05)}
+:root[data-theme="light"] .loadbanner.danger .lbico,
+:root[data-theme="light"] .loadbanner.danger .alhd b,
+:root[data-theme="light"] .loadbanner.danger .albd{color:#dc2626}
