@@ -68,7 +68,7 @@
     home: "p-home", extract: "p-extract", "extract-run": "p-extract-run", dataset: "p-dataset", train: "p-train",
     run: "p-run", "train-cfg": "p-train-cfg",
     "tool-mask": "p-tool-mask", "tool-bili": "p-tool-bili",
-    "tool-color": "p-tool-color", "tool-angle": "p-tool-angle", "tool-engine": "p-tool-engine",
+    "tool-color": "p-tool-color", "tool-frames": "p-tool-frames", "tool-angle": "p-tool-angle", "tool-engine": "p-tool-engine",
     "train-convert": "p-train-convert",
     "dataset-run": "p-dataset-run",
     "bili-jobs": "p-bili-jobs",
@@ -106,6 +106,7 @@
     "tool-mask": [{ t: "工具" }, { t: "遮罩绘制" }],
     "tool-bili": [{ t: "工具" }, { t: "B 站下载" }],
     "tool-color": [{ t: "工具" }, { t: "色域迁移" }],
+    "tool-frames": [{ t: "工具" }, { t: "视频切帧" }],
     "tool-angle": [{ t: "工具" }, { t: "角度可视化" }],
     "tool-engine": [{ t: "工具" }, { t: "引擎编译" }],
     debug: [{ t: "关于", go: "about" }, { t: "调试" }],
@@ -175,7 +176,7 @@
   /* 每个导航组的最后位置：点「训练器」应回到上次待的界面，而不是永远回列表 */
   var LAST_PAGE = {};
   var PAGE_GROUP = { run: "train", "train-cfg": "train", "extract-run": "extract", "dataset-run": "dataset", "tool-mask": "tools",
-                     "tool-bili": "tools", "tool-color": "tools", "tool-angle": "tools", "train-convert": "train",
+                     "tool-bili": "tools", "tool-color": "tools", "tool-frames": "tools", "tool-angle": "tools", "train-convert": "train",
                      debug: "about" };
 
   function groupOf(key) { return PAGE_GROUP[key] || key; }
@@ -237,6 +238,7 @@
         if (cm) openCfg(cm);
       }
     }
+    if (key === "tool-frames" && window.framesBind) window.framesBind();
     if (key === "tool-mask") {
       var mk = document.getElementById("mkFrame");
       if (mk && !mk.dataset.themeBound) {

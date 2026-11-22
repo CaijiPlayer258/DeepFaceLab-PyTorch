@@ -340,7 +340,9 @@ from .routes_account import router as _account_router
 app.include_router(_account_router)
 
 from .routes_oneshot import router as _oneshot_router
+from .backend_tools.frames import router as _frames_router
 app.include_router(_oneshot_router)
+app.include_router(_frames_router)
 
 from .routes_merge import router as _merge_router
 app.include_router(_merge_router)
