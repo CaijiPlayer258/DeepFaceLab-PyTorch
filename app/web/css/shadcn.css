@@ -97,7 +97,8 @@ select:focus,
 input:focus,
 textarea:focus {
   border-color: var(--sc-ring) !important;
-  box-shadow: 0 0 0 1px var(--sc-ring) !important;   /* 细环，不是 3px 光晕 */
+  /* 3px 半透明光晕（原来是 1px 细环，和别处的焦点表达不一致，看着像没聚焦） */
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sc-ring) 24%, transparent) !important;
   outline: none !important;
 }
 .inp::placeholder,

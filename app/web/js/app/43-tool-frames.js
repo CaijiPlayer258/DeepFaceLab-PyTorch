@@ -171,6 +171,7 @@
     var cInk3 = (cs.getPropertyValue("--ink-3") || "#8b8b98").trim();
     var cLine = (cs.getPropertyValue("--line") || "rgba(128,128,128,.2)").trim();
     var cBrand = (cs.getPropertyValue("--brand") || "#5d6ccf").trim();
+    var cRgb = (cs.getPropertyValue("--brand-rgb") || "93,108,207").trim();
     var cFont = (cs.getPropertyValue("--font") || "system-ui").trim();
 
     var padL = 54, padR = 14, padT = 12, padB = 22;
@@ -202,13 +203,28 @@
     });
 
     if (HIST.length < 2) return;
+    function px(p) { return padL + plotW * Math.min(100, Math.max(0, p.pct)) / 100; }
+    function py(p) { return padT + plotH * (1 - Math.min(1, p.spd / maxSpd)); }
+
+    /* 曲线下的面积：渐隐的淡蓝，让图有体积感（只有一条线时中间是空的，很难看） */
+    var grad = g.createLinearGradient(0, padT, 0, padT + plotH);
+    grad.addColorStop(0, "rgba(" + cRgb + ",.34)");
+    grad.addColorStop(1, "rgba(" + cRgb + ",0)");
+    g.beginPath();
+    g.moveTo(px(HIST[0]), padT + plotH);
+    HIST.forEach(function (p) { g.lineTo(px(p), py(p)); });
+    g.lineTo(px(HIST[HIST.length - 1]), padT + plotH);
+    g.closePath();
+    g.fillStyle = grad;
+    g.fill();
+
     g.strokeStyle = cBrand;
-    g.lineWidth = 1.6;
+    g.lineWidth = 1.8;
+    g.lineJoin = "round";
+    g.lineCap = "round";
     g.beginPath();
     HIST.forEach(function (p, i) {
-      var x = padL + plotW * Math.min(100, Math.max(0, p.pct)) / 100;
-      var y = padT + plotH * (1 - Math.min(1, p.spd / maxSpd));
-      if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+      if (i === 0) g.moveTo(px(p), py(p)); else g.lineTo(px(p), py(p));
     });
     g.stroke();
   }

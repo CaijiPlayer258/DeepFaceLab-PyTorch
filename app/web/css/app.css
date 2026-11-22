@@ -6552,3 +6552,25 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
    色域迁移这类「填完参数 → 点执行」的页，按钮放右边更顺手，也和对话框的按钮位置一致。 */
 .actsRight { justify-content: flex-end; }
 .actsRight > .hint { margin-left: 0; margin-right: auto; }
+
+/* 数字框的步进按钮：Chromium 默认画成一小块白底黑箭头，深色主题上非常扎眼。
+   统一去掉（键盘上下键、滚轮、直接输入都还能调）。 */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+}
+input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+
+/* 视频切帧的进度条：比通用的 4px 细条厚一点，带品牌色渐变和外发光，
+   跑起来时一眼能看出「在推进」，而不是一条淡淡的灰线。 */
+#p-tool-frames-run .mgprep .bar {
+  height: 6px;
+  background: color-mix(in srgb, var(--line) 70%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand) 12%, transparent);
+}
+#p-tool-frames-run .mgprep .bar i {
+  background: linear-gradient(90deg, var(--brand), color-mix(in srgb, var(--brand) 55%, #ffffff));
+  box-shadow: 0 0 10px rgba(var(--brand-rgb), .55), 0 0 3px rgba(var(--brand-rgb), .75);
+}

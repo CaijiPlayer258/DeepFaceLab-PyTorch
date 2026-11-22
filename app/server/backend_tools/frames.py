@@ -160,7 +160,12 @@ def _run(src: Path, dst: Path, mode: str, value: float, fmt: str, quality: int,
         if expect <= 0:
             expect = 0
 
-        dst.mkdir(parents=True, exist_ok=True)
+        try:
+            dst.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # 视频在只读位置（程序目录、网络盘）时退回工作区，别让任务直接失败
+            dst = WORKSPACE / "_frames" / src.stem
+            dst.mkdir(parents=True, exist_ok=True)
         ext = "png" if fmt == "png" else "jpg"
         pattern = str(dst / ("%06d." + ext))
         cmd = [_ffmpeg(), "-hide_banner", "-y", "-nostdin", "-loglevel", "error",
@@ -268,11 +273,20 @@ def start_frames(payload: dict | None = None):
 
     if not str(src):
         raise HTTPException(400, "请选择源视频")
+    # 中文/全角字符在 Windows 上可能以 NFD 形式传进来（复制粘贴、网络共享都遇到过），
+    # 直接 exists() 会假阴性；先按 NFC 归一化再判一次。
     if not src.exists():
-        raise HTTPException(404, "源路径不存在：%s" % src)
+        import unicodedata
+        alt = Path(unicodedata.normalize("NFC", str(src)))
+        if alt.exists():
+            src = alt
+    if not src.exists():
+        raise HTTPException(404, "源视频不存在：%s" % src)
     if src.is_dir():
         raise HTTPException(400, "源必须是视频文件（目录请用提取器）")
-    dst = Path(dst_raw) if dst_raw else (WORKSPACE / "_frames" / src.stem)
+    # 默认输出到**视频同目录的同名文件夹**（视频.mp4 → 视频/），
+    # 比塞进 workspace\_frames 更好找，也不会和别的视频混在一个池子里。
+    dst = Path(dst_raw) if dst_raw else (src.parent / src.stem)
 
     with _LOCK:
         if _JOB["running"]:
