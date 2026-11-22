@@ -23,7 +23,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
-KEEP_TOP = ["version.txt", "app", "desktop", "tools", "runtime/unified", "weights"]
+KEEP_TOP = ["version.txt", "RunGUI.bat", "app", "desktop", "tools", "runtime/unified", "weights"]
 
 # workspace 只带 XSegLite 这一个模型（遮罩推理要用），其余模型/数据集/缓存一概不带。
 WORKSPACE_KEEP = ["workspace/model/XSegLite"]

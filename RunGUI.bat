@@ -10,7 +10,12 @@ rem Electron must not run in plain-node mode
 set "ELECTRON_RUN_AS_NODE="
 
 set "ELECTRON=desktop\node_modules\electron\dist\electron.exe"
-set "PY=%CD%\runtime\server\Scripts\pythonw.exe"
+
+rem Backend interpreter: unified first (merged env), then the old split layout.
+rem Keep this list in sync with desktop\main.js PY_CANDIDATES.
+set "PY=%CD%\runtime\unified\pythonw.exe"
+if not exist "%PY%" set "PY=%CD%\runtime\server\Scripts\pythonw.exe"
+if not exist "%PY%" set "PY=%CD%\runtime\engine\pythonw.exe"
 
 if not exist "%ELECTRON%" goto no_electron
 if not exist "%PY%" goto no_python
@@ -33,7 +38,10 @@ exit /b 1
 echo [ERROR] Portable Python runtime not found.
 echo.
 echo   Missing: %PY%
-echo   The runtime\server folder must sit next to this script.
+echo   Expected one of:\r
+    runtime\unified\pythonw.exe\r
+    runtime\server\Scripts\pythonw.exe\r
+    runtime\engine\pythonw.exe
 echo.
 pause
 exit /b 1
