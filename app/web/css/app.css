@@ -1103,7 +1103,14 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
 .crumb { color: var(--ink-3); cursor: pointer; transition: color .12s ease; -webkit-app-region: no-drag; }
 .crumb:hover { color: var(--ink-1); }
 .crumb.on { color: var(--ink-1); font-weight: 600; cursor: default; }
-.crumb-sep { color: var(--line-strong); font-size: 11px; }
+/* 分隔符：容器有 padding-top:6px（给 CJK 字形补偿的），这个西文符号跟着被压低，
+   看上去就是「歪了」。单独上移 3px 摆回视觉中线；颜色也别用 --line-strong（#35353f
+   在深色顶栏上几乎看不见），退到 --ink-3 这一档刚好只做分隔。 */
+.crumb-sep {
+  color: var(--ink-3); font-size: 11px; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  position: relative; top: -3px;
+}
 
 /* 面包屑视觉居中：CJK 字形在行盒里偏上，光靠 flex 居中看着还是高，往下压 3px */
 .crumbs { padding-top: 6px; }
