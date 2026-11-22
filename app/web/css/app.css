@@ -6531,3 +6531,8 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 .loadbanner.danger .albd{color:var(--bad,#ff6467)}
 :root[data-theme="light"] .alert.danger{border-color:rgba(220,38,38,.26);background:rgba(220,38,38,.05)}
 
+
+/* 动作行靠右：说明文字留在左边，按钮推到行尾。
+   色域迁移这类「填完参数 → 点执行」的页，按钮放右边更顺手，也和对话框的按钮位置一致。 */
+.actsRight { justify-content: flex-end; }
+.actsRight > .hint { margin-left: 0; margin-right: auto; }
