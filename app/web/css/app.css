@@ -4504,12 +4504,11 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
 .alert.warn{border-color:rgba(220,170,60,.45);background:rgba(220,170,60,.08)}
 
 /* 训练页「模块加载失败」常驻横幅（js/loadbanner.js 控制显隐）。
-   沿用 .alert.warn 的深色主题配色，只补三样：左侧强调条、模块名小标签、
+   沿用 .alert.warn 的深色主题配色，只补两样：模块名小标签、
    标题的警示色。它是状态而不是 toast —— 会一直挂着直到用户关掉。 */
 .loadbanner{margin:14px 0 0;position:relative;overflow:hidden}
 .loadbanner.hide{display:none}
-.loadbanner::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;
-  background:var(--warn,#f0b429);opacity:.85}
+/* 左侧强调条已移除：只靠边框/淡底色/图标/标题色区分状态，不再画那条 3px 竖线 */
 .loadbanner .lbico{display:inline-grid;place-items:center;width:16px;height:16px;flex:none;
   border-radius:50%;background:rgba(220,170,60,.18);color:var(--warn,#f0b429);
   font-size:11px;font-weight:800;line-height:1;font-style:normal}
@@ -6497,10 +6496,9 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
    只换配色。用于「状态型提示」：预训练结束重置了 inter、之后按新设置继续训练等。
    与 .warn（黄，异常）区分开：蓝 = 正常但需要知道的事。 */
 .alert.info{border-color:rgba(91,140,255,.40);background:rgba(91,140,255,.08)}
-.loadbanner.info::before{background:var(--accent,#5b8cff);opacity:.9}
 .loadbanner.info .lbico{background:rgba(91,140,255,.18);color:var(--accent,#5b8cff)}
 .loadbanner.info .alhd b{color:var(--accent,#5b8cff)}
 html:not(.dark) .alert.info{border-color:rgba(37,99,235,.30);background:rgba(37,99,235,.06)}
-html:not(.dark) .loadbanner.info::before{background:#2563eb}
+html:not(.dark) 
 html:not(.dark) .loadbanner.info .lbico{background:rgba(37,99,235,.14);color:#1d4ed8}
 html:not(.dark) .loadbanner.info .alhd b{color:#1d4ed8}
