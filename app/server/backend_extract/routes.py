@@ -107,7 +107,15 @@ def extract_start(payload: dict | None = None):
             raise HTTPException(400, "这个目录里没有图片：%s" % p)
     elif not p.is_file():
         raise HTTPException(400, "不是普通文件或目录：%s" % p)
-    face_dir = _resolve_dir(dst) if dst else (WORKSPACE / "_frames")
+    # 输出默认跟随输入：
+    #   视频 → <视频所在目录>/<视频名>/aligned
+    #   目录 → <该目录>/aligned
+    # 都不写死到 workspace/_frames —— 那儿会把不同素材混在一个池子里。
+    if dst:
+        face_dir = _resolve_dir(dst)
+    else:
+        _base = p if p.is_dir() else (p.parent / p.stem)
+        face_dir = _base / "aligned"
     face_dir.mkdir(parents=True, exist_ok=True)
     dst = str(face_dir)
 

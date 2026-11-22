@@ -112,6 +112,7 @@
   window.noSpell = noSpell;
 
   function bindPickPaths() {
+    document.querySelectorAll(".pathinp").forEach(function (b) { if (window.bindClickToFocus) window.bindClickToFocus(b); });
     document.querySelectorAll(".pathinp").forEach(function (box) {
       if (box.dataset.pick) return;
       box.dataset.pick = "1";
@@ -129,6 +130,23 @@
     });
   }
   window.bindPickPaths = bindPickPaths;
+
+  /* 整块路径框都能点：以前只有 <input> 的文本区接得住点击，
+     点标签「输入」或者框内留白都没反应，得瞄准中间才点得进。 */
+  function bindClickToFocus(box) {
+    if (!box || box.dataset.focusBound) return;
+    box.dataset.focusBound = "1";
+    box.addEventListener("mousedown", function (e) {
+      if (e.target.closest(".iconpill")) return;      /* 那颗图标是选文件/目录，别抢它的点击 */
+      var inp = box.querySelector(".pathval");
+      if (!inp || e.target === inp) return;
+      e.preventDefault();
+      inp.focus();
+      try { inp.setSelectionRange(inp.value.length, inp.value.length); } catch (err) {}
+    });
+  }
+  window.bindClickToFocus = bindClickToFocus;
+  document.querySelectorAll(".pathinp").forEach(bindClickToFocus);
 
   /* 路径框统一去引号：从资源管理器「复制为路径」粘进来的值带双引号，
      带引号的字符串 Path 打不开 —— 后端也会清，但界面先改掉，
