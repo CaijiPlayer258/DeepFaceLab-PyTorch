@@ -69,7 +69,7 @@
     el.setAttribute("aria-live", "polite");
     var head = document.createElement("div");
     head.className = "alhd";
-    head.innerHTML = '<svg class="ic lbico" aria-hidden="true"><use href="#' + (kind === "info" ? "i-info" : (kind === "warn" ? "i-warn" : "i-alert")) + '"/></svg>'
+    head.innerHTML = '<svg class="ic lbico" aria-hidden="true"><use href="#' + (kind === "info" ? "i-info" : (kind === "warn" ? "i-warn" : "i-error")) + '"/></svg>'
       + "<b></b>"
       + '<button class="alx" type="button" title="收起">×</button>';
     head.querySelector("b").textContent = title;

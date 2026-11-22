@@ -53,7 +53,7 @@ body { font-family: var(--font); }
   --accent:var(--ink); --accent-ink:var(--bg); --accent-soft:var(--surface-hover);
   --surface-raised:#ffffff; --surface-hover:#f2f2f4;
   --accent-rgb:23,23,26;
-  --ok:#0f9d58; --warn:#c2740b; --bad:#d33a3a;
+  --ok:#0f9d58; --warn:#c2740b; --bad:#dc2626;
   /* 辅助色盘（8 色）：只做点缀 —— 状态点、进度条、渐变、滑块高亮、提示标签。
      不进大面积背景，语义固定见 UI设计规范.md §1.5 */
   --aux-amber:#eab308; --aux-red:#ef4444; --aux-green:#22c55e;
@@ -70,7 +70,7 @@ body { font-family: var(--font); }
   --accent:var(--ink); --accent-ink:var(--bg); --accent-soft:var(--surface-hover);
   --surface-raised:#ffffff; --surface-hover:#f2f2f4;
   --accent-rgb:23,23,26;
-  --ok:#0f9d58; --warn:#c2740b; --bad:#d33a3a;
+  --ok:#0f9d58; --warn:#c2740b; --bad:#dc2626;
   --shadow:0 1px 2px rgba(0,0,0,.05),0 10px 30px rgba(0,0,0,.07);
   --shadow-high:0 12px 34px rgba(20,20,40,.16);
 }
@@ -82,7 +82,7 @@ body { font-family: var(--font); }
   --accent:var(--ink); --accent-ink:var(--bg); --accent-soft:var(--surface-hover);
   --surface-raised:#1e1e24; --surface-hover:#232329;
   --accent-rgb:242,242,244;
-  --ok:#3ddc84; --warn:#f0b429; --bad:#f87171;
+  --ok:#3ddc84; --warn:#f0b429; --bad:#ff6467;
   --shadow:0 1px 2px rgba(0,0,0,.5),0 12px 36px rgba(0,0,0,.55);
   --shadow-high:0 14px 40px rgba(0,0,0,.66);
 }
@@ -6511,9 +6511,6 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
    底色/边框也一起降到 .34 / .07 —— 之前那条边太重，整块像警告条而不是说明。 */
 .loadbanner.danger .lbico,
 .loadbanner.danger .alhd b,
-.loadbanner.danger .albd{color:#ff6467}
-/* 浅色主题：#ff6467 在白底上只有 2.9:1，读不清，降到 #dc2626（5.9:1） */
+.loadbanner.danger .albd{color:var(--bad,#ff6467)}
 :root[data-theme="light"] .alert.danger{border-color:rgba(220,38,38,.26);background:rgba(220,38,38,.05)}
-:root[data-theme="light"] .loadbanner.danger .lbico,
-:root[data-theme="light"] .loadbanner.danger .alhd b,
-:root[data-theme="light"] .loadbanner.danger .albd{color:#dc2626}
+

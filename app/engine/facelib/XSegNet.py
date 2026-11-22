@@ -92,11 +92,25 @@ class XSegNet(object):
 
                 if model is self.model:
                     ok = self._load_model_weights_compat(model_file_path)
+                    res = None
                 else:
-                    ok = model.load_weights(model_file_path)
+                    # 用带原因的加载：失败时把 missing/shape/corrupt 报出来，
+                    # 不再“读不到就当新的”静默重初始化。
+                    res = model.load_weights_ex(model_file_path)
+                    ok = bool(res)
 
                 do_init = not ok
                 if do_init:
+                    if res is not None:
+                        try:
+                            from core.leras import load_events as _lev
+                            _lev.emit_event(_lev.make_event(
+                                getattr(model, 'name', None) or filename, res))
+                        except Exception:
+                            pass
+                        io.log_info('[XSeg] %s 加载失败（%s）：%s'
+                                    % (filename, getattr(res, 'reason', '?'),
+                                       (getattr(res, 'detail', '') or '')[:160]))
                     if raise_on_no_model_files:
                         raise Exception(f"{model_file_path} 不存在或加载失败。")
                     if not self.training:

@@ -131,11 +131,24 @@ class QModel(ModelBase):
             if not do_init:
                 filepath = self.get_strpath_storage_for_file(filename)
                 if Path(filepath).exists():
+                    _res = None
                     try:
-                        model.load_weights(filepath)
-                        do_init = False
-                    except:
+                        # 以前这里根本不看返回值：load_weights 返回 False 也算“加载成功”，
+                        # 于是权重既没加载也没初始化，训练照跑，没有任何提示。
+                        _res = model.load_weights_ex(filepath)
+                        do_init = not bool(_res)
+                    except Exception:
                         do_init = True
+                    if do_init and _res is not None:
+                        try:
+                            from core.leras import load_events as _lev
+                            _lev.emit_event(_lev.make_event(
+                                getattr(model, 'name', None) or filename, _res))
+                        except Exception:
+                            pass
+                        io.log_info('[Q96] %s 加载失败（%s）：%s'
+                                    % (filename, getattr(_res, 'reason', '?'),
+                                       (getattr(_res, 'detail', '') or '')[:160]))
                 else:
                     do_init = True
             

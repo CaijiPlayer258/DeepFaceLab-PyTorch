@@ -535,12 +535,26 @@ class AMPModel(ModelBase):
 			load_ok = False
 			if not do_init:
 				filepath = self.get_strpath_storage_for_file(filename)
+				_load_res = None
 				if Path(filepath).exists():
 					try:
-						load_ok = model.load_weights(filepath)
+						# 带原因的加载：失败时把 missing/shape/corrupt 说清楚，
+						# 不要“读不到就当新的”静默重初始化。
+						_load_res = model.load_weights_ex(filepath)
+						load_ok = bool(_load_res)
 					except Exception:
 						load_ok = False
 					do_init = not load_ok
+					if do_init and _load_res is not None:
+						try:
+							from core.leras import load_events as _lev
+							_lev.emit_event(_lev.make_event(
+								getattr(model, 'name', None) or filename, _load_res))
+						except Exception:
+							pass
+						io.log_info('[AMP] %s 加载失败（%s）：%s'
+						            % (filename, getattr(_load_res, 'reason', '?'),
+						               (getattr(_load_res, 'detail', '') or '')[:160]))
 				else:
 					do_init = True
 
