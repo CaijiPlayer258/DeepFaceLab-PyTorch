@@ -25,6 +25,13 @@ def _version() -> str:
         return "4.1.0"
 
 
+# 目录计数缓存：key = 目录路径, value = (mtime_ns, 文件数)。
+# data_dst/aligned 这种 4 万份对齐图的目录，扫一层就要 ~600ms；
+# 而 /api/state 每次刷新都会问一遍 —— 登录后「进主页很卡」主要就是它。
+# 用目录 mtime 做失效依据：直接子项增删一定会改父目录的 mtime，数一层正好对得上。
+_COUNT_CACHE: dict = {}
+
+
 def _count_images(folder: Path) -> int:
     """只数**这一层**的图片，不递归，也不数 _/. 开头的缓存文件。
 
@@ -36,7 +43,17 @@ def _count_images(folder: Path) -> int:
     if not folder.is_dir():
         return 0
     from .._dataset_fast import count_images
-    return count_images(folder)
+    key = str(folder)
+    try:
+        stamp = folder.stat().st_mtime_ns
+    except OSError:
+        return count_images(folder)
+    hit = _COUNT_CACHE.get(key)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    n = count_images(folder)
+    _COUNT_CACHE[key] = (stamp, n)
+    return n
 
 
 def _dataset(name: str) -> dict:

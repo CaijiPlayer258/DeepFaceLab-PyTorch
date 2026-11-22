@@ -92,6 +92,33 @@ def __getattr__(name):
 install_events(app)
 
 
+def _prewarm_state() -> None:
+    """后台预热 /api/state 的冷启动开销。
+
+    实测进程起来后的**第一个** /api/state 要 ~2.2s：errface 的能力探测（惰性导入
+    xgboost）约 1.1s，runtime/datasets 各 0.1s。界面登录完立刻拉这个接口，
+    那 2 秒就是「进主页很卡」。这些值在整段进程生命周期里基本不变，
+    所以在后台线程先算一遍，首个请求直接命中缓存。
+    """
+    try:
+        from .backend_dataset import stats as _st
+        _st._version()
+        _st._runtime()
+        _st._dataset("data_src")
+        _st._dataset("data_dst")
+        _st._models()
+        _st._capabilities()
+    except Exception:
+        pass
+
+
+try:
+    import threading as _threading
+    _threading.Thread(target=_prewarm_state, name="state-prewarm", daemon=True).start()
+except Exception:
+    pass
+
+
 @app.get("/")
 def index():
     """index.html 里的 ?v=N 按**文件修改时间**自动重写。
