@@ -46,7 +46,7 @@ html[data-theme="dark"] {
 body { font-family: var(--font); }
 :root{
   --bg:#ececee; --panel:#ffffff; --panel-2:#f7f7f8; --line:#e7e7ea; --line-strong:#d6d6db;
-  --ink:#17171a; --ink-2:#55555f; --ink-3:#8f8f99;
+  --ink:#17171a; --ink-2:#55555f; --ink-3:#6e6e78;
   /* 主题色只给"部分按钮 + 部分进度条"用，单独一套变量；
      --accent 退回中性，所有装饰性强调（导航选中、焦点环、小标签…）自动变黑白。 */
   --brand:#5d6ccf; --brand-ink:#ffffff; --brand-hover:#6b79dd; --brand-press:#4e5bbb;
@@ -65,7 +65,7 @@ body { font-family: var(--font); }
 /* 浅色也要能显式声明：揭幕用的克隆层需要独立于外层主题 */
 [data-theme="light"]{
   --bg:#ececee; --panel:#ffffff; --panel-2:#f7f7f8; --line:#e7e7ea; --line-strong:#d6d6db;
-  --ink:#17171a; --ink-2:#55555f; --ink-3:#8f8f99;
+  --ink:#17171a; --ink-2:#55555f; --ink-3:#6e6e78;
   --brand:#5d6ccf; --brand-ink:#ffffff; --brand-hover:#6b79dd; --brand-press:#4e5bbb;
   --accent:var(--ink); --accent-ink:var(--bg); --accent-soft:var(--surface-hover);
   --surface-raised:#ffffff; --surface-hover:#f2f2f4;
@@ -76,7 +76,7 @@ body { font-family: var(--font); }
 }
 [data-theme="dark"]{
   --bg:#08080a; --panel:#141418; --panel-2:#1a1a1f; --line:#26262d; --line-strong:#35353f;
-  --ink:#f2f2f4; --ink-2:#a3a3ad; --ink-3:#6d6d78;
+  --ink:#f2f2f4; --ink-2:#a3a3ad; --ink-3:#84848f;
   /* 深色下同色号仍然够亮（白字对比度 4.6:1），不再单独调浅 */
   --brand:#5d6ccf; --brand-ink:#ffffff; --brand-hover:#6f7cdd; --brand-press:#4e5bbb;
   --accent:var(--ink); --accent-ink:var(--bg); --accent-soft:var(--surface-hover);
@@ -4426,13 +4426,13 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
   min-height: 0;
 }
 /* 细滚动条：不要设 scrollbar-width，否则 Chromium 会忽略下面的 ::-webkit- 规则 */
-.legalBody::-webkit-scrollbar { width: 5px; height: 5px; }
+.legalBody::-webkit-scrollbar { width: 6px; height: 6px; }
 .legalBody::-webkit-scrollbar-track { background: transparent; }
 .legalBody::-webkit-scrollbar-thumb {
-  background: rgba(255,255,255,.14);
+  background: rgba(255,255,255,.24);
   border-radius: 999px;
 }
-.legalBody::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.26); }
+.legalBody::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.38); }
 .legalBody::-webkit-scrollbar-button { display: none; height: 0; }
 
 .legalBody section { padding: 16px 0; }
@@ -4462,7 +4462,10 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
   accent-color: var(--brand, #5d6ccf); cursor: pointer;
   transform: scale(.66); transform-origin: center;
 }
-.legalChk b { color: var(--ink, #f2f2f4); font-weight: 600; }
+/* 这里不能用 var(--ink)：协议层是浮在欢迎页上的独立层，若该层没继承到深色主题的
+   --ink，就会退成浅色主题的 #17171a，深底上等于看不见（看起来像拖影）。
+   直接写和标题同档的浅色。 */
+.legalChk b { color: rgba(246,247,252,.95); font-weight: 600; }
 
 .legalActs { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .legal .legalActs .btn {
@@ -4568,6 +4571,11 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
 /* flex-basis 必须是 0（flex:1），写成 auto 会以内容高度为准：
    卡片被 max-height 截住后，body 不缩、内容继续往下画，底部复选框区就压上去了。 */
 #welcome .legal .legalBody{overflow:auto; flex:1 1 0%; min-height:0}
+/* 正文能滚、但滚动条很细：底部加一层渐隐，看到文字淡出就知道下面还有 */
+.legalBody{
+  -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 24px), transparent 100%);
+  mask-image: linear-gradient(180deg, #000 calc(100% - 24px), transparent 100%);
+}
 
 /* 协议卡片：和登录页的毛玻璃条同一套语言（同一组 blur/brightness 参数），
    这样它浮在扫码背景上时，看起来是"同一块玻璃"，而不是另贴上去的深色板子。 */
@@ -6482,8 +6490,8 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
    形态：10px 槽 + 2px 透明边框内缩（视觉 6px），不透明填充，悬停只换色。
 
    颜色一律走主题 token：
-     light  --line-strong #d6d6db → 悬停 --ink-3 #8f8f99
-     dark   --line-strong #35353f → 悬停 --ink-3 #6d6d78
+     light  --line-strong #d6d6db → 悬停 --ink-3 #6e6e78
+     dark   --line-strong #35353f → 悬停 --ink-3 #84848f
    以前写死 #2c2c34，切到浅色主题就是一条黑杠——这正是那次的 bug。
 
    注意：不要写 scrollbar-width / scrollbar-color，Chromium 见到标准属性会忽略 ::-webkit- 定制。 */
