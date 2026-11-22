@@ -6502,3 +6502,11 @@ html:not(.dark) .alert.info{border-color:rgba(37,99,235,.30);background:rgba(37,
 html:not(.dark) 
 html:not(.dark) .loadbanner.info .lbico{background:rgba(37,99,235,.14);color:#1d4ed8}
 html:not(.dark) .loadbanner.info .alhd b{color:#1d4ed8}
+
+/* danger 变体补齐：圆点和标题都要跟着变红。
+   之前只给 info 写了覆盖，danger 的图标会退回 .loadbanner 的默认黄色，
+   于是出现“红色卡片配黄色感叹号”的混搭。 */
+.loadbanner.danger .lbico{background:rgba(220,80,80,.18);color:var(--bad,#e05555)}
+.loadbanner.danger .alhd b{color:var(--bad,#e05555)}
+html:not(.dark) .loadbanner.danger .lbico{background:rgba(185,28,28,.12);color:#b91c1c}
+html:not(.dark) .loadbanner.danger .alhd b{color:#b91c1c}
