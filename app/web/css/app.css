@@ -50,6 +50,7 @@ body { font-family: var(--font); }
   /* 主题色只给"部分按钮 + 部分进度条"用，单独一套变量；
      --accent 退回中性，所有装饰性强调（导航选中、焦点环、小标签…）自动变黑白。 */
   --brand:#5d6ccf; --brand-ink:#ffffff; --brand-hover:#6b79dd; --brand-press:#4e5bbb;
+  --brand-rgb:93,108,207;
   --accent:var(--ink); --accent-ink:var(--bg); --accent-soft:var(--surface-hover);
   --surface-raised:#ffffff; --surface-hover:#f2f2f4;
   --accent-rgb:23,23,26;
@@ -69,6 +70,7 @@ body { font-family: var(--font); }
   --bg:#ececee; --panel:#ffffff; --panel-2:#f7f7f8; --line:#e7e7ea; --line-strong:#d6d6db;
   --ink:#17171a; --ink-2:#55555f; --ink-3:#6e6e78;
   --brand:#5d6ccf; --brand-ink:#ffffff; --brand-hover:#6b79dd; --brand-press:#4e5bbb;
+  --brand-rgb:93,108,207;
   --accent:var(--ink); --accent-ink:var(--bg); --accent-soft:var(--surface-hover);
   --surface-raised:#ffffff; --surface-hover:#f2f2f4;
   --accent-rgb:23,23,26;
@@ -684,19 +686,19 @@ body, .app, .shell, .main { background-color: var(--panel); }
 }
 .live.s-gray { background: var(--ink-3); }
 @keyframes pulseBlue {
-  0%   { box-shadow: 0 0 0 0 rgba(93,108,207,.55); }
-  70%  { box-shadow: 0 0 0 6px rgba(93,108,207,0); }
-  100% { box-shadow: 0 0 0 0 rgba(93,108,207,0); }
+  0%   { box-shadow: 0 0 0 0 rgba(var(--brand-rgb),.55); }
+  70%  { box-shadow: 0 0 0 6px rgba(var(--brand-rgb),0); }
+  100% { box-shadow: 0 0 0 0 rgba(var(--brand-rgb),0); }
 }
 @keyframes pulseGreen {
-  0%   { box-shadow: 0 0 0 0 rgba(15,157,88,.5); }
-  70%  { box-shadow: 0 0 0 6px rgba(15,157,88,0); }
-  100% { box-shadow: 0 0 0 0 rgba(15,157,88,0); }
+  0%   { box-shadow: 0 0 0 0 rgba(var(--ok-rgb),.5); }
+  70%  { box-shadow: 0 0 0 6px rgba(var(--ok-rgb),0); }
+  100% { box-shadow: 0 0 0 0 rgba(var(--ok-rgb),0); }
 }
 @keyframes pulseRed {
-  0%   { box-shadow: 0 0 0 0 rgba(211,58,58,.5); }
-  70%  { box-shadow: 0 0 0 6px rgba(211,58,58,0); }
-  100% { box-shadow: 0 0 0 0 rgba(211,58,58,0); }
+  0%   { box-shadow: 0 0 0 0 rgba(var(--bad-rgb),.5); }
+  70%  { box-shadow: 0 0 0 6px rgba(var(--bad-rgb),0); }
+  100% { box-shadow: 0 0 0 0 rgba(var(--bad-rgb),0); }
 }
 
 .runbar { font-size: 12px; color: var(--ink-3); margin: 6px 0 14px; display: flex; gap: 8px; flex-wrap: wrap; }
