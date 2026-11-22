@@ -28,7 +28,7 @@ def check() -> dict:
 
 @router.get("/version")
 def version() -> dict:
-    return {"version": U.local_version()}
+    return U.parse_version()          # {version, base, when, human}
 
 
 @router.post("/apply")

@@ -11,7 +11,9 @@
 """
 from __future__ import annotations
 
+import datetime as _dt
 import json
+import re
 import os
 import shutil
 import tempfile
@@ -44,6 +46,32 @@ def _get_json(url: str, timeout: int = 15) -> Dict[str, Any]:
     req = urllib.request.Request(url, headers={"User-Agent": "DeepFaceLab-4.1-Updater", "Accept": "application/vnd.github+json"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+# 版本号格式：MAJOR.MINOR.YY.MMDD.HHMM（见 app/tools/bump_version.py）
+_VER_TIME = re.compile(r"^(\d+)\.(\d+)\.(\d{2})\.(\d{4})\.(\d{4})$")
+
+
+def parse_version(v=None) -> Dict[str, Any]:
+    """把版本号拆成「大版本 + 构建时间」，给界面显示用。
+
+    4.1.26.1122.2304 -> base 4.1 / 2026-11-22 23:04。解析不了就原样返回，
+    不认识的格式（老版本 4.1.1）也能正常显示。
+    """
+    v = (v if v is not None else local_version()).strip()
+    m = _VER_TIME.match(v)
+    if not m:
+        return {"version": v, "base": v, "when": None, "human": "v" + v}
+    major, minor, yy, mmdd, hhmm = m.groups()
+    try:
+        # 用 datetime 而不是 time.strftime：后者要 9 元组，少一个就静默失败
+        when_dt = _dt.datetime(2000 + int(yy), int(mmdd[:2]), int(mmdd[2:]),
+                               int(hhmm[:2]), int(hhmm[2:]))
+        when = when_dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return {"version": v, "base": "%s.%s" % (major, minor), "when": None, "human": "v" + v}
+    return {"version": v, "base": "%s.%s" % (major, minor), "when": when,
+            "human": "v%s.%s · %s" % (major, minor, when)}
 
 
 def _ver_tuple(v: str) -> tuple:
@@ -177,10 +205,10 @@ def apply(asset_name: Optional[str] = None) -> Dict[str, Any]:
 
         installed: List[str] = []
         # 备份放 workspace/ 下：放项目根会被 git 当成未跟踪文件，
-    # 更糟的是「全盘 add」时被一起提交（实测把 1328 个文件塞进了提交）。
-    # 用户数据区本来就被 .gitignore 整个忽略，也符合「备份是用户资产」的语义。
-    _ws = ROOT / "workspace"
-    backup = (_ws if _ws.is_dir() else ROOT) / f".backup-{int(time.time())}"
+        # 更糟的是「全盘 add」时被一起提交（实测把 1328 个文件塞进了提交）。
+        # 用户数据区本来就被 .gitignore 整个忽略，也符合「备份是用户资产」的语义。
+        _ws = ROOT / "workspace"
+        backup = (_ws if _ws.is_dir() else ROOT) / f".backup-{int(time.time())}"
         for path in sorted(staged.rglob("*")):
             if not path.is_file():
                 continue

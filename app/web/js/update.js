@@ -48,7 +48,7 @@
   function setBtn(t) { btn.textContent = t; }
 
   fetch("/api/update/version").then(function (r) { return r.json(); })
-    .then(function (j) { if (local) local.textContent = "当前 v" + j.version; })
+    .then(function (j) { if (local) local.textContent = "当前 " + (j.human || ("v" + j.version)); })
     .catch(function () {});
 
   btn.addEventListener("click", function () {
