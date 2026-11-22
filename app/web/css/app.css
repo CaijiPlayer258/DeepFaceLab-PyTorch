@@ -160,6 +160,8 @@ label.f{display:block;font-size:12px;color:var(--ink-2);margin-bottom:6px;font-w
 .stat .v{font-size:21px;font-weight:680;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
 .stat .v small{font-size:11.5px;font-weight:500;color:var(--ink-3);margin-left:4px}
 .tag{display:inline-block;font-size:10.5px;padding:2px 8px;border-radius:999px;font-weight:650;white-space:nowrap}
+/* 标签位放骨架：文字清空会让宽度塌成 0，位置跟着跳 —— 给个固定尺寸 */
+.tag.sk{min-width:48px;height:17px;display:inline-block;border-radius:999px}
 .tag.ok{background:rgba(var(--ok-rgb),.14);color:var(--ok)}
 .tag.n{background:var(--line);color:var(--ink-2)}
 /* 训练状态的徽章：和左上角圆点同一套色（蓝=连接/加载，绿=训练，黄=暂停，红=停止中/失败，灰=已停止） */

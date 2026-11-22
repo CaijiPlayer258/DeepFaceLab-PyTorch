@@ -46,6 +46,29 @@ def _norm_target(target) -> str:
     return s or "data_src"
 
 
+# 目录清单缓存：key = 目录路径, value = (mtime_ns, files, skipped)。
+# 以前 /api/dataset/count 一次请求要扫三遍同一个目录（_resolve_root 判空一遍、
+# _count_payload 数一遍、skipped_subdirs 再一遍）—— data_dst/aligned 四万份对齐图，
+# 单次就是 1~2 秒，前端在这期间只能干等，看起来就是「读文件时整屏卡住」。
+# 目录 mtime 变（增删文件）即失效，语义和 _count_images 的缓存一致。
+_LIST_CACHE: dict = {}
+
+
+def _list_cached(root):
+    key = str(root)
+    try:
+        stamp = root.stat().st_mtime_ns
+    except OSError:
+        stamp = 0
+    hit = _LIST_CACHE.get(key)
+    if hit and hit[0] == stamp:
+        return hit[1], hit[2]
+    files = FF.list_images(root)
+    skipped = FF.skipped_subdirs(root)
+    _LIST_CACHE[key] = (stamp, files, skipped)
+    return files, skipped
+
+
 def _resolve_root(target):
     """数据集目录名 → 真正要处理的目录，返回 (root, redirected)。
 
@@ -60,15 +83,14 @@ def _resolve_root(target):
         raise HTTPException(404, "目录不存在：%s" % root)
     redirected = False
     aligned = root / "aligned"
-    if aligned.is_dir() and not FF.list_images(root):
+    if aligned.is_dir() and not _list_cached(root)[0]:
         root, redirected = aligned, True
     return root, redirected
 
 
 def _count_payload(root, target, redirected):
     """一处算完，UI 和引擎共用：这一层有几张、哪些子目录被跳过。"""
-    files = FF.list_images(root)
-    skipped = FF.skipped_subdirs(root)
+    files, skipped = _list_cached(root)
     return {"ok": True, "target": target, "dir": str(root),
             "redirected_to_aligned": bool(redirected),
             "count": len(files), "n_files": len(files),

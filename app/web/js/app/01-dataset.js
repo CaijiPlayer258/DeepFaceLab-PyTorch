@@ -191,10 +191,16 @@
 
   function dsRefreshCount(dirArg) {
     var arg = (dirArg == null ? dsDirArg() : dirArg) || "data_src";
+    /* 读目录期间把「N 张」变成骨架条：这一块在等后端扫盘，
+         其余按钮照常可点 —— 不要用全屏遮挡表示加载。 */
+    var tagEl = document.getElementById("dsPathCount");
+    if (tagEl) { tagEl.classList.add("sk"); tagEl.textContent = ""; }
+    var restore = function () { if (tagEl) tagEl.classList.remove("sk"); };
     return fetch("/api/dataset/count", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dir: arg })
     }).then(function (r) { return r.json(); }).then(function (d) {
+      restore();
       if (!d || d.count == null) return null;
       DS_COUNT = { arg: arg, dir: d.dir || "", count: d.count || 0,
                    skipped: d.skipped_dirs || [], recursive: d.recursive_would_be || 0 };
@@ -202,7 +208,10 @@
       if (el) el.textContent = DS_COUNT.count + " 张";
       dsWarmFaceid();
       return DS_COUNT;
-    }).catch(function () { return null; });
+    }).catch(function () {
+      if (tagEl) { tagEl.classList.remove("sk"); tagEl.textContent = "—"; }
+      return null;
+    });
   }
   window.dsRefreshCount = dsRefreshCount;
 

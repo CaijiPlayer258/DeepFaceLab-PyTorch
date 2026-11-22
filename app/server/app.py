@@ -108,6 +108,15 @@ def _prewarm_state() -> None:
         _st._dataset("data_dst")
         _st._models()
         _st._capabilities()
+        # 目录清单也预热：/api/dataset/count 首次扫 data_dst（4 万张）要 1.8s，
+        # 提前在后台跑一遍，用户点开数据集时直接命中缓存。
+        from .backend_oneshot import routes as _or
+        for _name in ("data_src", "data_dst"):
+            _dir = _or.WORKSPACE / _name
+            # 真正被数的是 aligned（有它就下探）；两个都预热，key 才对得上
+            for _d in (_dir / "aligned", _dir):
+                if _d.is_dir():
+                    _or._list_cached(_d)
     except Exception:
         pass
 
