@@ -89,21 +89,21 @@ def extract_start(payload: dict | None = None):
     p = Path(src)
     # 输入框以前提示「源视频文件或源图片目录」，但这里只吃视频 —— 拖一个切帧输出目录进来
     # 会得到「视频不存在」，看着像路径写错，其实是选错了东西。分开报，并说清楚该去哪。
+    # 输入可以是**视频文件**，也可以是**图片目录 / DFL 项目目录**。
+    # align_stream 里两条分支都在（视频走 ffmpeg，目录逐张读），这条校验别再把目录挡掉。
+    if not p.exists():
+        raise HTTPException(404, "路径不存在：%s" % p)
     if p.is_dir():
         _exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
         try:
             _n = sum(1 for x in p.iterdir() if x.is_file() and x.suffix.lower() in _exts)
+            _has_aligned = (p / "aligned").is_dir()
         except OSError:
-            _n = 0
-        if _n:
-            raise HTTPException(400,
-                "这是图片目录（%d 张），不是视频：%s\n" % (_n, p) +
-                "要给人脸做对齐请用「数据处理」，或把这里的帧合成回视频后再提取。")
-        raise HTTPException(400, "这是文件夹，不是视频文件：%s" % p)
-    if not p.exists():
-        raise HTTPException(404, "路径不存在：%s" % p)
-    if not p.is_file():
-        raise HTTPException(400, "不是普通文件：%s" % p)
+            _n, _has_aligned = 0, False
+        if not _n and not _has_aligned:
+            raise HTTPException(400, "这个目录里没有图片：%s" % p)
+    elif not p.is_file():
+        raise HTTPException(400, "不是普通文件或目录：%s" % p)
     face_dir = _resolve_dir(dst) if dst else (WORKSPACE / "_frames")
     face_dir.mkdir(parents=True, exist_ok=True)
     dst = str(face_dir)

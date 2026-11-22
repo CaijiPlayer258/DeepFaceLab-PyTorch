@@ -129,33 +129,88 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
     # 坏命令并杀掉 ffmpeg（实测稳定复现 0 帧）。即便 fps == 源帧率，也显式写出来。
     vf.append("fps=%g" % max(0.01, float(fps)))
 
-    from .. import _hwaccel
-    in_params = _hwaccel.input_params(str(src))     # 触发（或命中）一次探测，下面复用
-    norm = _hwaccel.normalize_filter()              # 硬解：先回 yuv420p 再转 BGR
-    if norm:
-        vf.append(norm)
+    # ---- 输入：视频文件 / 图片目录 / DFL 项目目录 ----
+    # 这一点本来是支持的（本模块 import 里那三个 _dfl_project_scan / _extract_frames /
+    # _imread_any 就是当时用的），后来收敛成只认视频，目录就被挡在门外了。
+    # 目录模式不经过 ffmpeg：逐张读成 bgr24 字节，喂给同一条检测/对齐流水线。
+    from .. import _hwaccel      # 视频模式用它探测硬解，结尾报状态也要读
+    _src_p = Path(str(src))
+    _dir_mode = _src_p.is_dir()
+    if _dir_mode:
+        _files = []
+        try:
+            # DFL 项目目录（有 aligned/）优先，其次才是普通图片目录
+            _names, _srcdir, _kind = _dfl_project_scan(_src_p)
+            if _names and _srcdir:
+                _files = [Path(_srcdir) / _n for _n in _names]
+        except Exception:
+            _files = []
+        if not _files:
+            _exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+            try:
+                _files = sorted(x for x in _src_p.iterdir()
+                                if x.is_file() and x.suffix.lower() in _exts)
+            except OSError:
+                _files = []
+        if not _files:
+            _job_fail("_align_stream/输入",
+                      RuntimeError("这个目录里没有图片：%s" % src))
+            return 0
+        def _as_bgr(_im):
+            # 检测器吃的是 bgr24：灰度/带 alpha 的图必须先归一成 3 通道，
+            # 否则 raw 长度不等于 W*H*3，_decode 会把每一帧都当坏帧丢掉（表现就是 0 张脸）。
+            if _im is None:
+                return None
+            if _im.ndim == 2:
+                return cv2.cvtColor(_im, cv2.COLOR_GRAY2BGR)
+            if _im.shape[2] == 4:
+                return cv2.cvtColor(_im, cv2.COLOR_BGRA2BGR)
+            return _im
 
-    # vf 为空时不能传 -vf ""（ffmpeg 会报错），所以整段参数一起省掉
-    # 不能传空列表：imageio_ffmpeg 在 output_params=[] 时会拼出坏命令并杀掉 ffmpeg（实测 0 帧）。
-    # 没有滤镜就显式给个 null，等价于不处理。
-    out_params = ["-vf", ",".join(vf)]
-    # 解码走 _hwaccel 的候选链（cuda → d3d11va → qsv → none）：硬解起不来/吐不出帧
-    # 就地换软解，绝不把异常抛给抽取流程。first=True 顺带验一帧，防「有头无帧」。
-    gen, meta, first_frame = _open_video(str(src), out_params, first=True,
-                                        in_params=in_params)
-    W, H = meta.get("size") or (0, 0)
-    if not W or not H:
-        try: gen.close()
-        except Exception: pass
-        _job_fail("_align_stream/解码", RuntimeError("解不出分辨率，视频打不开或没有视频流：%s" % src))
-        return 0
-    dur = float(meta.get("duration") or 0)
-    total_est = max(1, int(dur * max(0.01, float(fps)))) if dur else 1
+        _probe = _as_bgr(_imread_any(_files[0]))
+        if _probe is None:
+            _job_fail("_align_stream/输入",
+                      RuntimeError("第一张图读不出来（损坏或不是图片）：%s" % _files[0]))
+            return 0
+        H, W = _probe.shape[:2]
+        total_est = len(_files)
+        dur = 0.0
 
-    # 续跑指纹：核对 + **每次跑完都刷新**（首跑也得写，否则下一次没得比）。
-    # 告警只在「目录里已有同号帧」时才发 —— 首跑没有续跑可言。
-    _resume_n = len(done_idx)
-    _diff = _note_resume_src(face_dir, src, W, H, dur, _resume_n)
+        def _file_gen():
+            for _f in _files[1:]:
+                _im = _as_bgr(_imread_any(_f))
+                if _im is None:
+                    continue
+                if _im.shape[0] != H or _im.shape[1] != W:
+                    _im = cv2.resize(_im, (W, H), interpolation=cv2.INTER_AREA)
+                yield _im.tobytes()
+
+        gen = _file_gen()
+        first_frame = _probe.tobytes()
+        _resume_n = len(done_idx)
+        _diff = _note_resume_src(face_dir, src, W, H, 0.0, _resume_n)
+    else:
+        in_params = _hwaccel.input_params(str(src))     # 触发（或命中）一次探测，下面复用
+        norm = _hwaccel.normalize_filter()              # 硬解：先回 yuv420p 再转 BGR
+        if norm:
+            vf.append(norm)
+
+        # 视频模式的 setup（滤镜/打开/分辨率/时长/续跑指纹）
+        out_params = ["-vf", ",".join(vf)]
+        gen, meta, first_frame = _open_video(str(src), out_params, first=True,
+                                            in_params=in_params)
+        W, H = meta.get("size") or (0, 0)
+        if not W or not H:
+            try: gen.close()
+            except Exception: pass
+            _job_fail("_align_stream/解码", RuntimeError("解不出分辨率，视频打不开或没有视频流：%s" % src))
+            return 0
+        dur = float(meta.get("duration") or 0)
+        total_est = max(1, int(dur * max(0.01, float(fps)))) if dur else 1
+        _resume_n = len(done_idx)
+        _diff = _note_resume_src(face_dir, src, W, H, dur, _resume_n)
+
+
     if _resume_n and _diff:
         _log("[align] 续跑命中 %d 帧，源素材与上次不同（%s）—— 这些帧号可能属于另一段素材"
              % (_resume_n, _diff))

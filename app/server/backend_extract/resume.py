@@ -12,6 +12,10 @@ import os
 import time
 from pathlib import Path
 
+# 续跑告警要写进 JOB（前端横幅）。这里以前没导入 —— 平时不动到告警分支就看不出来，
+# 一旦「aligned/ 里已有同号帧 + 换了源素材」就会 NameError，整个提取直接失败。
+from .._common.jobs import JOB
+
 # ---------------- 续跑指纹：同一项目换了源素材 ----------------
 # 完成判据是按**帧号**做的（done_idx，见 _align_stream）：换一段素材时帧号从 0 重排，
 # 旧帧就会被当成「已完成」整段跳过 —— 静默少抽，且一个字节的日志都不留。
