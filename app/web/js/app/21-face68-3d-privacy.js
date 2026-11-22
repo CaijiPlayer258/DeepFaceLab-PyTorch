@@ -130,6 +130,22 @@
   }
   window.bindPickPaths = bindPickPaths;
 
+  /* 路径框统一去引号：从资源管理器「复制为路径」粘进来的值带双引号，
+     带引号的字符串 Path 打不开 —— 后端也会清，但界面先改掉，
+     用户才不会以为路径真的不存在。 */
+  function cleanPathValue(el) {
+    if (!el || el.tagName !== "INPUT" || !el.value) return;
+    var t = el.value.trim();
+    while (t.length && /[\s"\u201c\u201d]/.test(t.charAt(0))) t = t.slice(1);
+    while (t.length && /[\s"\u201c\u201d]/.test(t.charAt(t.length - 1))) t = t.slice(0, -1);
+    if (t !== el.value) el.value = t;
+  }
+  window.cleanPathValue = cleanPathValue;
+  document.addEventListener("change", function (e) {
+    var el = e.target;
+    if (el && el.classList && el.classList.contains("pathval")) cleanPathValue(el);
+  }, true);
+
   function bindDropPaths() {
     document.querySelectorAll(".pathinp").forEach(function (box) {
       if (box.dataset.drop) return;

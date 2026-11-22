@@ -252,8 +252,8 @@ def start_frames(payload: dict | None = None):
     """POST {src, dst, mode:'fps'|'every', value, fmt:'jpg'|'png', quality, from, to}"""
     global _THREAD
     payload = payload or {}
-    src = Path(str(payload.get("src") or "").strip().strip('"'))
-    dst_raw = str(payload.get("dst") or "").strip().strip('"')
+    src = Path(str(payload.get("src") or "").strip().strip('\'"“”').strip())
+    dst_raw = str(payload.get("dst") or "").strip().strip('\'"“”').strip()
     mode = str(payload.get("mode") or "all")   # all = 全切（默认）
     try:
         value = float(payload.get("value") or (2 if mode == "fps" else 1))

@@ -71,8 +71,11 @@ def _resolve_dir(dst: str) -> Path:
 def extract_start(payload: dict | None = None):
     """真抽帧：src = 视频文件，dst = 输出目录（默认 workspace/_frames），fps = 抽帧频率。"""
     payload = payload or {}
-    src = (payload.get("src") or "").strip()
-    dst = (payload.get("dst") or "").strip()
+    # 资源管理器「复制为路径」给的是 "D:\..." —— 带引号。以前只 strip 空白，
+    # 于是 Path 拿到的字面量里含引号，exists() 永远 False，报「路径不存在」/「视频不存在」。
+    # 这里统一去掉首尾引号（半角/全角都算），空白在引号内外都清。
+    src = (payload.get("src") or "").strip().strip('\'"“”').strip()
+    dst = (payload.get("dst") or "").strip().strip('\'"“”').strip()
     fps = float(payload.get("fps") or 2)
     skip = int(payload.get("skip") or 0)      # 每 N 帧取 1；给了就以源帧率为准换算 fps
     rotate = int(payload.get("rotate") or 0)
