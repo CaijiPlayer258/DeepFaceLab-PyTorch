@@ -47,8 +47,18 @@
   function setState(t) { if (state) state.textContent = t; }
   function setBtn(t) { btn.textContent = t; }
 
+  /* 版本角标用「v4.1 + 蓝色日期标签」，和关于页表格里的写法一致；
+     只有大版本号放正文，日期做成 tag，一行里不会被一串数字撑开。 */
+  function verBadge(raw) {
+    var v = String(raw || "").replace(/^v/, "");
+    var m = v.match(/^(\d+\.\d+)-(\d{2})(\d{2})(?:-b(\d+))?/);
+    if (!m) return "v" + v;
+    return "v" + m[1] + ' <span class="tag t-blue" style="margin-left:6px;vertical-align:1px">' +
+           m[2] + "-" + m[3] + (m[4] ? " · B" + m[4] : "") + "</span>";
+  }
+
   fetch("/api/update/version").then(function (r) { return r.json(); })
-    .then(function (j) { if (local) local.textContent = "当前 " + (j.human || ("v" + j.version)); })
+    .then(function (j) { if (local) local.innerHTML = verBadge(j.version); })
     .catch(function () {});
 
   btn.addEventListener("click", function () {
@@ -71,11 +81,11 @@
       if (j.behind) {
         MODE = "install";
         setBtn("下载并安装");
-        setState("发现新版本 " + (j.remote || j.tag || ""));
+        setState("发现新版本");
       } else {
         MODE = "check";
         setBtn("检查更新");
-        setState("已是最新（" + j.local + "）");
+        setState("已是最新");
       }
     }).catch(function (e) {
       btn.disabled = false;
