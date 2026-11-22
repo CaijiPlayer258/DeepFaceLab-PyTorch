@@ -108,3 +108,8 @@ app/docs/notes/inter_study/cand*/
 
 # 更新程序的覆盖前备份（历史上放在项目根，已改到 workspace/）
 .backup-*
+
+# 启动入口压缩包：本地发布用，不进仓库
+/启动入口.zip
+*.zip
+!app/**/*.zip
