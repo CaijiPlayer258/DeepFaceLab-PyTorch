@@ -4514,7 +4514,7 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
 .loadbanner .lbico{display:inline-flex;align-items:center;justify-content:center;
   width:16px;height:16px;flex:none;color:var(--warn,#f0b429);font-style:normal}
 .loadbanner .lbico svg,.loadbanner .lbico.ic{width:16px;height:16px;display:block}
-.loadbanner .alhd b{color:var(--warn,#f0b429)}
+.loadbanner .alhd b{color:var(--ink)}
 .loadbanner .albd{white-space:pre-line}
 .loadbanner .lblist{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .loadbanner .lblist:empty{display:none}
@@ -6494,21 +6494,22 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 
 
 
-/* 蓝色 info 变体：复用 .alert.loadbanner 的结构（左侧强调条 / 圆点图标 / 标题 / × ），
-   只换配色。用于「状态型提示」：预训练结束重置了 inter、之后按新设置继续训练等。
-   与 .warn（黄，异常）区分开：蓝 = 正常但需要知道的事。 */
-.alert.info{border-color:rgba(91,140,255,.40);background:rgba(91,140,255,.08)}
-.loadbanner.info .lbico{color:var(--accent,#5b8cff)}
-.loadbanner.info .alhd b{color:var(--accent,#5b8cff)}
-html:not(.dark) .alert.info{border-color:rgba(37,99,235,.30);background:rgba(37,99,235,.06)}
-html:not(.dark) 
-html:not(.dark) .loadbanner.info .lbico{color:#1d4ed8}
-html:not(.dark) .loadbanner.info .alhd b{color:#1d4ed8}
+/* info 变体：配色跟品牌同色系（--brand #5d6ccf）。
+   之前用的是亮青蓝 rgba(91,140,255)，放在深色面板上发紫、跟其它控件不搭，所以改成品牌色。 */
+.alert.info{border-color:rgba(93,108,207,.45);background:rgba(93,108,207,.10)}
+.loadbanner.info .lbico{color:#8b98e8}
+html:not(.dark) .alert.info{border-color:rgba(93,108,207,.28);background:rgba(93,108,207,.07)}
+html:not(.dark) .loadbanner.info .lbico{color:#4e5bbb}
 
-/* danger 变体补齐：圆点和标题都要跟着变红。
-   之前只给 info 写了覆盖，danger 的图标会退回 .loadbanner 的默认黄色，
-   于是出现“红色卡片配黄色感叹号”的混搭。 */
+/* 状态色只用在边框 / 底色 / 图标上；info 和 warn 的标题与正文保持灰白，别染色 */
+.loadbanner.info .alhd b,
+.loadbanner.warn .alhd b{color:var(--ink)}
+.loadbanner .albd{color:var(--ink-2)}
+
+/* danger 是唯一例外：标题和正文整条都用红色 */
 .loadbanner.danger .lbico{color:var(--bad,#e05555)}
-.loadbanner.danger .alhd b{color:var(--bad,#e05555)}
-html:not(.dark) .loadbanner.danger .lbico{color:#b91c1c}
-html:not(.dark) .loadbanner.danger .alhd b{color:#b91c1c}
+.loadbanner.danger .alhd b,
+.loadbanner.danger .albd{color:var(--bad,#e05555)}
+html:not(.dark) .loadbanner.danger .lbico,
+html:not(.dark) .loadbanner.danger .alhd b,
+html:not(.dark) .loadbanner.danger .albd{color:#b91c1c}
