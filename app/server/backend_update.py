@@ -48,7 +48,10 @@ def _get_json(url: str, timeout: int = 15) -> Dict[str, Any]:
         return json.loads(resp.read().decode("utf-8"))
 
 
-# 版本号格式：MAJOR.MINOR.YY.MMDD.HHMM（见 app/tools/bump_version.py）
+# 版本号格式：MAJOR.MINOR-MMDD[-bN]（见 app/tools/bump_version.py）
+#   4.1-1122        11-22 当天第一版
+#   4.1-1122-b2     当天第二版
+_VER_DATE = re.compile(r"^v?(\d+)\.(\d+)-(\d{2})(\d{2})(?:-b(\d+))?$")
 _VER_TIME = re.compile(r"^(\d+)\.(\d+)\.(\d{2})\.(\d{4})\.(\d{4})$")
 
 
@@ -59,6 +62,15 @@ def parse_version(v=None) -> Dict[str, Any]:
     不认识的格式（老版本 4.1.1）也能正常显示。
     """
     v = (v if v is not None else local_version()).strip()
+    md = _VER_DATE.match(v)
+    if md:
+        major, minor, mm, dd, b = md.groups()
+        build = int(b or 1)
+        human = "v%s.%s \u00b7 %s-%s" % (major, minor, mm, dd)
+        if build > 1:
+            human += " \u00b7 B%d" % build
+        return {"version": v, "base": "%s.%s" % (major, minor), "build": build,
+                "when": None, "human": human}
     m = _VER_TIME.match(v)
     if not m:
         return {"version": v, "base": v, "when": None, "human": "v" + v}
@@ -75,11 +87,15 @@ def parse_version(v=None) -> Dict[str, Any]:
 
 
 def _ver_tuple(v: str) -> tuple:
-    out = []
-    for part in v.replace("v", "").split("."):
-        num = "".join(ch for ch in part if ch.isdigit())
-        out.append(int(num) if num else 0)
-    return tuple(out)
+    # 4.1-1122 / 4.1-1122-b2：日期固定四位，直接比 (major, minor, MMDD, build)
+    v = (v or "").strip()
+    md = _VER_DATE.match(v)
+    if md:
+        major, minor, mm, dd, b = md.groups()
+        return (int(major), int(minor), int(mm + dd), int(b or 1))
+    # 旧格式（4.1.2 / 4.1.26.1122.2310）一律当「更早」：
+    # 它们没有日期段，混进新格式里比较没有意义（4.1-200 会被拆成 (4,1200) 排到 4.1-1122 前面）。
+    return (0, 0, 0, 0)
 
 
 def check() -> Dict[str, Any]:

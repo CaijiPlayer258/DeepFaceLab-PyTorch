@@ -70,8 +70,8 @@
       }
       if (j.behind) {
         MODE = "install";
-        setBtn("下载并安装 " + j.tag);
-        setState("发现新版本（" + j.package + "）");
+        setBtn("下载并安装");
+        setState("发现新版本 " + (j.remote || j.tag || ""));
       } else {
         MODE = "check";
         setBtn("检查更新");
@@ -91,21 +91,12 @@
     fetch("/api/update/progress").then(function (r) { return r.json(); }).then(function (p) {
       if (!p || !p.running) return;
       var pct = Math.max(0, Math.min(100, p.pct || 0));
-      if (state) {
-        state.innerHTML = '<span class="upd-prog"><i style="width:' + pct + '%"></i></span>' +
-                         '<span class="upd-msg">' + (p.msg || p.phase || "处理中…") +
-                         (p.total ? ("  " + (p.done / 1048576).toFixed(1) + " / " + (p.total / 1048576).toFixed(1) + " MB") : "") +
-                         "</span>";
-      }
+      var bar = document.getElementById("updProg");
+      if (bar) { bar.classList.remove("hide"); bar.firstElementChild.style.width = pct + "%"; }
+      var t = p.msg || "处理中…";
+      if (p.total) t += "  " + (p.done / 1048576).toFixed(1) + " / " + (p.total / 1048576).toFixed(1) + " MB";
+      setState(t);
     }).catch(function () {});
-  }
-
-  function doRestart() {
-    btn.disabled = true;
-    setState("正在重启…");
-    var api = window.desktop;
-    if (api && api.restart) { api.restart(); return; }
-    fetch("/api/app/restart", { method: "POST" }).catch(function () {});
   }
   function doInstall() {
     if (!INFO || !INFO.behind) return;
@@ -119,6 +110,8 @@
       body: JSON.stringify({ asset: INFO.asset ? INFO.asset.name : null })
     }).then(function (r) { return r.json(); }).then(function (j) {
       stopPoll();
+      var bar0 = document.getElementById("updProg");
+      if (bar0) { bar0.firstElementChild.style.width = "100%"; }
       btn.disabled = false;
       if (!j.ok) { setState("安装失败：" + (j.error || "")); return; }
       if (!j.installed) { setState(j.message || "已是最新"); return; }

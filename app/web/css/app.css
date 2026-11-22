@@ -6590,10 +6590,12 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   color: var(--ink); }
 .updnotes .upd-empty { color: var(--ink-3); }
 
-/* 安装进度：一条细条 + 一行文字，不弹窗、不挡操作 */
-#updState { display: inline-flex; align-items: center; gap: 10px; }
-#updState .upd-prog { width: 160px; height: 5px; border-radius: 999px;
-  background: var(--line); overflow: hidden; display: inline-block; }
-#updState .upd-prog i { display: block; height: 100%; border-radius: 999px;
+
+/* 更新卡片：按钮 → 进度条 → 状态文字，竖着排。
+   以前进度条塞在状态文字里、和按钮同一行，换行后位置乱跳。 */
+.updrow { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.updprog { width: 100%; max-width: 420px; height: 5px; border-radius: 999px;
+  background: var(--line); overflow: hidden; }
+.updprog i { display: block; height: 100%; width: 0; border-radius: 999px;
   background: var(--brand); transition: width .25s ease; }
-#updState .upd-msg { color: var(--ink-2); }
+#updState:empty { display: none; }

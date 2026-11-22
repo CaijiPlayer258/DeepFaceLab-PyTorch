@@ -1540,9 +1540,10 @@
 
         <div class="card" id="updCard" style="margin-top:14px">
           <div class="cardhd"><b>版本与更新</b><span class="hint" id="updLocal">—</span></div>
-          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <div class="updrow">
             <button class="btn" id="updCheck" type="button">检查更新</button>
-            <span id="updState" class="hint">—</span>
+            <div class="updprog hide" id="updProg"><i></i></div>
+            <span id="updState" class="hint"></span>
           </div>
           <div id="updNotes" class="updnotes" style="display:none"></div>
         </div>
