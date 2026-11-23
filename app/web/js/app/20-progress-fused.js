@@ -718,7 +718,11 @@
             if (window.MODELS) renderMerge(window.MODELS);
           } else {
             if (btn) { btn.disabled = false; btn.textContent = "导出"; }
-            toast("导出失败", d.error || "看控制台日志", "error");
+            /* 用户只会截图：把进程的真实输出（traceback 末尾）直接放进 toast，
+               而不是一句「看控制台日志」。error 为空时就用日志尾部。 */
+            var tail = (d.log || []).slice(-12).join("\n").trim();
+            var head = String(d.error || "").trim();
+            toast("导出失败", head ? (head + (tail ? "\n\n" + tail : "")) : (tail || "导出进程没有输出"), "error");
             console.warn("export log", (d.log || []).join("\n"));
           }
         }

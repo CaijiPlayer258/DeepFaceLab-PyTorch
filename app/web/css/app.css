@@ -6314,3 +6314,11 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   background:var(--brand); display:inline-block; flex:none; }
 /* 模块行（设计稿 .mod）与现有 cvrowi 对齐：加一列说明 */
 #p-train-convert .cvrowi .c { font-variant-numeric:tabular-nums; }
+
+/* 报错 toast：正文是完整 traceback，要能读、能滚、能截图 */
+.toast[data-type="error"] .ts{white-space:pre-wrap;word-break:break-word;
+  font-family:var(--mono);font-size:11.5px;line-height:1.55;
+  max-height:46vh;overflow:auto;margin-top:6px}
+.toast[data-type="error"]{max-width:min(760px, 92vw)}
+/* 错误 toast 没有倒计时条，底部留一点对称的内边距 */
+.toast[data-type="error"]{padding-bottom:12px}

@@ -786,6 +786,9 @@
     if (!root) return null;
     var meta = TOAST_META[type] || TOAST_META.success;
     var life = (typeof ms === "number" && ms > 400) ? ms : 3600;
+    /* 报错不自动消失、也不画底部倒计时条：用户通常只会截个图，
+       倒计时一到就没了等于把唯一的线索丢掉。要关自己点 ×。 */
+    var sticky = (type === "error");
 
     var el = document.createElement("div");
     el.className = "toast";
@@ -793,9 +796,10 @@
     el.innerHTML =
       '<svg class="ic ti" style="stroke:' + meta.color + ';opacity:1"><use href="' + meta.icon + '"/></svg>' +
       '<div><div class="tt">' + title + '</div><div class="ts">' + (sub || "") + '</div></div>' +
-      '<button class="tx">×</button><div class="tb"><i></i></div>';
+      '<button class="tx">×</button>' + (sticky ? "" : '<div class="tb"><i></i></div>');
     el.querySelector(".tx").addEventListener("click", function () { dismissToast(el); });
-    el.querySelector(".tb i").style.animationDuration = life + "ms";
+    var _tb = el.querySelector(".tb i");
+    if (_tb) _tb.style.animationDuration = life + "ms";
     root.appendChild(el);
     /* shadcn 的 toast 有 TOAST_LIMIT（默认只留最新几条），不会无限堆 */
     var alive = root.querySelectorAll(".toast:not([data-leaving])");
@@ -806,7 +810,7 @@
     layoutToasts();
     requestAnimationFrame(layoutToasts);
     if (window.I18N) window.I18N.refresh();
-    setTimeout(function () { dismissToast(el); }, life);
+    if (!sticky) setTimeout(function () { dismissToast(el); }, life);
     return el;
   }
   window.toast = toast;
