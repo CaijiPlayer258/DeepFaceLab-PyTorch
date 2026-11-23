@@ -11,7 +11,13 @@ import os, sys, warnings, threading, time, pickle
 from pathlib import Path
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# 这个脚本从 app/engine/tools/ 搬到了 app/tools/migrate/，parent.parent 变成了 app/tools，
+# 于是 `from core.interact import ...` 直接 ModuleNotFoundError: No module named 'core'
+# （导出 dfm 一律退出码 1 就是这个）。引擎的包在 app/engine 下，两个目录都要在 sys.path 里。
+_APP = Path(__file__).resolve().parents[2]        # app/
+sys.path.insert(0, str(_APP / 'engine'))          # core / models / mainscripts
+sys.path.insert(0, str(_APP))                     # app.* 下的辅助包
+sys.path.insert(0, str(_APP / 'tools'))           # 同目录的兄弟脚本
 
 warnings.filterwarnings('ignore',
     message=r'Constant folding - Only steps=1 can be constant folded.*onnx::Slice.*',
