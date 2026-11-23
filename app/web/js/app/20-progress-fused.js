@@ -250,6 +250,11 @@
       mgpFusedPaint({ running: true, msg: "启动快速导出…", vid: {} });
       document.dispatchEvent(new CustomEvent("merge:export-start", { detail: payload }));
 
+      /* 先把轮询挂上再发请求。
+         后端的同步阶段（读人脸库 / 显存闸门 / 预装 sd 会话 + 批大小探测）可能要很久，
+         以前要等 POST 返回才开始轮询，这段时间界面一动不动、看起来就是卡死。
+         轮询是幂等的（mgFusedPoll 内部会先 stop 再起），POST 返回后重复调用无害。 */
+      mgFusedPoll();
 
       fetch("/api/merge/export", {
         method: "POST", headers: { "Content-Type": "application/json" },

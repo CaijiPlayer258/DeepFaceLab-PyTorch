@@ -2058,6 +2058,9 @@ def _fused_run(cfg: dict) -> dict:
     # dfm 批大小阶梯（_pred_pick_batch）会真的跑几次空张量前向来量耗时：留在流水线里会让
     # 开头 1~2 秒的 GPU 被它占着（120 帧的片子那是 15% 的开销）。单模型这条最常见的路
     # 提前在这里跑掉 —— 既预热了 session，也让测速窗口干净。
+    with _merge_job_lock:
+        _merge_job["msg"] = "探测 dfm 批大小（会跑几次空张量前向）…"
+        _merge_job["updated_at"] = time.time()
     try:
         _batch_for(str(cfg["dfm"]))
     except Exception as e:                                     # noqa: BLE001
@@ -2242,6 +2245,12 @@ def _fused_run(cfg: dict) -> dict:
     for _x in _pre_dfms:
         _t_pre = time.time()
         _vid_log("快速导出：预装会话 %s …" % Path(_x).name)
+        # 预装要几秒到几十秒（ONNX 加载 + warm + CUDA Graph 捕获），进度条这段时间是 0。
+        # 以前用户在导出设置页干等，什么都看不到 —— 把这一步写进 job.msg，
+        # 前端轮询就能显示「加载模型会话 xxx.dfm」。
+        with _merge_job_lock:
+            _merge_job["msg"] = "加载模型会话 %s …" % Path(_x).name
+            _merge_job["updated_at"] = time.time()
         try:
             _dfm_session(_x)
             _vid_log("快速导出：会话就绪 %s（%.1fs）" % (Path(_x).name, time.time() - _t_pre))
