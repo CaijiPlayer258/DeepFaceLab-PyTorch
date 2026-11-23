@@ -189,11 +189,12 @@ def start(name: str) -> dict:
 
     def worker():
         try:
-            # 转换 = TF .npy -> torch .pth，只做这一件事。
-            # 导出 .dfm 是另一条路（模型卡片上的「导出」），这里绝不碰它 ——
-            # 以前走去 export_dfm.py 会顺带生成几百 MB 的 .dfm，属于重复语言。
-            cmd = [str(exe), str(conv), "--src", str(md), "--dst", str(md),
-                   "--model", stem.rsplit("_", 1)[-1] or "SAEHD", "--name", stem]
+            # 走 4.0 那条路：export_dfm.py 里的 convert_npy_to_pth()（它才是真正
+            # 被 4.0 合成器「转换并导出 DFM」调到的代码 —— models.import_model(is_exporting=True)
+            # 读 npy，model.save() 写 pth）。加 --pth-only 就只转 pth，不导 .dfm。
+            cmd = [str(exe), str(_migrate_dir() / "export_dfm.py"),
+                   "--model", stem.rsplit("_", 1)[-1] or "SAEHD",
+                   "--model-dir", str(md), "--force-name", stem, "--pth-only"]
             _log("$ " + " ".join(cmd))
             proc = subprocess.Popen(
                 cmd, cwd=str(_dfl_root()),
