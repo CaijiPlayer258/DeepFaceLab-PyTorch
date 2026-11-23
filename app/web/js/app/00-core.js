@@ -192,6 +192,73 @@
 
   /* 模型转换页：设计稿（convert-page-live.html）里没有列表 —— 进来要么是在跑的那张卡，
      要么什么都没有（从模型卡片点「转换」时，那边已经设好 __cvPick 并由 start() 直接接管）。 */
+  /* ---- 转换卡片的渲染（顶层，和 cvRun 在一起）---- */
+  var CV_SPIN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" ' +
+                'stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.6"/></svg>';
+  function cvStepSet(id, cls, mark) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.className = "cvstep " + (cls || "");
+    var ic = el.querySelector(".cvic");
+    if (ic) ic.innerHTML = (mark === "spin") ? CV_SPIN : String(mark);
+  }
+  function cvRowsHtml(mods) {
+    return (mods || []).map(function (m) {
+      var on = m.state === "ok" ? "ok"
+             : (m.state === "run" ? "run"
+             : ((m.state === "err" || m.state === "bad") ? "bad" : ""));
+      var mk = on === "ok" ? "✓" : (on === "run" ? "›" : (on === "bad" ? "!" : "·"));
+      var cnt;
+      if (on === "ok") cnt = (m.total || m.items || 0) + " 项";
+      else if (on === "run") cnt = (m.items || 0) + " / " + (m.total || "?") + " 项";
+      else if (on === "bad") cnt = "失败";
+      else cnt = m.total ? (m.total + " 项") : "—";
+      var html = '<div class="cvrowi ' + on + '">' +
+                 '<span class="mk">' + mk + '</span>' +
+                 '<span class="n">' + String(m.name == null ? "" : m.name) + '</span>' +
+                 '<span class="c">' + cnt + '</span>';
+      if (on === "bad" && m.reason) html += '<div class="cvreason">' + String(m.reason) + "</div>";
+      return html + "</div>";
+    }).join("");
+  }
+  function cvPaint(st) {
+    var card = document.getElementById("cvCard");
+    if (!card) return;
+    st = st || {};
+    card.style.display = "";
+    var mods = st.modules || [];
+    var nm = document.getElementById("cvName");
+    if (nm) nm.textContent = st.name || "未开始";
+    var mt = document.getElementById("cvMeta");
+    if (mt) {
+      var bits = [];
+      if (st.arch) bits.push(String(st.arch).toUpperCase());
+      if (mods.length) bits.push(mods.length + " 个模块");
+      mt.textContent = bits.join(" · ");
+    }
+    var isErr = st.step === "error";
+    var isIdle = !st.step || st.step === "idle";
+    var bd = document.getElementById("cvBad");
+    if (bd) bd.className = "cvbadge" + (isErr ? " on" : "");
+    card.classList.toggle("bad", isErr);
+
+    if (isIdle) {
+      cvStepSet("cvS1", "", "1"); cvStepSet("cvS2", "", "2"); cvStepSet("cvS3", "", "3");
+    } else if (st.step === "load") {
+      cvStepSet("cvS1", "on open", "spin"); cvStepSet("cvS2", "", "2"); cvStepSet("cvS3", "", "3");
+    } else if (st.step === "convert") {
+      cvStepSet("cvS1", "done", "✓"); cvStepSet("cvS2", "on open", "spin"); cvStepSet("cvS3", "", "3");
+    } else if (st.step === "done") {
+      cvStepSet("cvS1", "done", "✓"); cvStepSet("cvS2", "done", "✓"); cvStepSet("cvS3", "done", "✓");
+    } else if (isErr) {
+      cvStepSet("cvS1", "done", "✓"); cvStepSet("cvS2", "err open", "!"); cvStepSet("cvS3", "", "3");
+    }
+
+    var r1 = document.getElementById("cvRows1"), r2 = document.getElementById("cvRows2");
+    if (r1) r1.innerHTML = cvRowsHtml(mods);
+    if (r2) r2.innerHTML = cvRowsHtml(mods);
+  }
+  window.__cvPaint = cvPaint;
   /* ---- 转换：直接调接口 + 自己轮询。不依赖文件末尾那个 IIFE 里的 __cvStart，
          它历史上挂没挂上不稳，导致点「转换」只弹一句「转换器还没就绪」。 ---- */
   var CV_TIMER = null;
@@ -209,7 +276,7 @@
     if (CV_TIMER) clearTimeout(CV_TIMER);
     CV_TIMER = setTimeout(function () {
       cvApi("/api/convert/status").then(function (st) {
-        if (window.__cvPaint) window.__cvPaint(st);
+        cvPaint(st);
         if (st && st.running) { cvPoll(); } else { CV_TIMER = null; }
       }).catch(function () { CV_TIMER = null; });
     }, 400);
@@ -224,7 +291,7 @@
     }).catch(function (e) {
       var msg = String((e && e.message) || e);
       if (window.toast) toast("转换启动失败", msg, "error");
-      if (window.__cvPaint) window.__cvPaint({ step: "error", name: name, modules:
+      cvPaint({ step: "error", name: name, modules:
         [{ name: "启动转换", state: "bad", reason: msg }] });
     });
   }
@@ -264,11 +331,11 @@
     }
 
     fetch("/api/convert/status").then(function (r) { return r.json(); }).then(function (st) {
-      if (!window.__cvPaint || !st) return;
-      if (st.running || st.step === "error" || st.step === "done") window.__cvPaint(st);
+      if (!st) return;
+      if (st.running || st.step === "error" || st.step === "done") cvPaint(st);
     }).catch(function (e) {
-      if (!window.__cvPaint) return;
-      window.__cvPaint({ step: "error", name: "状态读取失败", modules:
+      return;
+      cvPaint({ step: "error", name: "状态读取失败", modules:
                         [{ name: "/api/convert/status", state: "bad", reason: String((e && e.message) || e) }] });
     });
   }

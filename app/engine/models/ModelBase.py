@@ -1040,8 +1040,15 @@ class ModelBase(object):
                 old_dir.mkdir(exist_ok=True)
                 for npy in npy_files:
                     dest = old_dir / npy.name
-                    if not dest.exists():
+                    # 以前是「old/ 里有同名就跳过」—— 于是重复转换时源 .npy 永远留在
+                    # model/ 里，看起来像「压根没归档」。这里改成覆盖：old/ 里留最新一份，
+                    # model/ 里那批 .npy 一定要挪走。
+                    try:
+                        if dest.exists():
+                            dest.unlink()
                         shutil.move(str(npy), str(dest))
+                    except Exception as _e:
+                        io.log_err(f"archive {npy.name} failed: {_e}")
                 # 同时备份 _data.dat 到 old/
                 dat_path = self.model_data_path
                 if dat_path.exists():
