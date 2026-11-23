@@ -393,7 +393,7 @@ def _start_video_export(body: dict):
     _dfm_raw = []
     _dfm_set = set()
     for _m in (body.get("models") or []):
-        _p = str((_m or {}).get("dfm") or "").strip()
+        _p = str((_m or {}).get("dfm") or (_m or {}).get("name") or "").strip()
         if _p:
             _dfm_raw.append(_p)
             _k = _dfm_key(_p)
@@ -402,9 +402,8 @@ def _start_video_export(body: dict):
     # force_passes：调试/验收用，单模型也走分趟 —— 只有它能和快速导出做「同分配对拍」。
     # 让"这一单到底走哪条路"可见：之前前端没有任何地方能看出后端选了 fused，
     # 用户选了 2 个模型却看到六列图时无从判断是"没传上去"还是"传上去但被判成 1 个"。
-    # 后端再判一次：接口只拿到 1 个 dfm（或一个都没有）时，看**人脸库**里有几个组。
-    # 库里有两个组 = 两个不同模型要换不同的人，这就是 passes 的判据；
-    # 以前只看 body.models，前端少传一个就整单退化成 fused（用户看到"池没了"）。
+    # 库里的组数为**只读信息**：它曾经参与判「几个模型」，但默认库是所有视频共用的，
+    # 别的素材留下的组会让单模型的一单被拆成多趟。现在只用它打日志。
     _lib_dfms = []
     try:
         from .compose import _auto_library
@@ -415,26 +414,26 @@ def _start_video_export(body: dict):
                 _p2 = str(_g.get("dfm") or "").strip()
                 if _p2 and _p2 not in _lib_dfms:
                     _lib_dfms.append(_p2)
-        for _p2 in _lib_dfms:
-            _k2 = _dfm_key(_p2)
-            if _k2 and _k2 not in _dfm_set:
-                _dfm_set.add(_k2)
+        # 库里的组只记日志、**不再并进 _dfm_set**：默认库 <工作区>/merge 是所有视频共用的，
+        # 别的素材留下的组会一直堆在里面。拿它判「几个模型」，单模型的一单就被拆成多趟，
+        # 整段视频白跑一遍。到底用哪些模型以请求里的 models 为准（前端只传左栏选中项）。
+        pass
     except Exception as _e:                                    # noqa: BLE001
         _vid_log("导出模式：读人脸库失败（%s）" % str(_e)[:100])
     # 逐条记下来（名字 + faces），这样"前端到底传了什么"一眼可见，
     # 不用再去猜是丢了模型还是丢了 faces。
     _names = ["%s%s" % (str((m or {}).get("name") or ""), (m or {}).get("faces") or [])
               for m in (body.get("models") or [])]
-    _vid_log("导出模式：distinct dfm=%d（%s）· models=%s → %s"
-             % (len(_dfm_set), (_names + ["库:" + len(_lib_dfms).__str__()]),
+    _vid_log("导出模式：distinct dfm=%d（%s）· models=%s · 库组=%s → %s"
+             % (len(_dfm_set), sorted(_dfm_set), _names, len(_lib_dfms),
                 "分趟（passes）" if (len(_dfm_set) > 1 or _bool_val(body.get("force_passes"), False))
                 else "快速导出（fused）"))
     _mode_pick = ("passes" if (len(_dfm_set) > 1 or _bool_val(body.get("force_passes"), False))
                   else "fused")
     with _merge_job_lock:
         _merge_job["mode"] = _mode_pick
-        _merge_job["mode_why"] = ("distinct dfm=%d（body=%d + 库=%d）"
-                                  % (len(_dfm_set), len(_names), len(_lib_dfms)))
+        _merge_job["mode_why"] = ("distinct dfm=%d（库里有 %d 个组，不参与判定）"
+                                  % (len(_dfm_set), len(_lib_dfms)))
     if _mode_pick == "passes" and fused:
         return _start_passes_export(body)
     cfg = _fused_cfg(body) if fused else _stage_cfg(body, "frames", chain=True)
