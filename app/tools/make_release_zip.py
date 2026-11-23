@@ -19,7 +19,17 @@ ROOT = Path(__file__).resolve().parents[2]
 INCLUDE = ("app", "desktop", "tools", "version.txt", "README.md", "README_EN.md", "LICENSE")
 SKIP_DIRS = {"__pycache__", "node_modules", ".git", "dist", "workspace", "runtime", ".backup"}
 SKIP_SUFFIX = {".pth", ".dfm", ".onnx", ".engine", ".npz", ".mp4", ".zip", ".7z", ".exe", ".dll", ".pyd"}
-SKIP_IMAGE_DIRS = ("app/docs/readme", "app/docs/notes", "app/web/img", "desktop/build")
+# 整个 app/docs 都不进包：它是开发文档 + 旧 Qt 代码参考（legacy-reference），
+# 约 16 MB，其中一半是会话对比图和旧界面截图。运行时没有任何代码 import 它，
+# 只有注释里引用路径 —— 最终用户不需要，更新时白下载十几兆。
+# 需要查文档的人看仓库本身。
+#   app/tools/accept | bench | shots：验收脚本、基准、截图工具，外加 _probe 里的调试产物
+#   （dbg_frames.png 一张就 0.8 MB）。这些是开发用的，server 不 import 它们。
+SKIP_PATHS = ("app/docs", "app/tools/accept", "app/tools/bench", "app/tools/shots",
+              "app/tools/audit")
+
+# 仍保留这几条的图片过滤：万一以后有图片放回 app/web 也别把渲染图打进包
+SKIP_IMAGE_DIRS = ("app/web/img", "desktop/build")
 
 
 def want(rel: Path) -> bool:
@@ -28,6 +38,8 @@ def want(rel: Path) -> bool:
     if any(part in SKIP_DIRS for part in rel.parts):
         return False
     posix = rel.as_posix()
+    if any(posix == d or posix.startswith(d + "/") for d in SKIP_PATHS):
+        return False
     if any(posix.startswith(d) for d in SKIP_IMAGE_DIRS) and rel.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
         return False
     return True
