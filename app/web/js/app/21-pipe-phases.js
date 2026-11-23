@@ -244,7 +244,7 @@
          图上的 lane/曲线/光点全是占位。这里只要它还在跑，就确保那条轮询在跑。 */
       if (d && d.mode === 'passes' && d.running && !window.__mgFusedRunning) {
         window.__mgFusedRunning = true;
-        if (typeof window.mgFusedStartPoll === 'function') window.mgFusedStartPoll();
+        if (typeof window.mgFusedPoll === 'function') window.mgFusedPoll();
       }
       if (d && d.mode === 'passes') window.__mgPoolAfter = (d.mask_on === false) ? 'dfm' : 'xseg';
       /* 分趟这条路没有自己的轮询驱动经典图 —— 这里把 status 交给它，

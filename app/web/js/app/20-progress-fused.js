@@ -160,6 +160,27 @@
       }, 250);
     }
 
+    /* 本地「正在导出」标志可能是上一单崩掉后残留的。
+       问一次 /api/merge/export/status：running 才是真在跑，否则一律复位后放行。 */
+    function mgSettleBusy(cb) {
+      fetch("/api/merge/export/status").then(function (r) { return r.json(); }).then(function (d) {
+        if (d && d.running) { cb(true); return; }
+        window.__mergeExporting = false;
+        window.__mgStageRunning = false;
+        window.__mgVramChecking = false;
+        window.__mgForced = 0;
+        if (window.mgpResultHide) window.mgpResultHide();
+        cb(false);
+      }).catch(function () {
+        /* 状态接口也挂了：保守放行，让真请求自己去报错，别把人挡在门外 */
+        window.__mergeExporting = false;
+        window.__mgStageRunning = false;
+        window.__mgVramChecking = false;
+        cb(false);
+      });
+    }
+
+    window.mgSettleBusy = mgSettleBusy;
     function mgFusedExport(payload) {
       payload = payload || {};
       var video = mgVidPath();
@@ -168,7 +189,19 @@
         return;
       }
       if (window.__mergeExporting || window.__mgStageRunning || window.__mgVramChecking) {
-        mgToastOnce("merge-busy", "正在导出", "上一次还没结束", "info");
+        /* 以前这里只弹一句 toast 就 return —— 用户看到「正在导出 / 上一次还没结束」，
+           却始终停在导出设置页，看不到任何进度（导出的进度页压根没切过去）。
+           更糟的是上一单如果崩了没复位，本地标志会一直卡着，永远进不去。
+           现在问一次后端：真在跑就把用户带到进度页；已经结束就复位，接着跑这一单。 */
+        mgSettleBusy(function (reallyRunning) {
+          if (reallyRunning) {
+            toast("正在导出", "下面显示的就是它现在的进度", "info");
+            if (window.mgStep) window.mgStep("progress");
+            mgFusedPoll();
+            return;
+          }
+          mgFusedExport(payload);
+        });
         return;
       }
       var body = {
@@ -239,12 +272,13 @@
         mgFusedStopPoll();
           if (String((e && e.message) || e).indexOf("已经在导出") >= 0) {
             toast("已有导出在跑", "界面显示的就是它现在的进度；要重来请先点取消导出", "info");
-            mgFusedStartPoll();
+            mgFusedPoll();
             return;
           }
           toast("导出未启动", String((e && e.message) || e).slice(0, 140), "error");
       });
     }
+    window.mgFusedPoll = mgFusedPoll;
     window.mgFusedExport = mgFusedExport;
     window.mgpFusedPaint = mgpFusedPaint;
 
