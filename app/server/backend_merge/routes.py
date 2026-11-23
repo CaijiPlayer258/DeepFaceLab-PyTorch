@@ -184,6 +184,9 @@ def merge_videos(dir: str = ""):
     if root is not None and not root.is_dir():
         raise _BadInput("目录不存在：%s" % root, 404)
     roots = [root] if root is not None else [Path(WORKSPACE)]
+    # 默认只看工作区顶层：导入的视频就复制在这一层，子目录留给项目自己的中间产物
+    # （merge/ 里的人脸库、_cache/、data_src/ 之类不该混进素材列表）。
+    # 显式给了 dir 时仍递归，方便按目录整理素材的人。
 
     out, seen = [], set()
     limit, truncated = 200, False
@@ -193,7 +196,11 @@ def merge_videos(dir: str = ""):
     for r in roots:
         if not r.is_dir():
             continue
-        for f in _walk_videos(r):
+        # 默认（没给 dir）只列顶层文件；给了 dir 才递归
+        _files = (list(_walk_videos(r)) if root is not None
+                  else [p for p in sorted(r.iterdir())
+                        if p.is_file() and p.suffix.lower() in _VIDEO_EXT])
+        for f in _files:
             if len(out) >= limit:
                 truncated = True
                 break
@@ -242,7 +249,9 @@ def merge_prepare(body: dict):
 
     target = _norm_path(body.get("dir"))
     if target is None:
-        target = Path(WORKSPACE) / "merge" / _safe_dirname(video.stem)
+        # 副本直接放工作区根：素材列表只扫这一层，用户一眼就能看到自己导入的视频。
+        # 以前放在 workspace/merge/<视频名>/，列表递归扫上去就是两条同名的视频。
+        target = Path(WORKSPACE)
     if target.exists() and not target.is_dir():
         raise _BadInput("dir 是一个已存在的文件，要目录：%s" % target)
     # ---- 快速导入：只把视频复制进工作区，不抽帧、不对齐 ----
@@ -253,6 +262,20 @@ def merge_prepare(body: dict):
     if not _align:
         target.mkdir(parents=True, exist_ok=True)
         dest = target / video.name
+        # 同名但内容不同（体积不同）时**不覆盖**——换个带序号的名字，
+        # 免得导入 B 视频把 workspace 里同名的 A 视频冲掉。
+        try:
+            if (dest.exists() and video.resolve() != dest.resolve()
+                    and dest.stat().st_size != video.stat().st_size):
+                _n = 2
+                while True:
+                    _cand = target / ("%s (%d)%s" % (video.stem, _n, video.suffix))
+                    if not _cand.exists():
+                        dest = _cand
+                        break
+                    _n += 1
+        except OSError:
+            pass
         try:
             if not dest.exists() or dest.stat().st_size != video.stat().st_size:
                 if video.resolve() != dest.resolve():
