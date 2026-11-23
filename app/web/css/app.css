@@ -4273,8 +4273,14 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
 #p-train-convert .cvrow .mini{height:26px;padding:0 10px;border-radius:8px}
 #p-train-convert .cvempty{font-size:12px;color:var(--ink-3);padding:6px 2px}
 
-#p-train-convert .cvcard{padding:16px;transition:border-color .35s ease, box-shadow .35s ease}
+#p-train-convert .cvcard{
+  /* 设计稿 convert-page-live.html：卡片 560px 居中、padding 16、圆角 14、带阴影 */
+  width:100%; max-width:560px; margin:8px auto 0;
+  padding:16px; border-radius:14px;
+  box-shadow:0 1px 2px rgba(0,0,0,.5), 0 12px 36px rgba(0,0,0,.55);
+  transition:border-color .35s ease, box-shadow .35s ease}
 #p-train-convert .cvcard.bad{border-color:color-mix(in srgb, var(--bad) 45%, transparent);
+  box-shadow:0 0 0 1px color-mix(in srgb, var(--bad) 10%, transparent), 0 12px 36px rgba(0,0,0,.55);
   box-shadow:0 0 0 1px color-mix(in srgb, var(--bad) 10%, transparent)}
 #p-train-convert .cvhd{display:flex;align-items:center;gap:8px;margin-bottom:10px}
 #p-train-convert .cvhd b{font-size:13px;font-weight:600}
@@ -4287,7 +4293,8 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
 #p-train-convert .cvstep{position:relative;padding:8px 0}
 #p-train-convert .cvhead{display:flex;gap:12px;align-items:center}
 #p-train-convert .cvic{width:22px;height:22px;border-radius:50%;flex:none;display:flex;
-  align-items:center;justify-content:center;font-size:11px;background:var(--panel);
+  align-items:center;justify-content:center;font-size:11px;
+  background:color-mix(in srgb, var(--panel) 86%, white 14%);
   color:var(--ink-3);z-index:1;transition:background .2s,color .2s,box-shadow .25s}
 #p-train-convert .cvstep.on .cvic{background:color-mix(in srgb, var(--brand) 18%, transparent);
   color:color-mix(in srgb, var(--brand) 62%, white);
