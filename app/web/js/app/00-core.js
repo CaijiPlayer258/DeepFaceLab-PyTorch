@@ -1165,7 +1165,18 @@
     fetch("/api/dataset/mask", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dir: dir, workers: 8, model: model, res: res })
-    }).then(function (r) { return r.json(); }).then(function (d) {
+    }).then(function (r) {
+      /* 后端崩成 500 时回的是纯文本 Internal Server Error，直接 r.json() 会抛
+         "Unexpected token 'I'..." —— 那句话说不出任何有用的信息。先看状态码，
+         把原文截一段带上，至少知道是哪一步挂了。 */
+      if (!r.ok) {
+        return r.text().then(function (t) {
+          var head = String(t || "").trim().slice(0, 120);
+          throw new Error("HTTP " + r.status + (head ? " · " + head : ""));
+        });
+      }
+      return r.json();
+    }).then(function (d) {
       if (d && d.ok === false) throw new Error(d.detail || "启动失败");
       toast("应用遮罩已开始", "共 " + (d.workers || 8) + " 线程 · " + (d.res || res) + "px", "success");
       maskPoll(btn);

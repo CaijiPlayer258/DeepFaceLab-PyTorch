@@ -6,12 +6,14 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import threading
 
 from fastapi import APIRouter, HTTPException
 
 from .._common.jobs import JOB
+from .._common.paths import WORKSPACE as _WORKSPACE, _APP_ROOT
 
 from .stats import (_capabilities, _dataset, _models, _ports, _ports_status,
                     _runtime, _version)
@@ -53,9 +55,18 @@ def dataset_mask(payload: dict | None = None):
     # 不做额外的前缀限制，也不做任何自动拼接
     raw_dir = str(payload.get("dir") or "data_src/aligned")
     p = Path(raw_dir)
-    root = (p if p.is_absolute() else (_APP_ROOT / p)).resolve()
+    if p.is_absolute():
+        root = p.resolve()
+    else:
+        # 相对路径先按工作区解析（数据都放 workspace/ 下），再退回软件根目录。
+        # 以前只认 _APP_ROOT，于是 data_src 变成 <仓库根>/data_src —— 永远不存在。
+        _ws = (_WORKSPACE / p)
+        root = (_ws if _ws.is_dir() else (_APP_ROOT / p)).resolve()
     if not root.is_dir():
-        raise HTTPException(404, "目录不存在: %s" % rel)
+        # 这里以前写的是 rel —— 变量根本不存在，于是「目录不存在」变成 NameError，
+        # FastAPI 回 500 纯文本 Internal Server Error，前端 r.json() 直接抛
+        # Unexpected token 'I'。报错要报得出来，不能自己先崩。
+        raise HTTPException(404, "目录不存在：%s" % root)
     workers = int(payload.get("workers") or 8)
     # 遮罩类型：lite / xseg（对应 XSegLite / XSeg 两个模型）；res 是写入 DFLJPG 的遮罩尺寸
     model = str(payload.get("model") or "lite").lower()

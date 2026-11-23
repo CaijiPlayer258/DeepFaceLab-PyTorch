@@ -14,6 +14,7 @@ from fastapi import HTTPException
 
 from .._common.jobs import JOB
 from ..backend_extract.detectors import _get_xseg
+from ..backend_extract.media import _imread_any   # Windows 中文路径只能这么读
 
 
 # ============================================================
@@ -91,7 +92,12 @@ def _mask_worker(folder: str, workers: int = 8, model: str | None = None, out_si
                     with JOB.lock:
                         done["ok"] += 1
         except Exception:
-            pass
+            # 以前这里 pass：读图/编码任何一步挂了都悄无声息，
+            # 跑完显示「完成」但一张遮罩都没写进去。留一条日志给排障。
+            import traceback as _tb
+            _first = done.setdefault('err', [])
+            if len(_first) < 3:
+                _first.append(str(fp) + ' :: ' + _tb.format_exc().strip().splitlines()[-1])
         finally:
             with JOB.lock:
                 done["n"] += 1
@@ -108,4 +114,7 @@ def _mask_worker(folder: str, workers: int = 8, model: str | None = None, out_si
         JOB.running = False
         JOB.pct = 100
         JOB.msg = "应用遮罩完成：%d 张，新增 %d，迁移 %d" % (total, done["ok"], done["moved"])
+        if done.get('err'):
+            # 有失败就别只报「完成」：把前几条原因带出来
+            JOB.msg += " · 失败 %d 张（%s）" % (len(done['err']), done['err'][0][:160])
     return done["ok"]
