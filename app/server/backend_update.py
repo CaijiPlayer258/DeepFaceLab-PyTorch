@@ -167,6 +167,30 @@ def _is_updateable(rel: Path) -> bool:
     return top in UPDATE_PATHS
 
 
+def _prune_backups(keep: int = 1) -> int:
+    """只保留最近 keep 个 .backup-* 目录，更老的删掉。
+
+    每更新一次就会在工作区留一份覆盖前的代码备份（十几 MB）。
+    不清理的话会一直堆下去，用户也不知道能不能删。
+    """
+    ws = ROOT / "workspace"
+    if not ws.is_dir():
+        return 0
+    try:
+        dirs = sorted((d for d in ws.iterdir() if d.is_dir() and d.name.startswith(".backup-")),
+                      key=lambda d: d.name, reverse=True)
+    except OSError:
+        return 0
+    removed = 0
+    for d in dirs[keep:]:
+        try:
+            shutil.rmtree(d, ignore_errors=True)
+            removed += 1
+        except Exception:
+            pass
+    return removed
+
+
 def apply(asset_name: Optional[str] = None) -> Dict[str, Any]:
     """下载并安装最新版本。返回 {ok, installed, files, backup, error}。"""
     info = check()
@@ -244,6 +268,12 @@ def apply(asset_name: Optional[str] = None) -> Dict[str, Any]:
                 "package": info.get("package"), "restart_required": True}
     except Exception as exc:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        try:
+            _dropped = _prune_backups(1)          # 只留最近一份，更老的清掉
+            if _dropped:
+                print("[update] 清理了 %d 份旧备份" % _dropped, flush=True)
+        except Exception:
+            pass
         _set_progress(running=False, phase="done", pct=100, msg="已安装，重启后生效")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
