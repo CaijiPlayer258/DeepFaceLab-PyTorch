@@ -25,8 +25,11 @@ SKIP_SUFFIX = {".pth", ".dfm", ".onnx", ".engine", ".npz", ".mp4", ".zip", ".7z"
 # 需要查文档的人看仓库本身。
 #   app/tools/accept | bench | shots：验收脚本、基准、截图工具，外加 _probe 里的调试产物
 #   （dbg_frames.png 一张就 0.8 MB）。这些是开发用的，server 不 import 它们。
-SKIP_PATHS = ("app/docs", "app/tools/accept", "app/tools/bench", "app/tools/shots",
-              "app/tools/audit")
+#   app/web/fonts：4.74 MB 字体（Inter + Noto Sans SC 的 202 个分片）。界面 --font 里
+#   已经排了 Microsoft YaHei UI / Segoe UI / system-ui 兜底，不带字体照样能显示中文；
+#   已经装好的用户本地有这份文件，更新时也不会被删掉。
+SKIP_PATHS = ("app/docs", "app/web/fonts", "app/tools/accept", "app/tools/bench",
+              "app/tools/shots", "app/tools/audit")
 
 # 仍保留这几条的图片过滤：万一以后有图片放回 app/web 也别把渲染图打进包
 SKIP_IMAGE_DIRS = ("app/web/img", "desktop/build")
