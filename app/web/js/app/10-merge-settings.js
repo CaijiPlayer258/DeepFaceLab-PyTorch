@@ -485,7 +485,7 @@
       if (sub) sub.textContent = "六宫格取图失败：" + MG_FDBG.err.slice(0, 90);
       if (window.mgHint) window.mgHint("");
       if (window.toast) {
-        try { toast("六宫格取图失败", MG_FDBG.err.slice(0, 90), "warn", 5000); } catch (x) {}
+        try { toast("六宫格取图失败", MG_FDBG.err.slice(0, 600), "error"); } catch (x) {}
       }
       return null;
     });
