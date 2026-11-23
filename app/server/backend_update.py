@@ -202,7 +202,7 @@ def auto_state() -> Dict[str, Any]:
     return dict(_AUTO_STATE)
 
 
-def start_auto_check(delay: float = 4.0) -> None:
+def start_auto_check(delay: float = 0.5) -> None:
     """起一个 daemon 线程，延时 delay 秒后查一次 release。
 
     延时是刻意的：进程刚起来时 /api/state 预热、TRT 引擎加载都在抢 IO，

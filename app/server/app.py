@@ -131,7 +131,7 @@ except Exception:
 # 结果缓存给 /api/update/auto，主页顶部的蓝条用它决定要不要提示。
 try:
     from .backend_update import start_auto_check as _start_autocheck
-    _start_autocheck(4.0)
+    _start_autocheck(0.5)
 except Exception:
     pass
 
