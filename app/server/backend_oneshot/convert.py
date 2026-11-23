@@ -54,14 +54,36 @@ def _fmt_size(n: int) -> str:
     return str(n)
 
 
+def _migrate_dir() -> Path:
+    """app/tools/migrate/ —— 迁移类脚本（导出 dfm / npy→pth）真正放的地方。
+
+    引擎目录下**没有** tools/，以前按 <engine>/tools/ 找，两个脚本都找不到。
+    """
+    return Path(__file__).resolve().parents[2] / "tools" / "migrate"
+
+
 def scan() -> list:
     """列出所有还没转换的老模型（有 *_weights.npy，没有 *_encoder.pth）。"""
     md = model_dir()
     out = []
     if not md.is_dir():
         return out
-    for npy in sorted(md.glob("*_weights.npy")):
-        stem = npy.name[: -len("_weights.npy")]        # 例：_smoketrain_SAEHD
+    # 4.0 有两套 npy 命名，都得认：
+    #   早期：<stem>_weights.npy（一个文件装全部权重）
+    #   后期：<stem>_encoder.npy / _decoder_src.npy / _inter.npy …（分模块，导出 dfm 直接能读）
+    # 以前只 glob *_weights.npy，于是分模块那批被判成「没有老模型」，
+    # 卡片上却写着「npy · 需转换」，点进去一片空白。
+    _cands = {}
+    for _f in sorted(md.glob("*.npy")):
+        for _suf in ("_weights.npy", "_encoder.npy"):
+            if _f.name.endswith(_suf):
+                _stem = _f.name[: -len(_suf)]
+                _prev = _cands.get(_stem)
+                # 同一个模型两种命名都在时，优先 weights.npy（转换流程按它走）
+                if _prev is None or _suf == "_weights.npy":
+                    _cands[_stem] = (_f, _suf)
+                break
+    for stem, (npy, _suffix) in sorted(_cands.items()):
         arch = ""
         parts = stem.rsplit("_", 1)
         if len(parts) == 2:
@@ -116,9 +138,16 @@ def start(name: str) -> dict:
         raise ValueError("缺少模型名")
     npy = md / (stem + "_weights.npy")
     if not npy.exists():
+        # 4.0 后期那批模型是「分模块 npy」（<stem>_encoder.npy / _decoder_src.npy …），
+        # 本来就不需要转换：导出 dfm 的脚本直接读 npy。以前这里抛 FileNotFoundError，
+        # 用户点「转换」只看到一句找不到文件，不知道该怎么办。
+        if (md / (stem + "_encoder.npy")).exists():
+            raise ValueError(
+                "这个模型是 4.0 后期的分模块 npy（_encoder.npy 那一套），不用转换 —— "
+                "直接点同一张卡片上的「导出」就能生成 .dfm。")
         raise FileNotFoundError(str(npy))
     exe = engine_python()
-    conv = _dfl_root() / "tools" / "convert_dfl_tf_to_torch.py"
+    conv = _migrate_dir() / "convert_dfl_tf_to_torch.py"
     if not conv.exists():
         raise FileNotFoundError(str(conv))
 

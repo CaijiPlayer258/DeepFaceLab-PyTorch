@@ -476,10 +476,13 @@
         return;
       }
       box.innerHTML = items.map(function (it, i) {
-        var tag = it.converted
-          ? '<span class="tag">已转换</span>'
-          : '<button class="mini" data-cv="' + i + '">转换</button>';
-        return '<div class="cvrow"><span class="n">' + esc(it.name) + '</span>' +
+        /* kind=modules 是 4.0 后期的分模块 npy（_encoder.npy 那套）：不需要转换，
+           导出 dfm 的脚本直接读它 —— 这里别给一个点了就报错的「转换」按钮。 */
+        var tag = it.kind === "modules"
+          ? '<span class="tag">可直接导出</span>'
+          : (it.converted
+             ? '<span class="tag">已转换</span>'
+             : '<button class="mini" data-cv="' + i + '">转换</button>');
                '<span class="m">' + esc(it.arch || "?") + ' · ' + esc(it.sizeText) + '</span>' +
                '<span class="sp"></span>' + tag + '</div>';
       }).join("");
