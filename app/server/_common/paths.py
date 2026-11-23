@@ -34,4 +34,8 @@ IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 # 4.0 引擎（训练 / 合成 / DFM 导出 / 检测模型都还靠它）：解析结果在 _paths 里缓存
 _DFL_ROOT = engine_root()
 _DFL_PY = engine_python()
-_DFL_TOOL = _DFL_ROOT / "tools" / "export_dfm.py"
+# 导出 DFM 的脚本在 app/tools/migrate/export_dfm.py —— 引擎目录下**没有** tools/，
+# 以前指向 <engine>/tools/export_dfm.py 永远不存在，于是「导出 dfm」「转换老模型」
+# 一律 500「找不到 4.0 的 python 或导出脚本」。参数是 --model / --model-dir / --force-name，
+# 和 _export_worker 拼的命令一致。
+_DFL_TOOL = ROOT / "app" / "tools" / "migrate" / "export_dfm.py"
