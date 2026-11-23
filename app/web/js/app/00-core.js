@@ -196,27 +196,48 @@
     var card = document.getElementById("cvCard");
     if (!card) return;
 
-    /* ① 从训练器模型卡片点「转换」过来：名字已经在 __cvPick 里，直接开跑。
-       以前这里只查 status，于是点了卡片什么都不发生 —— 名字白传了。 */
+    /* 卡片常显 + 空闲态：直接操作 DOM，不依赖 window.__cvPaint
+       （那个 export 在文件末尾的 IIFE 里，历史上挂没挂上不稳）。 */
+    card.style.display = "";
+    card.classList.remove("bad");
+    var nm = document.getElementById("cvName");
+    if (nm) nm.textContent = "未开始";
+    var mt = document.getElementById("cvMeta");
+    if (mt) mt.textContent = "";
+    var bd = document.getElementById("cvBad");
+    if (bd) bd.className = "cvbadge";
+    ["cvS1", "cvS2", "cvS3"].forEach(function (sid, idx) {
+      var el = document.getElementById(sid);
+      if (!el) return;
+      el.className = "cvstep";
+      var ic = el.querySelector(".cvic");
+      if (ic) ic.textContent = String(idx + 1);
+    });
+    ["cvRows1", "cvRows2"].forEach(function (rid) {
+      var el = document.getElementById(rid);
+      if (el) el.innerHTML = "";
+    });
+
     var pick = window.__cvPick;
     if (pick) {
       window.__cvPick = "";
+      if (nm) nm.textContent = pick;
       if (window.__cvStart) {
         try { window.__cvStart({ name: pick }); }
         catch (e) { if (window.toast) toast("转换失败", String(e), "error"); }
         return;
       }
+      if (window.toast) toast("转换", "转换器还没就绪", "error");
+      return;
     }
 
-    /* ② 没带名字：看有没有正在跑（或刚失败）的任务，有就把卡画出来 */
     fetch("/api/convert/status").then(function (r) { return r.json(); }).then(function (st) {
-      if (!st || (!st.running && st.step !== "error")) {
-        card.style.display = "none";
-        return;
-      }
-      if (window.__cvPaint) window.__cvPaint(st);
-    }).catch(function () {
-      card.style.display = "none";
+      if (!window.__cvPaint || !st) return;
+      if (st.running || st.step === "error" || st.step === "done") window.__cvPaint(st);
+    }).catch(function (e) {
+      if (!window.__cvPaint) return;
+      window.__cvPaint({ step: "error", name: "状态读取失败", modules:
+                        [{ name: "/api/convert/status", state: "bad", reason: String((e && e.message) || e) }] });
     });
   }
 
@@ -1373,49 +1394,64 @@
       if (ic) ic.innerHTML = (mark === "spin") ? SPIN_SVG : String(mark);
     }
 
+    /* 一行 = 一个模块：mk · 名字 · 项数；bad 时下面追加一行原因（设计稿的 .reason） */
+    function cvRowsHtml(mods, isErr) {
+      return (mods || []).map(function (m) {
+        var on = m.state === "ok" ? "ok"
+               : (m.state === "run" ? "run"
+               : ((m.state === "err" || m.state === "bad") ? "bad" : ""));
+        var mk = on === "ok" ? "✓" : (on === "run" ? "›" : (on === "bad" ? "!" : "·"));
+        var cnt;
+        if (on === "ok") cnt = (m.total || m.items || 0) + " 项";
+        else if (on === "run") cnt = (m.items || 0) + " / " + (m.total || "?") + " 项";
+        else if (on === "bad") cnt = "失败";
+        else cnt = m.total ? (m.total + " 项") : "—";
+        var html = '<div class="cvrowi ' + on + (on === "bad" ? " shake" : "") + '">' +
+                   '<span class="mk">' + mk + '</span>' +
+                   '<span class="n">' + esc(m.name) + '</span>' +
+                   '<span class="c">' + cnt + '</span>';
+        if (on === "bad" && m.reason) {
+          html += '<div class="cvreason">' + esc(m.reason) + "</div>";
+        }
+        return html + "</div>";
+      }).join("");
+    }
+
     function paint(st) {
       var card = $("cvCard");
       if (!card) return;
+      st = st || {};
       card.style.display = "";
-      $("cvName").textContent = st.name || "model";
-      $("cvMeta").textContent = st.modules && st.modules.length ? (st.modules.length + " 个模块") : "";
+      var mods = st.modules || [];
+      $("cvName").textContent = st.name || "未开始";
+      var meta = $("cvMeta");
+      if (meta) {
+        var bits = [];
+        if (st.arch) bits.push(String(st.arch).toUpperCase());
+        if (mods.length) bits.push(mods.length + " 个模块");
+        meta.textContent = bits.join(" · ");
+      }
+      var isErr = st.step === "error";
+      var isIdle = !st.step || st.step === "idle";
+      var badge = $("cvBad");
+      if (badge) badge.className = "cvbadge" + (isErr ? " on" : "");
+      card.classList.toggle("bad", isErr);
 
-      if (st.step === "load") {
+      if (isIdle) {
+        step("cvS1", "", "1"); step("cvS2", "", "2"); step("cvS3", "", "3");
+      } else if (st.step === "load") {
         step("cvS1", "on open", "spin"); step("cvS2", "", "2"); step("cvS3", "", "3");
       } else if (st.step === "convert") {
         step("cvS1", "done", "✓"); step("cvS2", "on open", "spin"); step("cvS3", "", "3");
       } else if (st.step === "done") {
         step("cvS1", "done", "✓"); step("cvS2", "done", "✓"); step("cvS3", "done", "✓");
-      } else if (st.step === "error") {
+      } else if (isErr) {
         step("cvS1", "done", "✓"); step("cvS2", "err open", "!"); step("cvS3", "", "3");
       }
 
-      var rows1 = $("cvRows1");
-      if (rows1) {
-        rows1.innerHTML = (st.modules || []).map(function (m) {
-          var on = m.state === "ok" ? "ok" : (m.state === "run" ? "run" : "");
-          var mk = on === "ok" ? "✓" : (on === "run" ? "›" : "·");
-          var cnt = (m.total || m.items || 0) ? ((m.total || m.items) + " 项") : "—";
-          return '<div class="cvrowi ' + on + '"><span class="mk">' + mk + '</span>' +
-                 '<span class="n">' + esc(m.name) + '</span>' +
-                 '<span class="c">' + cnt + '</span></div>';
-        }).join("");
-      }
-      var rows = $("cvRows2");
-      if (rows) {
-        var html = (st.modules || []).map(function (m) {
-          var state = m.state === "ok" ? "ok" : (st.step === "error" && m.state !== "ok" ? "wait" : (m.state === "run" ? "run" : "wait"));
-          var mk = state === "ok" ? "✓" : (state === "run" ? "›" : "·");
-          var cnt = state === "ok" ? "完成" : (state === "run" ? "转换中" : "等待");
-          return '<div class="cvrowi ' + state + '"><span class="mk">' + mk + '</span>' +
-                 '<span class="n">' + esc(m.name) + '</span><span class="c">' + cnt + '</span></div>';
-        }).join("");
-        if (st.step === "error" && st.error) {
-          html += '<div class="cvrowi bad"><span class="mk">!</span><span class="n">' +
-                  esc(st.error) + '</span></div>';
-        }
-        rows.innerHTML = html;
-      }
+      var r1 = $("cvRows1"), r2 = $("cvRows2");
+      if (r1) r1.innerHTML = cvRowsHtml(mods, isErr);
+      if (r2) r2.innerHTML = cvRowsHtml(mods, isErr);
     }
 
     function poll() {
