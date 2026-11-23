@@ -4260,427 +4260,85 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
 #p-merge .mgrow .mgtiny{width:100% !important;flex:1 1 auto !important;text-align:left}
 
 
-/* ================= 模型转换页（Stepper） ================= */
+/* ================= 模型转换页 ================= 
+   直接照 docs/preview/prototypes/convert-page-live.html（动效 v14）的类名和数值：
+   步骤圆点三态 + 竖线生长 + rows 面板展开 + 失败行抖动 + 右上失败标记淡入。
+   总进度条和状态 pill 是设计稿里没有的，别加。 */
 #p-train-convert .cvlist{display:flex;flex-direction:column;gap:8px}
 #p-train-convert .cvrow{display:flex;align-items:center;gap:10px;padding:9px 12px;
-  border:1px solid var(--line);border-radius:10px;background:var(--panel-2)}
-#p-train-convert .cvrow .n{font-family:var(--mono);font-size:12.5px;color:var(--ink)}
+  border:1px solid var(--line);border-radius:9px;background:var(--panel)}
+#p-train-convert .cvrow .n{font-family:var(--mono);font-size:12.5px;color:var(--ink);flex:1;min-width:0}
 #p-train-convert .cvrow .m{font-size:11.5px;color:var(--ink-3)}
 #p-train-convert .cvrow .sp{flex:1}
 #p-train-convert .cvrow .mini{height:26px;padding:0 10px;border-radius:8px}
 #p-train-convert .cvempty{font-size:12px;color:var(--ink-3);padding:6px 2px}
 
-#p-train-convert .cvcard{padding:24px}
-#p-train-convert .cvhd{display:flex;align-items:baseline;gap:8px;margin-bottom:12px}
+#p-train-convert .cvcard{padding:16px;transition:border-color .35s ease, box-shadow .35s ease}
+#p-train-convert .cvcard.bad{border-color:color-mix(in srgb, var(--bad) 45%, transparent);
+  box-shadow:0 0 0 1px color-mix(in srgb, var(--bad) 10%, transparent)}
+#p-train-convert .cvhd{display:flex;align-items:center;gap:8px;margin-bottom:10px}
 #p-train-convert .cvhd b{font-size:13px;font-weight:600}
-#p-train-convert .cvmeta{font-size:12px;color:var(--ink-3);flex:1}
-#p-train-convert .cvbad{font-size:12px;color:var(--bad);opacity:0;transition:opacity .25s}
-#p-train-convert .cvbad.on{opacity:1}
+#p-train-convert .cvmeta{font-size:12px;color:var(--ink-3)}
+#p-train-convert .cvspacer{flex:1}
+#p-train-convert .cvbadge{font-size:12px;color:var(--bad);opacity:0;transition:opacity .25s ease}
+#p-train-convert .cvbadge.on{opacity:1}
 
-.cvsteps .cvst{position:relative;padding:8px 0}
-.cvsteps .cvst + .cvst{margin-top:6px}
-.cvsteps .cvsh{display:flex;align-items:center;gap:10px}
-.cvsteps .cvic{position:relative;z-index:1;width:24px;height:24px;border-radius:50%;flex:none;
-  display:grid;place-items:center;font-size:11px;background:var(--panel-2);color:var(--ink-3);
-  transition:background .2s,color .2s,box-shadow .25s}
-.cvsteps .cvst.on .cvic{background-color:var(--panel);color:#a8b3ee;
-  background-image:linear-gradient(rgba(93,108,207,.18),rgba(93,108,207,.18));
-  box-shadow:0 0 0 3px rgba(93,108,207,.12)}
-.cvsteps .cvst.done .cvic{background-color:var(--panel);color:var(--ok);
-  background-image:linear-gradient(rgba(61,220,132,.14),rgba(61,220,132,.14))}
-.cvsteps .cvst.err .cvic{background-color:var(--panel);color:var(--bad);
-  background-image:linear-gradient(rgba(248,113,113,.16),rgba(248,113,113,.16));
-  box-shadow:0 0 0 3px rgba(248,113,113,.12)}
-.cvsteps .cvnm{font-size:12.5px;color:var(--ink-2);transition:color .2s}
-.cvsteps .cvst.on .cvnm{color:var(--ink)}
-.cvsteps .cvst.err .cvnm{color:var(--bad)}
+/* 一步 */
+#p-train-convert .cvstep{position:relative;padding:8px 0}
+#p-train-convert .cvhead{display:flex;gap:12px;align-items:center}
+#p-train-convert .cvic{width:22px;height:22px;border-radius:50%;flex:none;display:flex;
+  align-items:center;justify-content:center;font-size:11px;background:var(--panel);
+  color:var(--ink-3);z-index:1;transition:background .2s,color .2s,box-shadow .25s}
+#p-train-convert .cvstep.on .cvic{background:color-mix(in srgb, var(--brand) 18%, transparent);
+  color:color-mix(in srgb, var(--brand) 62%, white);
+  box-shadow:0 0 0 3px color-mix(in srgb, var(--brand) 12%, transparent)}
+#p-train-convert .cvstep.done .cvic{background:color-mix(in srgb, var(--ok) 14%, transparent);color:var(--ok)}
+#p-train-convert .cvstep.err .cvic{background:color-mix(in srgb, var(--bad) 16%, transparent);
+  color:var(--bad);box-shadow:0 0 0 3px color-mix(in srgb, var(--bad) 12%, transparent)}
+#p-train-convert .cvic svg{width:12px;height:12px;animation:cvspin .9s linear infinite}
+@keyframes cvspin{to{transform:rotate(360deg)}}
+#p-train-convert .cvnm{font-size:12.5px;color:var(--ink-2);transition:color .2s}
+#p-train-convert .cvstep.on .cvnm{color:var(--ink)}
+#p-train-convert .cvstep.err .cvnm{color:var(--bad)}
 
-.cvsteps .cvline{position:absolute;left:11px;top:32px;bottom:-6px;width:1px;background:var(--line)}
-.cvsteps .cvst:last-child .cvline{display:none}
-.cvsteps .cvline > i{position:absolute;inset:0;background:var(--ok);transform-origin:top;
-  transform:scaleY(0);transition:transform .38s var(--ease)}
-.cvsteps .cvst.done .cvline > i{transform:scaleY(1)}
+/* 竖线：done 时从 0 长到 1 */
+#p-train-convert .cvdot{position:absolute;left:10.5px;top:30px;bottom:-6px;width:1px;background:var(--line)}
+#p-train-convert .cvstep:last-child .cvdot{display:none}
+#p-train-convert .cvdot > i{position:absolute;inset:0;background:var(--ok);transform-origin:top;
+  transform:scaleY(0);transition:transform 380ms cubic-bezier(.16,1,.3,1)}
+#p-train-convert .cvstep.done .cvdot > i{transform:scaleY(1)}
 
-.cvsteps .cvpnl{display:grid;grid-template-rows:0fr;opacity:0;margin-left:34px;
-  transition:grid-template-rows .45s var(--ease),opacity .3s,margin .45s}
-.cvsteps .cvst.open .cvpnl{grid-template-rows:1fr;opacity:1;margin-top:8px}
-.cvsteps .cvpnl > div{overflow:hidden}
-.cvsteps .cvrows{border:1px solid var(--line);border-radius:12px;background:var(--panel-2);overflow:hidden}
-.cvsteps .cvrowi{display:flex;align-items:center;gap:10px;padding:7px 10px;font-size:12px;
+/* 模块清单面板：grid-rows 0fr → 1fr */
+#p-train-convert .cvpanel{display:grid;grid-template-rows:0fr;opacity:0;margin-left:34px;
+  transition:grid-template-rows 320ms cubic-bezier(.16,1,.3,1), opacity .24s ease}
+#p-train-convert .cvstep.open .cvpanel{grid-template-rows:1fr;opacity:1;margin-top:8px}
+#p-train-convert .cvpanel > div{overflow:hidden}
+#p-train-convert .cvrows{border:1px solid var(--line);border-radius:12px;
+  background:var(--panel);overflow:hidden}
+#p-train-convert .cvrowi{display:flex;align-items:center;gap:10px;padding:7px 10px;font-size:12px;
   border-bottom:1px solid var(--line);flex-wrap:wrap}
-.cvsteps .cvrowi:last-child{border-bottom:0}
-.cvsteps .cvrowi .mk{width:12px;text-align:center;color:var(--ink-3)}
-.cvsteps .cvrowi .n{font-family:var(--mono);flex:1;min-width:0;color:var(--ink-2)}
-.cvsteps .cvrowi .c{color:var(--ink-3);min-width:62px;text-align:right;font-variant-numeric:tabular-nums}
-.cvsteps .cvrowi.run{background:rgba(93,108,207,.08)}
-.cvsteps .cvrowi.run .n{color:var(--ink)} .cvsteps .cvrowi.run .c{color:#a8b3ee}
-.cvsteps .cvrowi.ok .mk,.cvsteps .cvrowi.ok .c{color:var(--ok)}
-.cvsteps .cvrowi.bad{background:rgba(248,113,113,.08)}
-.cvsteps .cvrowi.bad .mk,.cvsteps .cvrowi.bad .c,.cvsteps .cvrowi.bad .n{color:var(--bad)}
+#p-train-convert .cvrowi:last-child{border-bottom:0}
+#p-train-convert .cvrowi .n{font-family:var(--mono);flex:1;min-width:0;color:var(--ink-2)}
+#p-train-convert .cvrowi .c{font-variant-numeric:tabular-nums;color:var(--ink-3);
+  min-width:62px;text-align:right}
+#p-train-convert .cvrowi .mk{width:12px;text-align:center;color:var(--ink-3)}
+#p-train-convert .cvrowi.run{background:color-mix(in srgb, var(--brand) 8%, transparent)}
+#p-train-convert .cvrowi.run .n{color:var(--ink)}
+#p-train-convert .cvrowi.run .c{color:color-mix(in srgb, var(--brand) 62%, white)}
+#p-train-convert .cvrowi.ok .mk,#p-train-convert .cvrowi.ok .c{color:var(--ok)}
+#p-train-convert .cvrowi.bad{background:color-mix(in srgb, var(--bad) 8%, transparent)}
+#p-train-convert .cvrowi.bad .mk,#p-train-convert .cvrowi.bad .c,#p-train-convert .cvrowi.bad .n{color:var(--bad)}
+#p-train-convert .cvreason{flex:0 0 100%;padding:1px 0 5px 22px;color:var(--bad);opacity:.85;
+  font-family:var(--mono);font-size:11px;line-height:1.65;word-break:break-word}
 
-
-
-/* 欢迎页：三张卡点开后的数据面板（就地在欢迎页展示） */
-.wfpanel {
-  width: 100%; margin-top: 14px; padding: 18px 20px;
-  background: #121216; border: 1px solid var(--line); border-radius: 14px;
-  text-align: left; animation: wfIn .18s ease;
+/* 失败那一行抖一下（设计稿 .shake） */
+@keyframes cvshake{0%,100%{transform:translateX(0)}15%{transform:translateX(-4px)}
+  30%{transform:translateX(4px)}45%{transform:translateX(-3px)}60%{transform:translateX(3px)}
+  75%{transform:translateX(-2px)}90%{transform:translateX(1px)}}
+#p-train-convert .cvrowi.shake{animation:cvshake .42s cubic-bezier(.36,.07,.19,.97) both}
+@media (prefers-reduced-motion: reduce){
+  #p-train-convert *{transition-duration:.01ms!important;animation-duration:.01ms!important}
 }
-@keyframes wfIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
-.wfpanel[hidden] { display: none; }
-.wfpanel h4 { margin: 0 0 12px; font-size: 13px; color: var(--ink); font-weight: 700; }
-.wfpanel .row { display: flex; align-items: baseline; gap: 10px; padding: 7px 0; border-top: 1px solid #1c1c22; }
-.wfpanel .row:first-of-type { border-top: 0; }
-.wfpanel .k { width: 132px; flex: none; font-size: 12px; color: var(--ink-3); }
-.wfpanel .v { font-size: 12.5px; color: var(--ink-2); line-height: 1.6; }
-.wfpanel .v b { color: var(--ink); font-weight: 600; }
-.wfeats .wf.big.on { border-color: var(--brand); background: #17171d; }
-
-/* ===== 欢迎页：斜置胶囊 + 毛玻璃条 + 扫码卡 ===== */
-.welcome .wcard {
-  position: relative; width: 100%; height: 100%; max-width: none;
-  display: flex; align-items: center; justify-content: center;
-  background: #04050a; overflow: hidden; border: 0; box-shadow: none; padding: 0;
-}
-.cf { position: absolute; inset: 0; width: 100% !important; height: 100% !important;
-  display: block !important; pointer-events: none;
-  transform: none;
-  filter: none; }
-.wbrand { position: absolute; left: 28px; top: 74px; z-index: 3;
-  display: flex; align-items: center; gap: 14px; pointer-events: none; }
-.wbrand .wlogo { width: 46px; height: 46px; border-radius: 12px; flex: none;
-  filter: drop-shadow(0 4px 18px rgba(0,0,0,.55)); }
-.wbrand .ctxt { font-size: 15px; letter-spacing: .5px; color: #eef0f8;
-  text-shadow: 0 2px 14px rgba(0,0,0,.6); }
-.cbar {
-  position: absolute; left: 0; right: 0; top: 0; bottom: 0;
-  display: flex; align-items: center; justify-content: center; gap: 20px;
-  padding: 0 40px;
-  /* 黑灰玻璃：先把背景去色压暗，再叠一层极淡的中性灰 */
-  background: linear-gradient(180deg, rgba(0,0,0,.12) 0%, rgba(0,0,0,.20) 100%);
-  backdrop-filter: blur(18px) brightness(.70) saturate(.9) contrast(.96);
-  -webkit-backdrop-filter: blur(18px) brightness(.70) saturate(.9) contrast(.96);
-  /* 只有上下 0.5px 描边；左右靠遮罩淡出，不留边 */
-  border-top: .5px solid rgba(255,255,255,.16);
-  border-bottom: .5px solid rgba(255,255,255,.10);
-  border-left: 0; border-right: 0;
-  -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 16%, #000 84%, transparent 100%);
-  mask-image: linear-gradient(90deg, transparent 0%, #000 16%, #000 84%, transparent 100%);
-  transition: opacity .3s ease, transform .3s ease;
-}
-.cbar .wlogo { width: 46px; height: 46px; border-radius: 12px; flex: none;
-  filter: drop-shadow(0 0 16px rgba(150,160,255,.55)); }
-.ctxt { font-size: 16px; letter-spacing: .4px; color: #f3f3f9; font-weight: 500; }
-.ctxt b { color: inherit; font-weight: 600; }
-.clogin {
-  margin: 22px 0 0 40px; font-size: 12.5px; color: #c8c8d4; letter-spacing: 1.2px;
-  background: none; border: 0; border-bottom: 1px solid rgba(255,255,255,.24);
-  padding: 3px 1px; cursor: pointer; transition: color .2s, border-color .2s;
-}
-.clogin:hover { color: #fff; border-color: #fff; }
-
-.cqr {
-  position: absolute; left: 50%; top: 50%; z-index: 3;
-  width: 322px; padding: 22px; border-radius: 26px; text-align: center;
-  background: linear-gradient(180deg, rgba(26,26,40,.42), rgba(12,12,20,.55));
-  backdrop-filter: blur(30px) saturate(160%);
-  -webkit-backdrop-filter: blur(30px) saturate(160%);
-  border: 1px solid rgba(255,255,255,.13);
-  box-shadow: 0 40px 110px rgba(0,0,0,.65), inset 0 1px 0 rgba(255,255,255,.15);
-  opacity: 1; pointer-events: auto;
-  transform: translate(-50%, -50%) scale(1);
-  transition: opacity .34s ease, transform .34s cubic-bezier(.2,.85,.25,1);
-}
-/* 二维码状态类由 JS 写成 .wqr / .wqr.ready / .wqr.expired / .wqr.error */
-.welcome .cqr .wqr {
-  aspect-ratio: 1 / 1; width: 100%; height: auto; background: #fff; border-radius: 16px;
-  padding: 10px; position: relative; overflow: hidden; display: grid; place-items: center;
-  font-size: 11px; color: #7a7a86;
-}
-.welcome .cqr .wqr img { width: 100%; height: 100%; object-fit: contain; display: block; }
-.welcome .cqr .wqr .wqrretry {
-  position: absolute; right: 10px; bottom: 10px; width: 32px; height: 32px;
-  display: none; place-items: center; border-radius: 10px; border: 1px solid #e2e2ea;
-  background: #f6f6fa; color: #444;
-}
-.welcome .cqr .wqr .wqrretry svg { width: 16px; height: 16px; }
-.welcome .cqr .wqr.expired .wqrretry,
-.welcome .cqr .wqr.error .wqrretry { display: grid; }
-.ccap { margin-top: 14px; font-size: 12px; color: #b9b9c8; letter-spacing: .3px;
-  line-height: 1.9; text-align: center; }
-.ccap .bili { height: 21px; width: auto; display: inline-block;
-  vertical-align: -5px; margin: 0 6px; opacity: 1;
-  filter: drop-shadow(0 2px 8px rgba(210,82,124,.35)); }
-
-.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
-  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
-.cqr .btn { margin-top: 14px; font-size: 11.5px; }
-
-.welcome.signin .cbar, .welcome.signin .clogin { opacity: 0; transform: scale(.985); pointer-events: none; }
-.welcome.signin .cqr { opacity: 1 !important; transform: translate(-50%, -50%) scale(1) !important; pointer-events: auto !important; }
-
-
-/* ===== 使用许可 / 免责声明 ===== */
-.legal {
-  position: fixed; inset: 0; z-index: 9000;
-  display: flex; align-items: center; justify-content: center;
-  padding: 4vh 24px;
-  background: rgba(6,7,11,.86);
-}
-.legalCard {
-  width: min(680px, 100%); max-height: 88vh;
-  display: flex; flex-direction: column;
-  background: var(--panel-2, #1a1a1f);
-  border: 1px solid var(--line, #26262d);
-  border-radius: 14px;
-  box-shadow: var(--shadow-high, 0 24px 60px rgba(0,0,0,.6));
-  overflow: hidden;
-}
-.legalHd { padding: 24px 26px 14px; }
-.legalHd b {
-  display: block; font-size: 15px; font-weight: 600;
-  letter-spacing: -.01em; color: var(--ink, #f2f2f4);
-}
-
-.legalBody {
-  padding: 0 26px 4px; overflow-y: auto; flex: 1;
-  /* flex 子项默认 min-height:auto：内容一长就把卡片顶高，overflow 不生效，
-     底部 .legalFt（复选框区）就压到正文上。必须显式给 0。 */
-  min-height: 0;
-}
-/* 细滚动条：不要设 scrollbar-width，否则 Chromium 会忽略下面的 ::-webkit- 规则 */
-.legalBody::-webkit-scrollbar { width: 6px; height: 6px; }
-.legalBody::-webkit-scrollbar-track { background: transparent; }
-.legalBody::-webkit-scrollbar-thumb {
-  background: rgba(255,255,255,.24);
-  border-radius: 999px;
-}
-.legalBody::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.38); }
-.legalBody::-webkit-scrollbar-button { display: none; height: 0; }
-
-.legalBody section { padding: 16px 0; }
-.legalBody section + section { border-top: 1px solid rgba(255,255,255,.05); }
-.legalBody h4 {
-  font-size: 12.5px; font-weight: 600; letter-spacing: .01em;
-  color: var(--ink, #f2f2f4); margin-bottom: 7px;
-}
-.legalBody p {
-  font-size: 12.5px; line-height: 1.8; color: var(--ink-2, #a3a3ad);
-  margin-bottom: 5px;
-}
-.legalBody p:last-child { margin-bottom: 0; }
-
-/* flex-shrink 默认 1：卡片高度不够时底部会被压缩，内容溢出盖到正文上。
-   固定住，让 .legalBody 单独承担滚动。 */
-.legalFt { padding: 14px 26px 22px; flex: 0 0 auto; }
-.legalChks { display: flex; flex-direction: column; gap: 9px; }
-.legalChk {
-  display: flex; align-items: flex-start; gap: 8px;
-  font-size: 12px; line-height: 1.55; color: var(--ink-2, #a3a3ad);
-  cursor: pointer; user-select: none;
-}
-.legalChk input {
-  /* 点击区 24×24（低于这个尺寸手指/鼠标都难点准），视觉靠 scale 收回 16 */
-  width: 24px; height: 24px; margin: -2px 0 0 -4px; flex: none;
-  accent-color: var(--brand, #5d6ccf); cursor: pointer;
-  transform: scale(.66); transform-origin: center;
-}
-/* 这里不能用 var(--ink)：协议层是浮在欢迎页上的独立层，若该层没继承到深色主题的
-   --ink，就会退成浅色主题的 #17171a，深底上等于看不见（看起来像拖影）。
-   直接写和标题同档的浅色。 */
-.legalChk b { color: rgba(246,247,252,.95); font-weight: 600; }
-
-.legalActs { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
-.legal .legalActs .btn {
-  height: 30px; padding: 0 14px; font-size: 12px; border-radius: 8px;
-  background: var(--surface-hover, #232329) !important;
-  border: 0 !important;
-  color: var(--ink-2, #a3a3ad) !important; box-shadow: none; font-weight: 500;
-}
-.legal .legalActs .btn:hover {
-  background: #2a2a31 !important; color: var(--ink, #f2f2f4) !important;
-}
-.legal .legalActs .btn:not(.ghost) {
-  background: var(--brand, #5d6ccf) !important; border-color: transparent !important;
-  color: #fff !important; font-weight: 500;
-}
-.legal .legalActs .btn:not(.ghost):hover { background: var(--brand-hover, #6f7cdd) !important; }
-.legal .legalActs .btn[disabled], .legal .legalActs .btn[disabled]:hover {
-  opacity: .4; cursor: not-allowed;
-  background: var(--brand, #5d6ccf) !important; color: #fff !important;
-}
-
-/* 中英切换：靠 <html lang> 控制，!important 才能压过 .legalHd b / h4 的 display */
-html:not([lang="en"]) .legal .legal-en { display: none !important; }
-html[lang="en"] .legal .legal-zh { display: none !important; }
-
-/* 训练页失败横幅：常驻、可关闭。和右下角 toast 分工不同 ——
-   toast 是「操作完成了」的瞬时反馈，横幅是「状态坏了、需要你改配置」。 */
-.alert{
-  margin:14px 0 0;border-radius:12px;padding:12px 14px;
-  border:1px solid var(--line);background:var(--surface-2);
-}
-.alert.danger{border-color:rgba(255,100,103,.34);background:rgba(255,100,103,.07)}
-.alert .alhd{display:flex;align-items:center;gap:8px}
-.alert .alhd b{font-size:13px;color:var(--ink);font-weight:700}
-.alert.danger .alhd b{color:var(--bad,#e05555)}
-.alert .alx{margin-left:auto;background:none;border:0;color:var(--ink-3);font-size:18px;line-height:1;cursor:pointer;padding:0 4px}
-.alert .alx:hover{color:var(--ink)}
-.alert .albd{margin-top:6px;font-size:12.5px;line-height:1.65;color:var(--ink-2);white-space:pre-line}
-.alert .alft{margin-top:9px;display:flex;gap:8px;flex-wrap:wrap}
-.alert .alft:empty{display:none}
-
-/* 参数页顶部：TF 时代（DFL 1.x/2.0）dat 的迁移提示。非阻塞 —— 只是把「迁了什么、
-   还差什么」摆在参数前面；不展开就一行，不挡任何操作，也不是错误。 */
-.lgHost{margin-top:14px}
-.lgHost[hidden]{display:none}
-.alert.warn{border-color:rgba(220,170,60,.45);background:rgba(220,170,60,.08)}
-
-/* 训练页「模块加载失败」常驻横幅（js/loadbanner.js 控制显隐）。
-   沿用 .alert.warn 的深色主题配色，只补两样：模块名小标签、
-   标题的警示色。它是状态而不是 toast —— 会一直挂着直到用户关掉。 */
-.loadbanner{margin:14px 0 0;position:relative;overflow:hidden}
-.loadbanner.hide{display:none}
-/* 左侧强调条已移除：只靠边框/淡底色/图标/标题色区分状态，不再画那条 3px 竖线 */
-/* 图标盒：内容由 sprite 提供（i-info 圆+i / i-warn 三角+! / i-alert 圆+!），
-   这里只管尺寸和继承色；不再画那个底色圆，否则三角形图标会显得很怪。 */
-.loadbanner .lbico{display:inline-flex;align-items:center;justify-content:center;
-  width:16px;height:16px;flex:none;color:var(--warn,#f0b429);font-style:normal}
-.loadbanner .lbico svg,.loadbanner .lbico.ic{width:16px;height:16px;display:block}
-.loadbanner .alhd b{color:var(--ink)}
-.loadbanner .albd{white-space:pre-line}
-.loadbanner .lblist{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
-.loadbanner .lblist:empty{display:none}
-.loadbanner .lbchip{font-family:var(--mono,ui-monospace,Consolas,monospace);font-size:11.5px;
-  padding:2px 7px;border-radius:6px;border:1px solid rgba(220,170,60,.45);
-  background:rgba(220,170,60,.10);color:var(--warn,#f0b429);white-space:nowrap}
-.alert .lgToggle{margin-left:auto}
-.alert .lgSub{font-variant-numeric:tabular-nums}
-.alert .lgNote{margin-top:6px;font-size:12px;color:var(--ink-3)}
-.alert .lgDetail{margin-top:10px;border-top:1px solid var(--line);padding-top:10px}
-.alert .lgDetail[hidden]{display:none}
-.alert .lgHd{font-size:12px;font-weight:600;color:var(--ink-2);margin:10px 0 4px}
-.alert .lgDetail .lgHd:first-child{margin-top:0}
-.alert .lgReasons{margin:0;padding-left:18px;font-size:12px;color:var(--ink-2);line-height:1.7}
-.alert pre.lgReport{margin:0;max-height:220px;overflow:auto;font-size:11.5px;line-height:1.6;
-  padding:8px 10px;border-radius:8px;background:var(--panel-2);border:1px solid var(--line);
-  white-space:pre-wrap;word-break:break-all;font-family:var(--mono,ui-monospace,Consolas,monospace)}
-.alert .lgCmd{display:flex;gap:8px;align-items:flex-start}
-.alert .lgCmd .lgCmdText{flex:1;margin:0;max-height:160px;overflow:auto;font-size:11.5px;
-  line-height:1.6;padding:8px 10px;border-radius:8px;background:var(--panel-2);
-  border:1px solid var(--line);white-space:pre-wrap;word-break:break-all;user-select:all;
-  font-family:var(--mono,ui-monospace,Consolas,monospace)}
-.alert .lgCmd .lgCopy{flex:none}
-
-/* 参数页的显存估算：放在底部动作栏里，就在「开始训练」旁边，永远可见 */
-.cfgactions .vram{margin:0;padding:5px 10px;border-radius:8px;border:1px solid var(--line);
-  background:var(--surface-2);font-size:12px;color:var(--ink-2);display:flex;
-  align-items:baseline;gap:6px;white-space:nowrap}
-.cfgactions .vram b{color:var(--ink);font-variant-numeric:tabular-nums}
-.cfgactions .vram.warn{border-color:rgba(220,170,60,.45);background:rgba(220,170,60,.09)}
-.cfgactions .vram.bad{border-color:rgba(220,80,80,.5);background:rgba(220,80,80,.1)}
-.cfgactions .vram .vh{display:none}
-
-/* 用户协议挪到登录页：不再是盖住整个应用的模态框，而是贴在欢迎页里的一层，
-   背景透明 → 底下的扫码页 shader 继续跑，视觉上和登录页是一体的。 */
-#welcome .legal{
-  position:absolute; inset:0; display:none; align-items:center; justify-content:center;
-  background:transparent; padding:24px; z-index:20;
-}
-#welcome .legal .legalCard{
-  max-height:calc(100% - 40px); max-width:760px; width:100%; overflow:hidden;
-  display:flex; flex-direction:column;
-}
-/* flex-basis 必须是 0（flex:1），写成 auto 会以内容高度为准：
-   卡片被 max-height 截住后，body 不缩、内容继续往下画，底部复选框区就压上去了。 */
-#welcome .legal .legalBody{overflow:auto; flex:1 1 0%; min-height:0}
-/* 正文能滚、但滚动条很细：底部加一层渐隐，看到文字淡出就知道下面还有 */
-.legalBody{
-  -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 24px), transparent 100%);
-  mask-image: linear-gradient(180deg, #000 calc(100% - 24px), transparent 100%);
-}
-
-/* 协议卡片：和登录页的毛玻璃条同一套语言（同一组 blur/brightness 参数），
-   这样它浮在扫码背景上时，看起来是"同一块玻璃"，而不是另贴上去的深色板子。 */
-#welcome .legal .legalCard{
-  /* 收窄一些，让四周露出更多流动的背景 —— 玻璃感来自"能看见后面在动" */
-  width: min(640px, 100%);
-  max-height: 78vh;
-  background: linear-gradient(180deg, rgba(10,11,16,.52) 0%, rgba(6,7,11,.62) 100%);
-  backdrop-filter: blur(18px) brightness(.72) saturate(.95) contrast(.98);
-  -webkit-backdrop-filter: blur(18px) brightness(.72) saturate(.95) contrast(.98);
-  border: .5px solid rgba(255,255,255,.14);
-  box-shadow: 0 24px 70px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.06);
-  border-radius: 16px;
-}
-/* 卡片内部的分隔线和正文颜色也往玻璃上调一档，避免"深色板 + 白字"的割裂感 */
-#welcome .legal .legalHd{ border-bottom: .5px solid rgba(255,255,255,.08); }
-#welcome .legal .legalBody p{ color: rgba(234,236,244,.80); }
-#welcome .legal .legalBody h4{ color: rgba(246,247,252,.95); }
-#welcome .legal .legalChk span{ color: rgba(234,236,244,.86); }
-
-/* 协议展示期间：只留背景 shader + 协议卡，扫码卡/品牌字全部隐掉。
-   半透明而不是 display:none —— 用透明度做个 0.25s 的淡出，
-   直接切 display 会"啪"地一下跳变，和毛玻璃的气质不搭。 */
-/* 语言切换**不淡出**：读协议时最可能想切到英文对照，
-   还要抬到协议层上面，否则被那层盖住点不到。 */
-#welcome.legal-on .wlang { z-index: 30; }
-
-#welcome.legal-on .cqr,
-#welcome.legal-on .wbrand {
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity .25s ease;
-}
-
-/* 关于页：hero 下面是第一张信息卡。全局 .card 有 48px 上边距（原本给"标签句"
-   留的视觉间隔），标签句删掉后这段就成了卡片上方一块空白，这里单独收窄。 */
-#p-about > .aboutHero + .card { margin-top: 26px !important; }   /* .page > .card 带 !important，这里必须对等 */
-
-/* ============ 遮挡率排序器（数据处理 · 排序不删） ============
-   没有新造一套组件：统计用 .stat，角标用 .tag（t-green/t-yellow/t-red），
-   网格自己只负责"方格子 + 右下角角标"这一层布局。 */
-.occbar {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
-  margin-top: 12px;
-}
-.occbar .cl { font-size: 12px; color: var(--ink-3); }
-.occbar #occThr { flex: 1 1 160px; min-width: 120px; accent-color: var(--brand); }
-.occbar #occThrNum { width: 62px; }
-.occbar .occacts { margin-left: auto; display: flex; gap: 6px; }
-.occbar .occacts .btn { height: 32px; padding: 0 14px; font-size: 12.5px; }
-
-.occgrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
-  gap: 8px;
-  margin-top: 12px;
-}
-.occcell {
-  position: relative; border-radius: 9px; overflow: hidden;
-  background: var(--panel-2); border: 1px solid var(--line);
-  aspect-ratio: 1 / 1;
-}
-.occcell img { display: block; width: 100%; height: 100%; object-fit: cover; }
-/* 超阈值的那批：描一圈品牌色，一眼看出"移走的是哪些" */
-.occcell.hit { border-color: var(--bad); box-shadow: 0 0 0 2px rgba(var(--bad-rgb),.28) inset; }
-.occcell .occb {
-  position: absolute; right: 4px; bottom: 4px;
-  font-variant-numeric: tabular-nums;
-  box-shadow: 0 1px 3px rgba(0,0,0,.28);
-}
-.occmore { margin-top: 8px; }
-/* .btn 的 display 带 !important，撤销按钮靠 hidden 属性收起，必须同权重才压得住 */
-#occUndo[hidden] { display: none !important; }
-
-.occun { margin-top: 14px; }
-.occunrow {
-  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
-  padding: 6px 0; border-top: 1px solid var(--line);
-  font-size: 12px;
-}
-.occunrow .ocr { color: var(--ink-2); }
-.occunrow .hint { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ============================================================================
    合成器 · 人脸数据库（导出前分组 / 回收站）

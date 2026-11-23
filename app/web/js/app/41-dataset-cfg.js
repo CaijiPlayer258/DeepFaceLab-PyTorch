@@ -527,12 +527,15 @@
         });
     }
 
+    /* 圆点的内容：数字 / ✓ / ! / 旋转圈（照 convert-page-live.html 的 .ic） */
+    var SPIN_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" ' +
+                   'stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.6"/></svg>';
     function step(el, cls, mark) {
       var node = $(el);
       if (!node) return;
-      node.className = "cvst " + (cls || "");
+      node.className = "cvstep " + (cls || "");
       var ic = node.querySelector(".cvic");
-      if (ic) ic.textContent = mark;
+      if (ic) ic.innerHTML = (mark === "spin") ? SPIN_SVG : String(mark);
     }
 
     function paint(st) {
@@ -543,16 +546,27 @@
       $("cvMeta").textContent = st.modules && st.modules.length ? (st.modules.length + " 个模块") : "";
 
       if (st.step === "load") {
-        step("cvS1", "on", "1"); step("cvS2", "", "2"); step("cvS3", "", "3");
+        step("cvS1", "on open", "spin"); step("cvS2", "", "2"); step("cvS3", "", "3");
       } else if (st.step === "convert") {
-        step("cvS1", "done", "✓"); step("cvS2", "on open", "2"); step("cvS3", "", "3");
+        step("cvS1", "done", "✓"); step("cvS2", "on open", "spin"); step("cvS3", "", "3");
       } else if (st.step === "done") {
         step("cvS1", "done", "✓"); step("cvS2", "done", "✓"); step("cvS3", "done", "✓");
       } else if (st.step === "error") {
         step("cvS1", "done", "✓"); step("cvS2", "err open", "!"); step("cvS3", "", "3");
       }
 
-      var rows = $("cvRows");
+      var rows1 = $("cvRows1");
+      if (rows1) {
+        rows1.innerHTML = (st.modules || []).map(function (m) {
+          var on = m.state === "ok" ? "ok" : (m.state === "run" ? "run" : "");
+          var mk = on === "ok" ? "✓" : (on === "run" ? "›" : "·");
+          var cnt = (m.total || m.items || 0) ? ((m.total || m.items) + " 项") : "—";
+          return '<div class="cvrowi ' + on + '"><span class="mk">' + mk + '</span>' +
+                 '<span class="n">' + esc(m.name) + '</span>' +
+                 '<span class="c">' + cnt + '</span></div>';
+        }).join("");
+      }
+      var rows = $("cvRows2");
       if (rows) {
         var html = (st.modules || []).map(function (m) {
           var state = m.state === "ok" ? "ok" : (st.step === "error" && m.state !== "ok" ? "wait" : (m.state === "run" ? "run" : "wait"));

@@ -509,21 +509,25 @@
           <div class="cvlist" id="cvList"></div>
         </div>
 
+        <!-- 结构照 docs/preview/prototypes/convert-page-live.html（动效 v14） -->
         <div class="card cvcard" id="cvCard" style="display:none">
-          <div class="cvhd"><b id="cvName">model</b><span class="cvmeta" id="cvMeta"></span></div>
-          <div class="cvsteps">
-            <div class="cvst" id="cvS1">
-              <div class="cvline"><i></i></div>
-              <div class="cvsh"><span class="cvic" id="cvI1">1</span><span class="cvnm">加载模块</span></div>
-            </div>
-            <div class="cvst" id="cvS2">
-              <div class="cvline"><i></i></div>
-              <div class="cvsh"><span class="cvic" id="cvI2">2</span><span class="cvnm">转换模型</span></div>
-              <div class="cvpnl"><div><div class="cvrows" id="cvRows"></div></div></div>
-            </div>
-            <div class="cvst" id="cvS3">
-              <div class="cvsh"><span class="cvic" id="cvI3">3</span><span class="cvnm">校验</span></div>
-            </div>
+          <div class="cvhd">
+            <b id="cvName">model</b><span class="cvmeta" id="cvMeta"></span>
+            <span class="cvspacer"></span>
+            <span class="cvbadge" id="cvBad">失败</span>
+          </div>
+          <div class="cvstep" id="cvS1">
+            <div class="cvdot"><i></i></div>
+            <div class="cvhead"><div class="cvic" id="cvI1">1</div><div class="cvnm">加载模块</div></div>
+            <div class="cvpanel"><div><div class="cvrows" id="cvRows1"></div></div></div>
+          </div>
+          <div class="cvstep" id="cvS2">
+            <div class="cvdot"><i></i></div>
+            <div class="cvhead"><div class="cvic" id="cvI2">2</div><div class="cvnm">转换模型</div></div>
+            <div class="cvpanel"><div><div class="cvrows" id="cvRows2"></div></div></div>
+          </div>
+          <div class="cvstep" id="cvS3">
+            <div class="cvhead"><div class="cvic" id="cvI3">3</div><div class="cvnm">完成</div></div>
           </div>
         </div>
 
