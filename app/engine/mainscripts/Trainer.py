@@ -231,6 +231,14 @@ def trainerThread (s2c, c2s, e,
             def send_preview():
                 if not debug:
                     previews = model.get_previews()
+                    if not previews:
+                        # 首次启动时训练还没跑满一轮，last_sample 可能是空的；
+                        # sample_for_preview 在 initialize 里就生成好了，用它兜底，
+                        # 否则新模型第一次开训要等到几十秒后才出图。
+                        try:
+                            previews = model.get_history_previews()
+                        except Exception:
+                            previews = []
                     n_samples_val = 0
                     n_cols_val = 5
                     if previews:

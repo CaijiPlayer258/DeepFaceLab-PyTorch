@@ -276,6 +276,9 @@ class ModelBase(object):
         self.options_show_override = {}
         self.loss_history = []
         self.sample_for_preview = None
+        # 训练第一轮之前 last_sample 还没有值；不初始化的话 get_previews() 会直接
+        # AttributeError —— 异常被上层吞掉，表现就是「首次启动永远没有预览图」。
+        self.last_sample = None
         self.choosed_gpu_indexes = None
         self._legacy_dat = None      # 非 None = 这份 dat 来自 TF 时代，值是迁移报告
         self.model_data_path = Path(self.get_strpath_storage_for_file('data.dat'))
@@ -713,7 +716,16 @@ class ModelBase(object):
         return self.target_iter != 0 and self.iter >= self.target_iter
 
     def get_previews(self):
-        return self.onGetPreview(self.last_sample)
+        # 优先用「上一轮训练真正喂进去的样本」；还没跑过一轮时退回初始化时生成的
+        # sample_for_preview —— 否则新模型/迁移过来的模型首次启动永远拿不到预览。
+        s = getattr(self, 'last_sample', None) or getattr(self, 'sample_for_preview', None)
+        if s is None:
+            return []
+        try:
+            return self.onGetPreview(s) or []
+        except Exception as e:
+            io.log_info(f'预览生成失败（这一轮跳过）：{type(e).__name__}: {e}')
+            return []
 
     def get_history_previews(self):
         return self.onGetPreview(self.sample_for_preview, for_history=True)

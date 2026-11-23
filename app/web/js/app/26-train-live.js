@@ -600,13 +600,17 @@
 
   /* 开训后自动拉一次预览：4.0 要跑出第一张才会给图，一次可能落空，
      所以最多重试 3 次、每次隔 12 秒。只在「本次开训」自动这一次。 */
+  /* 开训后自动等第一张图。
+     以前只重试 3 次 × 12 秒（36 秒）就放弃：新模型或刚迁移过来的模型首次启动时，
+     前几十秒往往还没有可预览的样本，一旦放弃就得手动点「刷新」，看起来就是「首次永远没有预览」。
+     现在放宽到最多 90 秒、每 6 秒一次，拿到图立刻停。 */
+  var PV_AUTO_DEADLINE = 90000;
   function pvAutoAfterStart() {
-    var tries = 0;
+    var started = Date.now();
     (function attempt() {
-      tries += 1;
       pvFetch(true).then(function (r) {
-        if (r && r.fresh) return;
-        if (tries < 3) setTimeout(attempt, 12000);
+        if (r && r.n) return;
+        if (Date.now() - started < PV_AUTO_DEADLINE) setTimeout(attempt, 6000);
       });
     })();
   }
@@ -890,7 +894,12 @@
        单独摆在预览区里看着像「四张脸拼在一起」。宁可空着，提示去刷新。 */
     pvShow(0);
     if (window.pollTrain) window.pollTrain(m);
-    pvFetch(true);
+    /* 进页面这一次没拿到图，就交给 pvAutoAfterStart 继续等（最多 90 秒）。
+       以前这里只请求一次，新模型首次启动正好卡在前几十秒，进来就是一片空白。 */
+    pvFetch(true).then(function (r) {
+      if (r && r.n) return;
+      if (window.pvAutoAfterStart) window.pvAutoAfterStart();
+    });
 
     if (box && !(m && m.spark && m.spark.src && m.spark.src.length)) {
       box.innerHTML = '<div class="chartempty">还没有 loss 记录 —— 跑几十个迭代就有了</div>';
