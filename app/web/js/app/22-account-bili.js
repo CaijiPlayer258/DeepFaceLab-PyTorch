@@ -251,6 +251,9 @@
   var CF = { ok: null, prev: null };
 
   function confirmBox(title, desc, okText, onOk, danger) {
+    /* 兼容只传 (title, desc, onOk) 的调用：第三个参数是函数就当回调，
+       否则它会被塞进按钮的 textContent —— 按钮上就会显示一坨 JS 源码。 */
+    if (typeof okText === "function") { danger = onOk; onOk = okText; okText = "确定"; }
     var box = $("confirmBox");
     if (!box) return;
     CF.ok = onOk;

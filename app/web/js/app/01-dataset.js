@@ -1618,7 +1618,10 @@
 
     var delBtn = el.querySelector('[data-act="del"]');
     if (delBtn) delBtn.addEventListener("click", function () {
-      confirmBox("删除模型", "会移除 " + m.name + " 的全部权重与配置，无法恢复。", function () {
+      confirmBox("删除模型",
+                "会移除 " + m.name + " 的全部权重与配置，无法恢复。",
+                "删除",
+                function () {
         fetch("/api/models/" + encodeURIComponent(m.name) + "/delete", { method: "POST" })
           .then(function (r) { return r.json().then(function (d) {
             if (!r.ok) throw new Error(d.detail || "删除失败");
@@ -1631,7 +1634,7 @@
           .catch(function (e) {
             toast("删除失败", String((e && e.message) || e).slice(0, 110), "error");
           });
-      });
+                }, true);
     });
     return el;
   }
