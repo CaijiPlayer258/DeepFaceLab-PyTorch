@@ -1811,7 +1811,7 @@ class SAEHDModel(ModelBase):
         with torch.no_grad():
             _ = wrapper(dummy)
 
-        # DeepFaceLive / DFMModel.py 在推理时固定使用 'in_face:0' 作为输入名。
+        # DFM 推理端固定使用 'in_face:0' 作为输入名。
         #原版 DFL(tf2onnx) 导出也使用带 ':0' 的张量名：
         #   input_names  = ['in_face:0']
         #   output_names = ['out_face_mask:0','out_celeb_face:0','out_celeb_face_mask:0']

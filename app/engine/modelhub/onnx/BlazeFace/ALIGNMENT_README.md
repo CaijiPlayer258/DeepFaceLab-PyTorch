@@ -134,7 +134,7 @@ python test_blazeface_alignment.py [image_path]
 
 ## 与其他组件集成
 
-此功能可以与 DeepFaceLive 的 FaceAligner 模块无缝集成：
+此功能可以直接对接后端的对齐模块：
 - FROM_RECT 模式可以直接使用对齐后的边界框
 - 提供更准确的人脸裁剪区域
 - 改善后续人脸交换和对齐的质量

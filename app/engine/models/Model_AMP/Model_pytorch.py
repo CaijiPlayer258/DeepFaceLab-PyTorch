@@ -1496,7 +1496,7 @@ class AMPModel(ModelBase):
 		with torch.no_grad():
 			_ = wrapper(dummy_face, dummy_morph)
 
-		# DeepFaceLive 侧通常用 TF 风格的 ':0' 张量名进行喂入。
+		# 推理端通常用 TF 风格的 ':0' 张量名进行喂入。
 		# 这里对齐导出的 ONNX I/O 命名（只改名字，不改计算/结构）。
 		export_kwargs = dict(
 			input_names=['in_face:0', 'morph_value:0'],

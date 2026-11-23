@@ -174,7 +174,7 @@ if __name__ == "__main__":
                     saved_models_path = str(Path(arguments.model_dir)),
                     force_model_name = getattr(arguments, 'force_name', None))
 
-    p = subparsers.add_parser( "exportdfm", help="导出供 DeepFaceLive 使用的模型")
+    p = subparsers.add_parser( "exportdfm", help="导出 DFM 模型（供推理端加载）")
     p.add_argument('--model-dir', required=True, action=fixPathAction, dest="model_dir", help="模型保存目录")
     p.add_argument('--model', required=True, dest="model_name", choices=pathex.get_all_dir_names_startswith ( Path(__file__).parent / 'models' , 'Model_'), help="模型类型")
     p.add_argument('--force-name', default=None, dest="force_name", help="强制模型名称")

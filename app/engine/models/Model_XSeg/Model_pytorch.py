@@ -293,7 +293,7 @@ class XSegModel(ModelBase):
         return result
 
     def export_dfm(self):
-        """Export XSeg to ONNX for DeepFaceLive usage (matches original DFL behavior).
+        """Export XSeg to ONNX for the inference side (matches original DFL behavior).
 
         Original TF version exports `model.onnx` with:
           input:  in_face  (NHWC, float32)
@@ -327,7 +327,7 @@ class XSegModel(ModelBase):
         #原版 DFL(tf2onnx) 导出的 XSeg ONNX 使用 ':0' 张量名：
         #   input_names=['in_face:0']
         #   output_names=['out_mask:0']
-        # 为了保持 DeepFaceLive 侧加载一致，这里仅对齐命名。
+        # 为了和推理端的加载约定一致，这里只对齐命名。
         export_kwargs = dict(
             input_names=['in_face:0'],
             output_names=['out_mask:0'],
