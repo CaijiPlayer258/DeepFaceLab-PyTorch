@@ -138,14 +138,11 @@ def start(name: str) -> dict:
     if not stem:
         raise ValueError("缺少模型名")
     npy = md / (stem + "_weights.npy")
-    if not npy.exists():
+    _mods_npy = md / (stem + "_encoder.npy")
+    if not npy.exists() and not _mods_npy.exists():
         # 4.0 后期那批模型是「分模块 npy」（<stem>_encoder.npy / _decoder_src.npy …），
         # 本来就不需要转换：导出 dfm 的脚本直接读 npy。以前这里抛 FileNotFoundError，
         # 用户点「转换」只看到一句找不到文件，不知道该怎么办。
-        if (md / (stem + "_encoder.npy")).exists():
-            raise ValueError(
-                "这个模型是 4.0 后期的分模块 npy（_encoder.npy 那一套），不用转换 —— "
-                "直接点同一张卡片上的「导出」就能生成 .dfm。")
         raise FileNotFoundError(str(npy))
     exe = engine_python()
     conv = _migrate_dir() / "convert_dfl_tf_to_torch.py"
@@ -175,8 +172,15 @@ def start(name: str) -> dict:
 
     def worker():
         try:
-            cmd = [str(exe), str(conv), "--src", str(md), "--dst", str(md),
-                   "--model", stem.rsplit("_", 1)[-1] or "SAEHD", "--name", stem]
+            if _mods_npy.exists() and not npy.exists():
+                # 4.0 后期的分模块 npy：export_dfm.py 第 54 行起自带
+                # 「[1] 转换 <name> (.npy → .pth)」，跑完既得到 .pth 也得到 .dfm
+                cmd = [str(exe), str(_migrate_dir() / "export_dfm.py"),
+                       "--model", stem.rsplit("_", 1)[-1] or "SAEHD",
+                       "--model-dir", str(md), "--force-name", stem]
+            else:
+                cmd = [str(exe), str(conv), "--src", str(md), "--dst", str(md),
+                       "--model", stem.rsplit("_", 1)[-1] or "SAEHD", "--name", stem]
             _log("$ " + " ".join(cmd))
             proc = subprocess.Popen(
                 cmd, cwd=str(_dfl_root()),

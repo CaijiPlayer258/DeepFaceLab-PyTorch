@@ -190,6 +190,46 @@
 
   var HASH_SYNCING = false;
 
+  /* 模型转换页的列表：拉 /api/convert/list，画出「名字 · 架构 · 大小 · 动作」。
+     kind=modules 的是 4.0 后期那套分模块 npy —— 转换会走 export_dfm.py（先把 npy 转成 pth）。 */
+  function cvListPaint() {
+    var box = document.getElementById("cvList");
+    if (!box) return;
+    fetch("/api/convert/list").then(function (r) { return r.json(); }).then(function (j) {
+      var items = (j && j.items) || [];
+      var card = box.closest ? box.closest(".card") : null;
+      if (!items.length) {
+        if (card) card.style.display = "none";
+        box.innerHTML = "";
+        return;
+      }
+      if (card) card.style.display = "";
+      box.innerHTML = items.map(function (it, i) {
+        var tag = it.converted ? '<span class="tag">已转换</span>'
+                              : '<button class="mini" data-cvgo="' + i + '">转换</button>';
+        return '<div class="cvrow"><span class="n">' + cvEsc(it.name) + "</span>" +
+               '<span class="m">' + cvEsc(it.arch || "?") + " · " + cvEsc(it.sizeText) + "</span>" +
+               '<span class="sp"></span>' + tag + "</div>";
+      }).join("");
+      window.__cvItems = items;
+      box.querySelectorAll("[data-cvgo]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var it = items[+btn.getAttribute("data-cvgo")];
+          if (!it || !window.__cvStart) return;
+          try { window.__cvStart(it); } catch (e) { if (window.toast) toast("转换失败", String(e), "error"); }
+        });
+      });
+    }).catch(function (e) {
+      box.textContent = "读不到转换列表：" + ((e && e.message) || e);
+    });
+  }
+  function cvEsc(v) {
+    return String(v == null ? "" : v).replace(/[&<>"]/g, function (c) {
+      return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c];
+    });
+  }
+  window.cvListPaint = cvListPaint;
+
   function go(key) {
     var id = PAGE_IDS[key];
     if (!id) return;
@@ -230,6 +270,10 @@
     if (key === "debug") { edInit(); edBind(); edDraw(); }
     if (key === "dataset") { renderSteps(); syncDatasetBadge(); erLoad(); }
     if (key === "train") bindTrainerTop();
+    /* 模型转换页：进来就把列表拉一次。
+       不依赖任何分片末尾的初始化（那种写法历史上被吞过好几次），
+       也不依赖 window.__cvBoot —— 这里自己拉、自己画、自己绑按钮。 */
+    if (key === "train-convert") cvListPaint();
     if (key === "settings" && window.WPK) window.WPK.enter();
     if (key === "train-cfg") {
       if (window.markHotRows) window.markHotRows();
@@ -316,6 +360,15 @@
     });
   });
   window.go = go;
+
+  /* 文档就绪后再兜一次：刷新/直达 #train-convert 时不会经过 go() */
+  document.addEventListener("DOMContentLoaded", function () {
+    setTimeout(function () {
+      if (location.hash.indexOf("train-convert") >= 0 && window.__cvBoot) {
+        try { window.__cvBoot(); } catch (e) {}
+      }
+    }, 200);
+  });
 
   /* ---------- 主题模式 ----------
      auto  = 跟随系统（默认，未登录时强制）
@@ -1242,3 +1295,186 @@
            之后 500ms，长任务不持续高频打请求。 */
         var next = age < MASK_POLL_FAST_MS ? 200 : 500;
 
+
+/* ============================================================================
+ * 训练器 · 模型转换（.npy -> .pth，Stepper）
+ * 从 41-dataset-cfg.js 挪过来的：那个分片在 head 里同步执行时，前面若有一步抛错，
+ * 后面这段就永远跑不到（getElementById 全是 null → 空卡片）。放在 00 号最先执行的分片里，
+ * 且等 DOM 就绪再初始化。
+ * ========================================================================== */
+  /* ---------------- 训练器 · 模型转换（.npy -> .pth，Stepper） ----------------
+     二级页：面包屑「模型选择 › 模型转换」，左上角有返回。
+     以前它是独立 page，进去只能靠侧栏跳走，Ctrl+R 后 hash 还停在转换页 ——
+     用户会以为「回不去了，必须重启」。 */
+  (function () {
+    var $ = function (id) { return document.getElementById(id); };
+    var timer = null;
+
+    function esc(s) {
+      return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
+        return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c];
+      });
+    }
+
+    function renderList(items) {
+      var box = $("cvList");
+      if (!box) return;
+      if (!items.length) {
+        /* 没有待转换的老模型时，这张卡整个收起来 —— 留一个空框在最上面很扎眼 */
+        var _cardBox = box.closest && box.closest(".card");
+        if (_cardBox) _cardBox.style.display = "none";
+        box.innerHTML = "";
+          return;
+      }
+      var _cardOn = box.closest && box.closest(".card");
+      if (_cardOn) _cardOn.style.display = "";
+      box.innerHTML = items.map(function (it, i) {
+        /* kind=modules 是 4.0 后期的分模块 npy（_encoder.npy 那套）：不需要转换，
+           导出 dfm 的脚本直接读它 —— 这里别给一个点了就报错的「转换」按钮。 */
+        var tag = it.kind === "modules"
+          ? '<span class="tag">可直接导出</span>'
+          : (it.converted
+             ? '<span class="tag">已转换</span>'
+             : '<button class="mini" data-cv="' + i + '">转换</button>');
+               '<span class="m">' + esc(it.arch || "?") + ' · ' + esc(it.sizeText) + '</span>' +
+               '<span class="sp"></span>' + tag + '</div>';
+      }).join("");
+      window.__cvItems = items;
+      box.querySelectorAll("[data-cv]").forEach(function (b) {
+        b.addEventListener("click", function () { start(items[+b.getAttribute("data-cv")]); });
+      });
+    }
+
+    function load() {
+      fetch("/api/convert/list").then(function (r) { return r.json(); })
+        .then(function (j) {
+          var items = (j && j.items) || [];
+          renderList(items);
+          /* 从模型卡片「转换」按钮进来时，直接开这一个模型 */
+          var pick = window.__cvPick;
+          if (pick) {
+            /* 卡片上的名字是 _cvprobe，转换列表里是 _cvprobe_SAEHD —— 按前缀匹配 */
+            var hit = items.filter(function (it) {
+              return it.name === pick || it.name.indexOf(pick + "_") === 0;
+            })[0];
+            window.__cvPick = "";
+            if (hit && !hit.converted) setTimeout(function () { start(hit); }, 60);
+          }
+        })
+        .catch(function (e) {
+          /* 失败别装成「没有老模型」：那样用户以为目录是空的，其实接口挂了 */
+          var box = $("cvList");
+          if (box) {
+            box.innerHTML = '<div class="cvempty">读不到转换列表：' +
+                            String((e && e.message) || e) + "</div>";
+          }
+        });
+    }
+
+    /* 圆点的内容：数字 / ✓ / ! / 旋转圈（照 convert-page-live.html 的 .ic） */
+    var SPIN_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" ' +
+                   'stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.6"/></svg>';
+    function step(el, cls, mark) {
+      var node = $(el);
+      if (!node) return;
+      node.className = "cvstep " + (cls || "");
+      var ic = node.querySelector(".cvic");
+      if (ic) ic.innerHTML = (mark === "spin") ? SPIN_SVG : String(mark);
+    }
+
+    function paint(st) {
+      var card = $("cvCard");
+      if (!card) return;
+      card.style.display = "";
+      $("cvName").textContent = st.name || "model";
+      $("cvMeta").textContent = st.modules && st.modules.length ? (st.modules.length + " 个模块") : "";
+
+      if (st.step === "load") {
+        step("cvS1", "on open", "spin"); step("cvS2", "", "2"); step("cvS3", "", "3");
+      } else if (st.step === "convert") {
+        step("cvS1", "done", "✓"); step("cvS2", "on open", "spin"); step("cvS3", "", "3");
+      } else if (st.step === "done") {
+        step("cvS1", "done", "✓"); step("cvS2", "done", "✓"); step("cvS3", "done", "✓");
+      } else if (st.step === "error") {
+        step("cvS1", "done", "✓"); step("cvS2", "err open", "!"); step("cvS3", "", "3");
+      }
+
+      var rows1 = $("cvRows1");
+      if (rows1) {
+        rows1.innerHTML = (st.modules || []).map(function (m) {
+          var on = m.state === "ok" ? "ok" : (m.state === "run" ? "run" : "");
+          var mk = on === "ok" ? "✓" : (on === "run" ? "›" : "·");
+          var cnt = (m.total || m.items || 0) ? ((m.total || m.items) + " 项") : "—";
+          return '<div class="cvrowi ' + on + '"><span class="mk">' + mk + '</span>' +
+                 '<span class="n">' + esc(m.name) + '</span>' +
+                 '<span class="c">' + cnt + '</span></div>';
+        }).join("");
+      }
+      var rows = $("cvRows2");
+      if (rows) {
+        var html = (st.modules || []).map(function (m) {
+          var state = m.state === "ok" ? "ok" : (st.step === "error" && m.state !== "ok" ? "wait" : (m.state === "run" ? "run" : "wait"));
+          var mk = state === "ok" ? "✓" : (state === "run" ? "›" : "·");
+          var cnt = state === "ok" ? "完成" : (state === "run" ? "转换中" : "等待");
+          return '<div class="cvrowi ' + state + '"><span class="mk">' + mk + '</span>' +
+                 '<span class="n">' + esc(m.name) + '</span><span class="c">' + cnt + '</span></div>';
+        }).join("");
+        if (st.step === "error" && st.error) {
+          html += '<div class="cvrowi bad"><span class="mk">!</span><span class="n">' +
+                  esc(st.error) + '</span></div>';
+        }
+        rows.innerHTML = html;
+      }
+    }
+
+    function poll() {
+      fetch("/api/convert/status").then(function (r) { return r.json(); }).then(function (st) {
+        paint(st);
+        if (st.running) { timer = setTimeout(poll, 400); }
+        else { clearTimeout(timer); timer = null; load(); }
+      }).catch(function () { timer = setTimeout(poll, 900); });
+    }
+
+    function start(it) {
+      $("cvCard").style.display = "";
+      step("cvS1", "on", "1"); step("cvS2", "", "2"); step("cvS3", "", "3");
+      if ($("cvRows")) $("cvRows").innerHTML = "";
+      fetch("/api/convert/start", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: it.name })
+      }).then(function (r) { return r.json(); }).then(function (j) {
+        if (j && j.ok) { if (timer) clearTimeout(timer); timer = setTimeout(poll, 300); }
+        else { paint({ step: "error", name: it.name, error: (j && j.detail) || "启动失败", modules: [] }); }
+      }).catch(function (e) {
+        paint({ step: "error", name: it.name, error: String(e), modules: [] });
+      });
+    }
+
+    var _go = window.go;
+    if (typeof _go === "function" && !_go.__cv) {
+      var wrapped = function (k) {
+        var r = _go.apply(this, arguments);
+        if (k === "train-convert") { setTimeout(load, 30); }
+        return r;
+      };
+      wrapped.__cv = true;
+      window.go = wrapped;
+    }
+    /* 先进页面放个占位：以前这里是纯空白，看不清到底是「没跑」还是「没数据」 */
+    /* 这个分片是在 <head> 里同步加载的，此刻 #cvList 还没解析出来 ——
+       以前在这里直接 load()，getElementById 拿到 null，renderList 里 `if (!box) return`
+       就什么都不画，页面永远是一张空卡片。等 DOM 就绪再跑。 */
+    function cvBoot() {
+      var box = $("cvList");
+      if (box && !box.innerHTML) {
+        box.innerHTML = '<div class="cvempty">正在读取 workspace/model …</div>';
+      }
+    window.__cvBoot = cvBoot;
+      load();
+    }
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", cvBoot);
+    } else {
+      cvBoot();
+    }
+  })();
