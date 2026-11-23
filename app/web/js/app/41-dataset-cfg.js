@@ -364,15 +364,6 @@
       if (sm && sm.textContent !== text) { sm.textContent = text; }
     }
 
-    (function () {
-      var back = document.getElementById("cvBack");
-      if (back && !back.dataset.bound) {
-        back.dataset.bound = "1";
-        back.addEventListener("click", function () {
-          if (window.go) window.go("train");
-        });
-      }
-    })();
 
     function load() {
       return fetch("/api/engines").then(function (r) { return r.json(); })
@@ -607,7 +598,11 @@
       wrapped.__cv = true;
       window.go = wrapped;
     }
-    setTimeout(function () { if ($("p-train-convert")) load(); }, 400);
+    /* 先进页面放个占位：以前这里是纯空白，看不清到底是「没跑」还是「没数据」 */
+    var _box0 = $("cvList");
+    if (_box0 && !_box0.innerHTML) _box0.innerHTML = '<div class="cvempty">正在读取 workspace/model …</div>';
+    load();
+    setTimeout(function () { if ($("p-train-convert")) load(); }, 600);
   })();
 
   /* ---------- 设置页 · B 站账号（未登录 → 打开欢迎页扫码） ---------- */
