@@ -45,7 +45,7 @@ def _spinner_until(flag_ref, text, out_file, sub_texts=None):
         time.sleep(0.12)
 
 
-def export(model_class_name: str, saved_models_path: str, force_model_name: str = None, pth_only: bool = False):
+def export(model_class_name: str, saved_models_path: str, force_model_name: str = None):
     """Load model and export to ONNX (.dfm)."""
     from core.interact import interact as io
 
@@ -60,12 +60,6 @@ def export(model_class_name: str, saved_models_path: str, force_model_name: str 
             sys.__stdout__.flush()
             convert_npy_to_pth(model_class_name, saved_models_path, force_model_name)
 
-    # 只要 pth（界面上的「转换」就是这一步）：转完就收工，不顺带导 .dfm。
-    # 4.0 的「转换并导出 DFM」是把这个函数整套跑完；4.1 把两件事拆开成两个按钮。
-    if pth_only:
-        sys.__stdout__.write('[OK] .npy -> .pth\n')
-        sys.__stdout__.flush()
-        return
 
     # Ensure iter >= 1 to skip first-run setup
     if force_model_name:
@@ -231,7 +225,6 @@ if __name__ == '__main__':
     p.add_argument('--model', required=True, dest='model_name', help='模型类型 (SAEHD, DeepFakeLarge, LIAELarge, XSeg, XSegLite)')
     p.add_argument('--model-dir', required=True, dest='model_dir', help='模型保存目录')
     p.add_argument('--force-name', default=None, dest='force_name', help='强制模型名称（可选）')
-    p.add_argument('--pth-only', action='store_true', dest='pth_only',
-                   help='只做 .npy → .pth 转换，不导出 .dfm（界面上的「转换」按钮用这个）')
+
     args = p.parse_args()
-    export(args.model_name, args.model_dir, args.force_name, pth_only=getattr(args, "pth_only", False))
+    export(args.model_name, args.model_dir, args.force_name)

@@ -162,7 +162,7 @@ def start(name: str) -> dict:
         # 用户点「转换」只看到一句找不到文件，不知道该怎么办。
         raise FileNotFoundError(str(npy))
     exe = engine_python()
-    conv = _migrate_dir() / "convert_dfl_tf_to_torch.py"
+    conv = _migrate_dir() / "convert_tf_to_torch.py"
     if not conv.exists():
         raise FileNotFoundError(str(conv))
 
@@ -189,12 +189,12 @@ def start(name: str) -> dict:
 
     def worker():
         try:
-            # 走 4.0 那条路：export_dfm.py 里的 convert_npy_to_pth()（它才是真正
-            # 被 4.0 合成器「转换并导出 DFM」调到的代码 —— models.import_model(is_exporting=True)
-            # 读 npy，model.save() 写 pth）。加 --pth-only 就只转 pth，不导 .dfm。
-            cmd = [str(exe), str(_migrate_dir() / "export_dfm.py"),
+            # 专用转换器 app/tools/migrate/convert_tf_to_torch.py：只做 npy -> pth，
+            # 不碰 .dfm。它内部复用 export_dfm.py 的 convert_npy_to_pth()（4.0 验证过
+            # 的那条 models.import_model(is_exporting=True) + model.save() 路径）。
+            cmd = [str(exe), str(conv),
                    "--model", stem.rsplit("_", 1)[-1] or "SAEHD",
-                   "--model-dir", str(md), "--force-name", stem, "--pth-only"]
+                   "--model-dir", str(md), "--name", stem]
             _log("$ " + " ".join(cmd))
             proc = subprocess.Popen(
                 cmd, cwd=str(_dfl_root()),
