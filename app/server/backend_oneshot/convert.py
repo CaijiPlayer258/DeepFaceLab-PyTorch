@@ -63,15 +63,15 @@ def _migrate_dir() -> Path:
 
 
 def scan() -> list:
-    """列出所有还没转换的老模型（有 *_weights.npy，没有 *_encoder.pth）。"""
+    """列出所有还没转成 torch 的 iperov TF 模型（有 *.npy，没有 *_encoder.pth）。"""
     md = model_dir()
     out = []
     if not md.is_dir():
         return out
-    # 4.0 有两套 npy 命名，都得认：
-    #   早期：<stem>_weights.npy（一个文件装全部权重）
-    #   后期：<stem>_encoder.npy / _decoder_src.npy / _inter.npy …（分模块，导出 dfm 直接能读）
-    # 以前只 glob *_weights.npy，于是分模块那批被判成「没有老模型」，
+    # iperov 原版（TF 2.0）有两套 npy 命名，都得认 —— 4.0/4.1 是本项目的 torch 版，权重是 .pth：
+    #   单文件：<stem>_weights.npy（一个文件装全部权重）
+    #   分模块：<stem>_encoder.npy / _decoder_src.npy / _inter.npy …
+    # 以前只 glob *_weights.npy，于是分模块那批被判成「没有 TF 模型」，
     # 卡片上却写着「npy · 需转换」，点进去一片空白。
     _cands = {}
     for _f in sorted(md.glob("*.npy")):
@@ -189,9 +189,9 @@ def start(name: str) -> dict:
 
     def worker():
         try:
-            /* 转换 = TF .npy -> torch .pth，只做这一件事。
-               导出 .dfm 是另一条路（模型卡片上的「导出」），这里绝不碰它 ——
-               以前走去 export_dfm.py 会顺带生成几百 MB 的 .dfm，属于重复语言。 */
+            # 转换 = TF .npy -> torch .pth，只做这一件事。
+            # 导出 .dfm 是另一条路（模型卡片上的「导出」），这里绝不碰它 ——
+            # 以前走去 export_dfm.py 会顺带生成几百 MB 的 .dfm，属于重复语言。
             cmd = [str(exe), str(conv), "--src", str(md), "--dst", str(md),
                    "--model", stem.rsplit("_", 1)[-1] or "SAEHD", "--name", stem]
             _log("$ " + " ".join(cmd))
