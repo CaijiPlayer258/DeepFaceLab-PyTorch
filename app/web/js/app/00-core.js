@@ -190,45 +190,23 @@
 
   var HASH_SYNCING = false;
 
-  /* 模型转换页的列表：拉 /api/convert/list，画出「名字 · 架构 · 大小 · 动作」。
-     kind=modules 的是 4.0 后期那套分模块 npy —— 转换会走 export_dfm.py（先把 npy 转成 pth）。 */
+  /* 模型转换页：设计稿（convert-page-live.html）里没有列表 —— 进来要么是在跑的那张卡，
+     要么什么都没有（从模型卡片点「转换」时，那边已经设好 __cvPick 并由 start() 直接接管）。 */
   function cvListPaint() {
-    var box = document.getElementById("cvList");
-    if (!box) return;
-    fetch("/api/convert/list").then(function (r) { return r.json(); }).then(function (j) {
-      var items = (j && j.items) || [];
-      var card = box.closest ? box.closest(".card") : null;
-      if (!items.length) {
-        if (card) card.style.display = "none";
-        box.innerHTML = "";
+    var card = document.getElementById("cvCard");
+    if (!card) return;
+    fetch("/api/convert/status").then(function (r) { return r.json(); }).then(function (st) {
+      if (!st || !st.running) {
+        if (st && st.step === "error" && window.__cvPaint) { window.__cvPaint(st); return; }
+        card.style.display = "none";
         return;
       }
-      if (card) card.style.display = "";
-      box.innerHTML = items.map(function (it, i) {
-        var tag = it.converted ? '<span class="tag">已转换</span>'
-                              : '<button class="mini" data-cvgo="' + i + '">转换</button>';
-        return '<div class="cvrow"><span class="n">' + cvEsc(it.name) + "</span>" +
-               '<span class="m">' + cvEsc(it.arch || "?") + " · " + cvEsc(it.sizeText) + "</span>" +
-               '<span class="sp"></span>' + tag + "</div>";
-      }).join("");
-      window.__cvItems = items;
-      box.querySelectorAll("[data-cvgo]").forEach(function (btn) {
-        btn.addEventListener("click", function () {
-          var it = items[+btn.getAttribute("data-cvgo")];
-          if (!it || !window.__cvStart) return;
-          try { window.__cvStart(it); } catch (e) { if (window.toast) toast("转换失败", String(e), "error"); }
-        });
-      });
-    }).catch(function (e) {
-      box.textContent = "读不到转换列表：" + ((e && e.message) || e);
+      if (window.__cvPaint) window.__cvPaint(st);
+    }).catch(function () {
+      card.style.display = "none";
     });
   }
-  function cvEsc(v) {
-    return String(v == null ? "" : v).replace(/[&<>"]/g, function (c) {
-      return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c];
-    });
-  }
-  window.cvListPaint = cvListPaint;
+
 
   function go(key) {
     var id = PAGE_IDS[key];
@@ -1470,6 +1448,9 @@
         box.innerHTML = '<div class="cvempty">正在读取 workspace/model …</div>';
       }
     window.__cvBoot = cvBoot;
+    /* 给路由里的 cvListPaint 用：查到在跑的任务就把卡片画出来 */
+    window.__cvPaint = paint;
+    window.__cvStart = start;
       load();
     }
     if (document.readyState === "loading") {
