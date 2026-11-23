@@ -75,6 +75,10 @@
         try { window.__welcome3d.start(); } catch (e) {}
       }
     }
+    /* 登录态一变就重算协议门：以前 applyAuth 不碰 __legalSync，
+       首次扫码登录后协议卡不弹，得等下一次启动才补上。 */
+    if (window.__legalSync) { try { window.__legalSync(); } catch (e) {} }
+
     if ($("hello") && AUTH.logged_in && AUTH.name) {
       $("hello").textContent = greeting() + "，" + AUTH.name;
     }

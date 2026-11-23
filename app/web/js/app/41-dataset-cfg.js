@@ -718,8 +718,9 @@
          弹出来会把整页盖住，等于看不见界面。 */
       if (window.__preview) { if (gate.style.display !== "none") close(); return; }
       var must = !!window.__loggedIn && !accepted();
-      if (must && gate.style.display === "none") open();
-      if (!must && gate.style.display !== "none") close();
+      /* 幂等：以前只在 display === "none" 时才 open()，而元素初始是空串（样式表控制），
+         于是首次登录永远打不开协议卡，得等下一次启动被别处设成 none 才生效。 */
+      if (must) open(); else close();
     }
     window.__legalSync = sync;
     window.__legalAccepted = accepted;
