@@ -29,7 +29,12 @@
   function applyAuth(a) {
     /* 允许无参调用：同意协议后要用"当前登录态"重绘一次。
        以前无参会把 __loggedIn 打成 false，于是又弹回扫码页。 */
-    if (a) AUTH = a;
+    if (a) {
+      /* 别把已知头像冲掉：调用方常常只传 {logged_in, name}，
+         以前这样一覆盖，AUTH.avatar 就没、头像退回字母，直到下次 /api/auth/state。 */
+      if (!a.avatar && AUTH && AUTH.avatar) a.avatar = AUTH.avatar;
+      AUTH = a;
+    }
     a = AUTH;
     window.__loggedIn = !!(a && a.logged_in) || !!window.__preview;
     window.__userName = (a && a.name) || "";
@@ -137,7 +142,9 @@
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ uid: d.uid || 0, name: d.name || "用户", avatar: d.avatar || "" })
         }).then(function () {
-          AUTH = { logged_in: true, name: d.name || "用户", onboarded: true };
+          /* avatar 必须一起带上：以前这里只放 name，登录那一刻 AUTH 里没有头像，
+             applyAuth → paintAvatar(undefined) 就退回首字母，要刷新一次 /api/auth/state 才补得回来。 */
+          AUTH = { logged_in: true, name: d.name || "用户", avatar: d.avatar || "", onboarded: true };
           playLoginIntro(function () {
             applyAuth(AUTH);
             toast("登录成功", "欢迎，" + (d.name || ""), "success");
@@ -220,7 +227,7 @@
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ uid: 258000000 + Math.floor(Math.random() * 999), name: name })
     }).then(function (r) { return r.json(); }).then(function (a) {
-      AUTH = { logged_in: true, name: a.name, onboarded: true };
+      AUTH = { logged_in: true, name: a.name, avatar: a.avatar || "", onboarded: true };
       playLoginIntro(function () {
         applyAuth(AUTH);
         toast("登录成功", "欢迎，" + a.name, "success");
