@@ -191,6 +191,51 @@ def _prune_backups(keep: int = 1) -> int:
     return removed
 
 
+# 启动时后台跑一次的自动检查：结果缓存在这里，前端问 /api/update/auto 即可。
+# 不在请求里同步调 GitHub —— 那是 1~3 秒的网络等待，会卡住主页首屏。
+_AUTO_STATE: Dict[str, Any] = {"checked": False, "checking": False,
+                               "behind": False, "remote": "", "tag": "",
+                               "name": "", "error": "", "at": 0}
+
+
+def auto_state() -> Dict[str, Any]:
+    return dict(_AUTO_STATE)
+
+
+def start_auto_check(delay: float = 4.0) -> None:
+    """起一个 daemon 线程，延时 delay 秒后查一次 release。
+
+    延时是刻意的：进程刚起来时 /api/state 预热、TRT 引擎加载都在抢 IO，
+    这时候去连 GitHub 没有意义，晚几秒再问。
+    """
+    import threading
+
+    def _run():
+        _AUTO_STATE["checking"] = True
+        try:
+            time.sleep(max(0.0, float(delay)))
+            info = check()
+            if not info.get("ok"):
+                _AUTO_STATE.update({"checked": True, "behind": False,
+                                   "error": str(info.get("error") or "")[:200],
+                                   "at": time.time()})
+                return
+            _AUTO_STATE.update({"checked": True, "behind": bool(info.get("behind")),
+                               "remote": str(info.get("remote") or ""),
+                               "tag": str(info.get("tag") or ""),
+                               "name": str(info.get("name") or ""),
+                               "local": str(info.get("local") or ""),
+                               "error": "", "at": time.time()})
+        except Exception as e:
+            _AUTO_STATE.update({"checked": True, "behind": False,
+                               "error": "%s: %s" % (type(e).__name__, str(e)[:160]),
+                               "at": time.time()})
+        finally:
+            _AUTO_STATE["checking"] = False
+
+    threading.Thread(target=_run, name="update-autocheck", daemon=True).start()
+
+
 def apply(asset_name: Optional[str] = None) -> Dict[str, Any]:
     """下载并安装最新版本。返回 {ok, installed, files, backup, error}。"""
     info = check()

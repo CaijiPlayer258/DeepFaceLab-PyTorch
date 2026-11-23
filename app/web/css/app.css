@@ -6599,3 +6599,15 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 .updprog i { display: block; height: 100%; width: 0; border-radius: 999px;
   background: var(--brand); transition: width .25s ease; }
 #updState:empty { display: none; }
+
+/* 主页顶部的更新提示条：蓝色（品牌色）alert，一条通栏，不遮内容 */
+.alertbar { display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; margin-bottom: 12px; border-radius: var(--r-md, 10px);
+  background: color-mix(in srgb, var(--brand) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--brand) 32%, transparent);
+  color: var(--ink); font-size: 13px; }
+.alertbar .ic { color: var(--brand); flex: none; }
+.alertbar .tx { flex: 1 1 auto; min-width: 0; }
+.alertbar .btn.sm { padding: 3px 10px; font-size: 12px; flex: none; }
+.alertbar .iconbtn { flex: none; opacity: .6; }
+.alertbar .iconbtn:hover { opacity: 1; }

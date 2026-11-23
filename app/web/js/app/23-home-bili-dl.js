@@ -580,3 +580,42 @@
   }
   window.drawAngle = drawAngle;
 
+  /* ---------- 主页顶部：有新版本时的蓝条 ---------- */
+  (function () {
+    var bar = document.getElementById("updAlert");
+    if (!bar) return;
+    var KEY = "dfl-upd-skip";          /* 点过 ✕ 的版本，不再重复提示 */
+    function skipped(v) {
+      try { return localStorage.getItem(KEY) === v; } catch (e) { return false; }
+    }
+    function show(remote, name) {
+      var tx = document.getElementById("updAlertTx");
+      var label = name || remote;
+      if (tx) tx.textContent = "发现新版本 " + label + " —— 去「关于」页可以下载并安装";
+      bar.classList.remove("hide");
+    }
+    function poll(tries) {
+      fetch("/api/update/auto").then(function (r) { return r.json(); }).then(function (d) {
+        if (!d) return;
+        if (!d.checked && tries > 0) { setTimeout(function () { poll(tries - 1); }, 5000); return; }
+        if (!d.behind) return;
+        var v = d.remote || d.tag || "";
+        if (!v || skipped(v)) return;
+        show(v, d.name);
+      }).catch(function () {});
+    }
+    /* 进程刚起来时后台那一次还没查完：每 5 秒问一次，最多 6 次（约 30 秒） */
+    poll(6);
+    var go = document.getElementById("updAlertGo");
+    if (go) go.addEventListener("click", function () {
+      bar.classList.add("hide");
+      if (window.go) window.go("about");
+    });
+    var x = document.getElementById("updAlertX");
+    if (x) x.addEventListener("click", function () {
+      bar.classList.add("hide");
+      fetch("/api/update/auto").then(function (r) { return r.json(); }).then(function (d) {
+        try { localStorage.setItem(KEY, (d && (d.remote || d.tag)) || "1"); } catch (e) {}
+      }).catch(function () {});
+    });
+  })();

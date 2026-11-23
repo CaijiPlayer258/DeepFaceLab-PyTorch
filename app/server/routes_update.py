@@ -11,6 +11,16 @@ from . import backend_update as U
 
 router = APIRouter(prefix="/api/update", tags=["update"])
 
+@router.get("/auto")
+def update_auto():
+    """启动时后台查的那一次结果（前端首页横幅用）。
+
+    checked=False 表示还没查完（进程刚起来），前端可以过几秒再问；
+    behind=True 才提示有新版本。
+    """
+    return U.auto_state()
+
+
 @router.get("/progress")
 def update_progress():
     """安装进度（下载 % / 解包 / 覆盖）。前端在 apply 期间轮询这个接口。"""

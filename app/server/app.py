@@ -127,6 +127,14 @@ try:
 except Exception:
     pass
 
+# 启动即查一次更新：放到后台线程、延时几秒，GitHub 那 1~3 秒的往返不占首屏。
+# 结果缓存给 /api/update/auto，主页顶部的蓝条用它决定要不要提示。
+try:
+    from .backend_update import start_auto_check as _start_autocheck
+    _start_autocheck(4.0)
+except Exception:
+    pass
+
 
 @app.get("/")
 def index():
