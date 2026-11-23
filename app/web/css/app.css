@@ -6631,3 +6631,28 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 /* 模型转换是训练器的二级页：标题下面留一行给返回 */
 .cvback { margin: -6px 0 12px; }
 .cvback .btn { font-size: 12.5px; padding: 5px 12px; }
+
+/* 模型转换卡片：设计稿 convert-page.html（方案 A，按模块展开）里的这几块 */
+#p-train-convert .cvov { display:flex; align-items:center; gap:10px; margin:12px 0 2px; }
+#p-train-convert .cvovbar { flex:1; height:4px; border-radius:999px;
+  background:var(--line-strong); overflow:hidden; }
+#p-train-convert .cvovbar i { display:block; height:100%; background:var(--brand);
+  border-radius:999px; transition:width .3s ease; }
+#p-train-convert .cvovpct { font-size:11.5px; color:var(--ink-2);
+  font-variant-numeric:tabular-nums; min-width:44px; text-align:right; }
+/* 每步的状态小标签：已完成 / 进行中 / 待执行 */
+#p-train-convert .cvpill { font-size:10px; padding:1px 6px; border-radius:5px;
+  background:var(--line-strong); color:var(--ink-3); margin-left:2px; }
+#p-train-convert .cvst.done .cvpill { background:color-mix(in srgb, var(--ok) 18%, transparent); color:var(--ok); }
+#p-train-convert .cvst.on .cvpill { background:color-mix(in srgb, var(--brand) 20%, transparent); color:var(--brand); }
+#p-train-convert .cvst.err .cvpill { background:color-mix(in srgb, var(--bad) 18%, transparent); color:var(--bad); }
+/* 步骤说明那行 */
+#p-train-convert .cvdesc { font-size:11.5px; color:var(--ink-3); line-height:1.7;
+  margin:2px 0 0 34px; }
+/* 底注 */
+#p-train-convert .cvfoot { display:flex; align-items:center; gap:8px; margin-top:15px;
+  padding-top:13px; border-top:1px solid var(--line); font-size:11.5px; color:var(--ink-3); }
+#p-train-convert .cvdot { width:6px; height:6px; border-radius:50%;
+  background:var(--brand); display:inline-block; flex:none; }
+/* 模块行（设计稿 .mod）与现有 cvrowi 对齐：加一列说明 */
+#p-train-convert .cvrowi .c { font-variant-numeric:tabular-nums; }

@@ -528,6 +528,12 @@
       node.className = "cvst " + (cls || "");
       var ic = node.querySelector(".cvic");
       if (ic) ic.textContent = mark;
+      var pill = node.querySelector(".cvpill");
+      if (pill) {
+        pill.textContent = (cls || "").indexOf("done") >= 0 ? "已完成"
+          : (cls || "").indexOf("err") >= 0 ? "失败"
+          : (cls || "").indexOf("on") >= 0 ? "进行中" : "待执行";
+      }
     }
 
     function paint(st) {
@@ -537,6 +543,20 @@
       $("cvName").textContent = st.name || "model";
       $("cvMeta").textContent = st.modules && st.modules.length ? (st.modules.length + " 个模块") : "";
       $("cvBad").className = "cvbad" + (st.step === "error" ? " on" : "");
+      /* 总进度：ok 的模块数 / 总数（设计稿那条 .ovbar） */
+      var _mods = st.modules || [];
+      var _okN = _mods.filter(function (m) { return m.state === "ok"; }).length;
+      var _pct = st.running ? (st.percent != null ? st.percent
+                 : (_mods.length ? Math.round(_okN * 100 / _mods.length) : 0))
+                : (st.step === "done" ? 100 : (st.percent || 0));
+      var _fill = $("cvOvFill"), _pctEl = $("cvOvPct");
+      if (_fill) _fill.style.width = Math.max(0, Math.min(100, _pct)) + "%";
+      if (_pctEl) _pctEl.textContent = Math.max(0, Math.min(100, _pct)) + "%";
+      /* 第一步的说明：读到了什么、识别成什么、多少模块 */
+      var _d1 = $("cvD1");
+      if (_d1 && _mods.length) {
+        _d1.textContent = "识别到 " + _mods.length + " 个模块";
+      }
 
       if (st.step === "load") {
         step("cvS1", "on", "1"); step("cvS2", "", "2"); step("cvS3", "", "3");
@@ -599,10 +619,21 @@
       window.go = wrapped;
     }
     /* 先进页面放个占位：以前这里是纯空白，看不清到底是「没跑」还是「没数据」 */
-    var _box0 = $("cvList");
-    if (_box0 && !_box0.innerHTML) _box0.innerHTML = '<div class="cvempty">正在读取 workspace/model …</div>';
-    load();
-    setTimeout(function () { if ($("p-train-convert")) load(); }, 600);
+    /* 这个分片是在 <head> 里同步加载的，此刻 #cvList 还没解析出来 ——
+       以前在这里直接 load()，getElementById 拿到 null，renderList 里 `if (!box) return`
+       就什么都不画，页面永远是一张空卡片。等 DOM 就绪再跑。 */
+    function cvBoot() {
+      var box = $("cvList");
+      if (box && !box.innerHTML) {
+        box.innerHTML = '<div class="cvempty">正在读取 workspace/model …</div>';
+      }
+      load();
+    }
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", cvBoot);
+    } else {
+      cvBoot();
+    }
   })();
 
   /* ---------- 设置页 · B 站账号（未登录 → 打开欢迎页扫码） ---------- */
