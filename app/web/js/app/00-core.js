@@ -103,6 +103,7 @@
     train: [{ t: "模型选择" }],
     run: [{ t: "模型选择", go: "train" }, { t: "参数设置", go: "train-cfg" }, { t: "训练界面" }],
     "train-cfg": [{ t: "模型选择", go: "train" }, { t: "参数设置" }],
+    "train-convert": [{ t: "模型选择", go: "train" }, { t: "模型转换" }],
     "tool-mask": [{ t: "工具" }, { t: "遮罩绘制" }],
     "tool-bili": [{ t: "工具" }, { t: "B 站下载" }],
     "tool-color": [{ t: "工具" }, { t: "色域迁移" }],

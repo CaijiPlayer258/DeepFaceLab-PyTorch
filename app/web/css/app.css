@@ -6627,3 +6627,7 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   text-underline-offset: 2px; text-decoration-thickness: 1px; cursor: pointer; }
 .alertbar .lnk:hover { color: color-mix(in srgb, var(--brand) 78%, white); }
 .alertbar b { font-weight: 600; color: var(--ink); }
+
+/* 模型转换是训练器的二级页：标题下面留一行给返回 */
+.cvback { margin: -6px 0 12px; }
+.cvback .btn { font-size: 12.5px; padding: 5px 12px; }

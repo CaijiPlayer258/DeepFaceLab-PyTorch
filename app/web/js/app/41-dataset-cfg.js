@@ -364,6 +364,16 @@
       if (sm && sm.textContent !== text) { sm.textContent = text; }
     }
 
+    (function () {
+      var back = document.getElementById("cvBack");
+      if (back && !back.dataset.bound) {
+        back.dataset.bound = "1";
+        back.addEventListener("click", function () {
+          if (window.go) window.go("train");
+        });
+      }
+    })();
+
     function load() {
       return fetch("/api/engines").then(function (r) { return r.json(); })
         .then(paint).catch(function () {});
@@ -457,7 +467,10 @@
   })();
 
 
-  /* ---------------- 工具：模型转换（.npy -> .pth，Stepper） ---------------- */
+  /* ---------------- 训练器 · 模型转换（.npy -> .pth，Stepper） ----------------
+     二级页：面包屑「模型选择 › 模型转换」，左上角有返回。
+     以前它是独立 page，进去只能靠侧栏跳走，Ctrl+R 后 hash 还停在转换页 ——
+     用户会以为「回不去了，必须重启」。 */
   (function () {
     var $ = function (id) { return document.getElementById(id); };
     var timer = null;
@@ -508,7 +521,14 @@
             if (hit && !hit.converted) setTimeout(function () { start(hit); }, 60);
           }
         })
-        .catch(function () { renderList([]); });
+        .catch(function (e) {
+          /* 失败别装成「没有老模型」：那样用户以为目录是空的，其实接口挂了 */
+          var box = $("cvList");
+          if (box) {
+            box.innerHTML = '<div class="cvempty">读不到转换列表：' +
+                            String((e && e.message) || e) + "</div>";
+          }
+        });
     }
 
     function step(el, cls, mark) {

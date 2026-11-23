@@ -98,6 +98,7 @@ def scan() -> list:
             "sizeText": _fmt_size(npy.stat().st_size),
             "hasDat": dat.exists(),
             "converted": converted,
+            "kind": ("modules" if _suffix == "_encoder.npy" else "weights"),
         })
     return out
 
