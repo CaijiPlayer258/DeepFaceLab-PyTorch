@@ -201,10 +201,24 @@ def merge_videos(dir: str = ""):
                 # 合成产物 / 缓存目录不作为素材列出来（否则列表里全是自己的输出）
                 if "_merged" in f.stem or ".merge_" in str(f.parent):
                     continue
+                # 导入视频时 prepare 会把源文件复制到 workspace/merge/<视频名>/，
+                # 那份副本再被扫出来，列表里就会出现两条一模一样的名字。
+                # 副本只是工作区里的中间态，不作为可选素材。
+                try:
+                    _rp = f.relative_to(Path(WORKSPACE)).parts
+                except ValueError:
+                    _rp = ()
+                if _rp and _rp[0].lower() == "merge":
+                    continue
                 key = os.path.normcase(str(f))
                 if key in seen:
                     continue
+                # 同名同体积的也算同一个（同一文件被软链/复制到别处时去重）
+                _dup = (f.name.lower(), f.stat().st_size)
+                if _dup in seen:
+                    continue
                 seen.add(key)
+                seen.add(_dup)
                 out.append({"path": str(f), "name": f.name, "dir": str(r),
                             "mb": round(f.stat().st_size / 1048576, 1)})
             except OSError:
