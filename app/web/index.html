@@ -510,36 +510,22 @@
         </div>
 
         <div class="card cvcard" id="cvCard" style="display:none">
-          <div class="cvhd">
-            <b id="cvName">model</b><span class="cvmeta" id="cvMeta"></span>
-            <span class="cvbad" id="cvBad">失败</span>
-          </div>
-          <!-- 总进度：设计稿 convert-page.html 里第二步上方那条 -->
-          <div class="cvov">
-            <div class="cvovbar"><i id="cvOvFill" style="width:0%"></i></div>
-            <span class="cvovpct" id="cvOvPct">0%</span>
-          </div>
+          <div class="cvhd"><b id="cvName">model</b><span class="cvmeta" id="cvMeta"></span></div>
           <div class="cvsteps">
             <div class="cvst" id="cvS1">
               <div class="cvline"><i></i></div>
-              <div class="cvsh"><span class="cvic" id="cvI1">1</span><span class="cvnm">加载模块</span><span class="cvpill" id="cvP1">待执行</span></div>
-              <div class="cvdesc" id="cvD1">读取 .npy，识别架构与模块清单</div>
+              <div class="cvsh"><span class="cvic" id="cvI1">1</span><span class="cvnm">加载模块</span></div>
             </div>
             <div class="cvst" id="cvS2">
               <div class="cvline"><i></i></div>
-              <div class="cvsh"><span class="cvic" id="cvI2">2</span><span class="cvnm">转换模型</span><span class="cvpill" id="cvP2">待执行</span></div>
-              <div class="cvdesc" id="cvD2">逐模块写出 .pth，卷积布局 NHWC → NCHW</div>
+              <div class="cvsh"><span class="cvic" id="cvI2">2</span><span class="cvnm">转换模型</span></div>
               <div class="cvpnl"><div><div class="cvrows" id="cvRows"></div></div></div>
             </div>
             <div class="cvst" id="cvS3">
-              <div class="cvsh"><span class="cvic" id="cvI3">3</span><span class="cvnm">校验</span><span class="cvpill" id="cvP3">待执行</span></div>
-              <div class="cvdesc" id="cvD3">各模块写出后逐个比对，页面显示的就是结果</div>
+              <div class="cvsh"><span class="cvic" id="cvI3">3</span><span class="cvnm">校验</span></div>
             </div>
           </div>
-          <div class="cvfoot"><span class="cvdot"></span>转换完成后可直接在这个模型上开始训练</div>
         </div>
-        </div>
-      </div>
 
       <!-- ================= 工具：角度可视化 ================= -->
       <div class="page" id="p-tool-angle">

@@ -476,9 +476,14 @@
       var box = $("cvList");
       if (!box) return;
       if (!items.length) {
-        box.innerHTML = '<div class="cvempty">workspace/model 里没有 *_weights.npy。把老版本的 .npy 模型放进去再刷新。</div>';
-        return;
+        /* 没有待转换的老模型时，这张卡整个收起来 —— 留一个空框在最上面很扎眼 */
+        var _cardBox = box.closest && box.closest(".card");
+        if (_cardBox) _cardBox.style.display = "none";
+        box.innerHTML = "";
+          return;
       }
+      var _cardOn = box.closest && box.closest(".card");
+      if (_cardOn) _cardOn.style.display = "";
       box.innerHTML = items.map(function (it, i) {
         /* kind=modules 是 4.0 后期的分模块 npy（_encoder.npy 那套）：不需要转换，
            导出 dfm 的脚本直接读它 —— 这里别给一个点了就报错的「转换」按钮。 */
@@ -528,12 +533,6 @@
       node.className = "cvst " + (cls || "");
       var ic = node.querySelector(".cvic");
       if (ic) ic.textContent = mark;
-      var pill = node.querySelector(".cvpill");
-      if (pill) {
-        pill.textContent = (cls || "").indexOf("done") >= 0 ? "已完成"
-          : (cls || "").indexOf("err") >= 0 ? "失败"
-          : (cls || "").indexOf("on") >= 0 ? "进行中" : "待执行";
-      }
     }
 
     function paint(st) {
@@ -542,21 +541,6 @@
       card.style.display = "";
       $("cvName").textContent = st.name || "model";
       $("cvMeta").textContent = st.modules && st.modules.length ? (st.modules.length + " 个模块") : "";
-      $("cvBad").className = "cvbad" + (st.step === "error" ? " on" : "");
-      /* 总进度：ok 的模块数 / 总数（设计稿那条 .ovbar） */
-      var _mods = st.modules || [];
-      var _okN = _mods.filter(function (m) { return m.state === "ok"; }).length;
-      var _pct = st.running ? (st.percent != null ? st.percent
-                 : (_mods.length ? Math.round(_okN * 100 / _mods.length) : 0))
-                : (st.step === "done" ? 100 : (st.percent || 0));
-      var _fill = $("cvOvFill"), _pctEl = $("cvOvPct");
-      if (_fill) _fill.style.width = Math.max(0, Math.min(100, _pct)) + "%";
-      if (_pctEl) _pctEl.textContent = Math.max(0, Math.min(100, _pct)) + "%";
-      /* 第一步的说明：读到了什么、识别成什么、多少模块 */
-      var _d1 = $("cvD1");
-      if (_d1 && _mods.length) {
-        _d1.textContent = "识别到 " + _mods.length + " 个模块";
-      }
 
       if (st.step === "load") {
         step("cvS1", "on", "1"); step("cvS2", "", "2"); step("cvS3", "", "3");
@@ -579,7 +563,7 @@
         }).join("");
         if (st.step === "error" && st.error) {
           html += '<div class="cvrowi bad"><span class="mk">!</span><span class="n">' +
-                  esc(st.error) + '</span><span class="c">失败</span></div>';
+                  esc(st.error) + '</span></div>';
         }
         rows.innerHTML = html;
       }
@@ -627,6 +611,7 @@
       if (box && !box.innerHTML) {
         box.innerHTML = '<div class="cvempty">正在读取 workspace/model …</div>';
       }
+    window.__cvBoot = cvBoot;
       load();
     }
     if (document.readyState === "loading") {
