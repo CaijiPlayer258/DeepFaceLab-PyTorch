@@ -132,9 +132,26 @@ def _watch(md: Path, stem: str, proc, modules):
         time.sleep(0.3)
 
 
+def _resolve_stem(md: Path, name: str) -> str:
+    """模型卡片上写的是显示名（DF-UDT416），文件却是 DF-UDT416_SAEHD_*.npy。
+
+    这里把两种写法都认下来：精确的 stem 直接用；否则按 <name>_* 去 glob 一次。
+    """
+    name = str(name).strip()
+    for suf in ("_weights.npy", "_encoder.npy"):
+        if (md / (name + suf)).exists():
+            return name
+    for suf in ("_weights.npy", "_encoder.npy"):
+        hits = sorted(md.glob(name + "_*" + suf))
+        if hits:
+            return hits[0].name[: -len(suf)]
+    return name
+
+
 def start(name: str) -> dict:
     md = model_dir()
-    stem = str(name).strip()
+    stem = _resolve_stem(md, name)
+    _log("resolve %s -> %s" % (name, stem))
     if not stem:
         raise ValueError("缺少模型名")
     npy = md / (stem + "_weights.npy")

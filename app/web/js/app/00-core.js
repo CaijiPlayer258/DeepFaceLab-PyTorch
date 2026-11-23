@@ -195,9 +195,22 @@
   function cvListPaint() {
     var card = document.getElementById("cvCard");
     if (!card) return;
+
+    /* ① 从训练器模型卡片点「转换」过来：名字已经在 __cvPick 里，直接开跑。
+       以前这里只查 status，于是点了卡片什么都不发生 —— 名字白传了。 */
+    var pick = window.__cvPick;
+    if (pick) {
+      window.__cvPick = "";
+      if (window.__cvStart) {
+        try { window.__cvStart({ name: pick }); }
+        catch (e) { if (window.toast) toast("转换失败", String(e), "error"); }
+        return;
+      }
+    }
+
+    /* ② 没带名字：看有没有正在跑（或刚失败）的任务，有就把卡画出来 */
     fetch("/api/convert/status").then(function (r) { return r.json(); }).then(function (st) {
-      if (!st || !st.running) {
-        if (st && st.step === "error" && window.__cvPaint) { window.__cvPaint(st); return; }
+      if (!st || (!st.running && st.step !== "error")) {
         card.style.display = "none";
         return;
       }
