@@ -313,6 +313,22 @@ def _assign_from_tf_saveable_dict(*, tf_dict: Dict[str, np.ndarray], saveable, s
         except Exception:
             dst_tensor.data.copy_(arr)
 
+    # ⓪ 顺序优先：TF 的 Saveable.load_weights 就是按 get_weights() 的顺序读，
+    #    存盘时 dict 的插入顺序 = 当时的顺序。数量一致 + 每个元素数对得上 → 直接用，
+    #    这比猜名字可靠，也接近 4.0 一直能用的那个行为。
+    _ordered = list(tf_dict.values())
+    if len(_ordered) == len(weights):
+        _ok = True
+        for _w, _arr in zip(weights, _ordered):
+            _dst = tuple(int(x) for x in _w.shape)
+            try:
+                _copy_np_to_tensor(_w, _convert_array_to_shape(_np_to_np(_arr), _dst))
+            except Exception:
+                _ok = False
+                break
+        if _ok:
+            return len(weights), len(weights), [], [], []
+
     remaining_keys = list(tf_dict.keys())
     remaining_set = set(remaining_keys)
 
