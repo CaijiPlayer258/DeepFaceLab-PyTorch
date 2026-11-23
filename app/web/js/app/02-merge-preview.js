@@ -1207,21 +1207,22 @@ function mgStageEmpty(on) {
     } catch (e) { byFace = []; }
     var assigned = {};
     byFace.forEach(function (x) { if (x && x.name) assigned[x.name] = (x.faces || []).slice(); });
-    /* 导出 payload = **分配表 ∪ 左栏选中**。
-       以前只从左栏 sel 出发：如果两张脸的 chip 指到了左栏没勾的那个模型，
-       它就被丢掉 —— 后端只看到 1 个 dfm，于是走 fused（六列图），用户以为池没了。
-       现在反过来：先把分配表里出现过的模型都带上，再补左栏勾了但没分配的（faces:[]=管全部）。 */
-    var out = [], seen = {};
-    byFace.forEach(function (x) {
-      if (!x || !x.name) return;
-      seen[x.name] = 1;
-      out.push({ name: x.name, faces: (x.faces || []).slice() });
-    });
+    /* 以左栏选中为准：分配表只用来给选中项补 faces，**不引入没选中的模型**。
+       以前是「分配表 ∪ 选中」，一旦画面上给别的模型指过脸（或早先选过多模型、
+       分配记录还留着），导出请求里就多带一个模型 —— 后端据此判成「多模型」，
+       本来单模型的一单被拆成两趟，整段视频白跑一遍。 */
+    var out = [];
     sel.forEach(function (n) {
-      if (seen[n]) return;
-      seen[n] = 1;
-      out.push({ name: n, faces: [] });
+      out.push({ name: n, faces: (assigned[n] || []).slice() });
     });
+    if (!out.length) {
+      var seen = {};
+      byFace.forEach(function (x) {
+        if (!x || !x.name || seen[x.name]) return;
+        seen[x.name] = 1;
+        out.push({ name: x.name, faces: (x.faces || []).slice() });
+      });
+    }
     return out;
   }
   window.mgExportModelsPayload = mgExportModelsPayload;
