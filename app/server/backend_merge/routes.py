@@ -338,9 +338,14 @@ def merge_open(body: dict):
             except Exception:
                 continue
         fps = _float_val("fps", body.get("fps"), 0.0, 240.0, 0.0)
+        try:
+            from ..backend_faces import store as _fstore
+            _fstore.set_active_source(p.name)
+        except Exception:
+            pass
         _cache_set(mode="project", dir=str(p), srcdir=srcdir, names=names,
-                   path="", list=[], frames=len(names), fps=fps, w=0, h=0,
-                   stale=False, opened_at=time.time())
+                       path="", list=[], frames=len(names), fps=fps, w=0, h=0,
+                       stale=False, opened_at=time.time())
         return _ok(path=str(p), name=p.name, mode="project", kind=kind,
                    srcdir=srcdir, frames=len(names), fps=fps,
                    width=0, height=0, with_landmarks=lm, sampled=len(sample))
@@ -360,6 +365,12 @@ def merge_open(body: dict):
     if not frames or int(frames) <= 0 or not fps or float(fps) <= 0:
         raise _BadInput("视频里读不出帧（frames=%s, fps=%s）：%s"
                         % (frames, fps, p.name))
+    # 人脸库按素材隔离：告诉 store 现在打开的是哪个视频
+    try:
+        from ..backend_faces import store as _fstore
+        _fstore.set_active_source(p.stem)
+    except Exception:
+        pass
     _cache_set(mode="video", path=str(p), dir="", list=[], names=[],
                frames=int(frames), fps=float(fps), w=int(w), h=int(h),
                stale=False, opened_at=time.time())

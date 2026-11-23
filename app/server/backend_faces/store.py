@@ -104,9 +104,35 @@ def workspace_root() -> Path:
         return base
 
 
+# 当前打开的素材（视频名 / 项目名）。人脸库按它分目录，不再让所有视频共用一个库：
+# 以前默认库固定是 <工作区>/merge，A 视频建的脸和组在 B 视频里照样可见，
+# 导出时还会被当成「另一个模型的组」，把单模型的一单拆成多趟。
+_ACTIVE_STEM = ""
+
+
+def set_active_source(name) -> None:
+    """记录当前打开的素材名，供 default_project() 派生子目录。"""
+    global _ACTIVE_STEM
+    text = str(name or "").strip().replace("\\", "/").rsplit("/", 1)[-1]
+    stem = Path(text).stem if text else ""
+    # 只留安全字符：目录名要能直接当路径用
+    stem = re.sub(r"[\\/:*?\"<>|]+", "_", stem).strip()
+    _ACTIVE_STEM = stem
+
+
+def active_source() -> str:
+    return _ACTIVE_STEM
+
+
 def default_project() -> Path:
-    """没给 project 时的默认库：<工作区>/merge（它的 _faces/ 就是人脸库）。"""
-    return workspace_root() / "merge"
+    """没给 project 时的默认库：<工作区>/merge/<当前素材名>。
+
+    按素材分目录，一个视频一个库；没打开任何素材时退回 <工作区>/merge。
+    """
+    base = workspace_root() / "merge"
+    if _ACTIVE_STEM:
+        return base / _ACTIVE_STEM
+    return base
 
 
 def _resolve_project(raw, create: bool = False):
