@@ -54,7 +54,17 @@ def _read_pickle(path: Path):
         from core.legacy_dat import pickle_compat_loads
         return pickle_compat_loads(blob)
     except Exception:
+        pass
+    try:
         return pickle.loads(blob)
+    except Exception:
+        # TF 的 save_weights 用 np.save 存 object 数组：里面带 persistent_id，
+        # 直接 pickle.loads 会报「no persistent_load function」。走 numpy 自己的
+        # unpickler（allow_pickle=True）才能读出来。
+        _arr = np.load(str(path), allow_pickle=True)
+        if hasattr(_arr, "files"):          # NpzFile：TF save_weights 写的就是它
+            return {k: _arr[k] for k in _arr.files}
+        return _arr.item() if hasattr(_arr, "item") else _arr
 
 
 def _read_saveable_dict(path: Path) -> Dict[str, np.ndarray]:
@@ -137,7 +147,7 @@ def _convert_array_to_shape(src: np.ndarray, dst_shape: Sequence[int]) -> np.nda
         if src.shape[::-1] == dst_shape:
             return src.T
 
-    # ⚠️ 元素数相同就 reshape —— 这个兜底**极其危险**，已收窄。
+    # [!] 元素数相同就 reshape —— 这个兜底**极其危险**，已收窄。
     # 它会让形状根本对不上的权重静默通过：np.reshape 只是把内存顺序重新解释一遍，
     # 得到的是一个完全错乱的张量，而且上层完全不知道出过事。
     # 旧版转换器靠"名字匹配失败 → 扫到第一个元素数相同的键 → reshape"这套组合，
@@ -180,7 +190,7 @@ def _collect_tensor_name_maps(module) -> Tuple[Dict[int, str], Dict[int, str]]:
       2. torch.nn.Module.named_parameters() —— 层级名（a/b/weight:0），兜底。
       3. leras get_layers() —— **只有扁平名**（conv1/weight:0），最后的兜底。
 
-    ⚠️ 历史坑（v4.0.8.4 修复）：旧版转换器**跳过了第 1 条**，只用了 2 和 3。
+    [!] 历史坑（v4.0.8.4 修复）：旧版转换器**跳过了第 1 条**，只用了 2 和 3。
     而 DFL 的 leras 把子层放在普通 list/dict 里，Torch 的 named_parameters()
     看不见它们，于是实际全部落到第 3 条扁平名上 —— 实测 encoder 的 8 个张量
     只映射出 2 个不同的名字（conv1/weight:0、conv1/bias:0），重名 6 个。
@@ -340,7 +350,7 @@ def _assign_from_tf_saveable_dict(*, tf_dict: Dict[str, np.ndarray], saveable, s
 
         # 2) 形状兜底。
         #
-        # ⚠️ 旧版是「扫到第一个形状能对上的键就用」—— 再配上 _convert_array_to_shape
+        # [!] 旧版是「扫到第一个形状能对上的键就用」—— 再配上 _convert_array_to_shape
         #    里"元素数相同就 reshape"的兜底，几乎总能扫到某个东西，于是实际语义
         #    变成「按字典顺序瞎猜参数」。这就是 LIAE ae=384 转出乱码的根因。
         #
@@ -439,7 +449,13 @@ def _assign_optimizer_from_tf_dict(*, tf_dict: Dict[str, np.ndarray], opt_spec: 
                 missing.append(key)
                 continue
             dst = weights[1 + i]
-            conv = _convert_array_to_shape(arr, tuple(int(x) for x in dst.shape))
+            try:
+                conv = _convert_array_to_shape(arr, tuple(int(x) for x in dst.shape))
+            except ValueError:
+                # 优化器动量对不上就跳过：权重已经转好，缺动量只是继续训练时头几百
+                # iter 收敛慢一点，不该让整次转换以 exit 1 收场。
+                missing.append("shape %s -> %s" % (getattr(arr, "shape", "?"), dst.shape))
+                continue
             try:
                 import torch
 
@@ -463,7 +479,13 @@ def _assign_optimizer_from_tf_dict(*, tf_dict: Dict[str, np.ndarray], opt_spec: 
                 missing.append(key)
                 continue
             dst = weights[1 + i]
-            conv = _convert_array_to_shape(arr, tuple(int(x) for x in dst.shape))
+            try:
+                conv = _convert_array_to_shape(arr, tuple(int(x) for x in dst.shape))
+            except ValueError:
+                # 优化器动量对不上就跳过：权重已经转好，缺动量只是继续训练时头几百
+                # iter 收敛慢一点，不该让整次转换以 exit 1 收场。
+                missing.append("shape %s -> %s" % (getattr(arr, "shape", "?"), dst.shape))
+                continue
             try:
                 import torch
 
@@ -481,7 +503,13 @@ def _assign_optimizer_from_tf_dict(*, tf_dict: Dict[str, np.ndarray], opt_spec: 
                 missing.append(key)
                 continue
             dst = weights[1 + n + i]
-            conv = _convert_array_to_shape(arr, tuple(int(x) for x in dst.shape))
+            try:
+                conv = _convert_array_to_shape(arr, tuple(int(x) for x in dst.shape))
+            except ValueError:
+                # 优化器动量对不上就跳过：权重已经转好，缺动量只是继续训练时头几百
+                # iter 收敛慢一点，不该让整次转换以 exit 1 收场。
+                missing.append("shape %s -> %s" % (getattr(arr, "shape", "?"), dst.shape))
+                continue
             try:
                 import torch
 
@@ -521,7 +549,13 @@ def _assign_optimizer_from_tf_dict(*, tf_dict: Dict[str, np.ndarray], opt_spec: 
                 for dst, (_k, src_val) in zip(weights[1:], state_items):
                     arr = _np_to_np(src_val)
                     try:
-                        conv = _convert_array_to_shape(arr, tuple(int(x) for x in dst.shape))
+                        try:
+                            conv = _convert_array_to_shape(arr, tuple(int(x) for x in dst.shape))
+                        except ValueError:
+                            # 优化器动量对不上就跳过：权重已经转好，缺动量只是继续训练时头几百
+                            # iter 收敛慢一点，不该让整次转换以 exit 1 收场。
+                            missing.append("shape %s -> %s" % (getattr(arr, "shape", "?"), dst.shape))
+                            continue
                     except Exception:
                         ok = False
                         break
@@ -1028,7 +1062,7 @@ def _convert_one_model(*, src_dir: Path, dst_dir: Path, model_name: str, model_c
             tf_dict=tf_dict, saveable=spec.obj, scope=spec.scope)
 
         if missing or ambiguous:
-            print(f"  ⚠️ {spec.filename}: 名字匹配未覆盖全部张量")
+            print(f"  [!] {spec.filename}: 名字匹配未覆盖全部张量")
             print(f"       missing={len(missing)}（保持初始化值，训练会带着垃圾权重跑）")
             print(f"       ambiguous={len(ambiguous)}（有多个同形状候选，拒绝猜测，同上）")
             for _m in missing[:5]:
@@ -1037,7 +1071,7 @@ def _convert_one_model(*, src_dir: Path, dst_dir: Path, model_name: str, model_c
                 print(f"       ambiguous: {_m}")
             _bad.append(spec.filename)
         if fallback:
-            print(f"  ⚠️ {spec.filename}: {len(fallback)} 个张量是靠形状兜底硬塞的（名字没对上）")
+            print(f"  [!] {spec.filename}: {len(fallback)} 个张量是靠形状兜底硬塞的（名字没对上）")
             _bad.append(spec.filename)
 
         dst_file = dst_dir / f"{model_name}_{spec.filename}"
@@ -1051,8 +1085,15 @@ def _convert_one_model(*, src_dir: Path, dst_dir: Path, model_name: str, model_c
         src_existing = _find_existing_weight_file(src_file)
 
         if src_existing is not None:
-            tf_dict = _read_saveable_dict(src_existing)
-            _assign_optimizer_from_tf_dict(tf_dict=tf_dict, opt_spec=opt_spec)
+            # 优化器状态是 best-effort：这些 npy 有时是 TF 的 persistent-id pickle
+            # （UnpicklingError: no persistent_load function）或形状对不上。
+            # 转不动就跳过 —— 权重已经写好了，缺动量只是继续训练时头几百 iter 慢一点，
+            # 不该让整次转换 exit 1、更不该让人以为模型没转成功。
+            try:
+                tf_dict = _read_saveable_dict(src_existing)
+                _assign_optimizer_from_tf_dict(tf_dict=tf_dict, opt_spec=opt_spec)
+            except Exception as _e:
+                print(f"  skip {opt_spec.filename}: {type(_e).__name__}: {str(_e)[:100]}")
 
         dst_file = dst_dir / f"{model_name}_{opt_spec.filename}"
         opt_spec.opt.save_weights(dst_file)
@@ -1061,7 +1102,7 @@ def _convert_one_model(*, src_dir: Path, dst_dir: Path, model_name: str, model_c
     if _bad:
         print("")
         print("  " + "!" * 66)
-        print(f"  ⚠️ 本次转换有 {len(_bad)} 个文件没能全部按名字对上权重：")
+        print(f"  [!] 本次转换有 {len(_bad)} 个文件没能全部按名字对上权重：")
         for _f in dict.fromkeys(_bad):
             print(f"       - {_f}")
         print("     这说明转换器的 TF 名映射和这个模型对不上。转出来的模型可能带错权重，")

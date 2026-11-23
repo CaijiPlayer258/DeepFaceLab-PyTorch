@@ -189,15 +189,11 @@ def start(name: str) -> dict:
 
     def worker():
         try:
-            if _mods_npy.exists() and not npy.exists():
-                # 4.0 后期的分模块 npy：export_dfm.py 第 54 行起自带
-                # 「[1] 转换 <name> (.npy → .pth)」，跑完既得到 .pth 也得到 .dfm
-                cmd = [str(exe), str(_migrate_dir() / "export_dfm.py"),
-                       "--model", stem.rsplit("_", 1)[-1] or "SAEHD",
-                       "--model-dir", str(md), "--force-name", stem]
-            else:
-                cmd = [str(exe), str(conv), "--src", str(md), "--dst", str(md),
-                       "--model", stem.rsplit("_", 1)[-1] or "SAEHD", "--name", stem]
+            /* 转换 = TF .npy -> torch .pth，只做这一件事。
+               导出 .dfm 是另一条路（模型卡片上的「导出」），这里绝不碰它 ——
+               以前走去 export_dfm.py 会顺带生成几百 MB 的 .dfm，属于重复语言。 */
+            cmd = [str(exe), str(conv), "--src", str(md), "--dst", str(md),
+                   "--model", stem.rsplit("_", 1)[-1] or "SAEHD", "--name", stem]
             _log("$ " + " ".join(cmd))
             proc = subprocess.Popen(
                 cmd, cwd=str(_dfl_root()),
