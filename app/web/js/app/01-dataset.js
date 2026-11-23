@@ -1480,6 +1480,8 @@
   function modelCard(m, idx) {
     var el = document.createElement("div");
     el.className = "mcard2";
+    /* 名字写在属性上：动态刷新时靠它认「这张卡对应哪个模型」 */
+    el.setAttribute("data-model", m.name);
     el.style.animationDelay = Math.min(idx, 8) * 45 + "ms";
 
     var params = [];
@@ -1682,7 +1684,51 @@
   /* 卡片是动态插入的，切到英文后再渲染会是中文 —— 渲染完统一过一遍词典 */
   try { if (window.I18N && window.I18N.get() === "en") window.I18N.refresh(); } catch (e) {}
     if (window.I18N) window.I18N.refresh();
+    /* 这一遍就是最新的：把签名记下来，下一拍轮询不会因为「还没记过」再重建一次 */
+    _mSig = modelsSig(MODELS);
   }
   /* 暴露给外部：新建 / 删除模型之后要立刻重画「模型选择」列表 */
   window.renderTrainer = renderTrainer;
+
+  /* ------------------------------------------------------------------
+     模型列表动态刷新（在「模型选择」页时每 3 秒看一次 /api/models）：
+       · 某模型的 .dat 没了 → 这张卡先淡出（.mgone），320ms 后真的移出 DOM，
+         再整体重排一次，剩下的卡片位置自然补上；
+       · 数据没变化就不动 DOM —— 否则每 3 秒重建一遍，鼠标悬停、滚动全被打断。
+     ------------------------------------------------------------------ */
+  var _mSig = "";
+  function modelsSig(list) {
+    return (list || []).map(function (m) {
+      return [m.name, m.iter, m.state, m.has_export ? 1 : 0].join(":");
+    }).join("|");
+  }
+  function syncTrainer(list) {
+    var box = $("mgrid");
+    if (!box) return;
+    var names = {};
+    (list || []).forEach(function (m) { names[m.name] = 1; });
+    var gone = [];
+    Array.prototype.forEach.call(box.querySelectorAll("[data-model]"), function (el) {
+      if (!names[el.getAttribute("data-model")]) gone.push(el);
+    });
+    if (!gone.length) { renderTrainer(list); return; }
+    gone.forEach(function (el) { el.classList.add("mgone"); });
+    setTimeout(function () {
+      gone.forEach(function (el) { if (el.parentNode) el.parentNode.removeChild(el); });
+      renderTrainer(list);
+    }, 320);
+  }
+  function pollModels() {
+    if (!document.getElementById("p-train")) return;
+    if (!$("mgrid") || document.getElementById("p-train").classList.contains("hide")) return;
+    fetch("/api/models").then(function (r) { return r.json(); }).then(function (d) {
+      var list = (d && d.models) || [];
+      var sig = modelsSig(list);
+      if (sig === _mSig) return;          /* 没变化：一个节点都不碰 */
+      _mSig = sig;
+      syncTrainer(list);
+    }).catch(function () {});
+  }
+  window.__pollModels = pollModels;
+  setInterval(pollModels, 3000);
 

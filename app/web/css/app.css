@@ -6322,3 +6322,13 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 .toast[data-type="error"]{max-width:min(760px, 92vw)}
 /* 错误 toast 没有倒计时条，底部留一点对称的内边距 */
 .toast[data-type="error"]{padding-bottom:12px}
+
+/* 模型卡消失：先淡出并轻微缩小，320ms 后由 JS 移出 DOM，剩下的自然重排 */
+.mcard2 { transition: opacity .3s ease, transform .3s ease; }
+.mcard2.mgone {
+  opacity: 0;
+  transform: scale(.94);
+  pointer-events: none;
+}
+/* 网格重排也带一点过渡，卡片补位时不会硬跳 */
+#mgrid { transition: grid-template-rows .3s ease; }
