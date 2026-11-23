@@ -6608,6 +6608,15 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   color: var(--ink); font-size: 13px; }
 .alertbar .ic { color: var(--brand); flex: none; }
 .alertbar .tx { flex: 1 1 auto; min-width: 0; }
-.alertbar .btn.sm { padding: 3px 10px; font-size: 12px; flex: none; }
-.alertbar .iconbtn { flex: none; opacity: .6; }
-.alertbar .iconbtn:hover { opacity: 1; }
+/* ✕：透明底、无边框，hover 才出现一层淡底 —— 原来那个方块描边看着像二级按钮 */
+.alertbar .iconbtn { flex: none; width: 22px; height: 22px; padding: 0;
+  border: 0; background: transparent; color: var(--ink-3); font-size: 12px;
+  line-height: 1; border-radius: 6px; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; }
+.alertbar .iconbtn:hover { background: color-mix(in srgb, var(--brand) 20%, transparent);
+  color: var(--ink); }
+/* 文案里的「关于」：品牌色 + 下划线，一眼看出能点 */
+.alertbar .lnk { color: var(--brand); text-decoration: underline;
+  text-underline-offset: 2px; text-decoration-thickness: 1px; cursor: pointer; }
+.alertbar .lnk:hover { color: color-mix(in srgb, var(--brand) 78%, white); }
+.alertbar b { font-weight: 600; color: var(--ink); }

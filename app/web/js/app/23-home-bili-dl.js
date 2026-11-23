@@ -591,7 +591,20 @@
     function show(remote, name) {
       var tx = document.getElementById("updAlertTx");
       var label = name || remote;
-      if (tx) tx.textContent = "发现新版本 " + label + " —— 去「关于」页可以下载并安装";
+      if (tx) {
+        /* 「关于」做成链接：不给单独按钮，句子读起来就是一个入口 */
+        tx.textContent = "";
+        var b = document.createElement("b");
+        b.textContent = label;
+        var a = document.createElement("a");
+        a.className = "lnk";
+        a.textContent = "关于";
+        a.addEventListener("click", function () {
+          bar.classList.add("hide");
+          if (window.go) window.go("about");
+        });
+        tx.append("发现新版本 ", b, " —— 去 ", a, " 页可以下载并安装");
+      }
       bar.classList.remove("hide");
     }
     function poll(tries) {
@@ -606,11 +619,6 @@
     }
     /* 进程刚起来时后台那一次还没查完：每 5 秒问一次，最多 6 次（约 30 秒） */
     poll(6);
-    var go = document.getElementById("updAlertGo");
-    if (go) go.addEventListener("click", function () {
-      bar.classList.add("hide");
-      if (window.go) window.go("about");
-    });
     var x = document.getElementById("updAlertX");
     if (x) x.addEventListener("click", function () {
       bar.classList.add("hide");
