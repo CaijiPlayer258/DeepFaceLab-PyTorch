@@ -192,6 +192,43 @@
 
   /* 模型转换页：设计稿（convert-page-live.html）里没有列表 —— 进来要么是在跑的那张卡，
      要么什么都没有（从模型卡片点「转换」时，那边已经设好 __cvPick 并由 start() 直接接管）。 */
+  /* ---- 转换：直接调接口 + 自己轮询。不依赖文件末尾那个 IIFE 里的 __cvStart，
+         它历史上挂没挂上不稳，导致点「转换」只弹一句「转换器还没就绪」。 ---- */
+  var CV_TIMER = null;
+  function cvApi(path, opts) {
+    return fetch(path, opts).then(function (r) {
+      if (!r.ok) {
+        return r.text().then(function (t) {
+          throw new Error("HTTP " + r.status + (t ? " · " + t.slice(0, 300) : ""));
+        });
+      }
+      return r.json();
+    });
+  }
+  function cvPoll() {
+    if (CV_TIMER) clearTimeout(CV_TIMER);
+    CV_TIMER = setTimeout(function () {
+      cvApi("/api/convert/status").then(function (st) {
+        if (window.__cvPaint) window.__cvPaint(st);
+        if (st && st.running) { cvPoll(); } else { CV_TIMER = null; }
+      }).catch(function () { CV_TIMER = null; });
+    }, 400);
+  }
+  function cvRun(name) {
+    cvApi("/api/convert/start", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name })
+    }).then(function () {
+      if (window.toast) toast("转换已开始", name, "success");
+      cvPoll();
+    }).catch(function (e) {
+      var msg = String((e && e.message) || e);
+      if (window.toast) toast("转换启动失败", msg, "error");
+      if (window.__cvPaint) window.__cvPaint({ step: "error", name: name, modules:
+        [{ name: "启动转换", state: "bad", reason: msg }] });
+    });
+  }
+
   function cvListPaint() {
     var card = document.getElementById("cvCard");
     if (!card) return;
@@ -222,12 +259,7 @@
     if (pick) {
       window.__cvPick = "";
       if (nm) nm.textContent = pick;
-      if (window.__cvStart) {
-        try { window.__cvStart({ name: pick }); }
-        catch (e) { if (window.toast) toast("转换失败", String(e), "error"); }
-        return;
-      }
-      if (window.toast) toast("转换", "转换器还没就绪", "error");
+      cvRun(pick);
       return;
     }
 
@@ -850,6 +882,8 @@
     var root = $("toastroot");
     if (!root) return null;
     var meta = TOAST_META[type] || TOAST_META.success;
+    /* error 的图标颜色直接给死：走 var(--bad) 在这套 sprite 上解析过一次绿的，很怪 */
+    var _tint = (type === "error") ? "#ff6467" : meta.color;
     var life = (typeof ms === "number" && ms > 400) ? ms : 3600;
     /* 报错不自动消失、也不画底部倒计时条：用户通常只会截个图，
        倒计时一到就没了等于把唯一的线索丢掉。要关自己点 ×。 */
@@ -859,7 +893,7 @@
     el.className = "toast";
     el.setAttribute("data-type", type || "success");
     el.innerHTML =
-      '<svg class="ic ti" style="stroke:' + meta.color + ';opacity:1"><use href="' + meta.icon + '"/></svg>' +
+      '<svg class="ic ti" style="stroke:' + _tint + ';opacity:1"><use href="' + meta.icon + '"/></svg>' +
       '<div><div class="tt">' + title + '</div><div class="ts">' + (sub || "") + '</div></div>' +
       '<button class="tx">×</button>' + (sticky ? "" : '<div class="tb"><i></i></div>');
     el.querySelector(".tx").addEventListener("click", function () { dismissToast(el); });
