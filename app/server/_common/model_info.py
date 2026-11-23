@@ -209,7 +209,7 @@ def _fast_model_entry(dat_path: Path) -> dict:
         "iter": int(params.get("iter", 0) or 0),
         "spark": spark,
         "has_dfm": dfm.exists(),
-        "weights": "npy" if any(dat_path.parent.glob(model_name + "_*decoder*.npy")) else "pth",
+        "weights": "npy" if (any(dat_path.parent.glob(model_name + "_*decoder*.npy")) and not any(dat_path.parent.glob(model_name + "_*decoder*.pth"))) else "pth",
         "trained_at": int(dat_path.stat().st_mtime),
         "has_preview": has_prev,
         "preview_url": ("/api/models/" + model_name + "/preview.png") if has_prev else None,
@@ -262,7 +262,7 @@ def _model_entry(dat_path: Path) -> dict:
 
     ok_prev = _preview_png(dat, preview)
 
-    weights = "npy" if any(dat_path.parent.glob(model_name + "_*decoder*.npy")) else "pth"
+    weights = "npy" if (any(dat_path.parent.glob(model_name + "_*decoder*.npy")) and not any(dat_path.parent.glob(model_name + "_*decoder*.pth"))) else "pth"
     dfm = dat_path.parent / (model_name + ".dfm")
 
     _archi2 = str(opt.get("archi", archi_from_name)).lower()
