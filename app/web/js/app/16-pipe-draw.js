@@ -150,8 +150,13 @@ window.mgPipeSetNodes = function (nodes) {
       }
 
       function build(lanes) {
+        /* 结构没变就别重建：这段往下第一步是 while (svg.firstChild) removeChild()，
+           每次 250ms 的一拍都会把整张图清空重画 —— 运行中一直闪，跑完停止轮询才「正常」。
+           lanes 的签名（每列有哪些线程名）不变，就只做数据更新，不动 DOM。 */
         var svg = $("mgPipeSvg");
         if (!svg) return false;
+        var _want = signature(lanes);
+        if (sig === _want && svg.firstChild) return false;
         while (svg.firstChild) svg.removeChild(svg.firstChild);
         layers = { defs: mk("defs", {}), edge: mk("g", { "class": "edges" }),
                    bypass: mk("g", { "class": "bypass" }), box: mk("g", {}),
