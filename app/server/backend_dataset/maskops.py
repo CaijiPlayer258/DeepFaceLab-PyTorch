@@ -97,7 +97,15 @@ def _mask_worker(folder: str, workers: int = 8, model: str | None = None, out_si
             import traceback as _tb
             _first = done.setdefault('err', [])
             if len(_first) < 3:
-                _first.append(str(fp) + ' :: ' + _tb.format_exc().strip().splitlines()[-1])
+                _ex = _tb.format_exc()
+                _lines = [x.strip() for x in _ex.strip().splitlines() if x.strip()]
+                _type = _lines[-1] if _lines else '?'          # 例如 NameError: name 'x' is not defined
+                _where = ''
+                for _ln in reversed(_lines):                    # 栈里最后一条我们自己的文件/行号
+                    if 'maskops.py' in _ln or 'backend_dataset' in _ln:
+                        _where = _ln
+                        break
+                _first.append('%s :: %s :: %s' % (fp.name, _type[:120], _where[:120]))
         finally:
             with JOB.lock:
                 done["n"] += 1
