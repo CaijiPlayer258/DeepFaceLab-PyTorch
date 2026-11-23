@@ -1460,12 +1460,13 @@
       if (box && !box.innerHTML) {
         box.innerHTML = '<div class="cvempty">正在读取 workspace/model …</div>';
       }
-    window.__cvBoot = cvBoot;
-    /* 给路由里的 cvListPaint 用：查到在跑的任务就把卡片画出来 */
-    window.__cvPaint = paint;
-    window.__cvStart = start;
       load();
     }
+    /* 挂在 IIFE 顶层（不是 cvBoot 里面）：cvBoot 只有在 DOMContentLoaded 时才会跑，
+       而路由里的 cvListPaint 是随时会被调的 —— export 写在函数体内就永远是 undefined。 */
+    window.__cvBoot = cvBoot;
+    window.__cvPaint = paint;
+    window.__cvStart = start;
     if (document.readyState === "loading") {
       document.addEventListener("DOMContentLoaded", cvBoot);
     } else {
