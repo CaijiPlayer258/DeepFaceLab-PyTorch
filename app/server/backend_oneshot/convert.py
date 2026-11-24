@@ -155,6 +155,27 @@ def start(name: str) -> dict:
     # DF 模型的 inter 直接被滤掉、decoder 还只剩一个 —— 界面上就凭空多出 inter_B、
     # 少掉 decoder_dst。现在原样保留权重里出现的模块名（去重、保序）。
     modules = []
+    # ① 先看模型配置里的 archi_type —— 这是权威来源：
+    #    df   -> encoder / inter / decoder_src / decoder_dst
+    #    liae -> encoder / inter_AB / inter_B / decoder
+    try:
+        import pickle as _pk
+        _dat = md / (stem + "_data.dat")
+        if _dat.exists():
+            _cfg = _pk.loads(_dat.read_bytes())
+            _opts = _cfg.get("options") or {}
+            # 字段名是 archi，值是 liae-ud / df-udt 这种；archi_type 是另外算出来的
+            _archi = str(_opts.get("archi_type") or _opts.get("archi") or "").lower()
+            if "liae" in _archi:
+                modules = [{"name": n, "state": "wait", "items": 0}
+                           for n in ("encoder", "inter_AB", "inter_B", "decoder")]
+            elif "df" in _archi:
+                modules = [{"name": n, "state": "wait", "items": 0}
+                           for n in ("encoder", "inter", "decoder_src", "decoder_dst")]
+    except Exception:
+        pass
+
+    # ② 配置读不出来时才退回看权重键名（单文件 _weights.npy 才有全量键）
     try:
         import pickle
         with open(npy, "rb") as f:
