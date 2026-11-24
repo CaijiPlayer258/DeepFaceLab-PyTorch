@@ -74,7 +74,7 @@
     "dataset-run": "p-dataset-run",
     "bili-jobs": "p-bili-jobs",
     debug: "p-debug",
-    merge: "p-merge", settings: "p-settings", about: "p-about"
+    merge: "p-merge", output: "p-output", settings: "p-settings", about: "p-about"
   };
 
   function $(id) { return document.getElementById(id); }
@@ -101,6 +101,7 @@
 
   /* ---------- 顶栏面包屑 ---------- */
   var CRUMBS = {
+    output: [{ t: "输出" }],
     train: [{ t: "模型选择" }],
     run: [{ t: "模型选择", go: "train" }, { t: "参数设置", go: "train-cfg" }, { t: "训练界面" }],
     "train-cfg": [{ t: "模型选择", go: "train" }, { t: "参数设置" }],
@@ -431,6 +432,11 @@
   function go(key) {
     var id = PAGE_IDS[key];
     if (!id) return;
+    /* 输出页：只在它可见时拉日志（不在这一页就不该一直轮询） */
+    if (window.LCSOutput) {
+      if (key === "output") window.LCSOutput.enter();
+      else window.LCSOutput.leave();
+    }
     if (window.__invalidateShotCache) window.__invalidateShotCache();
     document.querySelectorAll(".page").forEach(function (p) { p.classList.remove("on"); });
     var el = document.getElementById(id);

@@ -40,6 +40,15 @@ def _apply_flags(argv) -> None:
 
 
 def main() -> int:
+    # 先把 stdout/stderr 接上 tee，后面所有输出（含 uvicorn、训练、提取、合成）
+    # 都会进内存环形缓冲 + _server_output.log，界面的「输出」页读的就是它。
+    # 必须在 import uvicorn 之前装，否则 import 期的告警会漏掉。
+    try:
+        from server._common import output_log
+        output_log.install()
+    except Exception as _e:
+        print('[output] tee 安装失败（不影响使用）：%s' % _e, flush=True)
+
     import uvicorn
 
     # --preview（或 DFL_PREVIEW=1）：给「设计工作台」这类独立浏览器会话用。

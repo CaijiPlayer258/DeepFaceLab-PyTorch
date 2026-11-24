@@ -352,6 +352,10 @@ from .backend_tools.frames import router as _frames_router
 app.include_router(_oneshot_router)
 app.include_router(_frames_router)
 
+# 输出页：GET /api/output/tail（serve 进程 stdout/stderr 的环形缓冲回显）
+from .backend_output import router as _output_router
+app.include_router(_output_router)
+
 from .routes_merge import router as _merge_router
 app.include_router(_merge_router)
 
