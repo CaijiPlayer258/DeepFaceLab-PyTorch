@@ -818,7 +818,7 @@
 
   var STAGE_NAME = ["抽帧", "人脸对齐", "应用遮罩", "完成"];
 
-  /* 速度曲线：横轴 = 进度（0~100%），纵轴 = 帧/秒，带刻度和网格 */
+  /* 速度曲线：横轴 = 进度（0~100%），纵轴 = 人脸/秒（faces/s），带刻度和网格 */
   var EX_HIST = [];          /* [{pct, fps}] */
 
   function drawSpeedGraph() {
@@ -847,7 +847,7 @@
 
     var peak = 1;
     EX_HIST.forEach(function (p) { if (p.fps > peak) peak = p.fps; });
-    if (EX_D && EX_D.fps > peak) peak = EX_D.fps;
+    if (EX_D && EX_D.faceRate > peak) peak = EX_D.faceRate;
     /* 顶部留 20% 余量：曲线不会顶到框，视觉上不憋 */
     var maxFps = Math.max(10, Math.ceil(peak * 1.2 / 10) * 10);
 
@@ -881,7 +881,7 @@
     var pts = EX_HIST.slice();
     var lastPct = pts.length ? pts[pts.length - 1].pct : -1;
     if (EX_D && EX_D.pct > lastPct + 0.05) {
-      pts.push({ pct: EX_D.pct, fps: EX_D.fps });
+      pts.push({ pct: EX_D.pct, fps: EX_D.faceRate });
     }
     if (pts.length < 2) return;
 
@@ -1255,7 +1255,9 @@
     if (typeof s.fps === "number") {
       var lastP = EX_HIST.length ? EX_HIST[EX_HIST.length - 1].pct : -1;
       if (s.pct > lastP || EX_HIST.length === 0) {
-        EX_HIST.push({ pct: s.pct || 0, fps: s.fps || 0 });
+        /* 曲线画的是**人脸速度**（faces/s），不是帧速度：帧速度被解码节奏抹得很平，
+           而每帧出几张脸本来就忽多忽少，画出来才有真实的波动感。 */
+        EX_HIST.push({ pct: s.pct || 0, fps: faceRate || 0 });
         if (EX_HIST.length > 600) EX_HIST.shift();
       }
     }
