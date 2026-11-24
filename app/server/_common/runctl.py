@@ -240,7 +240,7 @@ _export_job_lock = _threading.Lock()
 # ============================================================
 # 训练：调 4.0 的 main.py train（真起进程，日志回传）
 # ============================================================
-_train_job = {"running": False, "name": "", "log": [], "ok": None, "error": None,
+_train_job = {"running": False, "name": "", "log": [], "ok": None, "error": None, "fatal": None,
               "iter": 0, "it_s": 0.0, "iter_at": 0.0, "started_at": 0.0, "target": 0,
               "paused": False, "saving": False, "lr": 0.0,
               "loss_src": None, "loss_dst": None,
@@ -455,6 +455,20 @@ def _train_worker(name: str, cpu_only: bool):
                 # 显存不够是最常见的启动失败：4.0 只往 stdout 打一坨 Python traceback，
                 # 用户看到的是 "CUDA out of memory" 原文，不知道该怎么办。这里翻译成人话，
                 # 顺便给出几条真正能降显存的开关。
+                # 训练数据为空是最常见的「新建模型直接开训」错误。4.0 抛完 ValueError
+                # 之后并不退出（它会继续等），于是界面上一直是「加载模型…已等 N 分钟」，
+                # 用户以为在加载、实际卡死。这里看到这行就立刻杀掉并给出能照做的提示。
+                if not _train_job.get("fatal"):
+                    _l2 = line.lower()
+                    if ("no training data provided" in _l2
+                            or ("training data" in _l2 and "valueerror" in _l2)):
+                        _train_job["fatal"] = (
+                            "训练数据是空的：data_src / data_dst 里没有当前分辨率的对齐脸。"
+                            "\n1) 先跑「提取器」把素材对齐（注意对齐分辨率要和模型一致）"
+                            "\n2) 或者换一个已经有对齐脸的模型（分辨率必须一致，4.0 不做自动缩放）")
+                        _train_job["error"] = _train_job["fatal"]
+                        _kill_train_tree()
+                        break
                 if not _train_job.get("oom_hint"):
                     _low = line.lower()
                     if ("out of memory" in _low or "cuda error: out of memory" in _low
