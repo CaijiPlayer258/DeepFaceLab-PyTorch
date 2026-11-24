@@ -845,6 +845,7 @@
       /* 「已导出」标记：以前靠那个 DFM 徽标（.tag.ok）判定，徽标按要求删了，
          判定改挂到行类名上 —— 自动选中仍然优先停在已导出的模型，行为不变。 */
       if (exported) r.classList.add("has-dfm");
+      else r.classList.add("no-dfm");   /* 没 .dfm = 合成用不了：不可选中，只能点右边的「导出」 */
       r.innerHTML = '<span class="nm">' + m.name + '</span>' +
         
         /* 徽标（face all / face N）不再显示：元素留着但恒 hidden，下面 bdEl 的点击切换绑定不删 */
@@ -860,7 +861,10 @@
       /* 这一行在列表里的下标：Shift 范围选择要用（append 之前取，正好是它自己的位置） */
       var rowIdx = box.children.length;
       /* 选中判定全交给 mgPickRow：Ctrl/Cmd 切单条、Shift 选范围、普通点击仍是单选 */
-      r.addEventListener("click", function (e) { mgPickRow(box, rowIdx, e); });
+      r.addEventListener("click", function (e) {
+        if (!exported) return;   /* 没 .dfm：点行不选中（导出后才能选） */
+        mgPickRow(box, rowIdx, e);
+      });
       /* 徽章：点它只切「管哪张脸」，不碰选中态 */
       var bdEl = r.querySelector(".mgface");
       if (bdEl) bdEl.addEventListener("click", function (e) {

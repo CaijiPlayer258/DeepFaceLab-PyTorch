@@ -6378,3 +6378,11 @@ html[data-theme="light"] .cvroundbtn:hover{background:#27272a;
 #p-export .cvcenter{flex:1;display:flex;flex-direction:column;
   align-items:center;justify-content:center;width:100%}
 #p-export .cvcard{width:100%;max-width:560px;margin:0 auto}
+
+/* 没导出 .dfm 的模型：合成用不了，整行灰掉、不参与选中；
+   右边那个「导出」按钮仍然可点（指针事件只还给它）。 */
+.mgitem.no-dfm { cursor: default; }
+.mgitem.no-dfm .nm { color: var(--ink-3); }
+.mgitem.no-dfm:hover { background: transparent; }
+.mgitem.no-dfm.on { background: transparent; }
+.mgitem.no-dfm .mgexp { pointer-events: auto; }
