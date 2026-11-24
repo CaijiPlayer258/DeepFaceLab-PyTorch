@@ -197,8 +197,10 @@ def start(name: str) -> dict:
                    "--model", stem.rsplit("_", 1)[-1] or "SAEHD",
                    "--model-dir", str(md), "--name", stem]
             _log("$ " + " ".join(cmd))
+            _env = dict(os.environ)
+            _env["DFL_TF_MATCH_LOG"] = "1"   # 让 Saveable 打出 [match] 行
             proc = subprocess.Popen(
-                cmd, cwd=str(_dfl_root()),
+                cmd, cwd=str(_dfl_root()), env=_env,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, encoding="utf-8", errors="replace",
             )
@@ -214,6 +216,11 @@ def start(name: str) -> dict:
                     continue
                 _log(line)
                 # 形如「├ encoder: .npy → .pth」「└ decoder_dst: .npy → .pth」
+                _mm = re.match(r"^\[match\]\s+(.+)$", line.strip())
+                if _mm:
+                    # 真实的名字/形状匹配：把这一条塞进 msg，前端显示成滚动的一行
+                    _set(msg="匹配 " + _mm.group(1)[:120])
+                    continue
                 _m = re.match(r"^[├└│\s]*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*\.npy", line.strip())
                 if _m:
                     _nm = _m.group(1)
@@ -226,7 +233,7 @@ def start(name: str) -> dict:
                         _done_n += 1
                         _set(modules=modules,
                              percent=int(_done_n * 100 / max(1, len(modules))))
-                        time.sleep(0.55)   # 让前端至少看到这一步（4 步共 ~2s，不然一闪就没）
+
             rc = proc.wait()
             if rc == 0:
                 for m in modules:

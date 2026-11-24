@@ -5,7 +5,11 @@ from pathlib import Path
 from core import pathex
 import numpy as np
 import torch
-import os
+import os
+# 打开后每匹配一个张量就打一行 [match]，供「模型转换」页显示真实的
+# 名字/形状匹配过程（训练时加载不开，免得刷屏）。
+_TF_MATCH_LOG = bool(os.environ.get("DFL_TF_MATCH_LOG"))
+
 import json
 import zipfile
 
@@ -558,12 +562,14 @@ class Saveable():
             dst_shape = tuple(int(x) for x in param.shape)
             chosen = None
             chosen_key = None
+            _how = ""
 
             # 1a) exact name
             chosen = _try_key(tf_name, dst_shape)
             if chosen is not None:
                 chosen_key = tf_name
                 n_exact += 1
+                _how = "名字"
 
             # 1b) without / with :0 suffix
             if chosen is None:
@@ -572,6 +578,7 @@ class Saveable():
                 if chosen is not None:
                     chosen_key = alt
                     n_suffix += 1
+                    _how = "名字:0"
 
             # 1c) shape-based fallback among unused keys -- ONLY if unique.
             # Two same-shaped layers in one model (the decoder alone holds
@@ -589,6 +596,7 @@ class Saveable():
                     chosen = _try_key(cands[0], dst_shape)
                     chosen_key = cands[0]
                     n_shape += 1
+                    _how = "形状"
                 elif len(cands) > 1:
                     name_hint = self.name or type(self).__name__
                     print(f"[WARN] TF weight '{tf_name}' (shape {param.shape}) 在 {name_hint} 中有 "
@@ -602,6 +610,14 @@ class Saveable():
                 print(f"[WARN] TF weight '{tf_name}' (shape {param.shape}) 在 {name_hint} 中无匹配，跳过加载")
                 return False  # refuse partial load
 
+            if _TF_MATCH_LOG:
+                try:
+                    print("[match] %s %s -> %s %s (%s)" % (
+                        tf_name, tuple(d[chosen_key].shape), tuple(dst_shape),
+                        "转置" if tuple(d[chosen_key].shape) != tuple(dst_shape) else "同形",
+                        _how), flush=True)
+                except Exception:
+                    pass
             remaining_keys.discard(chosen_key)
             validated.append((param, chosen))
 
