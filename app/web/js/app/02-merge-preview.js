@@ -1234,10 +1234,12 @@ function mgStageEmpty(on) {
     var btn = document.getElementById("mgExport");
     if (btn) {
       btn.disabled = (n === 0);
+      /* 文案直接写在按钮上：没选模型时按钮就写「先选一个模型」，不再另起一行红字 */
+      btn.textContent = n === 0 ? "先选一个模型" : "导出";
       btn.title = n ? "" : "先选一个模型";
       btn.setAttribute("aria-disabled", n === 0 ? "true" : "false");
     }
-    ["mgExportHint", "mgStartHint"].forEach(function (id) {
+    ["mgStartHint"].forEach(function (id) {
       var h = document.getElementById(id);
       if (!h) return;
       h.hidden = (n !== 0);
