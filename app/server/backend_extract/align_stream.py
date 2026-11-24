@@ -23,6 +23,13 @@ from .detectors import _get_fast_detector, _get_heavy_detector, _get_landmarks10
 from .media import _dfl_project_scan, _extract_frames, _imread_any, _open_video
 from .resume import SRC_FP_NAME, _fp_diff, _note_resume_src, _read_src_fp, _src_fingerprint
 
+# 落盘线程池：emit 段实测占 wall 的 81~85%，是整条流水线最慢的一级。
+# 里面 cv2.imencode 会释放 GIL，所以多线程真能并行（不是假并行）。
+# 每批 _flush 结束时等本批写完，计数才 +，进度和续跑语义不变。
+from concurrent.futures import ThreadPoolExecutor as _TPE
+_WPOOL = _TPE(max_workers=4, thread_name_prefix="dfljpg")
+
+
 def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
                   quality: str = "high", skip: int = 0, src_fps: float = 0.0,
                   strict_align: "bool | None" = None) -> int:
@@ -335,6 +342,7 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
                 lms = [None] * len(items)
             cost["lm106"] += _t() - _t0
         wrote = 0
+        _jfuts = []
         for it, lm68 in zip(items, lms):
             if _amode == "68":
                 if lm68 is None:
@@ -379,7 +387,8 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
                 meta_f["yaw"], meta_f["pitch"], meta_f["roll"] = it["pose"]
             try:
                 _tj = _t()
-                write_dfljpg(it["path"], crop, meta_f)
+                # 丢给线程池：JPEG 4:4:4 编码 + pickle 元数据 + 写文件一起并行
+                _jfuts.append(_WPOOL.submit(write_dfljpg, it["path"], crop, meta_f))
                 cost["jpeg"] += _t() - _tj
                 wrote += 1
                 with lock:                  # 落盘即计数：跑的过程中就能看到数字在长
@@ -387,6 +396,12 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
             except Exception as e:          # noqa: BLE001 —— 落盘失败也要留痕
                 print("[extract] 写 %s 失败：%s" % (Path(it["path"]).name, e), flush=True)
                 continue
+        # 等本批的落盘真正写完（失败的单独记，不因为一张写坏就丢掉整批的计数）
+        for _f in _jfuts:
+            try:
+                _f.result()
+            except Exception as _e:      # noqa: BLE001
+                print("[extract] 写盘失败：%s" % str(_e)[:160], flush=True)
         if wrote:
             # 锁序：先放掉 lock 再拿 JOB.lock（_decode 那边是 JOB.lock → 读 stats，反向嵌套会死锁）
             with JOB.lock:
