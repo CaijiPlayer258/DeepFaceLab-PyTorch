@@ -6334,10 +6334,13 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 
 /* ---- 转换页：整体垂直居中（以前只水平居中，窗口一大卡片就偏上）---- */
 /* 注意：只有 .on 时才 flex —— 直接写 #p-train-convert{display:flex} 会覆盖
-   .page{display:none}，转换页就永远显示、把合成器等页面全挡住。 */
-#p-train-convert.on{display:flex;flex-direction:column;align-items:center;justify-content:center;
+   .page{display:none}，转换页就永远显示、把合成器等页面全挡住。
+   布局：标题贴左上角（和别的子页一致），卡片在剩余高度里垂直居中。 */
+#p-train-convert.on{display:flex;flex-direction:column;align-items:stretch;
   min-height:calc(100vh - 96px);padding:18px 24px 28px}
-#p-train-convert > .title{align-self:stretch;max-width:560px;width:100%;margin:0 auto 10px}
+#p-train-convert > .title{align-self:flex-start;margin:0 0 10px}
+#p-train-convert .cvcenter{flex:1;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;width:100%}
 #p-train-convert .cvcard{margin:0 auto}
 
 /* ---- 行内明细出现/消失时高度缓动（别再突变）---- */
@@ -6369,8 +6372,9 @@ html[data-theme="light"] .cvroundbtn:hover{background:#27272a;
 
 
 /* ---- 导出 DFM 独立页（和模型转换页同一套居中 + 步进器）---- */
-#p-export.on{display:flex;flex-direction:column;align-items:center;justify-content:center;
+#p-export.on{display:flex;flex-direction:column;align-items:stretch;
   min-height:calc(100vh - 96px);padding:18px 24px 28px}
-#p-export > .title{align-self:stretch;max-width:560px;width:100%;margin:0 auto 10px}
-#p-export .cvcenter{display:flex;flex-direction:column;align-items:center;width:100%;max-width:560px}
+#p-export > .title{align-self:flex-start;margin:0 0 10px}
+#p-export .cvcenter{flex:1;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;width:100%}
 #p-export .cvcard{width:100%;max-width:560px;margin:0 auto}
