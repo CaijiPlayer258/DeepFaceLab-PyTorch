@@ -47,6 +47,22 @@ def _check_target(body):
     if running and cur and name != cur:
         raise HTTPException(409, "现在训练的是 %s，不是 %s" % (cur, name))
 
+def _mark_stopping(name=None):
+    """主动停止前先打标记 —— worker 靠它区分「用户停」和「崩了」。
+
+    psutil.kill() 在 Windows 上把进程退出码设成 15（SIGTERM），
+    而 worker 的收尾只看 _train_job['stopping']：没这个标记，「点了停止」
+    就会被渲染成「训练失败 · 训练进程退出码 15」。
+    """
+    try:
+        from .._common import runctl as _rc
+        with _rc._train_job_lock:
+            _rc._train_job["stopping"] = True
+            _rc._train_job["ok"] = True          # 主动停止不算失败
+    except Exception:
+        pass
+
+
 @router.post("/api/train/start")
 def train_start(body: dict):
     body = body or {}
@@ -237,6 +253,10 @@ def train_stop(body: dict = None):
             if attempt >= 1:
                 if _app_mod._train_proc is not None and _app_mod._train_proc.poll() is None:
                     time.sleep(2.0)
+                    # 先打标记再杀：worker 的收尾逻辑靠 _train_job["stopping"] 判断
+                    # 「是用户停的还是崩的」。少了这一步，主动停止会被显示成
+                    # 「训练失败 · 训练进程退出码 15」（psutil.kill = SIGTERM = 15）。
+                    _mark_stopping(name)
                     _kill_train_tree()
                     return {"ok": True, "graceful": False,
                             "msg": "训练还在加载模型（未进入迭代），已直接结束"}
@@ -249,6 +269,7 @@ def train_stop(body: dict = None):
             break
         time.sleep(1)
     if _app_mod._train_proc is not None and _app_mod._train_proc.poll() is None:
+        _mark_stopping(name)
         _kill_train_tree()
         return {"ok": True, "graceful": False, "msg": "已强制结束（没等到它自己退出）"}
     return {"ok": True, "graceful": graceful,

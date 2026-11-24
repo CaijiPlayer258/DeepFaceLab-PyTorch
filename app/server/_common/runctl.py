@@ -85,6 +85,11 @@ def _shutdown_cleanup():
         running = _train_job["running"]
     if not running:
         return
+    # 应用退出 = 主动结束，不是训练失败。少了这个标记，关掉应用再打开会看到
+    # 「训练失败 · 训练进程退出码 15」（psutil.kill 在 Windows 上就是 SIGTERM=15）。
+    with _train_job_lock:
+        _train_job["stopping"] = True
+        _train_job["ok"] = True
     try:
         _webui_post("/request-quit", timeout=2.0)
     except Exception:
@@ -507,11 +512,13 @@ def _train_worker(name: str, cpu_only: bool):
         with _train_job_lock:
             manual = bool(_train_job.get("stopping"))
             _train_job["running"] = False
+            if _train_job.get("fatal"):
+                _train_job["msg"] = "训练已停止"
             _train_job["paused"] = False
             _train_job["stopping"] = False
             # 用户点「停止」时进程可能是被强杀的（退出码非 0），不该显示成"训练失败"
             _train_job["ok"] = ok or manual
-            if not ok and not manual:
+            if not ok and not manual and not _train_job.get("fatal"):
                 rc = proc.returncode
                 # Windows 上被外部杀掉会报 4294967295（其实就是 -1），直接印出来没人看得懂
                 if rc is not None and rc >= 0x80000000:
