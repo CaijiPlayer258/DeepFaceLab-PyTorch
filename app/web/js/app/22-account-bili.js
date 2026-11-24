@@ -58,11 +58,12 @@
     if (w) {
       /* 未登录当然要看扫码页；已登录但还没同意协议的，也先停在这里读协议 ——
          协议现在长在欢迎页里，藏在主页面后面等于没给用户看。 */
-      var needLegal = !!AUTH.logged_in && !(window.__legalAccepted && window.__legalAccepted());
+      /* 协议和登录态解耦之后，欢迎页只看登录状态：协议卡本身是 .legal 全屏遮罩
+         （z-index 9000），盖在哪个页面都行，不需要欢迎页专门为它停留。 */
       /* 未登录看扫码页；已登录但还没同意协议的，也先停在这里（协议卡盖在扫码页上） */
       /* 预览模式（设计工作台画布）直接把欢迎页藏掉：那个会话没有登录态，
          停在扫码页就看不到任何真实界面。 */
-      var show = window.__preview ? false : (!AUTH.logged_in || needLegal);
+      var show = window.__preview ? false : !AUTH.logged_in;
       w.style.display = show ? "grid" : "none";
       /* 欢迎页一藏起来就停 shader，否则它会在后台空转、拖慢整机 */
       if (!show && window.__welcome3d && window.__welcome3d.stop) {

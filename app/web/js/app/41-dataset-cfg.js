@@ -585,11 +585,14 @@
     }
 
     function sync() {
-      /* 协议在**扫码登录之后**才弹：没登录时先好好扫码，别一进来就堵着。 */
+
       /* 预览模式（serve.py --preview）一律不弹：设计工作台的画布会话没有登录态，
          弹出来会把整页盖住，等于看不见界面。 */
       if (window.__preview) { if (gate.style.display !== "none") close(); return; }
-      var must = !!window.__loggedIn && !accepted();
+      /* **不再依赖 __loggedIn**：这份协议讲的是软件使用（肖像权、责任边界、商业许可），
+         和 B 站账号没关系。以前写成「登录之后才弹」，结果是不登录的用户永远看不到 ——
+         而他们照样能用提取/训练/合成，等于协议没生效。现在首次启动就弹。 */
+      var must = !accepted();
       /* 幂等：以前只在 display === "none" 时才 open()，而元素初始是空串（样式表控制），
          于是首次登录永远打不开协议卡，得等下一次启动被别处设成 none 才生效。 */
       if (must) open(); else close();
@@ -615,20 +618,17 @@
       if (window.__afterLegal) { var f = window.__afterLegal; window.__afterLegal = null; f(); }
     });
 
+    /* 不同意 = 用不了。以前这里会登出 B 站 + reload，结果是转一圈又回到扫码页、
+       软件照常能用 —— 协议门形同虚设。现在停在协议页，只给一句说明。 */
+    var declineNote = null;
     noBtn.addEventListener("click", function () {
-      Promise.all([
-        fetch("/api/auth/logout", { method: "POST" }),
-        fetch("/api/bili/logout", { method: "POST" })
-      ]).catch(function () {}).then(function () {
-        try { localStorage.removeItem(KEY); } catch (e) {}
-        try {
-          document.cookie.split(";").forEach(function (c) {
-            var k = c.split("=")[0].trim();
-            if (k) document.cookie = k + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/";
-          });
-        } catch (e) {}
-        location.reload();
-      });
+      if (declineNote) return;
+      declineNote = document.createElement("div");
+      declineNote.className = "legalDeclineNote";
+      declineNote.innerHTML =
+        '<span class="legal-zh">不同意上述条款则无法使用本软件。关闭窗口即可退出。</span>' +
+        '<span class="legal-en">Without accepting these terms the software cannot be used. Close the window to exit.</span>';
+      noBtn.parentNode.parentNode.appendChild(declineNote);
     });
 
     setInterval(sync, 600);

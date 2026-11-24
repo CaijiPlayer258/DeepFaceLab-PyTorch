@@ -6817,3 +6817,11 @@ html[lang="en"] .legal .legal-zh { display: none !important; }
 }
 
 #welcome.legal-on .wlang { z-index: 30; }
+
+/* 「不同意」之后的说明：停在协议页，不再登出+reload（那样只是回到扫码页，软件照用）*/
+.legalDeclineNote{margin:2px 26px 18px;padding:10px 12px;border-radius:9px;
+  border:1px solid rgba(255,100,103,.35);background:rgba(255,100,103,.08);
+  font-size:12px;line-height:1.6;color:#ff9a9c}
+.legalDeclineNote .legal-en{display:none}
+html[lang="en"] .legalDeclineNote .legal-en{display:block}
+html[lang="en"] .legalDeclineNote .legal-zh{display:none}
