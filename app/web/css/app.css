@@ -6323,3 +6323,8 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 }
 /* 网格重排也带一点过渡，卡片补位时不会硬跳 */
 #mgrid { transition: grid-template-rows .3s ease; }
+
+/* 模块行下面那行小字：这个模块最后一条名字/形状匹配的明细 */
+#p-train-convert .cvdetail{flex:0 0 100%;padding:1px 0 5px 22px;
+  color:var(--ink-3);font-family:var(--mono);font-size:10.5px;line-height:1.6;
+  word-break:break-word}

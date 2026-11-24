@@ -209,16 +209,17 @@
              : ((m.state === "err" || m.state === "bad") ? "bad" : ""));
       var mk = on === "ok" ? "✓" : (on === "run" ? "›" : (on === "bad" ? "!" : "·"));
       var cnt;
-      /* 没有真实项数时别硬编「—」：说清现在是什么状态更有用 */
-      if (on === "ok") cnt = (m.total || m.items || 0) ? ((m.total || m.items) + " 项") : "已完成";
-      else if (on === "run") cnt = (m.items || 0) + " / " + (m.total || "?") + " 项";
+      /* items = 这个模块真实匹配上的张量个数（后端从 [match] 行累计） */
+      if (on === "ok") cnt = (m.items || m.total || 0) ? ((m.items || m.total) + " 项") : "已完成";
+      else if (on === "run") cnt = (m.items || 0) + " 项…";
       else if (on === "bad") cnt = (String(m.reason || "").indexOf("shape") >= 0 ? "形状不符" : "失败");
-      else cnt = "待转换";
+      else cnt = (m.items || 0) ? ((m.items) + " 项…") : "待转换";
       var html = '<div class="cvrowi ' + on + '">' +
                  '<span class="mk">' + mk + '</span>' +
                  '<span class="n">' + String(m.name == null ? "" : m.name) + '</span>' +
                  '<span class="c">' + cnt + '</span>';
       if (on === "bad" && m.reason) html += '<div class="cvreason">' + String(m.reason) + "</div>";
+      else if (m.detail) html += '<div class="cvdetail">' + String(m.detail) + "</div>";
       return html + "</div>";
     }).join("");
   }

@@ -207,7 +207,8 @@ def start(name: str) -> dict:
                 text=True, encoding="utf-8", errors="replace",
             )
             _set(step="convert")
-            threading.Thread(target=_watch, args=(md, stem, proc, modules), daemon=True).start()
+            # _watch 是旧的「看 .pth 出现」轮询：它会把每个模块的 items 一律设成 1，
+            # 和我们从 [match] 行累计出来的真实张量数（18 / 4 / 0 / 88）冲突。停用它。
             # 逐行解析脚本输出，把模块一个个点亮 —— 光靠看 .pth 出现是不够的：
             # model.save() 会一口气把 4 个文件写完，中间态只有一瞬，前端根本看不到。
             _log_lines = []
@@ -219,10 +220,18 @@ def start(name: str) -> dict:
                     continue
                 _log(line)
                 # 形如「├ encoder: .npy → .pth」「└ decoder_dst: .npy → .pth」
-                _mm = re.match(r"^\[match\]\s+(.+)$", line.strip())
+                _mm = re.match(r"^\[match\]\s+([^|]+)\|(.+)$", line.strip())
                 if _mm:
-                    # 真实的名字/形状匹配：把这一条塞进 msg，前端显示成滚动的一行
-                    _set(msg="匹配 " + _mm.group(1)[:120])
+                    # 形如「[match] encoder|down1/conv1/weight:0 (3,3,4,64) -> (64,4,3,3) 转置 (名字)」
+                    # 归到对应模块上：累计命中的张量数（真实项数）+ 记下最后一条明细
+                    _mn, _rest = _mm.group(1).strip(), _mm.group(2).strip()
+                    for _mod in modules:
+                        _n = _mod.get("name") or ""
+                        if _n and (_n == _mn or _n in _mn or _mn in _n):
+                            _mod["items"] = int(_mod.get("items") or 0) + 1
+                            _mod["detail"] = _rest[:120]
+                            break
+                    _set(msg="匹配 " + _rest[:110], modules=modules)
                     continue
                 _m = re.match(r"^[├└│\s]*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*\.npy", line.strip())
                 if _m:
@@ -232,7 +241,7 @@ def start(name: str) -> dict:
                     _seen.add(_nm)
                     if _done_n < len(modules):
                         modules[_done_n]["state"] = "ok"
-                        modules[_done_n]["items"] = 1
+                        # items 别动：那是 [match] 行逐个张量累计出来的真实个数
                         _done_n += 1
                         _set(modules=modules,
                              percent=int(_done_n * 100 / max(1, len(modules))))
@@ -241,7 +250,8 @@ def start(name: str) -> dict:
             if rc == 0:
                 for m in modules:
                     m["state"] = "ok"
-                    m["items"] = 1
+                    # items 保留 [match] 累计出来的真实张量数（18 / 4 / 0 / 88），
+                    # 以前这里粗暴覆盖成 1，页面上每个模块都显示「1 项」
                 _set(running=False, step="done", modules=modules, percent=100, ended=time.time())
             else:
                 # 失败也要给出「哪个模块 / 为什么」，否则前端只有整张卡变红，

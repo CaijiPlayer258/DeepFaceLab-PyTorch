@@ -612,8 +612,9 @@ class Saveable():
 
             if _TF_MATCH_LOG:
                 try:
-                    print("[match] %s %s -> %s %s (%s)" % (
-                        tf_name, tuple(d[chosen_key].shape), tuple(dst_shape),
+                    print("[match] %s|%s %s -> %s %s (%s)" % (
+                        (self.name or "?"), tf_name, tuple(d[chosen_key].shape),
+                        tuple(dst_shape),
                         "转置" if tuple(d[chosen_key].shape) != tuple(dst_shape) else "同形",
                         _how), flush=True)
                 except Exception:
