@@ -208,6 +208,7 @@ def start(name: str) -> dict:
             threading.Thread(target=_watch, args=(md, stem, proc, modules), daemon=True).start()
             # 逐行解析脚本输出，把模块一个个点亮 —— 光靠看 .pth 出现是不够的：
             # model.save() 会一口气把 4 个文件写完，中间态只有一瞬，前端根本看不到。
+            _log_lines = []
             _done_n = 0
             _seen = set()
             for line in proc.stdout:            # type: ignore[union-attr]
@@ -241,8 +242,20 @@ def start(name: str) -> dict:
                     m["items"] = 1
                 _set(running=False, step="done", modules=modules, percent=100, ended=time.time())
             else:
+                # 失败也要给出「哪个模块 / 为什么」，否则前端只有整张卡变红，
+                # 看不到设计稿里 .cvreason 那一行（形状不符/名字对不上/文件损坏）。
+                _tail = [x for x in (_log_lines or []) if x.strip()][-4:]
+                _why = ([x for x in _tail if ('shape' in x.lower() or '无匹配' in x
+                         or 'mismatch' in x.lower() or '候选' in x or 'WARN' in x
+                         or 'Error' in x or 'error' in x)][:1] or _tail or
+                        ["转换脚本退出码 %d" % rc])[0]
+                _bad = {
+                    "name": (modules[-1]["name"] if modules else "转换"),
+                    "state": "bad",
+                    "reason": "%s（退出码 %d）" % (str(_why).strip()[:240], rc),
+                }
                 _set(running=False, step="error", ended=time.time(),
-                     error="转换脚本退出码 %d（看 log 最后几行）" % rc)
+                     error=_bad["reason"], modules=((modules[:-1] + [_bad]) if modules else [_bad]))
         except Exception as e:
             _set(running=False, step="error", ended=time.time(), error=str(e)[:300])
 

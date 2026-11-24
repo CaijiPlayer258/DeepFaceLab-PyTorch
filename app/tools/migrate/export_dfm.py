@@ -204,6 +204,20 @@ def convert_npy_to_pth(model_class_name: str, saved_models_path: str, force_mode
 
     io.log_info = _orig_log
 
+    # 加载失败必须在这里炸掉：_load_tf_weights 遇到形状不符/名字对不上会
+    # 打一行 [WARN] 然后 return False，模型带着**随机初始化**的权重继续跑，
+    # model.save() 照样写出一套 .pth —— 看起来转换成功，其实是废的。
+    _miss = []
+    for _m in ('encoder', 'inter', 'inter_AB', 'inter_B', 'decoder',
+               'decoder_src', 'decoder_dst'):
+        _obj = getattr(model, _m, None)
+        _res = getattr(_obj, 'last_load_result', None) if _obj is not None else None
+        if _res is not None and not getattr(_res, 'ok', True):
+            _miss.append("%s: %s %s" % (_m, getattr(_res, 'reason', '?'),
+                                          str(getattr(_res, 'detail', ''))[:160]))
+    if _miss:
+        raise RuntimeError("TF 权重没能全部对上：" + " | ".join(_miss[:3]))
+
     # 显示模块树
     _mods = [m for m in ['encoder', 'inter', 'inter_B', 'inter_AB', 'decoder',
                          'decoder_src', 'decoder_dst', 'decoder_mask'] if hasattr(model, m)]
