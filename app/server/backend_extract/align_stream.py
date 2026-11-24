@@ -520,7 +520,10 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
             if idx % 10 == 0:
                 with JOB.lock:
                     JOB.done = idx
-                    JOB.pct = min(99, int(idx * 100 / max(1, total_est)))
+                    # 浮点百分比：整数只有 0..99 一百个值，速度曲线最多一百个点、
+                    # 一段 17 秒的活儿里 X 轴会一大段一大段地空着。浮点之后每个
+                    # 采样点都有自己的横坐标，曲线才连续。
+                    JOB.pct = min(99.0, round(idx * 100.0 / max(1, total_est), 2))
                     el = max(0.01, time.time() - t0)
                     JOB.fps = idx / el
                     JOB.faces_new = stats["made"]

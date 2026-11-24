@@ -880,7 +880,7 @@
     /* 末端用缓动中的实时值补一个点：两包 SSE 之间线条也会继续长 */
     var pts = EX_HIST.slice();
     var lastPct = pts.length ? pts[pts.length - 1].pct : -1;
-    if (EX_D && EX_D.pct > lastPct + 0.05) {
+    if (EX_D && EX_D.pct > lastPct + 0.01) {
       pts.push({ pct: EX_D.pct, fps: EX_D.faceRate });
     }
     if (pts.length < 2) return;
@@ -1254,7 +1254,10 @@
     };
     if (typeof s.fps === "number") {
       var lastP = EX_HIST.length ? EX_HIST[EX_HIST.length - 1].pct : -1;
-      if (s.pct > lastP || EX_HIST.length === 0) {
+      /* 只要横向有推进就记一个点（后端 pct 已改成浮点，差不多每帧都动）。
+         以前只在整数 pct 变大时记，一段 17 秒的活儿曲线只有十几个点，
+         峰谷被采没了看着像一条直线。 */
+      if (s.pct > lastP + 0.01 || EX_HIST.length === 0) {
         /* 曲线画的是**人脸速度**（faces/s），不是帧速度：帧速度被解码节奏抹得很平，
            而每帧出几张脸本来就忽多忽少，画出来才有真实的波动感。 */
         EX_HIST.push({ pct: s.pct || 0, fps: faceRate || 0 });
