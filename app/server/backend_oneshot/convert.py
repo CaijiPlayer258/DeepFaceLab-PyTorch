@@ -301,13 +301,21 @@ def start(name: str) -> dict:
                             _mm3["reason"] = _detail
                             _marked = True
                             break
-                if not _marked:
-                    _bad = {"name": _who, "state": "bad", "reason": _detail}
-                    modules = (modules or []) + [_bad]
+                if not _marked and modules is not None:
+                    # 不能用 modules = modules + [...] —— 那会让 Python 把 modules 当成
+                    # worker 的局部变量，前面 _set(modules=modules) 直接 UnboundLocalError，
+                    # 整段 error 处理全崩，页面上就是「失败」却一个字原因都没有。
+                    modules.append({"name": _who, "state": "bad", "reason": _detail})
                 _set(running=False, step="error", ended=time.time(),
                      error=_detail, modules=modules)
         except Exception as e:
-            _set(running=False, step="error", ended=time.time(), error=str(e)[:300])
+            # 兜底：这里以前只写 error，不写 modules —— 前端拿到「全 wait」的模块表，
+            # 页面上就是「失败」但四行全是「待转换」，一句原因都看不到。
+            import traceback as _tb3
+            _line = _tb3.format_exc().strip().splitlines()
+            _last = (_line[-1] if _line else "%s: %s" % (type(e).__name__, e))[:300]
+            _set(running=False, step="error", ended=time.time(), error=_last,
+                 modules=[{"name": "转换", "state": "bad", "reason": _last}])
 
     threading.Thread(target=worker, daemon=True).start()
     return {"ok": True, "name": stem, "modules": modules}
