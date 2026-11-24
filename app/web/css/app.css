@@ -6406,3 +6406,14 @@ html[data-theme="light"] .cvroundbtn:hover{background:#27272a;
   white-space:pre-line;overflow-wrap:anywhere}
 /* 长串（路径、模块名）不换行就会顶出容器 —— pre-line 只管 \n，不管超长单词 */
 .alert .alhd b,.alert .albd{min-width:0;overflow-wrap:anywhere}
+
+/* ---------- 模块名小标签（loadBanner 里 warnings 超过一条时摆的那行）----------
+   和 .alert 骨架同一批被 d71d2f7 删掉的。没有 .lbchip 时 list.innerHTML 里那四个
+   <span> 就是四个裸 inline 元素，连成一串「encoderinterdecoder_srcdecoder_dst」——
+   用户截图里那行看不懂的字就是这个。 */
+.loadbanner .lblist{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.loadbanner .lblist:empty{display:none}
+.loadbanner .lbchip{font-family:var(--mono,ui-monospace,Consolas,monospace);
+  font-size:11.5px;padding:2px 7px;border-radius:6px;
+  border:1px solid rgba(220,170,60,.45);background:rgba(220,170,60,.10);
+  color:var(--warn,#f0b429);white-space:nowrap}
