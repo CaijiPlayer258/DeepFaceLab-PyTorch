@@ -1472,8 +1472,8 @@
       return pts.join(" ");
     }
     return '<svg viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="none">' +
-      '<polyline fill="none" stroke="var(--ink-2)" stroke-width="1" vector-effect="non-scaling-stroke" points="' + poly(s) + '"/>' +
-      '<polyline fill="none" stroke="var(--ok)" stroke-width="1" vector-effect="non-scaling-stroke" opacity=".8" points="' + poly(d) + '"/>' +
+      '<polyline fill="none" stroke="var(--chart-src)" stroke-width="1" vector-effect="non-scaling-stroke" points="' + poly(s) + '"/>' +
+      '<polyline fill="none" stroke="var(--chart-dst)" stroke-width="1" vector-effect="non-scaling-stroke" opacity=".8" points="' + poly(d) + '"/>' +
       "</svg>";
   }
 
@@ -1501,8 +1501,8 @@
     /* 没有 loss 曲线就不画那块占位：空卡片比一行“暂无 loss 记录”干净 */
     var chart = (m.spark && m.spark.src && m.spark.src.length)
       ? '<div class="lchart">' + sparkSVG(m.spark) +
-        '<div class="lg"><span><i style="background:var(--ink-2)"></i>src</span>' +
-        '<span><i style="background:var(--ok)"></i>dst</span>' +
+        '<div class="lg"><span><i style="background:var(--chart-src)"></i>src</span>' +
+        '<span><i style="background:var(--chart-dst)"></i>dst</span>' +
         '<span style="margin-left:auto">最近 ' + m.spark.src.length + " iter</span></div></div>"
       : '';
 
