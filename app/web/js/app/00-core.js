@@ -219,7 +219,7 @@
                  '<span class="n">' + String(m.name == null ? "" : m.name) + '</span>' +
                  '<span class="c">' + cnt + '</span>';
       if (on === "bad" && m.reason) html += '<div class="cvreason">' + String(m.reason) + "</div>";
-      else if (m.detail) html += '<div class="cvdetail">' + String(m.detail) + "</div>";
+      else if (m.detail && on !== "ok") html += '<div class="cvdetail">' + String(m.detail) + "</div>";
       return html + "</div>";
     }).join("");
   }

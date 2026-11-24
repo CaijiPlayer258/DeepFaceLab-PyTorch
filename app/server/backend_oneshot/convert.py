@@ -150,8 +150,11 @@ def start(name: str) -> dict:
     if not conv.exists():
         raise FileNotFoundError(str(conv))
 
-    # 模块清单：优先按 weights.npy 里的键前缀推断，读不出来就按 SAEHD 默认给四个
-    modules = [{"name": n, "state": "wait", "items": 0} for n in ("encoder", "inter_AB", "inter_B", "decoder")]
+    # 模块清单：**从模型权重里读真实的那几个**，不要套模板。
+    # 以前这里过滤 MODULE_SUFFIXES（那是 LIAE 的 encoder/inter_AB/inter_B/decoder），
+    # DF 模型的 inter 直接被滤掉、decoder 还只剩一个 —— 界面上就凭空多出 inter_B、
+    # 少掉 decoder_dst。现在原样保留权重里出现的模块名（去重、保序）。
+    modules = []
     try:
         import pickle
         with open(npy, "rb") as f:
@@ -162,11 +165,14 @@ def start(name: str) -> dict:
             head = k.split("/")[0].split(":")[0]
             if head and head not in pref:
                 pref.append(head)
-        pref = [p for p in pref if p in MODULE_SUFFIXES]
+        # 只留看起来像模块名的（模型自己的模块就是这些前缀）
+        pref = [p for p in pref if p and not p.startswith("_")]
         if pref:
             modules = [{"name": p, "state": "wait", "items": 0} for p in pref]
-    except Exception as e:                     # 读不出来不影响转换本身
-        _log("读取 npy 键失败（用默认模块表）: %s" % e)
+    except Exception as e:
+        _log("读取 npy 键失败: %s" % e)
+    if not modules:
+        modules = [{"name": n, "state": "wait", "items": 0} for n in ("encoder", "inter", "decoder")]
 
     _set(running=True, name=stem, file=npy.name, started=time.time(), ended=0.0,
          step="load", modules=modules, percent=0, error="", log=[])
@@ -184,12 +190,13 @@ def start(name: str) -> dict:
             _env["DFL_TF_MATCH_LOG"] = "1"   # 让 Saveable 打出 [match] 行
             _env["PYTHONIOENCODING"] = "utf-8"   # 否则中文异常在 GBK 下变乱码，页面上只剩「退出码 1」
             _env["PYTHONUTF8"] = "1"
+            _set(step="convert", msg="正在匹配权重名与形状…")
             proc = subprocess.Popen(
                 cmd, cwd=str(_dfl_root()), env=_env,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, encoding="utf-8", errors="replace",
             )
-            _set(step="convert")
+            _set(step="convert", msg="正在匹配权重名与形状…")
             # _watch 是旧的「看 .pth 出现」轮询：它会把每个模块的 items 一律设成 1，
             # 和我们从 [match] 行累计出来的真实张量数（18 / 4 / 0 / 88）冲突。停用它。
             # 逐行解析脚本输出，把模块一个个点亮 —— 光靠看 .pth 出现是不够的：
@@ -233,6 +240,7 @@ def start(name: str) -> dict:
             if rc == 0:
                 for m in modules:
                     m["state"] = "ok"
+                    m.pop("detail", None)   # 匹配日志只在跑的时候看，收尾别留在卡片上
                     # items 保留 [match] 累计出来的真实张量数（18 / 4 / 0 / 88），
                     # 以前这里粗暴覆盖成 1，页面上每个模块都显示「1 项」
                 _set(running=False, step="done", modules=modules, percent=100, ended=time.time())
