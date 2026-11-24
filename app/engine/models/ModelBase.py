@@ -1076,7 +1076,16 @@ class ModelBase(object):
         if not self.autobackups_path.exists():
             self.autobackups_path.mkdir(exist_ok=True)
 
-        n = getattr(self, 'max_backups', 24)
+        # 「最大备份数量」界面上能改、也写进了 dat 的 options，但这里以前读的是
+        # self.max_backups —— 那个属性**从来没有被赋过值**，getattr 永远返回 24。
+        # 于是用户设 3 也是按 24 轮转：三份之后的备份既不会被删，编号还会一路涨
+        # 到 24 才开始滚动。和 backup_interval 不同（Trainer 那边读的是 options，
+        # 那个是生效的），这一项从 4.0 起就是死的。
+        try:
+            n = int(self.options.get('max_backups') or 24)
+        except (TypeError, ValueError):
+            n = 24
+        n = max(1, min(99, n))      # 界面给的范围是 1..99，别让脏值把循环搞炸
 
         bckp_filename_list = [self.get_strpath_storage_for_file(filename) for _, filename in self.get_model_filename_list()]
         bckp_filename_list += [str(self.get_summary_path()), str(self.model_data_path)]
