@@ -174,27 +174,31 @@ _electron_backend.log 每次启动都被 "w" 截断。这一页让用户自己�
   }
 
   /* ---------- 渲染 ---------- */
-  function blockHtml(cls, head, n, rows, tagAttr) {
+  function blockHtml(cls, head, n, rows, tagAttr, open) {
     var body = rows.map(function (r) { return esc(r.s); }).join("\n");
-    return '<details class="' + cls + '"><summary' + (tagAttr || "") + ">" + esc(head) +
+    return '<details class="' + cls + '"' + (open ? " open" : "") + ">" +
+      '<summary' + (tagAttr || "") + ">" + esc(head) +
       ' <em>' + n + ' 行</em></summary><div class="tbraw">' + body + '</div></details>';
   }
 
+  /* 最后一个分组强制 open —— 最下面那块往往就是「刚发生的事」（新出的报错、正在刷的
+     显存规划），折起来等于把最新信息藏了。still 可手动收起，只是默认展开。 */
   function renderGroups(groups) {
     var buf = [];
     for (var i = 0; i < groups.length; i++) {
       var g = groups[i];
+      var isLast = (i === groups.length - 1);
       if (g.k === "l") {
         var cls = classify(g.r.s);
         var tag = tagOf(g.r.s);
         buf.push('<span class="ln ' + cls + '"' + (tag ? ' data-tag="' + esc(tag) + '"' : "") +
           ">" + esc(g.r.s) + "</span>");
       } else if (g.k === "tb") {
-        buf.push(blockHtml("tb", g.head, g.rows.length, g.rows));
+        buf.push(blockHtml("tb", g.head, g.rows.length, g.rows, null, isLast));
       } else if (g.k === "vb") {
-        buf.push(blockHtml("vb", g.head, g.rows.length, g.rows));
+        buf.push(blockHtml("vb", g.head, g.rows.length, g.rows, null, isLast));
       } else if (g.k === "rep") {
-        buf.push(blockHtml("rep", g.s, g.n, g.rows));
+        buf.push(blockHtml("rep", g.s, g.n, g.rows, null, isLast));
       }
     }
     return buf.join("");
@@ -221,7 +225,15 @@ _electron_backend.log 每次启动都被 "w" 截断。这一页让用户自己�
     return Math.max(0, lastN - OUT.seenN);
   }
 
+  /* 内容还没到一屏高度（没有滚动条）时，不该出现「N 条新输出」—— 那时候
+     一切都在眼前，提这个反而多余。 */
+  function scrollable() {
+    var el = pane();
+    return !!el && el.scrollHeight > el.clientHeight + 2;
+  }
+
   function newbarHtml() {
+    if (!scrollable()) return "";
     var u = unreadCount();
     return u ? '<div class="newbar" data-act="jump">' + u + " 条新输出  ↓</div>" : "";
   }

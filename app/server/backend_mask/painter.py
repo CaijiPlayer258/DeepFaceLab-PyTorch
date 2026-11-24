@@ -384,10 +384,24 @@ def _load_mask_b64(img_path: Path):
         if isinstance(_raw, (bytes, bytearray, memoryview)):
             mask = _decode_mask(bytes(_raw))
         else:
+            # 数组分支必须**归一成 uint8 H×W**：cv2.imencode 只吃 uint8/uint16，
+            # 老版本存进来的可能是 float32 的 0..1，直接丢进去会编码失败或者输出全黑，
+            # 前端就是「遮罩空白」。通道数也要收：4 通道取第 0 个（遮罩在前端是灰度）。
             try:
                 import numpy as _np
                 _arr = _np.asarray(_raw)
-                mask = _arr if _arr.ndim == 2 else None
+                if _arr.ndim == 3 and _arr.shape[2] in (1, 3, 4):
+                    _arr = _arr[..., 0]
+                if _arr.ndim != 2 or _arr.size == 0:
+                    mask = None
+                else:
+                    if _arr.dtype != _np.uint8:
+                        _m = _arr.astype(_np.float32)
+                        _mx = float(_m.max()) if _m.size else 0.0
+                        if _mx <= 1.0:
+                            _m = _m * 255.0
+                        _arr = _np.clip(_m, 0, 255).astype(_np.uint8)
+                    mask = _arr
             except Exception:
                 mask = None
         if mask is not None:
