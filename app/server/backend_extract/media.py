@@ -156,7 +156,10 @@ def _ffmpeg_exe():
     except Exception:
         return "ffmpeg"
 
-def _open_video(src, out_params, first=False, in_params=None):
+def _open_video(src, out_params, first=False, in_params=None, pix_fmt="bgr24"):
+    """… pix_fmt="nv12" 时管道里传的是 NV12（1080p 3.1MB，比 bgr24 的 6.2MB 少一半），
+    代价是下游要一次 cv2.cvtColor(NV12→BGR)（实测 2~3ms，比多传 3MB 便宜）。
+    """
     """打开 rawvideo 解码管道：先按 _hwaccel 的结论上硬解，失败静默换软解。
 
     硬解在探测阶段过了、但这条片子解不开（编码 profile 不支持 / 显存不够）时也不
@@ -176,7 +179,8 @@ def _open_video(src, out_params, first=False, in_params=None):
         try:
             gen = imageio_ffmpeg.read_frames(
                 str(src),
-                pix_fmt="bgr24",               # 直接用 BGR：省掉一次通道反转拷贝（~3ms/帧）
+                pix_fmt=pix_fmt,               # bgr24（默认）/ nv12（提取主路：带宽减半）
+                bits_per_pixel=(12 if pix_fmt == "nv12" else 24),
                 input_params=list(params),
                 output_params=list(out_params),
             )
@@ -190,8 +194,9 @@ def _open_video(src, out_params, first=False, in_params=None):
                 f0 = next(gen)
             except StopIteration:
                 f0 = None
-            if f0 is None or len(f0) != W * H * 3:
-                raise RuntimeError("解不出帧")
+            _need = W * H * 3 // 2 if pix_fmt == "nv12" else W * H * 3
+            if f0 is None or len(f0) != _need:
+                raise RuntimeError("解不出帧（%d 字节，期望 %d）" % (len(f0) if f0 else -1, _need))
             return gen, meta, f0
         except Exception as e:                      # noqa: BLE001
             last = e

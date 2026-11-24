@@ -197,8 +197,10 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
 
         # 视频模式的 setup（滤镜/打开/分辨率/时长/续跑指纹）
         out_params = ["-vf", ",".join(vf)]
+        # NV12：1080p 一帧 3.1MB（bgr24 是 6.2MB）。实测图传占 wall 的 84%，
+        # 先把带宽砍一半；多出来的一次 cvtColor（2~3ms）比少传 3MB 便宜。
         gen, meta, first_frame = _open_video(str(src), out_params, first=True,
-                                            in_params=in_params)
+                                            in_params=in_params, pix_fmt="nv12")
         W, H = meta.get("size") or (0, 0)
         if not W or not H:
             try: gen.close()
@@ -469,10 +471,12 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
             cost["read"] += _t() - t_a
             if stop.is_set() or not JOB.running:
                 break
-            if len(raw) != W * H * 3:
+            if len(raw) != W * H * 3 // 2:      # NV12：Y 平面 W*H + UV 交错 W*H/2
                 continue
             if idx not in done_idx:
-                frame = np.frombuffer(raw, np.uint8).reshape(H, W, 3)
+                # NV12 → BGR 一次搞定（比管道里多传 3MB 划算，实测 2~3ms）
+                frame = cv2.cvtColor(np.frombuffer(raw, np.uint8).reshape(H * 3 // 2, W),
+                                     cv2.COLOR_YUV2BGR_NV12)
                 put((idx, frame))
             idx += 1
             with lock:
