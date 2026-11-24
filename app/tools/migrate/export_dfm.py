@@ -151,8 +151,14 @@ def export(model_class_name: str, saved_models_path: str, force_model_name: str 
             f = max(dfm_files, key=lambda x: x.stat().st_mtime)  # most recent
             if f.stem.endswith('_model'):
                 new_name = f.stem[:-6] + '.dfm'
-                f.rename(base / new_name)
-                out_path = str(base / new_name)
+                _dest = base / new_name
+                # Windows 上 Path.rename 在**目标已存在**时抛 FileExistsError（不是覆盖）。
+                # 以前这里直接 rename：同一个模型导第二次就失败，旧的 <name>.dfm 和新的
+                # <name>_model.dfm 一起留在目录里，界面上看着像「两个模型」。
+                # 用 os.replace：原子替换，Posix 和 Windows 都覆盖。
+                import os as _os
+                _os.replace(str(f), str(_dest))
+                out_path = str(_dest)
             else:
                 out_path = str(f)
         if not out_path:
