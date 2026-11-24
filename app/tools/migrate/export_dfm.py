@@ -161,6 +161,7 @@ def export(model_class_name: str, saved_models_path: str, force_model_name: str 
 
 def convert_npy_to_pth(model_class_name: str, saved_models_path: str, force_model_name: str = None):
     """加载 .npy 权重并保存为 .pth（抑制模型摘要，仅显示模块树）"""
+
     from core.interact import interact as io
     import models
 

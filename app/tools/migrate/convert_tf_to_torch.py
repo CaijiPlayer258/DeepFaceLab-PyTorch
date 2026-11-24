@@ -52,8 +52,24 @@ def main(argv=None):
         print("[skip] %s 已经是 torch 权重" % stem)
         return 0
 
+    # 失败原因落到文件：stdout 在模型加载层被吞过，界面只能看到「退出码 1」
+    _errlog = md / "_convert.error.log"
+    try:
+        if _errlog.exists():
+            _errlog.unlink()
+    except Exception:
+        pass
+
     print("[convert] %s (%s): .npy -> .pth" % (stem, a.model_name))
-    convert_npy_to_pth(a.model_name, str(md), stem)
+    try:
+        convert_npy_to_pth(a.model_name, str(md), stem)
+    except Exception:
+        import traceback as _tb
+        try:
+            _errlog.write_text(_tb.format_exc(), encoding="utf-8")
+        except Exception:
+            pass
+        raise
     print("[OK] %s 转换完成" % stem)
     return 0
 

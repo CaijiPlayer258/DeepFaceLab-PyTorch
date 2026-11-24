@@ -199,6 +199,8 @@ def start(name: str) -> dict:
             _log("$ " + " ".join(cmd))
             _env = dict(os.environ)
             _env["DFL_TF_MATCH_LOG"] = "1"   # 让 Saveable 打出 [match] 行
+            _env["PYTHONIOENCODING"] = "utf-8"   # 否则中文异常在 GBK 下变乱码，页面上只剩「退出码 1」
+            _env["PYTHONUTF8"] = "1"
             proc = subprocess.Popen(
                 cmd, cwd=str(_dfl_root()), env=_env,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -244,18 +246,66 @@ def start(name: str) -> dict:
             else:
                 # 失败也要给出「哪个模块 / 为什么」，否则前端只有整张卡变红，
                 # 看不到设计稿里 .cvreason 那一行（形状不符/名字对不上/文件损坏）。
-                _tail = [x for x in (_log_lines or []) if x.strip()][-4:]
-                _why = ([x for x in _tail if ('shape' in x.lower() or '无匹配' in x
-                         or 'mismatch' in x.lower() or '候选' in x or 'WARN' in x
-                         or 'Error' in x or 'error' in x)][:1] or _tail or
-                        ["转换脚本退出码 %d" % rc])[0]
-                _bad = {
-                    "name": (modules[-1]["name"] if modules else "转换"),
-                    "state": "bad",
-                    "reason": "%s（退出码 %d）" % (str(_why).strip()[:240], rc),
-                }
+                # 优先找真正的异常行（RuntimeError / TF 权重没能全部对上 / shape），
+                # 找不到才退回「退出码 N」。以前直接把退出码当原因，页面上只看到
+                # 一句「转换脚本退出码 1（退出码 1）」，等于没说。
+                _all = [x for x in (_log_lines or []) if x.strip()]
+                _kinds = ("tf 权重没能全部对上", "runtimeerror", "shape",
+                          "mismatch", "无匹配", "候选", "[warn]", "error")
+                _why = ""
+                for _ln in reversed(_all):
+                    if any(k in _ln.lower() for k in _kinds):
+                        _why = _ln.strip()
+                        break
+                # 首选脚本自己落的错误文件（traceback 全在里面，不受 stdout 被吞的影响）
+                _errf = md / "_convert.error.log"
+                if _errf.exists():
+                    try:
+                        _tb = [x.strip() for x in
+                               _errf.read_text(encoding="utf-8", errors="replace").splitlines()
+                               if x.strip()]
+                        if _tb:
+                            _why = _tb[-1]
+                            _prev = _tb[-2] if len(_tb) >= 2 else ""
+                            if 'File "' in _prev:
+                                _why = _prev + " → " + _why
+                    except Exception:
+                        pass
+                if not _why:
+                    # traceback 的最后一行通常是 `模块.异常: 说明`，比退出码有用得多
+                    _tail2 = [x.strip() for x in _all if x.strip()][-2:]
+                    _why = " / ".join(_tail2) if _tail2 else ("转换脚本退出码 %d" % rc)
+                # 失败归到哪个模块：日志里出现 <模块>: 就归给它，否则归最后一步
+                _who = None
+                # 先从错误文本里认（traceback 那行就写着 `encoder: shape ...`）
+                for _mm2 in modules:
+                    if (_mm2["name"] + ":") in (_why or ""):
+                        _who = _mm2["name"]
+                        break
+                if not _who:
+                    for _ln in reversed(_all):
+                        for _mm2 in modules:
+                            if (_mm2["name"] + ":") in _ln:
+                                _who = _mm2["name"]
+                                break
+                        if _who:
+                            break
+                if not _who:
+                    _who = modules[-1]["name"] if modules else "转换"
+                _detail = _why[:300]
+                _marked = False
+                if modules:
+                    for _mm3 in modules:
+                        if _mm3["name"] == _who:
+                            _mm3["state"] = "bad"
+                            _mm3["reason"] = _detail
+                            _marked = True
+                            break
+                if not _marked:
+                    _bad = {"name": _who, "state": "bad", "reason": _detail}
+                    modules = (modules or []) + [_bad]
                 _set(running=False, step="error", ended=time.time(),
-                     error=_bad["reason"], modules=((modules[:-1] + [_bad]) if modules else [_bad]))
+                     error=_detail, modules=modules)
         except Exception as e:
             _set(running=False, step="error", ended=time.time(), error=str(e)[:300])
 
