@@ -6434,12 +6434,16 @@ html[data-theme="light"] .cvroundbtn:hover{background:#27272a;
    日志开头几个字符会看不见（实测「[preview]」被裁成「_review]」）。
    inset:0 是相对 .main 的 padding box，正好把 22/28/30 那些内边距一起盖掉。 */
 #p-output.on{position:absolute;inset:0;display:flex;flex-direction:column;
-  margin:0;padding:0 !important;height:auto}
-#p-output .outwrap{display:flex;flex-direction:column;flex:1 1 auto;height:100%;min-height:0;gap:10px}
+  margin:0;padding:0 !important;height:auto;overflow:hidden}
+/* min-width:0 是关键：flex 子项默认 min-width:auto，内容（超长路径/一行上千字符）
+   会把容器撑得比 .main 还宽 → .main 出横向滚动条 → 用户看到的左边被裁掉一半
+   （「[preview]」变「_review]」、「[vram]」变「ram]」）。同理给 .outpane 也加上。 */
+#p-output .outwrap{display:flex;flex-direction:column;flex:1 1 auto;
+  height:100%;min-height:0;min-width:0;width:100%;gap:0;overflow:hidden}
 
 
 /* 日志面板：固定 12.5px，等宽字体，纯黑 */
-#p-output .outpane{flex:1 1 auto;min-height:0;margin:0;overflow:auto;
+#p-output .outpane{flex:1 1 auto;min-height:0;min-width:0;width:100%;margin:0;overflow:auto;
   padding:12px 16px;border-radius:0;border:0;
   /* 全局 html,body 是 user-select:none（380 行），日志必须能选 —— 否则用户
      没法 Ctrl+A / 拖选复制，这一页就白做了。子元素要显式覆盖回去。 */
