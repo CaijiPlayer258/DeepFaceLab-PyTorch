@@ -120,8 +120,17 @@ def install():
             sys.stderr = _Tee(sys.stderr)
     except Exception:
         pass
+    # 每次启动轮转一次：上一轮的日志留成 .1，本次从空开始。
+    # 不这样做的话，用户打开「输出」页看到的是历史累积（上次预览、上次训练、
+    # 甚至若干天前的），分不清哪一行是这一次的。
     try:
-        _append_file("\n===== serve 启动 %s =====\n"
+        p = _path()
+        if p.exists() and p.stat().st_size > 0:
+            os.replace(str(p), str(p) + ".1")
+    except Exception:
+        pass
+    try:
+        _append_file("===== serve 启动 %s =====\n"
                      % time.strftime("%Y-%m-%d %H:%M:%S"))
     except Exception:
         pass
