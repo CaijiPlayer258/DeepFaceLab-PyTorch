@@ -99,7 +99,11 @@ def _shutdown_cleanup():
 # DFM 导出（内置在合成器里）
 # 用 4.0 的 python（有 torch 2.7 + onnx）跑 tools/migrate/export_dfm.py
 # ============================================================
-_export_job = {"running": False, "name": "", "log": [], "ok": None, "error": None}
+# 导出的三个阶段（前端步进器按它点亮）
+_EXPORT_STEPS = [("load", "加载权重"), ("pack", "组装 DFM"), ("write", "写入文件")]
+
+_export_job = {"running": False, "name": "", "log": [], "ok": None, "error": None,
+               "step": "idle", "modules": [], "percent": 0}
 
 # 4.0 训练进程自带的监控服务端口（4.1 只从它拉预览，不展示那个界面）
 WEBUI_PORT = 6790
@@ -152,7 +156,10 @@ def _export_worker(name: str, arch: str):
            "--model-dir", str(WORKSPACE / "model"),
            "--force-name", name]
     with _export_job_lock:
-        _export_job.update({"running": True, "name": name, "log": [], "ok": None, "error": None})
+        _export_job.update({"running": True, "name": name, "log": [], "ok": None, "error": None,
+                           "step": "load", "percent": 0,
+                           "modules": [{"name": n, "state": ("run" if k == "load" else "wait")}
+                                       for k, n in _EXPORT_STEPS]})
     try:
         proc = subprocess.Popen(cmd, cwd=str(_DFL_ROOT), creationflags=_NO_WINDOW,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -165,6 +172,19 @@ def _export_worker(name: str, arch: str):
             if not line:
                 continue
             if any(k in line for k in _TRAIN_LOG_SKIP):
+                continue
+            if line.startswith("[stage]"):
+                _st = line.split()[1] if len(line.split()) > 1 else ""
+                _keys = [k for k, _ in _EXPORT_STEPS]
+                if _st in _keys:
+                    _i = _keys.index(_st)
+                    _mods = [{"name": n,
+                              "state": ("ok" if _j < _i else ("run" if _j == _i else "wait"))}
+                             for _j, (_k2, n) in enumerate(_EXPORT_STEPS)]
+                    with _export_job_lock:
+                        _export_job["step"] = _st
+                        _export_job["modules"] = _mods
+                        _export_job["percent"] = int(_i * 100 / len(_EXPORT_STEPS))
                 continue
             with _export_job_lock:
                 _export_job["log"].append(line)
@@ -185,13 +205,29 @@ def _export_worker(name: str, arch: str):
         with _export_job_lock:
             _export_job["running"] = False
             _export_job["ok"] = ok
+            if ok:
+                _export_job["step"] = "done"
+                _export_job["percent"] = 100
+                _export_job["modules"] = [{"name": n, "state": "ok"}
+                                          for _k, n in _EXPORT_STEPS]
             if size_note:
                 _export_job["error"] = size_note
                 _export_job["log"].append("[!] " + size_note)
             if restored:
                 _export_job["log"].append("[!] 导出脚本改动了 _data.dat，已还原: " + ", ".join(restored))
             if not ok:
-                _export_job["error"] = "导出进程退出码 %d" % proc.returncode
+                _export_job["error"] = _export_job.get("error") or ("导出进程退出码 %d" % proc.returncode)
+                _export_job["step"] = "error"
+                # 当前阶段标红，带上最后一行日志当原因
+                _tail = [x for x in (_export_job.get("log") or []) if x.strip()][-1:]
+                _why = (_tail[0] if _tail else _export_job["error"])[:220]
+                _cur = next((i for i, m in enumerate(_export_job.get("modules") or [])
+                             if m.get("state") == "run"), 0)
+                _mods = _export_job.get("modules") or []
+                if _mods:
+                    _mods[_cur]["state"] = "bad"
+                    _mods[_cur]["reason"] = _why
+                    _export_job["modules"] = _mods
     except Exception as e:
         with _export_job_lock:
             _export_job["running"] = False

@@ -4267,14 +4267,14 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
    直接照 docs/preview/prototypes/convert-page-live.html（动效 v14）的类名和数值：
    步骤圆点三态 + 竖线生长 + rows 面板展开 + 失败行抖动 + 右上失败标记淡入。
    总进度条和状态 pill 是设计稿里没有的，别加。 */
-#p-train-convert .cvlist{display:flex;flex-direction:column;gap:8px}
-#p-train-convert .cvrow{display:flex;align-items:center;gap:10px;padding:9px 12px;
+.cvcard .cvlist{display:flex;flex-direction:column;gap:8px}
+.cvcard .cvrow{display:flex;align-items:center;gap:10px;padding:9px 12px;
   border:1px solid var(--line);border-radius:9px;background:var(--panel)}
-#p-train-convert .cvrow .n{font-family:var(--mono);font-size:12.5px;color:var(--ink);flex:1;min-width:0}
-#p-train-convert .cvrow .m{font-size:11.5px;color:var(--ink-3)}
-#p-train-convert .cvrow .sp{flex:1}
-#p-train-convert .cvrow .mini{height:26px;padding:0 10px;border-radius:8px}
-#p-train-convert .cvempty{font-size:12px;color:var(--ink-3);padding:6px 2px}
+.cvcard .cvrow .n{font-family:var(--mono);font-size:12.5px;color:var(--ink);flex:1;min-width:0}
+.cvcard .cvrow .m{font-size:11.5px;color:var(--ink-3)}
+.cvcard .cvrow .sp{flex:1}
+.cvcard .cvrow .mini{height:26px;padding:0 10px;border-radius:8px}
+.cvcard .cvempty{font-size:12px;color:var(--ink-3);padding:6px 2px}
 
 #p-train-convert .cvcard{
   /* 设计稿 convert-page-live.html：卡片 560px 居中、padding 16、圆角 14、带阴影 */
@@ -4285,67 +4285,67 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
 #p-train-convert .cvcard.bad{border-color:color-mix(in srgb, var(--bad) 45%, transparent);
   box-shadow:0 0 0 1px color-mix(in srgb, var(--bad) 10%, transparent), 0 12px 36px rgba(0,0,0,.55);
   box-shadow:0 0 0 1px color-mix(in srgb, var(--bad) 10%, transparent)}
-#p-train-convert .cvhd{display:flex;align-items:center;gap:8px;margin-bottom:10px}
-#p-train-convert .cvhd b{font-size:13px;font-weight:600}
-#p-train-convert .cvmeta{font-size:12px;color:var(--ink-3)}
-#p-train-convert .cvspacer{flex:1}
-#p-train-convert .cvbadge{font-size:12px;color:var(--bad);opacity:0;transition:opacity .25s ease}
-#p-train-convert .cvbadge.on{opacity:1}
+.cvcard .cvhd{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.cvcard .cvhd b{font-size:13px;font-weight:600}
+.cvcard .cvmeta{font-size:12px;color:var(--ink-3)}
+.cvcard .cvspacer{flex:1}
+.cvcard .cvbadge{font-size:12px;color:var(--bad);opacity:0;transition:opacity .25s ease}
+.cvcard .cvbadge.on{opacity:1}
 
 /* 一步 */
-#p-train-convert .cvstep{position:relative;padding:8px 0}
-#p-train-convert .cvhead{display:flex;gap:12px;align-items:center}
-#p-train-convert .cvic{width:22px;height:22px;border-radius:50%;flex:none;display:flex;
+.cvcard .cvstep{position:relative;padding:8px 0}
+.cvcard .cvhead{display:flex;gap:12px;align-items:center}
+.cvcard .cvic{width:22px;height:22px;border-radius:50%;flex:none;display:flex;
   align-items:center;justify-content:center;font-size:11px;
   background:color-mix(in srgb, var(--panel) 86%, white 14%);
   color:var(--ink-3);z-index:1;transition:background .2s,color .2s,box-shadow .25s}
-#p-train-convert .cvstep.on .cvic{background:color-mix(in srgb, var(--brand) 18%, transparent);
+.cvcard .cvstep.on .cvic{background:color-mix(in srgb, var(--brand) 18%, transparent);
   color:color-mix(in srgb, var(--brand) 62%, white);
   box-shadow:0 0 0 3px color-mix(in srgb, var(--brand) 12%, transparent)}
-#p-train-convert .cvstep.done .cvic{background:color-mix(in srgb, var(--ok) 14%, transparent);color:var(--ok)}
-#p-train-convert .cvstep.err .cvic{background:color-mix(in srgb, var(--bad) 16%, transparent);
+.cvcard .cvstep.done .cvic{background:color-mix(in srgb, var(--ok) 14%, transparent);color:var(--ok)}
+.cvcard .cvstep.err .cvic{background:color-mix(in srgb, var(--bad) 16%, transparent);
   color:var(--bad);box-shadow:0 0 0 3px color-mix(in srgb, var(--bad) 12%, transparent)}
-#p-train-convert .cvic svg{width:12px;height:12px;animation:cvspin .9s linear infinite}
+.cvcard .cvic svg{width:12px;height:12px;animation:cvspin .9s linear infinite}
 @keyframes cvspin{to{transform:rotate(360deg)}}
-#p-train-convert .cvnm{font-size:12.5px;color:var(--ink-2);transition:color .2s}
-#p-train-convert .cvstep.on .cvnm{color:var(--ink)}
-#p-train-convert .cvstep.err .cvnm{color:var(--bad)}
+.cvcard .cvnm{font-size:12.5px;color:var(--ink-2);transition:color .2s}
+.cvcard .cvstep.on .cvnm{color:var(--ink)}
+.cvcard .cvstep.err .cvnm{color:var(--bad)}
 
 /* 竖线：done 时从 0 长到 1 */
-#p-train-convert .cvdot{position:absolute;left:10.5px;top:30px;bottom:-6px;width:1px;background:var(--line)}
-#p-train-convert .cvstep:last-child .cvdot{display:none}
-#p-train-convert .cvdot > i{position:absolute;left:0;right:0;top:0;bottom:0;background:var(--ok);transform-origin:top;
+.cvcard .cvdot{position:absolute;left:10.5px;top:30px;bottom:-6px;width:1px;background:var(--line)}
+.cvcard .cvstep:last-child .cvdot{display:none}
+.cvcard .cvdot > i{position:absolute;left:0;right:0;top:0;bottom:0;background:var(--ok);transform-origin:top;
   transform:scaleY(0);transition:transform 380ms cubic-bezier(.16,1,.3,1)}
-#p-train-convert .cvstep.done .cvdot > i{transform:scaleY(1)}
+.cvcard .cvstep.done .cvdot > i{transform:scaleY(1)}
 
 /* 模块清单面板：grid-rows 0fr → 1fr */
-#p-train-convert .cvpanel{display:grid;grid-template-rows:0fr;opacity:0;margin-left:34px;
+.cvcard .cvpanel{display:grid;grid-template-rows:0fr;opacity:0;margin-left:34px;
   transition:grid-template-rows 320ms cubic-bezier(.16,1,.3,1), opacity .24s ease}
-#p-train-convert .cvstep.open .cvpanel{grid-template-rows:1fr;opacity:1;margin-top:8px}
-#p-train-convert .cvpanel > div{overflow:hidden}
-#p-train-convert .cvrows{border:1px solid var(--line);border-radius:12px;
+.cvcard .cvstep.open .cvpanel{grid-template-rows:1fr;opacity:1;margin-top:8px}
+.cvcard .cvpanel > div{overflow:hidden}
+.cvcard .cvrows{border:1px solid var(--line);border-radius:12px;
   background:var(--panel);overflow:hidden}
-#p-train-convert .cvrowi{display:flex;align-items:center;gap:10px;padding:7px 10px;font-size:12px;
+.cvcard .cvrowi{display:flex;align-items:center;gap:10px;padding:7px 10px;font-size:12px;
   border-bottom:1px solid var(--line);flex-wrap:wrap}
-#p-train-convert .cvrowi:last-child{border-bottom:0}
-#p-train-convert .cvrowi .n{font-family:var(--mono);flex:1;min-width:0;color:var(--ink-2)}
-#p-train-convert .cvrowi .c{font-variant-numeric:tabular-nums;color:var(--ink-3);
+.cvcard .cvrowi:last-child{border-bottom:0}
+.cvcard .cvrowi .n{font-family:var(--mono);flex:1;min-width:0;color:var(--ink-2)}
+.cvcard .cvrowi .c{font-variant-numeric:tabular-nums;color:var(--ink-3);
   min-width:62px;text-align:right}
-#p-train-convert .cvrowi .mk{width:12px;text-align:center;color:var(--ink-3)}
-#p-train-convert .cvrowi.run{background:color-mix(in srgb, var(--brand) 8%, transparent)}
-#p-train-convert .cvrowi.run .n{color:var(--ink)}
-#p-train-convert .cvrowi.run .c{color:color-mix(in srgb, var(--brand) 62%, white)}
-#p-train-convert .cvrowi.ok .mk,#p-train-convert .cvrowi.ok .c{color:var(--ok)}
-#p-train-convert .cvrowi.bad{background:color-mix(in srgb, var(--bad) 8%, transparent)}
-#p-train-convert .cvrowi.bad .mk,#p-train-convert .cvrowi.bad .c,#p-train-convert .cvrowi.bad .n{color:var(--bad)}
-#p-train-convert .cvreason{flex:0 0 100%;padding:1px 0 5px 22px;color:var(--bad);opacity:.85;
+.cvcard .cvrowi .mk{width:12px;text-align:center;color:var(--ink-3)}
+.cvcard .cvrowi.run{background:color-mix(in srgb, var(--brand) 8%, transparent)}
+.cvcard .cvrowi.run .n{color:var(--ink)}
+.cvcard .cvrowi.run .c{color:color-mix(in srgb, var(--brand) 62%, white)}
+.cvcard .cvrowi.ok .mk,.cvcard .cvrowi.ok .c{color:var(--ok)}
+.cvcard .cvrowi.bad{background:color-mix(in srgb, var(--bad) 8%, transparent)}
+.cvcard .cvrowi.bad .mk,.cvcard .cvrowi.bad .c,.cvcard .cvrowi.bad .n{color:var(--bad)}
+.cvcard .cvreason{flex:0 0 100%;padding:1px 0 5px 22px;color:var(--bad);opacity:.85;
   font-family:var(--mono);font-size:11px;line-height:1.65;word-break:break-word}
 
 /* 失败那一行抖一下（设计稿 .shake） */
 @keyframes cvshake{0%,100%{transform:translateX(0)}15%{transform:translateX(-4px)}
   30%{transform:translateX(4px)}45%{transform:translateX(-3px)}60%{transform:translateX(3px)}
   75%{transform:translateX(-2px)}90%{transform:translateX(1px)}}
-#p-train-convert .cvrowi.shake{animation:cvshake .42s cubic-bezier(.36,.07,.19,.97) both}
+.cvcard .cvrowi.shake{animation:cvshake .42s cubic-bezier(.36,.07,.19,.97) both}
 @media (prefers-reduced-motion: reduce){
   #p-train-convert *{transition-duration:.01ms!important;animation-duration:.01ms!important}
 }
@@ -6301,12 +6301,12 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 .cvback .btn { font-size: 12.5px; padding: 5px 12px; }
 
 /* 模型转换卡片：设计稿 convert-page.html（方案 A，按模块展开）里的这几块 */
-#p-train-convert .cvov { display:flex; align-items:center; gap:10px; margin:12px 0 2px; }
-#p-train-convert .cvovbar { flex:1; height:4px; border-radius:999px;
+.cvcard .cvov { display:flex; align-items:center; gap:10px; margin:12px 0 2px; }
+.cvcard .cvovbar { flex:1; height:4px; border-radius:999px;
   background:var(--line-strong); overflow:hidden; }
-#p-train-convert .cvovbar i { display:block; height:100%; background:var(--brand);
+.cvcard .cvovbar i { display:block; height:100%; background:var(--brand);
   border-radius:999px; transition:width .3s ease; }
-#p-train-convert .cvovpct { font-size:11.5px; color:var(--ink-2);
+.cvcard .cvovpct { font-size:11.5px; color:var(--ink-2);
   font-variant-numeric:tabular-nums; min-width:44px; text-align:right; }
 
 /* 报错 toast：正文是完整 traceback，要能读、能滚、能截图 */
@@ -6328,7 +6328,7 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 #mgrid { transition: grid-template-rows .3s ease; }
 
 /* 模块行下面那行小字：这个模块最后一条名字/形状匹配的明细 */
-#p-train-convert .cvdetail{flex:0 0 100%;padding:1px 0 5px 22px;
+.cvcard .cvdetail{flex:0 0 100%;padding:1px 0 5px 22px;
   color:var(--ink-3);font-family:var(--mono);font-size:10.5px;line-height:1.6;
   word-break:break-word}
 
@@ -6341,28 +6341,42 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 #p-train-convert .cvcard{margin:0 auto}
 
 /* ---- 行内明细出现/消失时高度缓动（别再突变）---- */
-#p-train-convert .cvrowi{max-height:46px;overflow:hidden;
+.cvcard .cvrowi{max-height:46px;overflow:hidden;
   transition:max-height .26s cubic-bezier(.16,1,.3,1),background-color .18s}
-#p-train-convert .cvrowi:has(.cvdetail),#p-train-convert .cvrowi:has(.cvreason){max-height:104px}
+.cvcard .cvrowi:has(.cvdetail),.cvcard .cvrowi:has(.cvreason){max-height:104px}
 
 /* ---- 完成后的圆形返回按钮（shadcn 风格，明暗都跟 --panel/--line 走）---- */
-#p-train-convert .cvdone{margin-top:16px;opacity:0;transform:translateY(6px);
+.cvcard .cvdone{margin-top:16px;opacity:0;transform:translateY(6px);
   pointer-events:none;transition:opacity .32s ease,transform .32s cubic-bezier(.16,1,.3,1)}
-#p-train-convert .cvdone.on{opacity:1;transform:none;pointer-events:auto}
+.cvcard .cvdone.on{opacity:1;transform:none;pointer-events:auto}
 /* 反色按钮：深色主题 = 纯白底 + 黑箭头；浅色主题 = 纯黑底 + 白箭头 */
-#p-train-convert .cvback{display:inline-flex;align-items:center;justify-content:center;
+.cvcard .cvback{display:inline-flex;align-items:center;justify-content:center;
   width:36px;height:36px;padding:0;border-radius:999px;cursor:pointer;
   background:#ffffff;border:1px solid rgba(0,0,0,.08);color:#0a0a0a;
   box-shadow:0 1px 2px rgba(0,0,0,.28),0 4px 14px rgba(0,0,0,.18);
   transition:background .18s,color .18s,border-color .18s,transform .18s,box-shadow .18s}
-#p-train-convert .cvback:hover{background:#f4f4f5;transform:translateY(-1px);
+.cvcard .cvback:hover{background:#f4f4f5;transform:translateY(-1px);
   box-shadow:0 2px 4px rgba(0,0,0,.3),0 8px 22px rgba(0,0,0,.24)}
-html[data-theme="light"] #p-train-convert .cvback{background:#0a0a0a;color:#fafafa;
+html[data-theme="light"] .cvcard .cvback{background:#0a0a0a;color:#fafafa;
   border-color:rgba(255,255,255,.10);
   box-shadow:0 1px 2px rgba(0,0,0,.16),0 4px 14px rgba(0,0,0,.10)}
-html[data-theme="light"] #p-train-convert .cvback:hover{background:#27272a;
+html[data-theme="light"] .cvcard .cvback:hover{background:#27272a;
   box-shadow:0 2px 4px rgba(0,0,0,.2),0 8px 22px rgba(0,0,0,.16)}
-#p-train-convert .cvback:active{transform:translateY(0) scale(.95);box-shadow:0 1px 2px rgba(0,0,0,.16)}
-#p-train-convert .cvback:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+.cvcard .cvback:active{transform:translateY(0) scale(.95);box-shadow:0 1px 2px rgba(0,0,0,.16)}
+.cvcard .cvback:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
 /* shadcn icon button：h-9(36px) 的圈配 size-4(16px) 的图标太瘦，18px 更饱满（2:1） */
-#p-train-convert .cvback .ic{width:18px;height:18px;stroke-width:2}
+.cvcard .cvback .ic{width:18px;height:18px;stroke-width:2}
+
+/* ---- 合成页左栏的导出步进卡片（比转换页窄，单独收一收）---- */
+.cvcard.excard{max-width:none;width:100%;margin:10px 0 0;padding:12px;border-radius:12px}
+.cvcard.excard .cvhd{flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.cvcard.excard .cvhd b{font-size:12.5px}
+.cvcard.excard .cvmeta{font-size:11.5px;flex:1 1 100%;order:3}
+.cvcard.excard .cvbadge{font-size:11.5px;order:2}
+.cvcard.excard .cvspacer{display:none}
+.cvcard.excard .cvstep{padding:5px 0}
+.cvcard.excard .cvhead{gap:8px}
+.cvcard.excard .cvic{width:20px;height:20px;font-size:11px}
+.cvcard.excard .cvnm{font-size:12px}
+.cvcard.excard .cvdot{display:none}
+.cvcard.excard .cvrows{padding-left:0}

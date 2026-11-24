@@ -272,6 +272,71 @@
     if (b) b.addEventListener("click", function () { go("train"); });
   })();
 
+  /* ---- DFM 导出步进器（三阶段，和转换页同一套外观）---- */
+  function exPaint(st) {
+    var card = document.getElementById("exCard");
+    if (!card) return;
+    st = st || {};
+    var isErr = st.step === "error";
+    var isDone = st.step === "done";
+    var isIdle = !st.step || st.step === "idle";
+    if (isIdle) { card.hidden = true; return; }
+    card.hidden = false;
+    card.classList.toggle("bad", isErr);
+    var nm = document.getElementById("exName");
+    if (nm) nm.textContent = st.name || "导出";
+    var mt = document.getElementById("exMeta");
+    if (mt) {
+      var p = st.percent || 0;
+      mt.textContent = isDone ? "已导出" : (isErr ? "" : (p + "%"));
+    }
+    var bd = document.getElementById("exBad");
+    if (bd) bd.className = "cvbadge" + (isErr ? " on" : "");
+    var mods = st.modules || [];
+    /* 三阶段：load / pack / write */
+    var order = ["load", "pack", "write"];
+    var cur = order.indexOf(st.step);
+    if (isDone) cur = order.length;
+    for (var i = 0; i < order.length; i++) {
+      var sid = "exS" + (i + 1), iid = "exI" + (i + 1);
+      var cls, mark;
+      if (isErr && i === Math.max(0, cur)) { cls = "err open"; mark = "!"; }
+      else if (i < cur) { cls = "done"; mark = "✓"; }
+      else if (i === cur) { cls = "on open"; mark = CV_SPIN; }
+      else { cls = ""; mark = String(i + 1); }
+      cvStepSet(sid, cls, mark);
+    }
+    var rows = document.getElementById("exRows");
+    if (rows) {
+      /* 第一阶段下面挂的是模块匹配明细（如果有） */
+      var sub = mods.filter(function (m) { return m.reason; });
+      rows.innerHTML = sub.length ? cvRowsHtml(sub) : "";
+    }
+  }
+  var _exTimer = null;
+  function exPoll() {
+    fetch("/api/models/export/status").then(function (r) { return r.json(); }).then(function (st) {
+      exPaint(st);
+      if (st && st.running) {
+        if (!_exTimer) _exTimer = setInterval(exPoll, 400);
+      } else {
+        if (_exTimer) { clearInterval(_exTimer); _exTimer = null; }
+      }
+    }).catch(function () {
+      if (_exTimer) { clearInterval(_exTimer); _exTimer = null; }
+    });
+  }
+  window.__exPoll = exPoll;
+  /* 导出页 / 合成页一进来就查一次（可能是上一次留下的结果） */
+  document.addEventListener("dsh:page", function (e) {
+    try {
+      var id = (e.detail && e.detail.id) || "";
+      if (id === "merge" || id === "merge-page") exPoll();
+    } catch (err) {}
+  });
+
+  window.__exPaint = exPaint;
+
   window.__cvPaint = cvPaint;
   /* ---- 转换：直接调接口 + 自己轮询。不依赖文件末尾那个 IIFE 里的 __cvStart，
          它历史上挂没挂上不稳，导致点「转换」只弹一句「转换器还没就绪」。 ---- */
@@ -399,6 +464,7 @@
        不依赖任何分片末尾的初始化（那种写法历史上被吞过好几次），
        也不依赖 window.__cvBoot —— 这里自己拉、自己画、自己绑按钮。 */
     if (key === "train-convert") cvListPaint();
+    if (key === "merge") { try { window.__exPoll && window.__exPoll(); } catch (e) {} }
     if (key === "settings" && window.WPK) window.WPK.enter();
     if (key === "train-cfg") {
       if (window.markHotRows) window.markHotRows();

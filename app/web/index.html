@@ -883,6 +883,20 @@
                    真正发请求的是那一页底部的「开始导出」。左栏一个模型都没选时禁用。 -->
               <button class="btn pri" id="mgExport" style="width:100%">导出</button>
               <div class="mgexport-hint" id="mgExportHint" hidden>先选一个模型</div>
+
+              <!-- 导出进度：和模型转换页同一套步进器，只是三个阶段不同 -->
+              <div class="card cvcard excard" id="exCard" hidden>
+                <div class="cvhd">
+                  <b id="exName">导出</b><span class="cvmeta" id="exMeta"></span>
+                  <span class="cvspacer"></span>
+                  <span class="cvbadge" id="exBad">失败</span>
+                </div>
+                <div class="cvstep" id="exS1"><div class="cvdot"><i></i></div>
+                  <div class="cvhead"><div class="cvic" id="exI1">1</div><div class="cvnm">加载权重</div></div>
+                  <div class="cvpanel"><div><div class="cvrows" id="exRows"></div></div></div></div>
+                <div class="cvstep" id="exS2"><div class="cvhead"><div class="cvic" id="exI2">2</div><div class="cvnm">组装 DFM</div></div></div>
+                <div class="cvstep" id="exS3"><div class="cvhead"><div class="cvic" id="exI3">3</div><div class="cvnm">写入文件</div></div></div>
+              </div>
             </div>
           </aside>
         </div>

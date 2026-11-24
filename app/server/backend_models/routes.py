@@ -276,6 +276,9 @@ def model_export(name: str):
         if _export_job["running"]:
             raise HTTPException(409, "已经在导出 " + _export_job["name"])
     arch = _arch_of(name)
+    with _export_job_lock:
+        _export_job.update({"running": False, "step": "idle", "modules": [], "percent": 0,
+                           "ok": None, "error": None, "log": [], "name": ""})
     threading.Thread(target=_export_worker, args=(name, arch), daemon=True).start()
     return {"ok": True, "name": name, "arch": arch, "running": True}
 
@@ -285,6 +288,9 @@ def model_export_status():
     with _export_job_lock:
         return {"running": _export_job["running"], "name": _export_job["name"],
                 "ok": _export_job["ok"], "error": _export_job["error"],
+                "step": _export_job.get("step", "idle"),
+                "modules": _export_job.get("modules") or [],
+                "percent": _export_job.get("percent", 0),
                 "log": _export_job["log"][-40:]}
 
 

@@ -61,6 +61,7 @@ def export(model_class_name: str, saved_models_path: str, force_model_name: str 
             convert_npy_to_pth(model_class_name, saved_models_path, force_model_name)
 
 
+    print("[stage] load", flush=True)          # 读配置、建模型
     # Ensure iter >= 1 to skip first-run setup
     if force_model_name:
         dat_path = Path(saved_models_path) / f'{force_model_name}_{model_class_name}_data.dat'
@@ -129,6 +130,8 @@ def export(model_class_name: str, saved_models_path: str, force_model_name: str 
     done = [False]
     t2 = threading.Thread(target=_spinner_until, args=(done, 'exporting', _orig_stdout), daemon=True)
     t2.start()
+    _orig_stdout.write("[stage] pack\n")   # 组装 ONNX 图（必须写 orig，下面 stdout 被换掉了）
+    _orig_stdout.flush()
     try:
         sys.stdout = open(os.devnull, 'w')
         model.export_dfm()
@@ -137,6 +140,8 @@ def export(model_class_name: str, saved_models_path: str, force_model_name: str 
         sys.stdout = _orig_stdout
     t2.join(0.3)
 
+    _orig_stdout.write("[stage] write\n")  # 写 .dfm / 改名
+    _orig_stdout.flush()
     # Rename exported .dfm: New416_model.dfm → New416.dfm
     out_path = ''
     try:
