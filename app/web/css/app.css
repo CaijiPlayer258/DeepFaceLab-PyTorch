@@ -6433,6 +6433,9 @@ html[data-theme="light"] .cvroundbtn:hover{background:#27272a;
 /* 日志面板：固定 12.5px，等宽字体，纯黑 */
 #p-output .outpane{flex:1 1 auto;min-height:0;margin:0;overflow:auto;
   padding:12px 14px;border-radius:12px;border:1px solid var(--line);
+  /* 全局 html,body 是 user-select:none（380 行），日志必须能选 —— 否则用户
+     没法 Ctrl+A / 拖选复制，这一页就白做了。子元素要显式覆盖回去。 */
+  -webkit-user-select: text; user-select: text; cursor: text;
   background:#000;color:#e8e8ea;
   font-family:var(--mono,ui-monospace,Consolas,'Cascadia Mono',monospace);
   font-size:12.5px;line-height:1.55;letter-spacing:0;
@@ -6440,7 +6443,7 @@ html[data-theme="light"] .cvroundbtn:hover{background:#27272a;
   tab-size:4;outline:none}
 /* 不换行模式：长路径横向滚，不折行（截图时更接近终端原样） */
 #p-output .outpane.nowrap{white-space:pre;word-break:normal}
-#p-output .outpane .ln{display:block}
+#p-output .outpane .ln{display:block;-webkit-user-select:text;user-select:text}
 #p-output .outpane .ln.e{color:#ff6467}        /* 报错行 */
 #p-output .outpane .ln.w{color:#f0b429}        /* 警告行 */
 #p-output .outpane .ln.d{color:#8b8b98}        /* [xxx] 前缀的常规噪音 */
