@@ -65,20 +65,65 @@ _electron_backend.log 每次启动都被 "w" 截断。这一页让用户自己�
     });
   }
 
+  /* 把 Traceback 块折起来 —— 一份 Python traceback 动辄二三十行，全展开的话
+     用户想往上翻真正有用的那几行得滚半天。识别规则：
+       · 起点：整行就是 «Traceback (most recent call last):»
+       · 终点：第一条**顶格**、且不是 ^^^ 标记、也不是下一个 Traceback 的行
+         —— 那一行就是异常消息（ValueError: ...），拿它当摘要
+       · 走到末尾还没找到消息行 = 块还没写完（流式），这一批先不折
+     折叠用 <details>：原生、可键盘操作、展开状态由浏览器记着。 */
+  var TB_RE = /^\s*Traceback \(most recent call last\)/;
+  var CARET_RE = /^\s*\^+\s*$/;
+
+  function group(rows) {
+    var out = [];
+    var i = 0;
+    while (i < rows.length) {
+      if (!TB_RE.test(rows[i].s)) { out.push({ k: "l", r: rows[i] }); i++; continue; }
+      var j = i + 1, head = null;
+      while (j < rows.length) {
+        var t = rows[j].s;
+        if (TB_RE.test(t)) break;                       // 下一个块开始，当前块没消息
+        if (t.length && t.charAt(0) !== " " && t.charAt(0) !== "\t" && !CARET_RE.test(t)) {
+          head = t; j++; break;                           // 顶格非 ^^^ = 异常消息
+        }
+        j++;
+      }
+      if (!head && j >= rows.length) {                    // 还没写完，先当普通行
+        out.push({ k: "l", r: rows[i] }); i++; continue;
+      }
+      out.push({ k: "tb", head: head || "Traceback", rows: rows.slice(i, j) });
+      i = j;
+    }
+    return out;
+  }
+
   function html(rows) {
+    var groups = group(rows);
     var buf = [];
-    for (var i = 0; i < rows.length; i++) {
-      buf.push('<span class="ln ' + classify(rows[i].s) + '">' + esc(rows[i].s) + "</span>");
+    for (var i = 0; i < groups.length; i++) {
+      var g = groups[i];
+      if (g.k === "l") {
+        buf.push('<span class="ln ' + classify(g.r.s) + '">' + esc(g.r.s) + "</span>");
+        continue;
+      }
+      var n = g.rows.length;
+      var body = g.rows.map(function (r) { return esc(r.s); }).join("\n");
+      buf.push('<details class="tb"><summary>' + esc(g.head) +
+        ' <em>' + n + ' 行</em></summary><div class="tbraw">' + body + "</div></details>");
     }
     return buf.join("");
   }
 
+  /* 增量 append 不行了：一个 traceback 块可能跨两次拉取，前一批看到的是「未闭合」
+     （按普通行摆着），后一批才补齐消息行 —— 那时得把前面那些行收进 <details>。
+     所以有新增就整体重渲染。6000 行以内这个代价可以接受（实测 3~6ms），
+     而且只在真的有新行时才跑，日志静止时一次都不渲染。 */
   function append(rows) {
     var el = pane();
     if (!el) return;
     var wasStuck = nearBottom();      // **先**判断，写进去之后 scrollHeight 就变了
-    el.insertAdjacentHTML("beforeend", html(rows));
-    while (el.childNodes.length > OUT.max) el.removeChild(el.firstChild);
+    el.innerHTML = html(OUT.rows);
     if (wasStuck) stick();
   }
 
