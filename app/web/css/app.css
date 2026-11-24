@@ -1858,7 +1858,10 @@ html[data-theme="dark"] { --chart-src: #7f8cf0; --chart-dst: #e8b04a; }
    合成工作室：照搬 4.0 MergeStudio 的三栏工作台布局，
    皮肤换成 4.1 的 token
    ============================================================ */
-#p-merge { display: flex; flex-direction: column; gap: 18px; padding-bottom: 0 !important; }
+/* 同样只能 .on 时才 flex —— 裸写 #p-merge{display:flex} 会让它永远显示，
+   而 #p-train-convert 的 min-height:100vh 会把它整个推到视口下方（用户看到的就是
+   「合成工作室」面包屑下面一片空白 + 中间飘着别的页面的标题）。 */
+#p-merge.on { display: flex; flex-direction: column; gap: 18px; padding-bottom: 0 !important; }
 
 .mgbar {
   display: flex;
@@ -6330,7 +6333,9 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
   word-break:break-word}
 
 /* ---- 转换页：整体垂直居中（以前只水平居中，窗口一大卡片就偏上）---- */
-#p-train-convert{display:flex;flex-direction:column;align-items:center;justify-content:center;
+/* 注意：只有 .on 时才 flex —— 直接写 #p-train-convert{display:flex} 会覆盖
+   .page{display:none}，转换页就永远显示、把合成器等页面全挡住。 */
+#p-train-convert.on{display:flex;flex-direction:column;align-items:center;justify-content:center;
   min-height:calc(100vh - 96px);padding:18px 24px 28px}
 #p-train-convert > .title{align-self:stretch;max-width:560px;width:100%;margin:0 auto 10px}
 #p-train-convert .cvcard{margin:0 auto}
