@@ -238,7 +238,11 @@
       if (mods.length) bits.push(mods.length + " 个模块");
       /* 后端每匹配完一个张量就更新 msg —— 这里直接显示，用户能看到
          「encoder/conv1/weight (3,3,4,8) -> (8,4,3,3) 转置 名字」这样在滚 */
-      mt.textContent = st.msg ? String(st.msg) : bits.join(" · ");
+      /* 正常完成后不再挂那行匹配日志（它只在跑的时候有意义）；出错才保留 */
+      var _isDone = (st.step === "done");
+      mt.textContent = (st.msg && !_isDone) ? String(st.msg) : bits.join(" · ");
+      var _dn = document.getElementById("cvDone");
+      if (_dn) _dn.classList.toggle("on", _isDone);
     }
     var isErr = st.step === "error";
     var isIdle = !st.step || st.step === "idle";
@@ -262,6 +266,12 @@
     if (r1) r1.innerHTML = cvRowsHtml(mods);
     if (r2) r2.innerHTML = cvRowsHtml(mods);
   }
+  /* 转换完成后卡片下面那个圆形返回按钮：回模型选择 */
+  (function () {
+    var b = document.getElementById("cvBack");
+    if (b) b.addEventListener("click", function () { go("train"); });
+  })();
+
   window.__cvPaint = cvPaint;
   /* ---- 转换：直接调接口 + 自己轮询。不依赖文件末尾那个 IIFE 里的 __cvStart，
          它历史上挂没挂上不稳，导致点「转换」只弹一句「转换器还没就绪」。 ---- */
