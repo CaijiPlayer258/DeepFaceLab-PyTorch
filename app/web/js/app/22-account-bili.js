@@ -63,7 +63,10 @@
       /* 未登录看扫码页；已登录但还没同意协议的，也先停在这里（协议卡盖在扫码页上） */
       /* 预览模式（设计工作台画布）直接把欢迎页藏掉：那个会话没有登录态，
          停在扫码页就看不到任何真实界面。 */
-      var show = window.__preview ? false : !AUTH.logged_in;
+      var needLegal = !!AUTH.logged_in && !(window.__legalAccepted && window.__legalAccepted());
+      /* 未登录 → 停在扫码页（**不能跳过**，登录是硬前提）；
+         已登录但没同意协议 → 也停在这里，协议卡盖在扫码页上面。 */
+      var show = window.__preview ? false : (!AUTH.logged_in || needLegal);
       w.style.display = show ? "grid" : "none";
       /* 欢迎页一藏起来就停 shader，否则它会在后台空转、拖慢整机 */
       if (!show && window.__welcome3d && window.__welcome3d.stop) {
