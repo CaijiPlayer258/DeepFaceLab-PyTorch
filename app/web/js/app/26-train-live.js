@@ -444,8 +444,17 @@
             hint = String(l).replace(/^[\s·]+/, "").slice(0, 34);
             return true;
           });
-          act = "加载模型…";
-          sub = [d.elapsed_s ? ("已等 " + _hms(d.elapsed_s)) : "", hint].filter(Boolean).join(" · ");
+          // 后端的 stalled：跑了两分钟一条迭代都没出来 = 卡死在初始化，不是「正在加载」。
+          // 引擎那边 Trainer 主线程卡在 e.wait()（无 timeout），出错时只打 traceback 不退出，
+          // 以前这里会一直显示「加载模型…已等 17m43s」，用户以为还在加载。
+          if (d.stalled) {
+            act = "卡在加载";
+            cls = "warn";
+            sub = d.stall_hint || "引擎没有吐出任何迭代，多半死在初始化";
+          } else {
+            act = "加载模型…";
+            sub = [d.elapsed_s ? ("已等 " + _hms(d.elapsed_s)) : "", hint].filter(Boolean).join(" · ");
+          }
         }
 
         /* 引擎的常驻提示（[notice]，例如预训练结束重置了 inter）：

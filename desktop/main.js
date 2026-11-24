@@ -141,6 +141,24 @@ ipcMain.handle("win:close", () => win && win.close());
 
 app.setAppUserModelId("com.caijiplayer.deepfacelab");
 
+/* 单实例锁：两个 4.1 同时开着 = 两个 serve.py 共用同一个 workspace/model，
+   后启动的那个在 _startup_sweep 里会把前一个**正在跑**的训练当孤儿 psutil.kill()，
+   退出码正好是 15，而且不置 stopping —— 界面上就是红色「训练失败 · 训练进程退出码 15」，
+   用户完全没点过停止。这是能拼出该现象的唯一路径，所以从这里堵。 */
+const __gotLock = app.requestSingleInstanceLock();
+if (!__gotLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    try {
+      if (!win) return;
+      if (win.isMinimized()) win.restore();
+      win.show();
+      win.focus();
+    } catch (e) {}
+  });
+}
+
 ipcMain.handle("dialog:file", async (e, title, filters) => {
   const r = await dialog.showOpenDialog(win, {
     title: title || "选择文件",

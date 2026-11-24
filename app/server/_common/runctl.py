@@ -38,20 +38,34 @@ def _sweep_orphan_trainers(why: str = "") -> int:
                 cmd = " ".join(p.info.get("cmdline") or [])
                 if "_dfl_train.py" not in cmd or p.pid == mine:
                     continue
-                # 别误杀另一个 4.1 实例正在用的训练进程：
-                # 只有当它的父进程已经没了（或者父进程不是 serve.py）才算孤儿。
-                managed = False
+                # 判孤儿的**唯一**标准：父进程已经死了。
+                #
+                # 以前读父进程 cmdline 来判 managed（含 serve.py 才算「有人管」），
+                # 一旦 cmdline 读不到（权限、父进程刚退出、其它工具拉起的）就判成
+                # "没人管" → psutil.kill() → 退出码 15，而且**不置 stopping**，
+                # 于是界面上是红字「训练失败 · 训练进程退出码 15」。
+                # 开两个 4.1 实例（desktop 那时没有单实例锁）时，后启动的 serve.py
+                # 会把前一个正在跑的训练当孤儿杀掉 —— 用户没点停止，训练却"失败"了。
+                #
+                # 现在反过来：只要父进程还活着就绝不动手。宁可留一个孤儿占显存，
+                # 也不能杀掉别人正在用的训练。
+                par = None
                 try:
                     par = p.parent()
-                    if par is not None and par.is_running():
-                        pcmd = " ".join(par.cmdline() or [])
-                        managed = ("serve.py" in pcmd) or ("app" in pcmd and "python" in pcmd.lower())
                 except Exception:
-                    managed = False
-                if managed:
-                    continue
+                    par = None
+                if par is not None:
+                    try:
+                        if par.is_running():
+                            continue
+                    except Exception:
+                        continue        # 判断不了就当它还活着，不杀
                 p.kill()
                 killed += 1
+                # 万一哪天又有路径走到这里：被清扫的训练不该被渲染成「训练失败 · 退出码 15」。
+                # （正常情况清扫只发生在开服那一刻，_train_job 还是全新的，这两行是保险。）
+                with _train_job_lock:
+                    _train_job["stopping"] = True
             except Exception:
                 continue
     except Exception:

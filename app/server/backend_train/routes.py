@@ -382,8 +382,26 @@ def train_status():
         eta = None
         if target and rate > 0 and it < target:
             eta = int((target - it) / rate)
+        # 「启动了很久但一条迭代都没出来」= 卡在加载阶段。引擎那边的 Trainer 主线程
+        # 卡在 e.wait()（无 timeout），trainerThread 出错时只打 Error: + traceback 就
+        # break，往 c2s 塞的 close 没有人读 —— 于是进程一直活着、一条 [#iter] 都不打。
+        # 以前界面就停在「加载模型…已等 17m43s」，用户以为在加载，其实是死了。
+        stalled = False
+        stall_hint = None
+        if j["running"] and not j.get("iter_seen") and elapsed >= 120:
+            stalled = True
+            tail = "\n".join((j.get("log") or [])[-25:])
+            if "out of memory" in tail.lower() or "cublas_status_alloc_failed" in tail.lower():
+                stall_hint = "卡在加载：显存不足（见下面的 CUDA 提示）"
+            elif "Traceback" in tail or "Error:" in tail:
+                stall_hint = "卡在加载：引擎抛了异常但没有退出（日志里有 Traceback）"
+            elif "No training data" in tail:
+                stall_hint = "卡在加载：训练数据是空的"
+            else:
+                stall_hint = "卡在加载：2 分钟没有一条迭代，引擎多半死在初始化（看日志尾巴）"
         return {"running": j["running"], "name": j["name"],
                 "iter": it, "ok": j["ok"],
+                "stalled": stalled, "stall_hint": stall_hint,
                 "error": j["error"], "log": j["log"][-80:],
                 # 引擎打 [notice] 前缀的常驻提示（预训练 inter 重置等），
                 # 前端用它渲染一条蓝色信息条；没有就是 None。
