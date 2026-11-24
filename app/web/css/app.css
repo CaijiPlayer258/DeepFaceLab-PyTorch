@@ -6346,7 +6346,7 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 #p-train-convert .cvdone.on{opacity:1;transform:none;pointer-events:auto}
 /* 反色按钮：深色主题 = 纯白底 + 黑箭头；浅色主题 = 纯黑底 + 白箭头 */
 #p-train-convert .cvback{display:inline-flex;align-items:center;justify-content:center;
-  width:38px;height:38px;padding:0;border-radius:999px;cursor:pointer;
+  width:36px;height:36px;padding:0;border-radius:999px;cursor:pointer;
   background:#ffffff;border:1px solid rgba(0,0,0,.08);color:#0a0a0a;
   box-shadow:0 1px 2px rgba(0,0,0,.28),0 4px 14px rgba(0,0,0,.18);
   transition:background .18s,color .18s,border-color .18s,transform .18s,box-shadow .18s}
@@ -6359,4 +6359,5 @@ html[data-theme="light"] #p-train-convert .cvback:hover{background:#27272a;
   box-shadow:0 2px 4px rgba(0,0,0,.2),0 8px 22px rgba(0,0,0,.16)}
 #p-train-convert .cvback:active{transform:translateY(0) scale(.95);box-shadow:0 1px 2px rgba(0,0,0,.16)}
 #p-train-convert .cvback:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
-#p-train-convert .cvback .ic{width:16px;height:16px}
+/* shadcn icon button：h-9(36px) 的圈配 size-4(16px) 的图标太瘦，18px 更饱满（2:1） */
+#p-train-convert .cvback .ic{width:18px;height:18px;stroke-width:2}
