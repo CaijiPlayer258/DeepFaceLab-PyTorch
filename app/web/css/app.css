@@ -6527,3 +6527,137 @@ html[data-theme="light"] .cvroundbtn:hover{background:#27272a;
 #p-output .outpane .ln.e{cursor:pointer}
 #p-output .outpane .ln.e:hover{filter:brightness(1.18)}
 #p-output .outpane .ln[data-tag]{cursor:pointer}
+
+
+/* ============================================================
+   协议门（#legalGate）的样式：d71d2f7 那次「转换卡片重做」用了大范围文本替换，
+   把 .legal / .legalCard / .legalBody 一整块连同 .alert、.lbchip 一起删掉了。
+   后果不是样式难看，而是登录 B 站之后协议页裸奔：没有 position:fixed、没有
+   遮罩背景、没有卡片、没有滚动区，整份协议直接铺在首页上。
+   这里按 afff798 的原样恢复。
+   ============================================================ */
+
+.legal {
+  position: fixed; inset: 0; z-index: 9000;
+  display: flex; align-items: center; justify-content: center;
+  padding: 4vh 24px;
+  background: rgba(6,7,11,.86);
+}
+
+.legalCard {
+  width: min(680px, 100%); max-height: 88vh;
+  display: flex; flex-direction: column;
+  background: var(--panel-2, #1a1a1f);
+  border: 1px solid var(--line, #26262d);
+  border-radius: 14px;
+  box-shadow: var(--shadow-high, 0 24px 60px rgba(0,0,0,.6));
+  overflow: hidden;
+}
+
+.legalHd { padding: 24px 26px 14px; }
+
+.legalHd b {
+  display: block; font-size: 15px; font-weight: 600;
+  letter-spacing: -.01em; color: var(--ink, #f2f2f4);
+}
+
+.legalBody {
+  padding: 0 26px 4px; overflow-y: auto; flex: 1;
+}
+
+.legalBody::-webkit-scrollbar { width: 5px; height: 5px; }
+
+.legalBody::-webkit-scrollbar-track { background: transparent; }
+
+.legalBody::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,.14);
+  border-radius: 999px;
+}
+
+.legalBody::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.26); }
+
+.legalBody::-webkit-scrollbar-button { display: none; height: 0; }
+
+.legalBody section { padding: 16px 0; }
+
+.legalBody section + section { border-top: 1px solid rgba(255,255,255,.05); }
+
+.legalBody h4 {
+  font-size: 12.5px; font-weight: 600; letter-spacing: .01em;
+  color: var(--ink, #f2f2f4); margin-bottom: 7px;
+}
+
+.legalBody p {
+  font-size: 12.5px; line-height: 1.8; color: var(--ink-2, #a3a3ad);
+  margin-bottom: 5px;
+}
+
+.legalBody p:last-child { margin-bottom: 0; }
+
+.legalFt { padding: 14px 26px 22px; }
+
+.legalChks { display: flex; flex-direction: column; gap: 9px; }
+
+.legalChk {
+  display: flex; align-items: flex-start; gap: 8px;
+  font-size: 12px; line-height: 1.55; color: var(--ink-2, #a3a3ad);
+  cursor: pointer; user-select: none;
+}
+
+.legalChk input {
+  width: 14px; height: 14px; margin-top: 2px; flex: none;
+  accent-color: var(--brand, #5d6ccf); cursor: pointer;
+}
+
+.legalChk b { color: var(--ink, #f2f2f4); font-weight: 600; }
+
+.legalActs { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
+.legal .legalActs .btn {
+  height: 30px; padding: 0 14px; font-size: 12px; border-radius: 8px;
+  background: var(--surface-hover, #232329) !important;
+  border: 0 !important;
+  color: var(--ink-2, #a3a3ad) !important; box-shadow: none; font-weight: 500;
+}
+
+.legal .legalActs .btn:hover {
+  background: #2a2a31 !important; color: var(--ink, #f2f2f4) !important;
+}
+
+.legal .legalActs .btn:not(.ghost) {
+  background: var(--brand, #5d6ccf) !important; border-color: transparent !important;
+  color: #fff !important; font-weight: 500;
+}
+
+.legal .legalActs .btn:not(.ghost):hover { background: var(--brand-hover, #6f7cdd) !important; }
+
+.legal .legalActs .btn[disabled], .legal .legalActs .btn[disabled]:hover {
+  opacity: .4; cursor: not-allowed;
+  background: var(--brand, #5d6ccf) !important; color: #fff !important;
+}
+
+html:not([lang="en"]) .legal .legal-en { display: none !important; }
+
+html[lang="en"] .legal .legal-zh { display: none !important; }
+
+#welcome .legal .legalCard{
+  max-height:calc(100% - 40px); max-width:760px; width:100%; overflow:hidden;
+  display:flex; flex-direction:column;
+}
+
+#welcome .legal .legalBody{overflow:auto; flex:1 1 auto}
+
+#welcome .legal .legalHd{ border-bottom: .5px solid rgba(255,255,255,.08); }
+
+#welcome .legal .legalBody p{ color: rgba(234,236,244,.80); }
+
+#welcome .legal .legalBody h4{ color: rgba(246,247,252,.95); }
+
+#welcome .legal .legalChk span{ color: rgba(234,236,244,.86); }
+
+#welcome.legal-on .cqr,
+#welcome.legal-on .wbrand {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .25s ease;
+}
