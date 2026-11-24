@@ -209,10 +209,11 @@
              : ((m.state === "err" || m.state === "bad") ? "bad" : ""));
       var mk = on === "ok" ? "✓" : (on === "run" ? "›" : (on === "bad" ? "!" : "·"));
       var cnt;
-      if (on === "ok") cnt = (m.total || m.items || 0) + " 项";
+      /* 没有真实项数时别硬编「—」：说清现在是什么状态更有用 */
+      if (on === "ok") cnt = (m.total || m.items || 0) ? ((m.total || m.items) + " 项") : "已完成";
       else if (on === "run") cnt = (m.items || 0) + " / " + (m.total || "?") + " 项";
-      else if (on === "bad") cnt = "失败";
-      else cnt = m.total ? (m.total + " 项") : "—";
+      else if (on === "bad") cnt = (String(m.reason || "").indexOf("shape") >= 0 ? "形状不符" : "失败");
+      else cnt = "待转换";
       var html = '<div class="cvrowi ' + on + '">' +
                  '<span class="mk">' + mk + '</span>' +
                  '<span class="n">' + String(m.name == null ? "" : m.name) + '</span>' +
