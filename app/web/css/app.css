@@ -6344,14 +6344,19 @@ input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 #p-train-convert .cvdone{margin-top:16px;opacity:0;transform:translateY(6px);
   pointer-events:none;transition:opacity .32s ease,transform .32s cubic-bezier(.16,1,.3,1)}
 #p-train-convert .cvdone.on{opacity:1;transform:none;pointer-events:auto}
+/* 反色按钮：深色主题 = 纯白底 + 黑箭头；浅色主题 = 纯黑底 + 白箭头 */
 #p-train-convert .cvback{display:inline-flex;align-items:center;justify-content:center;
   width:38px;height:38px;padding:0;border-radius:999px;cursor:pointer;
-  background:var(--panel);border:1px solid var(--line);color:var(--ink-2);
-  box-shadow:0 1px 2px rgba(0,0,0,.16);
+  background:#ffffff;border:1px solid rgba(0,0,0,.08);color:#0a0a0a;
+  box-shadow:0 1px 2px rgba(0,0,0,.28),0 4px 14px rgba(0,0,0,.18);
   transition:background .18s,color .18s,border-color .18s,transform .18s,box-shadow .18s}
-#p-train-convert .cvback:hover{background:color-mix(in srgb,var(--ink) 9%,var(--panel));
-  border-color:color-mix(in srgb,var(--ink) 18%,var(--line));color:var(--ink);
-  transform:translateY(-1px);box-shadow:0 4px 10px rgba(0,0,0,.22)}
+#p-train-convert .cvback:hover{background:#f4f4f5;transform:translateY(-1px);
+  box-shadow:0 2px 4px rgba(0,0,0,.3),0 8px 22px rgba(0,0,0,.24)}
+html[data-theme="light"] #p-train-convert .cvback{background:#0a0a0a;color:#fafafa;
+  border-color:rgba(255,255,255,.10);
+  box-shadow:0 1px 2px rgba(0,0,0,.16),0 4px 14px rgba(0,0,0,.10)}
+html[data-theme="light"] #p-train-convert .cvback:hover{background:#27272a;
+  box-shadow:0 2px 4px rgba(0,0,0,.2),0 8px 22px rgba(0,0,0,.16)}
 #p-train-convert .cvback:active{transform:translateY(0) scale(.95);box-shadow:0 1px 2px rgba(0,0,0,.16)}
 #p-train-convert .cvback:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
 #p-train-convert .cvback .ic{width:16px;height:16px}
