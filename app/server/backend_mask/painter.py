@@ -390,18 +390,29 @@ def _load_mask_b64(img_path: Path):
             try:
                 import numpy as _np
                 _arr = _np.asarray(_raw)
-                if _arr.ndim == 3 and _arr.shape[2] in (1, 3, 4):
-                    _arr = _arr[..., 0]
-                if _arr.ndim != 2 or _arr.size == 0:
-                    mask = None
-                else:
-                    if _arr.dtype != _np.uint8:
-                        _m = _arr.astype(_np.float32)
-                        _mx = float(_m.max()) if _m.size else 0.0
-                        if _mx <= 1.0:
-                            _m = _m * 255.0
-                        _arr = _np.clip(_m, 0, 255).astype(_np.uint8)
-                    mask = _arr
+                mask = None
+                # ★ 老版本（_align.rewrite_dfljpg_meta 那条路）把**编码后的 PNG/JPEG 字节流**
+                #   pickle 成了 (N,1) 的 uint8 数组，不是二维遮罩！实测 workspace/data_src
+                #   里就是 shape=(1229,1) / (1219,1) 这种。
+                #   上一版只看 ndim==2 就当成遮罩用，于是 cv2.imencode 把 1229 字节的乱码
+                #   编成一张 1229×1 的图 —— 前端拿到的遮罩全是噪点，等于「所有图都读不了」。
+                #   正确做法：先按**字节流**解码（imdecode 认不出 PNG/JPEG 头就返回 None），
+                #   解不出来才当二维遮罩。
+                if _arr.ndim >= 1 and _arr.dtype == _np.uint8 and _arr.size > 8:
+                    mask = _decode_mask(_arr.tobytes())
+                if mask is None:
+                    if _arr.ndim == 3 and _arr.shape[2] in (1, 3, 4):
+                        _arr = _arr[..., 0]
+                    if _arr.ndim != 2 or _arr.size == 0:
+                        mask = None
+                    else:
+                        if _arr.dtype != _np.uint8:
+                            _m = _arr.astype(_np.float32)
+                            _mx = float(_m.max()) if _m.size else 0.0
+                            if _mx <= 1.0:
+                                _m = _m * 255.0
+                            _arr = _np.clip(_m, 0, 255).astype(_np.uint8)
+                        mask = _arr
             except Exception:
                 mask = None
         if mask is not None:
