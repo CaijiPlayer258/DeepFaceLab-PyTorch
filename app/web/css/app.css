@@ -6484,3 +6484,46 @@ html[data-theme="light"] .cvroundbtn:hover{background:#27272a;
 #p-output .outpane .tbraw{margin:4px 0 4px 2px;padding-left:8px;
   border-left:1px solid rgba(255,100,103,.25);color:#d99a9b;
   white-space:pre-wrap;word-break:break-word}
+
+/* ---------- 输出页的状态条与「N 条新输出」 ---------- */
+/* 状态条：只在「只看错误 / 只看某前缀」激活时出现，34px */
+#p-output .outbar2{flex:none;display:flex;align-items:center;gap:14px;
+  height:34px;padding:0 16px;background:#0d0d10;
+  border-bottom:1px solid #1e1e24;font-size:12px;color:#8b98e8;
+  user-select:none}
+#p-output .outbar2.hide{display:none}
+#p-output .outbar2 .bt{font-weight:600}
+#p-output .outbar2 .bx{margin-left:auto;color:#8b8b98;cursor:pointer}
+#p-output .outbar2 .bx:hover{color:#e8e8ea}
+
+/* 「N 条新输出」：sticky 贴住视口底 —— 未滚到底时它看起来就是最后一行，
+   滚到底时它自然落到内容末尾。半透明渐变压住下面的字，不挡阅读。 */
+#p-output .newbar{position:sticky;bottom:0;flex:none;
+  margin:0;padding:15px 0 5px;text-align:center;
+  font-size:12.5px;color:#8b98e8;cursor:pointer;user-select:none;
+  background:linear-gradient(to top,#000 42%,rgba(0,0,0,.86) 70%,rgba(0,0,0,0));
+  transition:color .12s}
+#p-output .newbar.hide{display:none}
+#p-output .newbar:hover{color:#b3bcff}
+
+/* 折叠块：显存规划和重复行沿用 traceback 那套外观，只是颜色不同 */
+#p-output .outpane details.vb{margin:2px 0;padding:0 0 0 10px;
+  border-left:2px solid rgba(139,152,232,.45)}
+#p-output .outpane details.vb > summary{color:#8b98e8}
+#p-output .outpane details.vb > summary::before{content:"▸ ";color:#5d6ccf}
+#p-output .outpane details.vb[open] > summary::before{content:"▾ "}
+#p-output .outpane details.vb > summary:hover{color:#b3bcff}
+#p-output .outpane details.vb .tbraw{border-left-color:rgba(139,152,232,.22);color:#9ba6dd}
+
+#p-output .outpane details.rep{margin:2px 0;padding:0 0 0 10px;
+  border-left:2px solid rgba(120,120,132,.35)}
+#p-output .outpane details.rep > summary{color:#a3a3ad}
+#p-output .outpane details.rep > summary::before{content:"▸ ";color:#6e6e78}
+#p-output .outpane details.rep[open] > summary::before{content:"▾ "}
+#p-output .outpane details.rep > summary:hover{color:#e8e8ea}
+#p-output .outpane details.rep .tbraw{border-left-color:rgba(120,120,132,.2);color:#8b8b98}
+
+/* 可点的行：光标提示，不加别的标记 */
+#p-output .outpane .ln.e{cursor:pointer}
+#p-output .outpane .ln.e:hover{filter:brightness(1.18)}
+#p-output .outpane .ln[data-tag]{cursor:pointer}
