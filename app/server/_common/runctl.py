@@ -23,6 +23,9 @@ from .model_info import _engine_has_flag, _engine_supports_cpu_only, _gpu_list, 
 from .paths import WORKSPACE, _DFL_PY, _DFL_ROOT, _DFL_TOOL, engine_python as _engine_python
 
 
+_MAIN_LIFESPAN = False    # 主 server 的 shutdown 只该收一次训练
+
+
 def _sweep_orphan_trainers(why: str = "") -> int:
     """杀掉不属于当前对话的训练进程（命令行里带 _dfl_train.py 的那些）。"""
     global _train_proc
@@ -94,7 +97,19 @@ def _startup_sweep():
         print("[face-cache] 启动清理失败（不影响使用）：%s" % str(e)[:160], flush=True)
 
 def _shutdown_cleanup():
-    """4.1 退出时把训练进程一起收掉 —— 否则它会变成孤儿继续占显存。”"""
+    """4.1 退出时把训练进程一起收掉 —— 否则它会变成孤儿继续占显存。
+
+    **只在主 server 的生命周期里生效。** /api/remote 打开远程访问时，app.py 会拿
+    **同一个 FastAPI app 对象**再起一个 uvicorn.Server（app.py:272-276），于是
+    install_events 挂的那对 startup/shutdown 钩子会被第二个 lifespan 再触发一次：
+    关掉远程访问 = 一次 lifespan shutdown = 把正在跑的训练强杀。用户没点停止，
+    训练却没了。用 _MAIN_LIFESPAN 这个一次性闸门挡掉后续 lifespan 的 shutdown。
+    """
+    global _MAIN_LIFESPAN
+    if _MAIN_LIFESPAN:
+        print("[trainer] 次级 lifespan 的 shutdown（/api/remote 那一套），跳过清理训练", flush=True)
+        return
+    _MAIN_LIFESPAN = True
     with _train_job_lock:
         running = _train_job["running"]
     if not running:

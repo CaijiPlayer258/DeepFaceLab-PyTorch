@@ -813,12 +813,10 @@ def models():
             import psutil  # noqa: F401
             alive = psutil.pid_exists(pid)
         except Exception:
-            import os as _os
-            try:
-                _os.kill(pid, 0)
-                alive = True
-            except Exception:
-                alive = False
+            # **别用 os.kill(pid, 0)**：Windows 上它不是探活，是往那个进程（以及
+            # 自己所在的 console group）投 Ctrl+C，副作用比探测本身大得多。
+            # 没有 psutil 时宁可判「未知=不活着」，也不要打一发信号过去。
+            alive = False
     return {"models": out, "training_pid": pid if alive else 0}
 
 

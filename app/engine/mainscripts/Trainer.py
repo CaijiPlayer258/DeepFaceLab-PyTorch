@@ -130,6 +130,31 @@ def trainerThread (s2c, c2s, e,
     except Exception:
         pass
 
+    def _pid_alive(pid: int) -> bool:
+        """判断 pid 是否还活着 —— 绝不用 os.kill(pid, 0)（Windows 上是投 Ctrl+C）。"""
+        try:
+            import psutil
+            return psutil.pid_exists(pid)
+        except Exception:
+            pass
+        try:
+            import ctypes
+            from ctypes import wintypes
+            PROCESS_QUERY_LIMITED = 0x1000
+            h = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED, False, int(pid))
+            if not h:
+                return False
+            try:
+                code = wintypes.DWORD()
+                if not ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code)):
+                    return False
+                return code.value == 259       # STILL_ACTIVE
+            finally:
+                ctypes.windll.kernel32.CloseHandle(h)
+        except Exception:
+            return False
+
+
     # ── 进程互斥锁：防止同一模型目录被启动第二个训练进程 ──────
     _lock_file = Path(saved_models_path) / '.train.lock' if saved_models_path else None
     if _lock_file is not None:
@@ -138,16 +163,18 @@ def trainerThread (s2c, c2s, e,
                 _pid_str = _lock_file.read_text().strip()
                 if _pid_str:
                     _pid = int(_pid_str)
-                    # Windows 下 os.kill(pid, 0) 检测进程是否存活
-                    try:
-                        os.kill(_pid, 0)
+                    # **别用 os.kill(pid, 0) 当探活**：Windows 上它根本不是探测，
+                    # CPython 会走 GenerateConsoleCtrlEvent(CTRL_C_EVENT=0, pid)，
+                    # 等于往目标（以及自己所在的 console group）投一个 Ctrl+C。
+                    # 实测：探测方当场吃 KeyboardInterrupt；被探测的那个训练收到
+                    # KeyboardInterrupt（不是 Exception，trainerThread 的 except 抓不到）
+                    # → 线程直接死 → 主线程仍卡在 e.wait() → 训练变成活僵尸。
+                    if _pid_alive(_pid):
                         raise RuntimeError(
                             f"模型目录 {saved_models_path} 已被进程 PID={_pid} 锁定，"
                             f"无法启动第二个训练进程。请先关闭已有训练进程，"
                             f"或删除锁文件 {_lock_file}。"
                         )
-                    except OSError:
-                        pass  # 进程已死，锁过期
             _lock_file.write_text(str(os.getpid()))
         except Exception as _lock_err:
             if '已被进程' in str(_lock_err):
