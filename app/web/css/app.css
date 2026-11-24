@@ -6386,3 +6386,23 @@ html[data-theme="light"] .cvroundbtn:hover{background:#27272a;
 .mgitem.no-dfm:hover { background: transparent; }
 .mgitem.no-dfm.on { background: transparent; }
 .mgitem.no-dfm .mgexp { pointer-events: auto; }
+
+/* ---------- 通知横幅（警告/失败/提示）的骨架 ----------
+   这套基础样式在 d71d2f7 那次「转换卡片重做」里被连带删掉了 —— 于是三条横幅
+   （loadBanner / runAlert / trainNotice）只剩 .alert.info / .danger 那两条颜色
+   覆盖，没有 padding、没有边框、没有 flex、.albd 也没有 pre-line 换行：长句子
+   直接顶出容器右边界，看着像「样式炸了」。按 afff798 的原样恢复，只把已经不存在
+   的 --surface-2 换成 --panel。 */
+.alert{margin:14px 0 0;border-radius:12px;padding:12px 14px;
+  border:1px solid var(--line);background:var(--panel)}
+.alert.danger{border-color:rgba(220,80,80,.42);background:rgba(220,80,80,.08)}
+.alert .alhd{display:flex;align-items:center;gap:8px}
+.alert .alhd b{font-size:13px;color:var(--ink);font-weight:700}
+.alert.danger .alhd b{color:var(--bad,#ff6467)}
+.alert .alx{margin-left:auto;background:none;border:0;color:var(--ink-3);
+  font-size:18px;line-height:1;cursor:pointer;padding:0 4px}
+.alert .alx:hover{color:var(--ink)}
+.alert .albd{margin-top:6px;font-size:12.5px;line-height:1.65;color:var(--ink-2);
+  white-space:pre-line;overflow-wrap:anywhere}
+/* 长串（路径、模块名）不换行就会顶出容器 —— pre-line 只管 \n，不管超长单词 */
+.alert .alhd b,.alert .albd{min-width:0;overflow-wrap:anywhere}
