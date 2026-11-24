@@ -371,10 +371,27 @@ def _load_mask_b64(img_path: Path):
     mask, src = None, ""
     head, legacy = _read_app15_metas(img_path)
     for meta, tag in ((head, "dfljpg"), (legacy, "dfljpg-legacy")):
-        if mask is None and (meta or {}).get("xseg_mask") is not None:
-            mask = _decode_mask(bytes(meta.get("xseg_mask") or b""))
-            if mask is not None:
-                src = tag
+        if mask is not None:
+            continue
+        if (meta or {}).get("xseg_mask") is None:
+            continue
+        # xseg_mask 有两种形态，别一律 bytes()：
+        #   · 正常是 encode_xseg_mask() 出来的 PNG/JPEG **字节**；
+        #   · 但老版本（_align.rewrite_dfljpg_meta 那条路）往里塞的是 **numpy 数组**，
+        #     那时 `arr or b""` 会走到 bool(array) → 「truth value of an array with
+        #     more than one element is ambiguous」，接口直接 500。
+        _raw = meta.get("xseg_mask")
+        if isinstance(_raw, (bytes, bytearray, memoryview)):
+            mask = _decode_mask(bytes(_raw))
+        else:
+            try:
+                import numpy as _np
+                _arr = _np.asarray(_raw)
+                mask = _arr if _arr.ndim == 2 else None
+            except Exception:
+                mask = None
+        if mask is not None:
+            src = tag
     if mask is None:
         png = _mask_png_path(img_path.parent, img_path.name)
         if png.is_file():
