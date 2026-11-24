@@ -70,6 +70,7 @@
     "tool-mask": "p-tool-mask", "tool-bili": "p-tool-bili",
     "tool-color": "p-tool-color", "tool-frames": "p-tool-frames", "tool-frames-run": "p-tool-frames-run", "tool-angle": "p-tool-angle", "tool-engine": "p-tool-engine",
     "train-convert": "p-train-convert",
+    export: "p-export",
     "dataset-run": "p-dataset-run",
     "bili-jobs": "p-bili-jobs",
     debug: "p-debug",
@@ -104,6 +105,7 @@
     run: [{ t: "模型选择", go: "train" }, { t: "参数设置", go: "train-cfg" }, { t: "训练界面" }],
     "train-cfg": [{ t: "模型选择", go: "train" }, { t: "参数设置" }],
     "train-convert": [{ t: "模型选择", go: "train" }, { t: "模型转换" }],
+    export: [{ t: "模型选择", go: "train" }, { t: "导出 DFM" }],
     "tool-mask": [{ t: "工具" }, { t: "遮罩绘制" }],
     "tool-bili": [{ t: "工具" }, { t: "B 站下载" }],
     "tool-color": [{ t: "工具" }, { t: "色域迁移" }],
@@ -280,8 +282,7 @@
     var isErr = st.step === "error";
     var isDone = st.step === "done";
     var isIdle = !st.step || st.step === "idle";
-    if (isIdle) { card.hidden = true; return; }
-    card.hidden = false;
+    /* 独立页：idle 也显示卡片（三格灰着），不隐藏 */
     card.classList.toggle("bad", isErr);
     var nm = document.getElementById("exName");
     if (nm) nm.textContent = st.name || "导出";
@@ -295,7 +296,7 @@
     var mods = st.modules || [];
     /* 三阶段：load / pack / write */
     var order = ["load", "pack", "write"];
-    var cur = order.indexOf(st.step);
+    var cur = isIdle ? -1 : order.indexOf(st.step);
     if (isDone) cur = order.length;
     for (var i = 0; i < order.length; i++) {
       var sid = "exS" + (i + 1), iid = "exI" + (i + 1);
@@ -306,6 +307,8 @@
       else { cls = ""; mark = String(i + 1); }
       cvStepSet(sid, cls, mark);
     }
+    var _exd = document.getElementById("exDone");
+    if (_exd) _exd.classList.toggle("on", isDone);
     var rows = document.getElementById("exRows");
     if (rows) {
       /* 第一阶段下面挂的是模块匹配明细（如果有） */
@@ -334,6 +337,11 @@
       if (id === "merge" || id === "merge-page") exPoll();
     } catch (err) {}
   });
+
+  (function () {
+    var b = document.getElementById("exBack");
+    if (b) b.addEventListener("click", function () { go("merge"); });
+  })();
 
   window.__exPaint = exPaint;
 
@@ -464,7 +472,7 @@
        不依赖任何分片末尾的初始化（那种写法历史上被吞过好几次），
        也不依赖 window.__cvBoot —— 这里自己拉、自己画、自己绑按钮。 */
     if (key === "train-convert") cvListPaint();
-    if (key === "merge") { try { window.__exPoll && window.__exPoll(); } catch (e) {} }
+    if (key === "export") { try { window.__exPoll && window.__exPoll(); } catch (e) {} }
     if (key === "settings" && window.WPK) window.WPK.enter();
     if (key === "train-cfg") {
       if (window.markHotRows) window.markHotRows();

@@ -1583,7 +1583,12 @@
       if (expBtn.disabled) return;
       expBtn.disabled = true;
       expBtn.textContent = "导出中…";
-      toast("导出 DFM", m.name + " · 要加载模型，几分钟", "info");
+      /* 进度放独立页（#p-export）：进去之后由 exPoll 每 400ms 画一次 */
+      if (window.go) go("export");
+      if (window.__exPaint) window.__exPaint({ step: "load", name: m.name, percent: 0,
+        modules: [{ name: "加载权重", state: "run" },
+                  { name: "组装 DFM", state: "wait" },
+                  { name: "写入文件", state: "wait" }] });
       fetch("/api/models/" + encodeURIComponent(m.name) + "/export", { method: "POST" })
         .then(function (r) { return r.json().then(function (d) {
           if (!r.ok) throw new Error(d.detail || "启动失败");
@@ -1592,11 +1597,7 @@
         .then(function () {
           var t = setInterval(function () {
             fetch("/api/models/export/status").then(function (r) { return r.json(); }).then(function (d) {
-              if (d.running) {
-                var last = (d.log && d.log.length) ? d.log[d.log.length - 1] : "";
-                expBtn.textContent = last ? String(last).slice(0, 6) : "导出中…";
-                return;
-              }
+              if (d.running) return;   /* 页面自己在画，这里只等结果 */
               clearInterval(t);
               expBtn.disabled = false;
               expBtn.textContent = "导出";

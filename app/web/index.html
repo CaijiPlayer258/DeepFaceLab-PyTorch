@@ -530,7 +530,7 @@
         </div>
 
         <div class="cvdone" id="cvDone">
-          <button class="cvback" id="cvBack" type="button" title="返回模型选择" aria-label="返回模型选择">
+          <button class="cvroundbtn" id="cvBack" type="button" title="返回模型选择" aria-label="返回模型选择">
             <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
                  aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
@@ -538,6 +538,40 @@
         </div>
       </div>
 
+
+      <!-- ================= 导出 DFM（独立页，和模型转换同一套步进器）================= -->
+      <div class="page" id="p-export">
+        <div class="title">导出 DFM</div>
+
+        <div class="cvcenter">
+          <div class="card cvcard" id="exCard">
+            <div class="cvhd">
+              <b id="exName">导出</b><span class="cvmeta" id="exMeta"></span>
+              <span class="cvspacer"></span>
+              <span class="cvbadge" id="exBad">失败</span>
+            </div>
+            <div class="cvstep" id="exS1">
+              <div class="cvdot"><i></i></div>
+              <div class="cvhead"><div class="cvic" id="exI1">1</div><div class="cvnm">加载权重</div></div>
+              <div class="cvpanel"><div><div class="cvrows" id="exRows"></div></div></div>
+            </div>
+            <div class="cvstep" id="exS2">
+              <div class="cvdot"><i></i></div>
+              <div class="cvhead"><div class="cvic" id="exI2">2</div><div class="cvnm">组装 DFM</div></div>
+            </div>
+            <div class="cvstep" id="exS3">
+              <div class="cvhead"><div class="cvic" id="exI3">3</div><div class="cvnm">写入文件</div></div>
+            </div>
+          </div>
+          <div class="cvdone" id="exDone">
+            <button class="cvroundbtn" id="exBack" type="button" title="返回合成工作室" aria-label="返回合成工作室">
+              <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                   aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
       <!-- ================= 工具：角度可视化 ================= -->
       <div class="page" id="p-tool-angle">
         <div class="title">角度可视化</div>
@@ -884,19 +918,6 @@
               <button class="btn pri" id="mgExport" style="width:100%">导出</button>
               <div class="mgexport-hint" id="mgExportHint" hidden>先选一个模型</div>
 
-              <!-- 导出进度：和模型转换页同一套步进器，只是三个阶段不同 -->
-              <div class="card cvcard excard" id="exCard" hidden>
-                <div class="cvhd">
-                  <b id="exName">导出</b><span class="cvmeta" id="exMeta"></span>
-                  <span class="cvspacer"></span>
-                  <span class="cvbadge" id="exBad">失败</span>
-                </div>
-                <div class="cvstep" id="exS1"><div class="cvdot"><i></i></div>
-                  <div class="cvhead"><div class="cvic" id="exI1">1</div><div class="cvnm">加载权重</div></div>
-                  <div class="cvpanel"><div><div class="cvrows" id="exRows"></div></div></div></div>
-                <div class="cvstep" id="exS2"><div class="cvhead"><div class="cvic" id="exI2">2</div><div class="cvnm">组装 DFM</div></div></div>
-                <div class="cvstep" id="exS3"><div class="cvhead"><div class="cvic" id="exI3">3</div><div class="cvnm">写入文件</div></div></div>
-              </div>
             </div>
           </aside>
         </div>
