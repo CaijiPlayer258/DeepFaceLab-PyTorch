@@ -116,23 +116,6 @@ def _log(line: str):
             CONVERT_JOB["log"] = CONVERT_JOB["log"][-200:]
 
 
-def _watch(md: Path, stem: str, proc, modules):
-    """轮询目标目录，哪个模块的 .pth 出现了就把它标成 ok。"""
-    seen = set()
-    while proc.poll() is None:
-        for m in modules:
-            if m["state"] == "ok":
-                continue
-            p = md / (stem + "_" + m["name"] + ".pth")
-            if p.exists() and p.stat().st_size > 0:
-                m["state"] = "ok"
-                m["items"] = 1
-                seen.add(m["name"])
-                done = sum(1 for x in modules if x["state"] == "ok")
-                _set(modules=modules, percent=int(done * 100 / max(1, len(modules))))
-        time.sleep(0.3)
-
-
 def _resolve_stem(md: Path, name: str) -> str:
     """模型卡片上写的是显示名（DF-UDT416），文件却是 DF-UDT416_SAEHD_*.npy。
 
