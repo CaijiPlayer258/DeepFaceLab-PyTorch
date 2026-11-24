@@ -40,6 +40,11 @@ class Job:
             self.running = False
             self.pct = 0
             self.fps = 0.0
+            # 瞬时速度（最近 N 个事件的时间戳）：累计平均会被启动开销（模型加载、
+            # ffmpeg 探测 400ms+）一路拖低，跑完 3/4 了显示的还是前半段的平均值。
+            # 前端拿到后自己再做指数平滑（exEase），所以这里给原始瞬时值就行。
+            self._ts = []          # 帧到达时间戳（滑动窗口）
+            self._ts_face = []     # 张脸落盘时间戳（滑动窗口）
             self.faces = 0.0
             self.faces_new = 0.0   # 本次运行新落盘的脸（不含 base_faces），人脸速度的分子
             self.done = 0
@@ -112,17 +117,61 @@ class Job:
             if msg:
                 self.msg = msg
 
+    _WIN = 20          # 窗口事件数：20 帧 / 20 张脸
+    _WIN_SEC = 1.0     # 至少覆盖 1 秒，否则事件太密（>1000/s）时窗口只有几毫秒
+
+    def _inst_rate(self, ts) -> float:
+        """最近窗口的瞬时速率（事件/秒）。窗口不够返回 0.0，调用方自己兜底。
+
+        为什么不用「累计 done / elapsed」：启动开销（载模型、探 ffmpeg 硬件解码、
+        第一帧 prefill）全算进分母，跑完 3/4 了显示的还是前半段的平均速度。
+        实测同一条 1439 帧的 1080p：累计口径 78 → 瞬时口径 93，差 19%；
+        而真正的工作速度确实是 93（见 [align] 完成 那行的墙钟换算）。
+        """
+        if len(ts) < 2:
+            return 0.0
+        now = ts[-1]
+        # 从尾部往前找够 _WIN 个且跨度 >= _WIN_SEC 的起点
+        i = len(ts) - 1
+        n = 0
+        while i > 0 and n < self._WIN and (now - ts[i]) < self._WIN_SEC:
+            i -= 1
+            n += 1
+        span = now - ts[i]
+        if span <= 0.0005 or n <= 0:
+            return 0.0
+        return n / span
+
+    def tick_frame(self):
+        """解到一帧：记时间戳，供 _inst_rate 算瞬时帧速。"""
+        now = time.time()
+        with self.lock:
+            self._ts.append(now)
+            if len(self._ts) > 64:
+                del self._ts[:-64]
+
+    def tick_face(self):
+        """落盘一张脸：记时间戳。"""
+        now = time.time()
+        with self.lock:
+            self._ts_face.append(now)
+            if len(self._ts_face) > 64:
+                del self._ts_face[:-64]
+
     def snapshot(self) -> dict:
         with self.lock:
             el = (time.time() - self.t0) if self.t0 else 0.0
-            rate = (self.done / el) if (el > 0.3 and self.done) else 0.0
+            # 瞬时帧速：最近窗口的时间戳差。窗口不足就用累计平均兜底。
+            fps_now = self._inst_rate(self._ts) or self.fps
+            rate = fps_now if fps_now > 0 else ((self.done / el) if (el > 0.3 and self.done) else 0.0)
             left = max(0, self.total - self.done)
             eta = (left / rate) if (rate > 0 and left > 0) else 0.0
             # 「人脸速度」和「帧速度」同一个口径：分子都是**本次运行**的计数
             # （帧 = done / faces 用 faces_new，续跑时不含目录里原有的 base_faces），
             # 分母都是 el（== 前端拿到的 elapsed）。以前前端自己拿累计 faces / elapsed
             # 算，续跑会虚高；而真正的毛病是 faces 在跑的时候压根没更新过。
-            face_rate = (self.faces_new / el) if (el > 0.3 and self.faces_new) else 0.0
+            face_rate = self._inst_rate(self._ts_face) or (
+                (self.faces_new / el) if (el > 0.3 and self.faces_new) else 0.0)
             return {
                 "running": self.running, "pct": self.pct, "fps": self.fps,
                 "faces": self.faces, "faces_new": self.faces_new,

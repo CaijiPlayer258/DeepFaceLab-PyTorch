@@ -408,6 +408,7 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
                 _jfuts.append(_WPOOL.submit(write_dfljpg, it["path"], crop, meta_f))
                 cost["jpeg"] += _t() - _tj
                 wrote += 1
+                JOB.tick_face()             # 瞬时人脸速度用
                 with lock:                  # 落盘即计数：跑的过程中就能看到数字在长
                     stats["made"] += 1
             except Exception as e:          # noqa: BLE001 —— 落盘失败也要留痕
@@ -427,6 +428,9 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
         return wrote
 
     def _emit(idx, img, faces):
+        # 产出帧速：这里才是「一帧真正处理完」的时刻。reader 那边记的是
+        # 「解到第几帧」，它有队列缓冲、会跑在前面（实测 89.5 vs 端到端 79.6）。
+        JOB.tick_frame()
         n = 0
         for k, fc in enumerate(faces):
             if not JOB.running:
