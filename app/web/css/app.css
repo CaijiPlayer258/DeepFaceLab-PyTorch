@@ -6423,16 +6423,24 @@ html[data-theme="light"] .cvroundbtn:hover{background:#27272a;
    **字号写死 px，不用 rem/em/vw/clamp** —— 用户要的是「截图上报时字的大小
    稳定」，窗口拉大字号不跟着放大。所以整页所有文字都用绝对 px。
    ============================================================ */
-/* .page 本身没有高度（.page{display:block}），所以这里得自己给一个 ——
-   否则 .outpane 的 flex:1 撑不出高度，日志框会塌成一条 40px 的黑线。
-   96px = 顶栏 + 页 padding，和别处 calc(100vh - 96px) 同一口径。 */
-#p-output.on{display:flex;flex-direction:column;height:calc(100vh - 96px)}
+/* 输出页要**铺满整个右侧内容区**：从顶栏底边一直到窗口底边、从侧栏右边一直到
+   窗口右边，四周不留白（用户明确要求的）。
+   两个抵消：
+     · .main 自己的 padding 是 22px 28px 30px（app.css:123），用负 margin 抵掉；
+     · .page 还有 padding: var(--pad-panel)，这里压成 0。
+   高度 57px 是顶栏实际高度（.topbar 那一条，含拖拽区）。 */
+/* 用绝对定位铺满 .main（它本来就是 position:relative + overflow:auto）——
+   负 margin 那套不行：容器超出父级后 .main 出横向滚动条，左侧被顶掉，
+   日志开头几个字符会看不见（实测「[preview]」被裁成「_review]」）。
+   inset:0 是相对 .main 的 padding box，正好把 22/28/30 那些内边距一起盖掉。 */
+#p-output.on{position:absolute;inset:0;display:flex;flex-direction:column;
+  margin:0;padding:0 !important;height:auto}
 #p-output .outwrap{display:flex;flex-direction:column;flex:1 1 auto;height:100%;min-height:0;gap:10px}
 
 
 /* 日志面板：固定 12.5px，等宽字体，纯黑 */
 #p-output .outpane{flex:1 1 auto;min-height:0;margin:0;overflow:auto;
-  padding:12px 14px;border-radius:12px;border:1px solid var(--line);
+  padding:12px 16px;border-radius:0;border:0;
   /* 全局 html,body 是 user-select:none（380 行），日志必须能选 —— 否则用户
      没法 Ctrl+A / 拖选复制，这一页就白做了。子元素要显式覆盖回去。 */
   -webkit-user-select: text; user-select: text; cursor: text;
