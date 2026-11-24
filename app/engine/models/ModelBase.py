@@ -720,6 +720,10 @@ class ModelBase(object):
         # sample_for_preview —— 否则新模型/迁移过来的模型首次启动永远拿不到预览。
         s = getattr(self, 'last_sample', None) or getattr(self, 'sample_for_preview', None)
         if s is None:
+            _now = time.time()
+            if _now - getattr(self, '_preview_nosample_t', 0.0) >= 30.0:
+                self._preview_nosample_t = _now
+                io.log_info('[preview] 还没有样本可用（last_sample / sample_for_preview 都是空），这一轮不生成预览 —— 等训练跑过一轮就有了')
             return []
         try:
             return self.onGetPreview(s) or []
@@ -886,8 +890,11 @@ class ModelBase(object):
             tmp_js = js_path.with_name(js_path.name + '.tmp')
             tmp_js.write_text(_json.dumps(payload, ensure_ascii=False), encoding='utf-8')
             os.replace(str(tmp_js), str(js_path))
-        except Exception:
-            pass          # 预览快照写失败不能影响训练
+        except Exception as e:
+            # 以前这里是裸 pass：预览快照写失败**完全无声**，界面就一直是「还没有预览图」，
+            # 用户和我们都只能猜。快照失败确实不该影响训练，但必须留下痕迹 ——
+            # 每次都打一行（30 秒最多一次，量很小），带异常类型和消息。
+            io.log_info(f'[preview] 预览快照写入失败（不影响训练）：{type(e).__name__}: {e}')
 
     def _preview_snapshot_due(self):
         return (time.time() - getattr(self, '_preview_snapshot_t', 0.0)
@@ -909,8 +916,8 @@ class ModelBase(object):
                                  kwargs={'previews': previews}, daemon=True,
                                  name='preview-snapshot')
             t.start()
-        except Exception:
-            pass
+        except Exception as e:
+            io.log_info(f'[preview] 起不了快照线程（不影响训练）：{type(e).__name__}: {e}')
 
     def _start_loss_loader(self, delay=0.0):
         """后台把 data.dat 里的 loss_history 读出来并进来。
