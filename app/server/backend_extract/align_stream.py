@@ -23,7 +23,7 @@ from .detectors import _get_fast_detector, _get_heavy_detector, _get_landmarks10
 from .media import _dfl_project_scan, _extract_frames, _imread_any, _open_video
 from .resume import SRC_FP_NAME, _fp_diff, _note_resume_src, _read_src_fp, _src_fingerprint
 
-# 落盘线程池：emit 段实测占 wall 的 81~85%，是整条流水线最慢的一级。
+# 落盘线程池：emit 段实测占 wall 的 81~85%（改前），是整条流水线最慢的一级。
 # 里面 cv2.imencode 会释放 GIL，所以多线程真能并行（不是假并行）。
 # 每批 _flush 结束时等本批写完，计数才 +，进度和续跑语义不变。
 from concurrent.futures import ThreadPoolExecutor as _TPE
@@ -205,7 +205,24 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
         # 视频模式的 setup（滤镜/打开/分辨率/时长/续跑指纹）
         out_params = ["-vf", ",".join(vf)]
         # NV12：1080p 一帧 3.1MB（bgr24 是 6.2MB）。实测图传占 wall 的 84%，
-        # 先把带宽砍一半；多出来的一次 cvtColor（2~3ms）比少传 3MB 便宜。
+        # 先把带宽砍一半；多出来的一次 cvtColor（实测 2.06ms）比少传 3MB 便宜。
+        #
+        # ★ 这里**是一次有意的质量让步**，写清楚免得以后有人以为是笔误：
+        #   管道传 NV12 时，YUV→RGB 由 OpenCV 的 cvtColor 做（UV 平面用 bilinear
+        #   上采样）；传 bgr24 时由 ffmpeg 的 swscale 做（bicubic）。两条路解出来的
+        #   像素**不逐位相同**：本机 1080p 实测 mean 1.43 / max 19（G 通道最明显，
+        #   因为它同时吃 U 和 V），换算成比例约 0.56%。差全在色度边缘（头发、嘴唇
+        #   轮廓这类色彩突变处），平坦区域几乎不差。
+        #
+        #   为什么提取能接受：对齐图后面还要过一次 warpAffine(INTER_CUBIC)，那是比
+        #   色度上采样大得多的重采样，0.56% 在这里被稀释掉了；而且图像是训练数据，
+        #   不是最终产物。
+        #   为什么合成器**不能**这么做：见 pipeline_fused.py:630 —— 它的产物要贴着
+        #   原视频，frames/%06d.png 有 fused_decode_parity.py 逐位盯着（mean 0.0000
+        #   / max 0），任何非零差都会挂回归。那边宁可慢 3.9ms/帧也强制软解 bgr24。
+        #
+        #   要退回逐位精确：把这里的 pix_fmt 换成 "bgr24" 即可（read 会慢回
+        #   7.5ms/帧，整条 wall 多约 3.5ms/帧）。
         gen, meta, first_frame = _open_video(str(src), out_params, first=True,
                                             in_params=in_params, pix_fmt="nv12")
         W, H = meta.get("size") or (0, 0)
