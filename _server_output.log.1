@@ -1,0 +1,31 @@
+===== serve 启动 2026-11-24 23:40:37 =====
+[merge-preview] ORT DLL 目录：D:\MyProject\DeepFaceLab-PyTorch-4.1\runtime\unified\Lib\site-packages\torch\lib
+PORT=8760
+[face-cache] 清空（serve 启动）：组均值 0 条 · 其它 {'auto_plan': 0} · 磁盘缓存文件 0 个
+[face-cache] 清空（serve 启动）：组均值 0 条 · 其它 {'auto_plan': 0} · 磁盘缓存文件 0 个
+[face-cache] 启动清理：组均值 0 条 · 其它 {'auto_plan': 0} · 磁盘缓存文件 0 个
+[face-cache] 启动清理：组均值 0 条 · 其它 {'auto_plan': 0} · 磁盘缓存文件 0 个
+[bili] 登录态：SESSDATA=***,bili_jct=***,DedeUserID=***,DedeUserID__ckMd5=***,sid=***,default_sites=*** (len=393) uid=500398541
+[vram] 预览：模型 参数量 ? · 权重 257 MB（文件体积（没读到图））· 输入 416 px（文件名/默认）· 非权重 0.0 MB
+[vram] 预览：显存 空闲 4010 / 共 8150 MB（min(torch 6999 / smi 4010)）· 预算 3754 MB = 空闲 − 预留 256 MB（max(256 MB, 空闲×5%)）+ 可回收 0 MB
+[vram] 预览：显存去向 本程序 0 MB（本进程 0 + 预览 worker 0）· 其它程序 4140 MB · 可回收 0 MB
+[vram] 预览：需求拆项 模型 257 + context 512 + 检测/遮罩 300 MB/份 + 帧 0×7.92 + dfm 批 80.0 MB（ORT arena 140 MB 含在预留里）
+[vram] 预览：计划 帧预算 0 / dfm 批 1（已降档） · 预计峰值 1149 MB（可用 3754 MB）
+[vram] 预览：采用 帧 0 / 批 1 / 进程 1 → 要 1149 MB ≤ 3754 MB
+[TRT] 载入引擎 tinymog_db2060b44992_sm1200_trt101339.bf16.engine（输入 maxbatch=8, use_graph=True, sync=event, own_stream=False）
+[TRT] tinymog: 命中 bf16 引擎 tinymog_db2060b44992_sm1200_trt101339.bf16.engine（md5=db2060b44992 sm=1200 trt101339）；int8 引擎不存在，已按顺序回退
+[TinyMogDet] 单张走 TrtSession 引擎（precision=bf16, max_batch=8）
+[TRT] CUDA Graph 捕获 shape=(1, 3, 640, 640) 用时 153.0 ms（之后该形状只 replay）
+[merge-preview] 预览模型常驻实测 1300 MB（空闲 3956 → 2656 MB）
+[vram] 预览：模型 参数量 ? · 权重 257 MB（文件体积（没读到图））· 输入 416 px（文件名/默认）· 非权重 0.0 MB
+[vram] 预览：显存 空闲 2622 / 共 8150 MB（min(torch 6935 / smi 2622)）· 预算 2366 MB = 空闲 − 预留 256 MB（max(256 MB, 空闲×5%)）+ 可回收 0 MB
+[vram] 预览：显存去向 本程序 1317 MB（本进程 17 + 预览 worker 1300）· 其它程序 4211 MB · 可回收 1300 MB
+[vram] 预览：需求拆项 模型 257 + context 512 + 检测/遮罩 300 MB/份 + 帧 0×7.92 + dfm 批 80.0 MB（ORT arena 140 MB 含在预留里）
+[vram] 预览：计划 帧预算 0 / dfm 批 1（已降档） · 预计峰值 1149 MB（可用 2366 MB）
+[vram] 预览：采用 帧 0 / 批 1 / 进程 1 → 要 1149 MB ≤ 2366 MB
+[vram] 预览：模型 参数量 ? · 权重 257 MB（文件体积（没读到图））· 输入 416 px（文件名/默认）· 非权重 0.0 MB
+[vram] 预览：显存 空闲 1475 / 共 8150 MB（min(torch 6935 / smi 1475)）· 预算 1219 MB = 空闲 − 预留 256 MB（max(256 MB, 空闲×5%)）+ 可回收 0 MB
+[vram] 预览：显存去向 本程序 1317 MB（本进程 17 + 预览 worker 1300）· 其它程序 5358 MB · 可回收 1300 MB
+[vram] 预览：需求拆项 模型 257 + context 512 + 检测/遮罩 300 MB/份 + 帧 0×7.92 + dfm 批 80.0 MB（ORT arena 140 MB 含在预留里）
+[vram] 预览：计划 帧预算 0 / dfm 批 1（已降档） · 预计峰值 1149 MB（可用 1219 MB）
+[vram] 预览：采用 帧 0 / 批 1 / 进程 1 → 要 1149 MB ≤ 1219 MB
