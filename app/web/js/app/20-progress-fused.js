@@ -687,8 +687,13 @@
   var DFM_POLL = null;
 
   function exportDfm(name, btn) {
-    if (btn) { btn.disabled = true; btn.textContent = "导出中"; }
-    toast("开始导出", name + " → .dfm（要加载模型，可能几分钟）", "info");
+    if (btn) { btn.disabled = true; }
+    /* 进度放独立页 #p-export（和训练器那条一致），别在按钮上轮播文字 */
+    if (window.go) go("export");
+    if (window.__exPaint) window.__exPaint({ step: "load", name: name, percent: 0,
+      modules: [{ name: "加载权重", state: "run" },
+                { name: "组装 DFM", state: "wait" },
+                { name: "写入文件", state: "wait" }] });
     fetch("/api/models/" + encodeURIComponent(name) + "/export", { method: "POST" })
       .then(function (r) {
         if (!r.ok) return r.json().then(function (d) { throw new Error(d.detail || "启动失败"); });
@@ -705,12 +710,10 @@
     if (DFM_POLL) clearInterval(DFM_POLL);
     DFM_POLL = setInterval(function () {
       fetch("/api/models/export/status").then(function (r) { return r.json(); }).then(function (d) {
-        if (btn) {
-          var last = (d.log && d.log.length) ? d.log[d.log.length - 1] : "";
-          btn.textContent = d.running ? (last ? last.slice(0, 6) : "导出中") : "导出";
-        }
+        /* 页面自己在画进度；这里只等结果 */
         if (!d.running) {
           clearInterval(DFM_POLL); DFM_POLL = null;
+          if (btn) { btn.disabled = false; }
           if (d.ok) {
             toast("导出完成", name + " 已生成 .dfm", "success");
             loadModels();
