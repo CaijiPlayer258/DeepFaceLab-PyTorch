@@ -1696,6 +1696,15 @@ def _stage_do_encode(cfg: dict) -> dict:
     except OSError as e:
         raise _BadInput("输出目录建不出来：%s（%s）" % (out.parent, e))
     part = out.with_name(out.stem + ".part" + out.suffix)
+    # 上一次导出被中途打断（点停止 / 关应用 / 崩）会留下半截 .part.mp4，
+    # 它会一直躺在输出目录里，用户看到「11月23日 (1)_merged.part.mp4」也不知道能不能删。
+    # 这一单既然要写同一个目标，旧的那份直接清掉。
+    try:
+        if part.is_file():
+            part.unlink()
+            _stage_log("清掉上次残留的半截文件：%s" % part.name)
+    except OSError:
+        pass
 
     pattern = str(_stage_frames_dir(cache) / "%06d.png")
     # 范围内的第一帧帧号（frames/ 是 000001.png 起的定长序号）
@@ -1732,6 +1741,15 @@ def _stage_do_encode(cfg: dict) -> dict:
             _stage_tick("encode", _n)
 
     enc = _vid_encode(cmd, part, total, on_progress=_on_prog)
+
+    # ffmpeg 退出 ≠ 文件写完：-movflags +faststart 要把 moov 挪到文件头，
+    # 对一小时的 1080p 成片这步会**整个文件重写一遍**（几十秒，进度条却是 100%）。
+    # 用户以为已经完成、点停止或者关应用 —— 于是留下半截 <名字>.part.mp4。
+    # 这里明说一句，让「正在收尾」和「已完成」在日志里能分开。
+    try:
+        _stage_log("编码结束，正在收尾（faststart 索引重写 + 改名，进度 100%% 之后这一步不可见）")
+    except Exception:
+        pass
     code, tail, sec = enc["code"], enc["tail"], enc["seconds"]
 
     if code != 0:

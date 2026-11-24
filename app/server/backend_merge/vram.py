@@ -2274,6 +2274,13 @@ def _pred_hyst_on() -> bool:
 
 
 def _pred_pick_file() -> Path:
+    # 放进 workspace/.cache/：这类实测缓存散在 workspace 根上，用户看到一堆
+    # _pred_batch_pick.json / _sess_bench.json 不知道该不该删。
+    return Path(WORKSPACE) / ".cache" / _PRED_HYST_CACHE
+
+
+def _pred_pick_file_legacy() -> Path:
+    """老位置（workspace 根）—— 读的时候当回退，别让已有实测白丢。"""
     return Path(WORKSPACE) / _PRED_HYST_CACHE
 
 
@@ -2286,6 +2293,8 @@ def _pred_pick_state() -> dict:
         data = {}
         try:
             p = _pred_pick_file()
+            if not p.is_file() and _pred_pick_file_legacy().is_file():
+                p = _pred_pick_file_legacy()        # 老位置回退
             if p.is_file():
                 d = json.loads(p.read_text("utf-8", "ignore") or "{}")
                 if isinstance(d, dict):
@@ -2302,7 +2311,9 @@ def _pred_pick_put(key: str, row: dict):
         st[str(key)] = dict(row)
         snap = {k: dict(v) for k, v in st.items()}
     try:
-        _pred_pick_file().write_text(json.dumps(snap, ensure_ascii=False, indent=1), "utf-8")
+        _f = _pred_pick_file()
+        _f.parent.mkdir(parents=True, exist_ok=True)
+        _f.write_text(json.dumps(snap, ensure_ascii=False, indent=1), "utf-8")
     except Exception:                                       # noqa: BLE001
         pass
 

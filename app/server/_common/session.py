@@ -330,6 +330,15 @@ def _gain(g, m, gpu_ms, cpu_ms) -> float:
 
 
 def _store_path(workspace=None):
+    # 状态文件统一放 workspace/.cache/，别散在 workspace 根上（用户看到一堆
+    # _sess_bench.json / _pred_batch_pick.json 不知道该不该删）。
+    from pathlib import Path
+    ws = Path(str(workspace or os.environ.get("DFL_WORKSPACE") or "."))
+    return ws / ".cache" / "_sess_bench.json"
+
+
+def _legacy_store_path(workspace=None):
+    """老位置（workspace 根）—— 读的时候当回退，别让已有实测数据白丢。"""
     from pathlib import Path
     ws = Path(str(workspace or os.environ.get("DFL_WORKSPACE") or "."))
     return ws / "_sess_bench.json"
@@ -338,14 +347,15 @@ def _store_path(workspace=None):
 def _load(workspace=None) -> dict:
     import json
     from pathlib import Path
-    p = _store_path(workspace)
-    try:
-        if Path(p).is_file():
-            d = json.loads(Path(p).read_text("utf-8", "ignore") or "{}")
-            if isinstance(d, dict):
-                return d
-    except Exception:                                       # noqa: BLE001
-        pass
+    # 先看新位置 .cache/，再回退老位置（workspace 根）—— 老用户已有的实测别白丢
+    for p in (_store_path(workspace), _legacy_store_path(workspace)):
+        try:
+            if Path(p).is_file():
+                d = json.loads(Path(p).read_text("utf-8", "ignore") or "{}")
+                if isinstance(d, dict) and d:
+                    return d
+        except Exception:                                   # noqa: BLE001
+            pass
     return {}
 
 

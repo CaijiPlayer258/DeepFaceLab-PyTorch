@@ -82,6 +82,35 @@ def _sweep_orphan_trainers(why: str = "") -> int:
 
 def _startup_sweep():
     """上一次 4.1 没正常退出时，训练进程会留在这儿。开服先收掉。"""
+    # 更新覆盖代码时会在 workspace 留 .backup-<时间戳>/（十几 MB）。以前只在
+    # 「更新成功」那条路上清（backend_update.py:317），更新失败/中断过几次就会堆一堆，
+    # 用户看着一堆 .backup-1795427188 也不知道能不能删。开服顺手清一次。
+    try:
+        from .. import backend_update as _bu
+        _n = _bu._prune_backups(1)
+        if _n:
+            print("[update] 清掉 %d 份旧的 .backup 快照（只留最近一份）" % _n, flush=True)
+    except Exception:
+        pass
+    # 把散在 workspace 根上的状态文件搬进 .cache/ —— 读的时候已经兼容旧路径（session.py
+    # 的 _legacy_store_path / vram.py 的 _pred_pick_file_legacy），这里只是把老的挪走，
+    # 免得用户看着一堆 _sess_bench.json / _pred_batch_pick.json 不知道该不该删。
+    try:
+        from .paths import WORKSPACE as _WS
+        _cd = _WS / ".cache"
+        for _n in ("_sess_bench.json", "_pred_batch_pick.json"):
+            _old = _WS / _n
+            if not _old.is_file():
+                continue
+            _cd.mkdir(parents=True, exist_ok=True)
+            _dst = _cd / _n
+            if _dst.exists():
+                _old.unlink()
+            else:
+                os.replace(str(_old), str(_dst))
+            print("[cache] 状态文件已迁到 .cache/：%s" % _n, flush=True)
+    except Exception:
+        pass
     _sweep_orphan_trainers("(启动清扫)")
     # 进程内的人脸 embedding / 组均值缓存：**进程重启就清空**（不落盘复用）。
     # 这里就是"重启"那一次调用点；另一次在每次导出 job 结束（routes_merge 的
