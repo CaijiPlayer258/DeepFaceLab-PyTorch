@@ -234,7 +234,9 @@
       var bits = [];
       if (st.arch) bits.push(String(st.arch).toUpperCase());
       if (mods.length) bits.push(mods.length + " 个模块");
-      mt.textContent = bits.join(" · ");
+      /* 后端每匹配完一个张量就更新 msg —— 这里直接显示，用户能看到
+         「encoder/conv1/weight (3,3,4,8) -> (8,4,3,3) 转置 名字」这样在滚 */
+      mt.textContent = st.msg ? String(st.msg) : bits.join(" · ");
     }
     var isErr = st.step === "error";
     var isIdle = !st.step || st.step === "idle";
