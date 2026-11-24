@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -203,10 +204,29 @@ def start(name: str) -> dict:
             )
             _set(step="convert")
             threading.Thread(target=_watch, args=(md, stem, proc, modules), daemon=True).start()
+            # 逐行解析脚本输出，把模块一个个点亮 —— 光靠看 .pth 出现是不够的：
+            # model.save() 会一口气把 4 个文件写完，中间态只有一瞬，前端根本看不到。
+            _done_n = 0
+            _seen = set()
             for line in proc.stdout:            # type: ignore[union-attr]
                 line = line.rstrip()
-                if line:
-                    _log(line)
+                if not line:
+                    continue
+                _log(line)
+                # 形如「├ encoder: .npy → .pth」「└ decoder_dst: .npy → .pth」
+                _m = re.match(r"^[├└│\s]*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*\.npy", line.strip())
+                if _m:
+                    _nm = _m.group(1)
+                    if _nm in _seen:
+                        continue
+                    _seen.add(_nm)
+                    if _done_n < len(modules):
+                        modules[_done_n]["state"] = "ok"
+                        modules[_done_n]["items"] = 1
+                        _done_n += 1
+                        _set(modules=modules,
+                             percent=int(_done_n * 100 / max(1, len(modules))))
+                        time.sleep(0.55)   # 让前端至少看到这一步（4 步共 ~2s，不然一闪就没）
             rc = proc.wait()
             if rc == 0:
                 for m in modules:

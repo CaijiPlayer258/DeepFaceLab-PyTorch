@@ -279,7 +279,7 @@
         cvPaint(st);
         if (st && st.running) { cvPoll(); } else { CV_TIMER = null; }
       }).catch(function () { CV_TIMER = null; });
-    }, 400);
+    }, 200);
   }
   function cvRun(name) {
     cvApi("/api/convert/start", {
