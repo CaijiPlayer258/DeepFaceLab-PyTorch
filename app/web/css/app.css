@@ -115,9 +115,8 @@ h1,h2,h3,h4{margin:0;font-weight:640;letter-spacing:-.012em}
   cursor:pointer;font-size:13px;user-select:none;transition:background .12s}
 .nav:hover{background:var(--line)}
 .nav.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
-/* 浅色主题下 --surface-hover 只是比白稍灰一点，当前页几乎看不出来。
-   补一条左侧品牌色竖条 —— 两个主题都用，识别度最稳。 */
-.nav.on{box-shadow:inset 3px 0 0 0 var(--brand)}
+
+
 .ic{width:15px;height:15px;flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;opacity:.85}
 .pill{display:inline-flex;align-items:center;gap:6px}
 .pill .ic{width:11px;height:11px;opacity:1;stroke-width:2}
