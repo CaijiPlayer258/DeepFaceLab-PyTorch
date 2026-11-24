@@ -5128,9 +5128,9 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
    ============================================================================ */
 
 /* ---------- 一、导入口的「先选一个模型」---------- */
-/* 左栏导出按钮下面那一行小字（0 个模型时出现；一旦选中就收起） */
+/* 导出按钮**上面**那一行小字（0 个模型时出现；一旦选中就收起） */
 .mgexport-hint {
-  margin-top: 6px;
+  margin: 0 0 6px;
   font-size: 11px;
   line-height: 1.5;
   color: #ef4444;
