@@ -116,6 +116,26 @@ def _env_batches(name, default="1,2,4,8"):
     return out or {1}
 
 
+# CUDA Graph 的「一次失败，整个进程都别再试」开关。
+# 必须是**模块级**：每个模型是一个新的 DfmTorch 实例，实例级的 g_batches=set()
+# 挡不住下一个模型（用户日志第 31 行就是第二个模型又去捕了一次）。
+# 为什么一次失败就该全关：capture 一旦被作废，PyTorch 的 captures_underway 栈不会 pop，
+# 之后**任何流、任何模型、任何档**再捕都会撞 CUDACachingAllocator 的断言；
+# 而且捕获线程的 current_stream 会留在 gstream 上（graphs.py 的 __exit__ 先 capture_end()
+# 再恢复流，capture_end 一抛就不恢复），后续 eager 也跟着跑错流。
+_GRAPH_OFF = False
+
+# 捕获期间必须独占「图池」这件事。三个子代理独立查到的共同结论：
+#   ① 捕获窗口内别的线程做 cudaMalloc / cudaHostAlloc / 任何 stream 同步 → 捕获作废（901）；
+#   ② 反过来，别的线程 close() 掉一份会话（_gs.clear() → CUDAGraph 析构 → 图池释放）
+#      时若正有 capture 在飞，会撞 CUDACachingAllocator.cpp:3475 的 captures_underway 断言
+#      （子代理 B 扫二进制确认：那句断言在 c10/cuda/CUDACachingAllocator.cpp，不是 CUDAGraph.cpp）；
+#   ③ 一次失败后 captures_underway 不 pop，之后任何流/模型/档位再捕都失败。
+# 这把锁只能挡住「我们自己人」（close vs capture）。ORT 那边的 cudaStreamSynchronize
+# 挡不住 —— 那是架构级问题，短窗口内无法根治，只能靠 _GRAPH_OFF 事后止损。
+_CAP_LOCK = threading.RLock()
+
+
 class _GraphRun:
     """一个 batch 档的捕获结果：静态入参 + 静态出参 + 图本身。
 
@@ -459,10 +479,18 @@ class DfmTorch:
     def _graph_for(self, b):
         """这一档能不能走图；不能就返回 None（调用方走 eager）。
 
+        模块级 _GRAPH_OFF 一旦置位，所有实例、所有档位一律 eager ——
+        见 _GRAPH_OFF 那段注释（一次失败必须全关，实例级挡不住下一个模型）。
+
         「不能」的三种情况都会**喊一次**：非 CUDA / NCHW（布局不同就不是同一个计算）、
         batch 不在捕获档里、捕获失败（以后不再重试，避免每帧一次异常）。
         """
-        if not self.graph_on:
+        global _GRAPH_OFF
+        if not self.graph_on or _GRAPH_OFF:
+            # _GRAPH_OFF 是**模块级**的：任何一个实例捕获失败过一次，整个进程里
+            # 后续所有会话（包括新加载的模型）都直接走 eager。
+            # 实例级的 g_batches=set() 挡不住新实例 —— 用户日志第 31 行就是第二个模型
+            # 又去捕了一次。这里读模块级开关，才真的挡得住。
             return None
         b = int(b)
         if self.device.type != "cuda" or self.nchw:
@@ -478,28 +506,46 @@ class DfmTorch:
         if g is False:                       # 捕过了、失败过
             return None
         if b not in self.g_batches:
-            if b not in self._g_warned:
+            # g_batches 被清空 = 已经全局禁用了（见 _GRAPH_OFF）。这时候再为每一档打一行
+            # 「batch=N 不在 DFL_DFM_GRAPH_B= 里」纯属噪音，而且会误导读日志的人去查环境变量。
+            if self.g_batches and b not in self._g_warned:
                 self._g_warned.add(b)
                 self._log("CUDA Graph：batch=%d 不在 DFL_DFM_GRAPH_B=%s 里 → 这一档走 eager"
                           % (b, ",".join(str(x) for x in sorted(self.g_batches))))
             return None
+        # 先记住当前流：捕获失败时 torch 不会帮我们恢复（它的 __exit__ 先 capture_end()
+        # 再恢复流，capture_end 一抛就跳过恢复），所以失败分支要手动 set_stream 回来。
+        _cur = torch.cuda.current_stream()
         try:
             g = self._capture(b)
         except Exception as e:                             # noqa: BLE001
             self._gs[b] = False
-            self.g_fail[b] = "%s: %s" % (type(e).__name__, str(e)[:300])
+            # 真正的错因在 __context__ 里：外面这句 901（capture invalidated）是**派生**的，
+            # 原始那条（900 / CUDNN_STATUS_INTERNAL_ERROR_DEVICE_ALLOCATION_FAILED 之类）
+            # 挂在 e.__context__ 上。以前只记 str(e)，等于把真因丢了。
+            _ctx = getattr(e, "__context__", None)
+            _ctx_txt = ("" if _ctx is None
+                        else " ← 真因: %s: %s" % (type(_ctx).__name__, str(_ctx)[:200]))
+            self.g_fail[b] = "%s: %s%s" % (type(e).__name__, str(e)[:240], _ctx_txt)
             # ★ 一次失败要**全局禁用**，不能只关这一档。
-            # 原因：captures_underway 是 torch 的**进程级**状态（CUDAGraph.cpp 里那个栈）。
+            # 原因：captures_underway 是 torch 的**进程级**状态。子代理 B 扫 c10_cuda.dll 的
+            # 字符串确认：那句 assert 在 c10/cuda/CUDACachingAllocator.cpp:3475（**不是**
+            # CUDAGraph.cpp），语义是「图形内存池的块在仍登记着 capture 时被释放」。
             # 某次 capture 异常退出时它没被 pop，于是后面**每一档、每一个模型**都会撞
             #   RuntimeError: captures_underway.empty() INTERNAL ASSERT FAILED
             # 实测用户日志：第一个模型失败一次之后，第二个模型 batch=1 立刻又失败 ——
             # 那不是新问题，是同一个脏状态。这里把 g_batches 清空，整条 CUDA Graph 路径
             # 在本进程内彻底关掉，后面的模型直接走 eager，不再交一次脏 capture。
+            # ★ 全局禁用（模块级）：实例级的 g_batches=set() 只影响这一份会话，
+            # 下一个模型是新实例、g_batches 又是默认值 → 还会再捕一次（日志 31 行）。
+            _GRAPH_OFF = True
             self.g_batches = set()
+            # ★ 把当前流恢复回去：torch.cuda.graph.__exit__ 是「先 capture_end() 再恢复流」，
+            # capture_end 一抛就**不恢复**，于是这个线程之后所有 eager 工作（含 _outs 里的
+            # current_stream().synchronize()）都落在 gstream 上 —— 实测会让后续 eager 前向
+            # 继续报同一句 901。这里手动改回去。
             try:
-                # 清掉挂起的 CUDA 错误：不清的话第一次那句『previous error』会继续
-                # 污染后续所有 CUDA 调用（ORT 那边报的是 failure 900 / stream is capturing）
-                torch.cuda.synchronize()
+                torch.cuda.set_stream(_cur)
             except Exception:
                 pass
             self._log("★ CUDA Graph 捕获失败 batch=%d（%s）→ 本进程内**全部**回退 eager"
@@ -533,7 +579,7 @@ class DfmTorch:
             del ys
         torch.cuda.synchronize()
         cap = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(cap, stream=s):
+        with _CAP_LOCK, torch.cuda.graph(cap, stream=s):
             with torch.no_grad():
                 _ys = self._run_net(net, stat_in)
                 # 出参的 bf16→fp32 也录进图里：_outs 每帧原本要再提交 3 个 cast kernel
@@ -873,7 +919,12 @@ class DfmTorch:
 
     def close(self):
         with self.lock:
-            self._gs.clear()
+            # 清 _gs = CUDAGraph 析构 = **图池释放**。如果此时别的线程正在 capture，
+            # 会撞 CUDACachingAllocator 的 captures_underway 断言（子代理 B 扫二进制定位在
+            # c10/cuda/CUDACachingAllocator.cpp:3475，不是 CUDAGraph.cpp）。所以和 _capture
+            # 共用一把模块级锁。self.lock 是实例锁，挡不住别的会话。
+            with _CAP_LOCK:
+                self._gs.clear()
             self.gstream = None
             self.nets.clear()
             try:
