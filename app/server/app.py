@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 
 import json
+import time
 
 # 导入即打补丁：Windows 上这套补丁必须在任何子进程被拉起之前生效（原 app.py 第 50 行）
 from ._common.bootstrap import _NO_WINDOW, _install_no_window
@@ -72,27 +73,47 @@ from .backend_merge import frames_prep as _mod_frames_prep
 # 这里给全局换一个 default_response_class：序列化前先把 nan/inf 换成 None，
 # 前端拿到 null 只显示「—」，比接口整个挂掉好得多。其余序列化参数与 Starlette
 # 原实现逐字一致（ensure_ascii/indent/separators 都不动）。
-# ============================================================
-def _json_safe(o, _depth=0):
-    """递归把 nan/inf 换成 None。深度有上限，别在奇怪的结构上炸栈。"""
+_NAN_LAST = 0.0
+
+
+def _json_safe(o, _depth=0, _path="", _hits=None):
+    """递归把 nan/inf 换成 None，顺手把**路径**记进 _hits（好定位是谁算出来的）。
+
+    只记录，不改行为：命中就换成 None，序列化照常往下走。
+    """
     if _depth > 24:
         return o
     if isinstance(o, float):
         if o != o or o == float("inf") or o == float("-inf"):
+            if _hits is not None and len(_hits) < 8:
+                _hits.append((_path or "(root)", "nan" if o != o else ("inf" if o > 0 else "-inf")))
             return None
         return o
     if isinstance(o, dict):
-        return {k: _json_safe(v, _depth + 1) for k, v in o.items()}
+        return {k: _json_safe(v, _depth + 1, _path + "." + str(k), _hits) for k, v in o.items()}
     if isinstance(o, (list, tuple)):
-        return [_json_safe(v, _depth + 1) for v in o]
+        return [_json_safe(v, _depth + 1, _path + "[%d]" % i, _hits) for i, v in enumerate(o)]
     return o
 
 
 class _SafeJSONResponse(JSONResponse):
     """先把 nan/inf 洗掉再序列化。参数与 Starlette 原版保持一致。"""
+
     def render(self, content) -> bytes:
+        hits = []
+        safe = _json_safe(content, _hits=hits)
+        if hits:
+            # 只在真的换掉了东西时打，而且每 60 秒最多一次 —— 轮询接口一秒一次，
+            # 不节流会把自己淹掉。拿到这条就知道是哪个字段算出了 nan，
+            # 可以直接去改那个除法的分母，而不是一直靠这里兜着。
+            global _NAN_LAST
+            _now = time.time()
+            if _now - _NAN_LAST > 60.0:
+                _NAN_LAST = _now
+                print("[json] 响应里有 nan/inf，已换成 null：%s"
+                      % "、".join("%s=%s" % h for h in hits), flush=True)
         return json.dumps(
-            _json_safe(content),
+            safe,
             ensure_ascii=False,
             allow_nan=False,
             indent=None,
