@@ -29,6 +29,7 @@ import json
 # 导入即打补丁：Windows 上这套补丁必须在任何子进程被拉起之前生效（原 app.py 第 50 行）
 from ._common.bootstrap import _NO_WINDOW, _install_no_window
 from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from ._paths import engine_python as _engine_python, engine_root as _engine_root
@@ -61,7 +62,47 @@ from .backend_extract import routes as _mod_extract_routes
 from .backend_merge import frames_prep as _mod_frames_prep
 
 
-app = FastAPI(title="DeepFaceLab 4.1", docs_url=None, redoc_url=None)
+# ============================================================
+# JSON 响应的 nan/inf 兜底
+# ------------------------------------------------------------
+# 某些接口在除零/空集合上算出 nan（常见于 vram 预算、it/s、比例），
+# Starlette 的 JSONResponse 用 allow_nan=False，于是整个接口 500：
+#   ValueError: Out of range float values are not JSON compliant: nan
+# 用户那边表现为「导出页每轮询一次就刷一屏红字」。
+# 这里给全局换一个 default_response_class：序列化前先把 nan/inf 换成 None，
+# 前端拿到 null 只显示「—」，比接口整个挂掉好得多。其余序列化参数与 Starlette
+# 原实现逐字一致（ensure_ascii/indent/separators 都不动）。
+# ============================================================
+def _json_safe(o, _depth=0):
+    """递归把 nan/inf 换成 None。深度有上限，别在奇怪的结构上炸栈。"""
+    if _depth > 24:
+        return o
+    if isinstance(o, float):
+        if o != o or o == float("inf") or o == float("-inf"):
+            return None
+        return o
+    if isinstance(o, dict):
+        return {k: _json_safe(v, _depth + 1) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_json_safe(v, _depth + 1) for v in o]
+    return o
+
+
+class _SafeJSONResponse(JSONResponse):
+    """先把 nan/inf 洗掉再序列化。参数与 Starlette 原版保持一致。"""
+    def render(self, content) -> bytes:
+        return json.dumps(
+            _json_safe(content),
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=None,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+
+app = FastAPI(title="DeepFaceLab 4.1", docs_url=None, redoc_url=None, default_response_class=_SafeJSONResponse)
+
+
 
 
 _FORWARD_MODULES = (
@@ -206,8 +247,21 @@ async def _no_cache(request, call_next):
 
     例外：人脸库缩略图（/api/merge/faces/thumb）是带 ETag 的静态缓存，
     必须保留 public/max-age，否则每划一次列表就重新解码一张原图。
+
+    **顺手兜住 nan/inf**：某些接口在除零或空集合上算出 nan，FastAPI 序列化时
+    直接抛 ValueError: Out of range float values are not JSON compliant: nan，
+    前端每轮询一次就 500 一次（实测一次导出刷了几十屏）。这里不看是哪个接口，
+    一律把响应体里的 NaN/Infinity 换成 null —— 前端拿到 null 只是显示「—」，
+    比整个接口 500 好得多。代价是每次响应多一次 json 往返，只在出错时才走。
     """
-    resp = await call_next(request)
+    try:
+        resp = await call_next(request)
+    except ValueError as _e:
+        # 走到这里说明某个接口返回了 nan/inf，Starlette 在 render 时炸了。
+        # 记下路径（不然只知道「某个接口 500」），再让上层按 500 收场。
+        print("[json] %s 序列化失败（%s）—— 该接口返回了 nan/inf"
+              % (request.url.path, str(_e)[:120]), flush=True)
+        raise
     if not request.url.path.startswith("/api/merge/faces/thumb"):
         resp.headers["Cache-Control"] = "no-store, must-revalidate"
     return resp
