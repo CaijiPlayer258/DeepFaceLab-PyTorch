@@ -516,6 +516,22 @@ def compose_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
         fw, mw, roi_f, roi_u8, (x0, y0, x1, y1) = layers[0]
         blended = _blend_layer(roi_f, fw, mw, mode, dst_u8=roi_u8)
         out = frame_bgr if roi is False else frame_bgr.copy()
+        # 尺寸守卫：seamlessClone 或者某条回退路径算出来的 blended 偶尔会和 ROI 差一圈
+        # （实测见过 177×131 对 147×71 —— 差得不是一像素，是两套坐标系混了），
+        # 直接 `out[y0:y1, x0:x1] = blended` 会抛 could not broadcast，整单导出失败。
+        # 这里就近重采样到 ROI 尺寸：不改变「贴哪儿」，只把尺寸对齐。
+        _bh, _bw = blended.shape[:2]
+        _rh, _rw = (y1 - y0), (x1 - x0)
+        if (_bh, _bw) != (_rh, _rw):
+            import cv2 as _cv2
+            blended = _cv2.resize(np.asarray(blended, np.float32), (_rw, _rh),
+                                  interpolation=_cv2.INTER_LINEAR)
+            timings["shape_fix"] = timings.get("shape_fix", 0) + 1
+            if not timings.get("_shape_warned"):
+                timings["_shape_warned"] = True
+                print("[compose] 尺寸不一致：blended=%dx%d ROI=%dx%d"
+                      " （已就近重采样，帧不会被跳过；把这一行发出来能定位是 pred 还是 mask 跑偏）"
+                      % (_bw, _bh, _rw, _rh), flush=True)
         out[y0:y1, x0:x1] = np.clip(blended * 255.0, 0, 255).astype(np.uint8)
     else:
         # 多张脸。4.0 的做法是「整帧 float32 累加，最后回一次 u8」——
@@ -674,6 +690,12 @@ def compose_aligned_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
         for fw, mw, roi_f, roi_u8, (x0, y0, x1, y1) in layers:
             sub = work[y0:y1, x0:x1]
             blended = _blend_layer(sub, fw, mw, mode, dst_u8=roi_u8)
+            _bh, _bw = blended.shape[:2]
+            if (_bh, _bw) != (y1 - y0, x1 - x0):
+                import cv2 as _cv2
+                blended = _cv2.resize(np.asarray(blended, np.float32),
+                                      (x1 - x0, y1 - y0), interpolation=_cv2.INTER_LINEAR)
+                timings["shape_fix"] = timings.get("shape_fix", 0) + 1
             work[y0:y1, x0:x1] = blended
         out = np.clip(work * 255.0, 0, 255).astype(np.uint8)
     timings["blend_ms"] = timings.get("blend_ms", 0.0) + (time.time() - t_b) * 1000.0
