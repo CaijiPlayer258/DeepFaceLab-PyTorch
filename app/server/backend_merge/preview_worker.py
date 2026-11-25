@@ -382,7 +382,7 @@ def main():
             blur_mask_modifier=max(-100, min(100, int(c.get("blur_mask_modifier", 0)))),
             show_debug=False,
         )
-        q = int(it.get("jpeg_quality") or 92)
+        q = int(it.get("jpeg_quality") or 100)
         q = max(30, min(100, q))
 
         faces = it.get("faces") or None      # 多模型：[{dfm, landmarks, box}, …]

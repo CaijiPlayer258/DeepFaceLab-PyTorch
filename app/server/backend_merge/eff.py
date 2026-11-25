@@ -496,10 +496,13 @@ def _eff_values_of(cfg: dict, kind: str) -> dict:
         fast = bool(cfg.get("chain"))
     q = cfg.get("jpeg_quality")
     if q is None:
-        try:
-            q = int(cfg.get("quality"))
-        except (TypeError, ValueError):
-            q = _STAGE_JPEG_QUALITY
+        # 别再退回 cfg['quality'] —— 那是**对齐质量档位**（"high"/"fast"），
+        # 和 JPEG 压缩质量是两件事。以前这里 int("high") 抛异常才落到 100，
+        # 而预览那条路 cfg['quality'] 有时是个数字（92），于是日志里冒出
+        # 「jpeg_quality ... 按 default=92 执行（界面可能显示 100）」—— 界面和实际对不上。
+        # 帧图编码的口径是**固定 100 + 4:4:4**（见 _stage_imencode / _vid_log），
+        # 这里就按那个口径兜底。
+        q = _STAGE_JPEG_QUALITY
     kn = _knobs_of(cfg)
     return {
         "detector": str(cfg.get("det_align") or cfg.get("detector") or _DEFAULT_DETECTOR),
