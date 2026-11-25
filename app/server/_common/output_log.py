@@ -120,13 +120,14 @@ def install():
             sys.stderr = _Tee(sys.stderr)
     except Exception:
         pass
-    # 每次启动轮转一次：上一轮的日志留成 .1，本次从空开始。
-    # 不这样做的话，用户打开「输出」页看到的是历史累积（上次预览、上次训练、
-    # 甚至若干天前的），分不清哪一行是这一次的。
+    # 每次启动**覆盖**这份日志（不是轮转、不是删除）—— 用户要的是「这次启动从零开始」，
+    # 但文件必须一直在，别出现「突然找不到日志文件」的情况。截断即可：
+    # 不生成 .1、不 unlink，文件原地清空，随后 _append_file 继续往后写。
     try:
         p = _path()
-        if p.exists() and p.stat().st_size > 0:
-            os.replace(str(p), str(p) + ".1")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "w", encoding="utf-8"):
+            pass                    # 打开即截断，内容归零
     except Exception:
         pass
     try:
