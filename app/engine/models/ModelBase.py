@@ -858,6 +858,11 @@ class ModelBase(object):
                 bgr = self._preview_to_bgr(item[1])
                 if bgr is not None and bgr.size:
                     imgs.append(bgr)
+            if not imgs:
+                # 以前这里直接往下走（不写图、也不吭声）。于是「模型卡片没预览图」
+                # 分不清是「没跑到」还是「跑到了但 get_previews 给的是空」。现在留一句。
+                io.log_info('[preview] 这一轮没有可写的图（previews=%d 条），跳过快照'
+                            % len(previews or []))
             if imgs:
                 h = min(i.shape[0] for i in imgs)
                 row = []
@@ -877,6 +882,11 @@ class ModelBase(object):
                     tmp = jpg_path.with_name(jpg_path.name + '.tmp')
                     tmp.write_bytes(buf.tobytes())
                     os.replace(str(tmp), str(jpg_path))
+                    # 成功也要留一句：以前只有失败才打日志，于是「预览图没出来」这件事
+                    # 查不出到底是「没跑到」还是「跑到了但没写」。这一行落了盘就有。
+                    io.log_info('[preview] 已写入快照：%s（%d 张 · %dx%d · %.1f KB · iter %d）'
+                                % (jpg_path.name, len(imgs), strip.shape[1], strip.shape[0],
+                                   jpg_path.stat().st_size / 1024.0, int(self.iter)))
 
             # loss 尾巴：模型卡片上那条小曲线，不读 data.dat 就能画
             import json as _json
