@@ -360,6 +360,30 @@ def cv2_invert(mat):
     return cv2.invertAffineTransform(np.asarray(mat, np.float64))
 
 
+def _fit_to_roi(blended, box, timings=None, tag=""):
+    """把 blended 对齐到 ROI 的 (h,w)。
+
+    正常路径下两者必然相等（rw/rh 与切片同源）。不相等说明「算 box 用的 frame_shape」
+    和「被切/被贴的那个数组」不是同一口径 —— 那一路要单独查，但不该让整单导出失败。
+    只对齐尺寸，不改贴哪儿。
+    """
+    import cv2
+    y0, y1, x0, x1 = box
+    _bh, _bw = blended.shape[:2]
+    _rh, _rw = (y1 - y0), (x1 - x0)
+    if (_bh, _bw) == (_rh, _rw):
+        return blended
+    if isinstance(timings, dict):
+        timings["shape_fix"] = timings.get("shape_fix", 0) + 1
+        if not timings.get("_shape_warned"):
+            timings["_shape_warned"] = True
+            import numpy as _np
+            print("[compose] 尺寸不一致%s：blended=%dx%d ROI=%dx%d"
+                  " （已就近重采样，帧不会被跳过；把这一行发出来能定位是 pred 还是 mask 跑偏）"
+                  % ((" · " + tag) if tag else "", _bw, _bh, _rw, _rh), flush=True)
+    return cv2.resize(np.asarray(blended, np.float32), (_rw, _rh),
+                      interpolation=cv2.INTER_LINEAR)
+
 def _blend_layer(src, fw, mw, mode: str, dst_u8=None):
     """一层脸的融合（4.0:949-965）：seamless 走 seamlessClone，其它按 mask 直接叠。
 
@@ -577,6 +601,7 @@ def compose_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
             out = frame_bgr.copy() if roi is False else frame_bgr
             for fw, mw, roi_f, roi_u8, (x0, y0, x1, y1) in layers:
                 blended = _blend_layer(roi_f, fw, mw, mode, dst_u8=roi_u8)
+                blended = _fit_to_roi(blended, (y0, y1, x0, x1), timings, "多脸/不相交")
                 out[y0:y1, x0:x1] = np.clip(blended * 255.0, 0, 255).astype(np.uint8)
         else:
             # ROI 相交：这才是必须整帧浮点的那种情况（4.0 的舍入语义）
@@ -584,6 +609,7 @@ def compose_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
             for fw, mw, roi_f, roi_u8, (x0, y0, x1, y1) in layers:
                 sub = work[y0:y1, x0:x1]
                 blended = _blend_layer(sub, fw, mw, mode, dst_u8=roi_u8)
+                blended = _fit_to_roi(blended, (y0, y1, x0, x1), timings, "多脸/相交")
                 work[y0:y1, x0:x1] = blended
             out = np.clip(work * 255.0, 0, 255).astype(np.uint8)
     timings["blend_ms"] = timings.get("blend_ms", 0.0) + (time.time() - t_b) * 1000.0
