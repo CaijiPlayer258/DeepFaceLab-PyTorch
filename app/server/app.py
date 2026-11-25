@@ -150,8 +150,37 @@ def __getattr__(name):
     raise AttributeError("module %r has no attribute %r" % (__name__, name))
 
 
+# ============================================================
+# 连接被对端关掉时的 asyncio 噪音：
+# 前端拖进度条会主动 abort 上一个 /api/merge/preview，asyncio 的
+# ProactorEventLoop 在 socket 被对端关掉时把 ConnectionResetError 当「未处理异常」
+# 打一整套 traceback（用户那份 188 行日志里 92 行全是它，把真问题淹了）。
+# 这里只吞 ConnectionReset/Aborted/BrokenPipe 这一族，其余异常照旧往上报。
+# 必须装在 uvicorn 自己的 loop 上 —— 在 serve.py 里 get_event_loop() 拿到的不是它。
+# ============================================================
+def install_conn_reset_filter(app_ref) -> None:
+    import asyncio
+
+    def _quiet(loop, context):
+        exc = context.get("exception")
+        msg = str(context.get("message") or "")
+        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError,
+                            BrokenPipeError, TimeoutError)):
+            return
+        if "ConnectionResetError" in msg or "_call_connection_lost" in msg:
+            return
+        loop.default_exception_handler(context)
+
+    @app_ref.on_event("startup")
+    async def _set_conn_filter():
+        try:
+            asyncio.get_running_loop().set_exception_handler(_quiet)
+        except Exception:
+            pass
+
 # 启动/退出钩子：清扫遗留训练进程（等价于原来的 @app.on_event 两行装饰器）
 install_events(app)
+install_conn_reset_filter(app)
 
 
 def _prewarm_state() -> None:
