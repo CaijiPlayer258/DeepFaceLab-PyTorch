@@ -979,6 +979,15 @@ def merge_analyze(step: int = 12, model: str = _DEFAULT_DETECTOR, thresh: float 
     det = _detector(det_name)
 
     marks, idx, scanned, broken = [], 0, 0, ""
+    # 单帧检测失败不该让整次分析挂掉：那只是一帧没读到脸，时间轴上少一个采样点而已。
+    # 以前这里是 raise，于是第 43608 帧一次 ORT 抖动（CUDA failure 900 那种）就把整条
+    # 分析废掉，界面上弹一句「分析失败」—— 而此时导出页正显示「12535 帧 完成」，
+    # 两件事没关系，用户却只能看到一条红字。
+    # 连续 _DET_FAIL_MAX 次才真放弃：那是系统性问题（context 坏了 / 模型没加载），
+    # 继续扫只会把同一句话重复上万次。
+    _fail_streak = 0
+    _fail_first = ""
+    _DET_FAIL_MAX = 8
     while idx < total:
         try:
             frame, _n = _frame_image(idx)
@@ -989,8 +998,14 @@ def merge_analyze(step: int = 12, model: str = _DEFAULT_DETECTOR, thresh: float 
             det.thresh = t
             try:
                 boxes = det.detect(frame)
+                _fail_streak = 0
             except Exception as e:
-                raise _BadInput("检测失败（第 %d 帧）：%s" % (idx, str(e)[:200]), 500)
+                _fail_streak += 1
+                if not _fail_first:
+                    _fail_first = "第 %d 帧：%s" % (idx, str(e)[:200])
+                if _fail_streak >= _DET_FAIL_MAX:
+                    raise _BadInput("检测连续失败 %d 次（%s）—— 不是单帧问题，先看输出页有没有 CUDA / 显存报错" % (_fail_streak, _fail_first), 500)
+                boxes = []            # 这一帧按「没脸」算，继续往下扫
         marks.append({"idx": idx, "count": len(boxes),
                       "box": boxes[0]["box"] if boxes else None})
         scanned += 1
