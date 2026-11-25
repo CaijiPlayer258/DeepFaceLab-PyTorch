@@ -93,9 +93,23 @@ def _flag(name, default="0"):
 
 
 def _env_batches(name, default="1,2,4,8"):
-    """"1,2,4,8" -> {1,2,4,8}；空/写错都退回默认（图只按这些 batch 捕）。"""
+    """\"1,2,4,8\" -> {1,2,4,8}；**显式留空** -> set()（一个都不捕获，全走 eager）。
+
+    以前留空会走 _env 的默认值（_env 把空串当没设），于是 DFL_DFM_GRAPH_B= 反而**只捕 batch=1** ——
+    想关的人关了还是崩在同一个地方。这里直接读 os.environ 把「没设」和「设成空」分开：
+      没设      → 用 default（1,2,4,8）
+      设成空串  → set()，整个 CUDA Graph 路径关掉
+      写了但全是不认识的 token → {1}（保底，说明写错了）
+    """
+    import os as _os
+    raw = _os.environ.get(name)
+    if raw is None:
+        raw = default
+    raw = str(raw).strip()
+    if not raw:
+        return set()
     out = set()
-    for tok in str(_env(name, default)).replace(";", ",").split(","):
+    for tok in raw.replace(";", ",").split(","):
         tok = tok.strip()
         if tok.isdigit() and int(tok) > 0:
             out.add(int(tok))
