@@ -1024,16 +1024,20 @@ class ModelBase(object):
             }
             pathex.write_bytes_safe(self.model_data_path, pickle.dumps(model_data))
             _write_params_cache(self.model_data_path, self)
-            # 保存时顺手刷新模型卡片预览（get_previews 必须在训练线程里调用）
-            try:
-                if self.generator_list:
-                    self._maybe_write_preview_snapshot(self.get_previews(), force=True)
-            except Exception:
-                pass
         else:
             # 宁可这次不写 data.dat，也不能用"只有本次运行的点"把历史覆盖掉
             io.log_err("没能读出 data.dat 里的历史损失，本次跳过写 data.dat"
                        "（避免把曲线截断）；权重和预览照常保存。")
+
+        # 预览快照：**不要**再被 generator_list 卡住。转换 / 导出（is_exporting）上下文里
+        # 没有 generator，以前的 if self.generator_list 让「由 npy 转换来的模型」永远
+        # 写不出一张预览图，而且外层 except 把一切都吞了、日志里一个字都没有。
+        # get_previews() 在没 generator 时会自己返回空（它内部有判断），空的话
+        # write_preview_snapshot 只写 json、不写图 —— 也不会炸。所以这里只兜异常。
+        try:
+            self._maybe_write_preview_snapshot(self.get_previews(), force=True)
+        except Exception as _pe:
+            io.log_info("[preview] 这次没写成快照（%s: %s）" % (type(_pe).__name__, _pe))
 
         # Write .meta_cache.json for fast GUI loading（不包含 loss_history）
         try:
