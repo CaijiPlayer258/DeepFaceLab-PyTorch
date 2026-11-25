@@ -33,7 +33,7 @@
     box.innerHTML = rows || "没有可清理的缓存";
     if (tag) {
       tag.textContent = total ? fmt(total) : "干净";
-      tag.className = "tag " + (total ? "t-warn" : "t-gray");
+      tag.className = "tag " + (total ? "t-yellow" : "t-gray");
     }
   }
 
