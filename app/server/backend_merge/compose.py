@@ -429,6 +429,24 @@ def _apply_sr_layers(out, layers, timings):
         print("[sr] 跳过（%s: %s）" % (e.__class__.__name__, str(e)[:160]), flush=True)
     return out
 
+_PRED_SHAPE_SEEN = {}
+
+
+def _pred_shape_complain(where: str, shape, extra: str = "") -> None:
+    """pred / pred_u8 不是方形时喊一次（带调用栈），之后同处不再重复。
+
+    只在**真的出问题**时打印，正常路径零成本（一次 ndim/shape 比较）。
+    """
+    key = str(where)
+    if _PRED_SHAPE_SEEN.get(key):
+        return
+    _PRED_SHAPE_SEEN[key] = True
+    import traceback as _tb
+    print("[compose] %s 拿到非方形的 pred：shape=%s%s —— 这份数据不该出现在这里，"
+          " 下面是它被送进来时的调用栈" % (key, tuple(shape), (" · " + extra) if extra else ""),
+          flush=True)
+    _tb.print_stack(file=__import__("sys").stdout)
+
 def compose_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
                   roi: bool = True) -> np.ndarray:
     """一帧的合成（纯 CPU）：遮罩准备 → 色彩迁移 → 融合 → 反贴回原帧。
@@ -462,6 +480,12 @@ def compose_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
     for f in faces:
         lm = np.asarray(f["landmarks"], np.float32)
         fo = np.clip(np.asarray(f["pred"], np.float32), 0, 1)
+        # 尺寸自检：pred 必须是**方形**（模型输出 S×S×3）。不是的话 sz 会按高度取，
+        # 而后面的 warp/混合全按方形假设走 —— 最后在 out[y0:y1, x0:x1] = blended 处
+        # 抛 could not broadcast（实测见过 177x131 对 147x71，两个方向比例还不一样）。
+        # 这里**第一次**遇到就打出形状 + 完整调用栈：知道是谁把非方形的东西当 pred 送进来了。
+        if fo.ndim != 3 or fo.shape[0] != fo.shape[1]:
+            _pred_shape_complain("compose_frame", fo.shape)
         sz = int(fo.shape[0])
         fmat = get_transform_mat(lm, sz, FaceType.WHOLE_FACE, scale=1.0)   # S->帧
         wrk = _prepare_mask(f, frame_bgr.shape, cfg, sz, timings)          # 遮罩准备

@@ -1792,6 +1792,11 @@ def _fused_run(cfg: dict) -> dict:
                     t_u8 = time.perf_counter()
                     for k, f in enumerate(faces):
                         prd, dst = outs[k][1], outs[k][2]
+                        # 尺寸自检：这一格要送进 compose，形状不对会在合成最后一步炸（见 _pred_shape_complain）
+                        if f["pred_u8"] is not None and (f["pred_u8"].ndim != 3
+                                or f["pred_u8"].shape[0] != f["pred_u8"].shape[1]):
+                            from .compose import _pred_shape_complain as _pc
+                            _pc("fused:pred_u8", f["pred_u8"].shape, "dfm=%s" % (str(f.get("dfm") or "")[-40:]))
                         f["pred_u8"] = _fused_q_u8(outs[k][0], _u8_fast, clip=False)
                         f["prd_u8"] = (None if prd is None
                                        else _fused_q_u8(prd, _u8_fast))
@@ -1886,6 +1891,11 @@ def _fused_run(cfg: dict) -> dict:
     # ---- ⑤ 合成（CPU：compose_frame；GPU：compose_frame_gpu，DFL_COMPOSE_GPU=1）----
     def _compose_args_gpu(job):
         """GPU 入口直接吃 uint8 —— 省掉 CPU 上的 5 次 astype(/255)（实测 1.2ms/张脸）。"""
+        # 尺寸自检：这一格要送进 compose，形状不对会在合成最后一步炸（见 _pred_shape_complain）
+        if f["pred_u8"] is not None and (f["pred_u8"].ndim != 3
+                or f["pred_u8"].shape[0] != f["pred_u8"].shape[1]):
+            from .compose import _pred_shape_complain as _pc
+            _pc("fused:pred_u8", f["pred_u8"].shape, "dfm=%s" % (str(f.get("dfm") or "")[-40:]))
         return [{"landmarks": f["lm"], "pred": f["pred_u8"],
                  "prd_dfm": f.get("prd_u8"), "dst_dfm": f.get("dstdfm_u8"),
                  "xseg_prd": f.get("xseg_prd_u8"), "xseg_dst": f.get("xseg_dst_u8")}
