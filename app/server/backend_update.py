@@ -307,6 +307,24 @@ def apply(asset_name: Optional[str] = None) -> Dict[str, Any]:
             shutil.copy2(path, dst)
             installed.append(str(rel).replace("\\", "/"))
 
+        # ★ 清 __pycache__：copy2 保留 mtime，而 .pyc 的有效性判据正是「源 mtime + size」。
+        # 新旧两版如果 mtime 相同（zip 里的时间戳），Python 会认为旧 .pyc 依然有效，
+        # 继续跑**旧字节码** —— 表现就是「version.txt 是新的、界面也显示新版本号，
+        # 但某个模块的行为还是旧的」。用户那边 compose.py 的守卫一直不生效，
+        # 最可能就是踩了这个。这里把所有 __pycache__ 目录删掉，重启后必然重编译。
+        _dropped_pyc = 0
+        for _pc in ROOT.rglob("__pycache__"):
+            if not _pc.is_dir():
+                continue
+            try:
+                _dropped_pyc += len(list(_pc.glob("*.pyc")))
+                shutil.rmtree(_pc, ignore_errors=True)
+            except Exception:
+                pass
+        if _dropped_pyc:
+            print("[update] 清掉 %d 个 __pycache__ 字节码（避免跑旧 .pyc）" % _dropped_pyc,
+                  flush=True)
+
         return {"ok": True, "installed": True, "version": local_version(),
                 "files": len(installed), "sample": installed[:10],
                 "backup": str(backup) if backup.exists() else None,
