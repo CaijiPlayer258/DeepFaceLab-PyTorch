@@ -58,12 +58,30 @@ class _Tee(io.TextIOBase):
     def __init__(self, stream):
         self._s = stream
 
+    def flush(self):
+        # ★ 必须转发。以前 _Tee 没有 flush()，于是 print(..., flush=True) 调到的是
+        # io.TextIOBase.flush()（空实现），**原流一个字节都没被 flush** ——
+        # 输出滞留在 Electron 的 pipe 缓冲里，_electron_backend.log 只剩半截日志。
+        # 表现就是「明明打了日志，文件里搜不到」。
+        try:
+            if self._s is not None:
+                self._s.flush()
+        except Exception:
+            pass
+
     def write(self, s):                                     # noqa: D401
         try:
             if self._s is not None:
                 self._s.write(s)
+                self._s.flush()      # 每行都推出去：这些日志是给排障用的，不能攒
         except Exception:
             pass
+
+    def isatty(self):
+        try:
+            return bool(self._s is not None and self._s.isatty())
+        except Exception:
+            return False
         if not s:
             return 0
         global _seq
