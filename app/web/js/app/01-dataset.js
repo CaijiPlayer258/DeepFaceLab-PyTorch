@@ -1514,9 +1514,13 @@
     /* 预览图不可点：以前是 <a target="_blank">，在 Electron 壳里会被
        setWindowOpenHandler 丢给 shell.openExternal —— 点一下模型缩略图就弹外部浏览器，
        非常莫名其妙。这里改成纯 <div>，只负责显示。想看大图去「参数」页或训练页。 */
+    /* 没有预览图时也要占一块：以前 preview_url 为空就整块不渲染，卡片高度会跳；
+       更糟的是「盘上有图但接口没给 URL」这种情况——用户看到的是空白，而不是「还没有」。
+       onerror 同理：URL 给了但 404，以前 <img> 静默塌掉，现在换成一行灰字。 */
     var prev = m.preview_url
-      ? '<div class="mprev"><img loading="lazy" src="' + m.preview_url + '" alt=""></div>'
-      : '';
+      ? '<div class="mprev"><img loading="lazy" src="' + m.preview_url + '" alt=""'
+        + ' onerror="this.parentNode.classList.add(\'empty\');this.parentNode.innerHTML=\'还没有预览图\'"></div>'
+      : '<div class="mprev empty">还没有预览图</div>';
 
     el.innerHTML = chart + prev +
       '<div class="mbody">' +

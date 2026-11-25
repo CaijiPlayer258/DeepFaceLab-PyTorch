@@ -155,6 +155,12 @@ def _preview_jpg(dat_path: Path) -> Path:
     return Path(str(dat_path)[: -len("_data.dat")] + "_preview.jpg")
 
 
+def _cache_png_of(dat_path: Path) -> Path:
+    """<模型名>.png —— 慢路从 sample_for_preview 拼出来的那张，和 /preview.png 同一个文件。"""
+    name = str(dat_path.name)[: -len("_data.dat")]
+    return CACHE_DIR / (name + ".png")
+
+
 # 新格式 dat / 快路上的模型：legacy 字段的占位，保证 /api/models 里每条都同构
 _NO_LEGACY = {
     "detected": False, "source": "params-cache", "counts": {}, "report": [],
@@ -189,7 +195,13 @@ def _fast_model_entry(dat_path: Path) -> dict:
         spark = {"src": [round(float(e[0]), 5) for e in tail if len(e) >= 2],
                  "dst": [round(float(e[1]), 5) for e in tail if len(e) >= 2]}
 
-    has_prev = _preview_jpg(dat_path).is_file()
+    # 预览图有两条落盘路：训练 save() 写的 <name>_preview.jpg，和 .cache/<name>.png
+    # （慢路从 sample_for_preview 现拼的）。以前快路**只认 jpg** —— 于是「由 npy 转换来、
+    # 没跑过训练」的模型永远 has_preview=False、preview_url=None，前端连 <img> 都不生成，
+    # 而盘上那张 .cache/<name>.png 明明存在、/api/models/<name>/preview.png 也能返回它。
+    # 这里两个都认。
+    has_prev = (_preview_jpg(dat_path).is_file()
+                or _cache_png_of(dat_path).is_file())
     dfm = dat_path.parent / (model_name + ".dfm")
     _archi = str(opt.get("archi", archi_from_name)).lower()
     return {
