@@ -474,7 +474,22 @@ class DfmTorch:
         except Exception as e:                             # noqa: BLE001
             self._gs[b] = False
             self.g_fail[b] = "%s: %s" % (type(e).__name__, str(e)[:300])
-            self._log("★ CUDA Graph 捕获失败 batch=%d（%s）→ 回退 eager（这一档不再试）"
+            # ★ 一次失败要**全局禁用**，不能只关这一档。
+            # 原因：captures_underway 是 torch 的**进程级**状态（CUDAGraph.cpp 里那个栈）。
+            # 某次 capture 异常退出时它没被 pop，于是后面**每一档、每一个模型**都会撞
+            #   RuntimeError: captures_underway.empty() INTERNAL ASSERT FAILED
+            # 实测用户日志：第一个模型失败一次之后，第二个模型 batch=1 立刻又失败 ——
+            # 那不是新问题，是同一个脏状态。这里把 g_batches 清空，整条 CUDA Graph 路径
+            # 在本进程内彻底关掉，后面的模型直接走 eager，不再交一次脏 capture。
+            self.g_batches = set()
+            try:
+                # 清掉挂起的 CUDA 错误：不清的话第一次那句『previous error』会继续
+                # 污染后续所有 CUDA 调用（ORT 那边报的是 failure 900 / stream is capturing）
+                torch.cuda.synchronize()
+            except Exception:
+                pass
+            self._log("★ CUDA Graph 捕获失败 batch=%d（%s）→ 本进程内**全部**回退 eager"
+                      "（一次失败会留下脏的 captures_underway，后面每档都会跟着失败）"
                       % (b, self.g_fail[b]))
             return None
         self._gs[b] = g
