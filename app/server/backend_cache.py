@@ -25,13 +25,44 @@ ROOT = Path(__file__).resolve().parents[2]      # 项目根
 WORKSPACE = _paths.WORKSPACE
 
 
-def _size(p: Path) -> int:
-    """目录递归求和 / 文件直接取大小。读不到就当 0。"""
+def _glob_capped(root: Path, pattern: str, limit: int = 20000,
+                 seconds: float = 3.0) -> list:
+    """glob 一份列表，超时或超量就停 —— 返回已拿到的部分。
+
+    为什么要限：用户机器上 %TEMP% 可能有几万个 dfl_*，连 listdir 带 stat 都能拖几十秒，
+    前端看到的就是「正在读取缓存清单…」一直转。这里宁可少列几个，也要先返回。
+    """
+    import time as _t
+    t0 = _t.monotonic()
+    out = []
+    try:
+        for p in root.glob(pattern):
+            out.append(p)
+            if len(out) >= limit or (_t.monotonic() - t0) > seconds:
+                break
+    except OSError:
+        pass
+    return out
+
+def _size(p: Path, budget: list = None) -> int:
+    """目录递归求和 / 文件直接取大小。读不到就当 0。
+
+    `budget` 是一个可变的 [剩余条目数]：整个扫描过程共享一份，用完就不再往下爬。
+    为什么要有它：%TEMP% 下 dfl_* 实测 182 项 / 2.5 GB，而每一项都可能是层很深的目录，
+    对每个都 rglob("*") 会把「列个清单」拖成几秒甚至几十秒 —— 用户看到的就是
+    「正在读取缓存清单…」一直卡着。宁可给个偏小的估算，也要先返回。
+    """
     try:
         if p.is_file():
             return p.stat().st_size
+        if budget is not None and budget[0] <= 0:
+            return 0
         total = 0
         for f in p.rglob("*"):
+            if budget is not None:
+                budget[0] -= 1
+                if budget[0] <= 0:
+                    break
             try:
                 if f.is_file():
                     total += f.stat().st_size
@@ -41,6 +72,33 @@ def _size(p: Path) -> int:
     except OSError:
         return 0
 
+
+def _size_shallow(p: Path, limit: int = 4000) -> int:
+    """只算第一层：文件取大小，子目录**不递归**（按 0 算）。
+
+    %TEMP%/dfl_* 实测 181 个目录 / 2.5 GB —— 每个都 rglob 一遍要 1.7 秒，
+    而用户点「重新扫描」只是想看看有多少、能不能清。精确到 MB 没有意义，
+    所以这里只 stat 一层，几毫秒返回。清理时仍然整个目录删掉，不受影响。
+    """
+    try:
+        if p.is_file():
+            return p.stat().st_size
+        if not p.is_dir():
+            return 0
+        total = 0
+        n = 0
+        for f in p.iterdir():
+            n += 1
+            if n > limit:
+                break
+            try:
+                if f.is_file():
+                    total += f.stat().st_size
+            except OSError:
+                pass
+        return total
+    except OSError:
+        return 0
 
 def _targets() -> list:
     """[(key, 标签, 路径, 说明)] —— 每一项都是「删了会自动重建或本来就不该留」。"""
@@ -62,40 +120,45 @@ def _targets() -> list:
 def _expand(key: str) -> list:
     """把一个 key 展开成具体的路径列表。"""
     if key == "pycache":
-        try:
-            return [p for p in ROOT.rglob("__pycache__") if p.is_dir()]
-        except OSError:
-            return []
+        # 只在代码目录里找。以前是 ROOT.rglob —— 那会把 workspace（5.6 万文件）和
+        # runtime（10 万+ 文件）整个爬一遍，而它们的 __pycache__ 一个都不该清。
+        roots = [ROOT / "app", ROOT / "desktop", ROOT / "tools"]
+        out = []
+        for r in roots:
+            if not r.is_dir():
+                continue
+            try:
+                out.extend(p for p in r.rglob("__pycache__") if p.is_dir())
+            except OSError:
+                pass
+        return out
     if key == "ws_cache":
         p = WORKSPACE / ".cache"
         return [p] if p.exists() else []
     if key == "ws_log":
-        try:
-            return [p for p in WORKSPACE.glob("*_merged.log") if p.is_file()]
-        except OSError:
-            return []
+        return [p for p in _glob_capped(WORKSPACE, "*_merged.log") if p.is_file()]
     if key == "ws_backup":
-        try:
-            return [p for p in WORKSPACE.glob(".backup-*") if p.is_dir()]
-        except OSError:
-            return []
+        return [p for p in _glob_capped(WORKSPACE, ".backup-*") if p.is_dir()]
     if key == "tmp_dfl":
         import tempfile
         tmp = Path(tempfile.gettempdir())
-        try:
-            return [p for p in tmp.glob("dfl_*")]
-        except OSError:
-            return []
+        return _glob_capped(tmp, "dfl_*")
     return []
 
 
 def _scan() -> list:
     items = []
+    budget = [40000]        # 整个扫描最多 stat 4 万个条目，超出就估算（见 _size）
     for key, label, _p, note in _targets():
         paths = _expand(key)
         # 日志/备份/临时这几类是「多个小文件」：报数量比报路径有用
         n = len(paths)
-        size = sum(_size(p) for p in paths)
+        if key in ("tmp_dfl", "pycache"):
+            # tmp_dfl：181 个目录 / 2.5 GB 的中间帧；pycache：每个 __pycache__ 里的 .pyc
+            # 全在第一层。递归爬这两个要 1.7 秒，用户看到的就是「正在读取缓存清单…」卡住。
+            size = sum(_size_shallow(p) for p in paths)
+        else:
+            size = sum(_size(p, budget) for p in paths)
         items.append({"key": key, "label": label, "note": note,
                       "count": n, "bytes": size,
                       "sample": [str(p.relative_to(ROOT)) if str(p).startswith(str(ROOT))
