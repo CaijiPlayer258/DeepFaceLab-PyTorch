@@ -474,6 +474,10 @@ try:
 except Exception:
     pass
 
+# ---------------- 缓存清理（设置页那张卡片） ----------------
+from .backend_cache import router as _cache_router
+app.include_router(_cache_router)
+
 from .routes_train import router as _train_router
 app.include_router(_train_router)
 

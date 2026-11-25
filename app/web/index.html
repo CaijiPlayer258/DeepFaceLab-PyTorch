@@ -1570,6 +1570,20 @@
           </div>
           <div class="hint" id="pkgMsg" style="margin-top:8px"></div>
         </div>
+        <div class="card" style="margin-bottom:14px">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:9px">
+            <b style="font-size:13px">缓存</b>
+            <span class="tag t-gray" id="cacheTag">未检测</span>
+            <div style="flex:1"></div>
+            <button class="mini" id="cacheScan">重新扫描</button>
+            <button class="mini" id="cacheClean">清理</button>
+          </div>
+          <div id="cacheBox" class="hint">正在读取缓存清单…</div>
+          <div class="hint" style="margin-top:8px">
+            字节码缓存必须清 —— 更新后如果不清，Python 可能继续跑旧 .pyc，
+            表现是「关于页显示新版本、行为却是旧的」。清完要重启一次才生效。
+          </div>
+        </div>
         <div class="card">
           <b style="font-size:13px;display:block;margin-bottom:10px">GitHub 代理</b>
           <div class="inp mono" style="margin-bottom:9px">http://127.0.0.1:26561</div>
