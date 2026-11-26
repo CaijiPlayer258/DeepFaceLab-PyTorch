@@ -67,7 +67,10 @@ def parse_version(v=None) -> Dict[str, Any]:
         major, minor, mm, dd, b = md.groups()
         build = int(b or 1)
         human = "v%s.%s \u00b7 %s-%s" % (major, minor, mm, dd)
-        if build > 1:
+        # 只要版本号里**显式写了** -bN 就显示，包括 b0 / b1。
+        # 以前是 `if build > 1`，于是 1126-b0、1126-b1 和「不带 build 的 1126」
+        # 在关于页长得一模一样 —— 用户根本分不清自己装的是哪一版。
+        if b is not None:
             human += " \u00b7 B%d" % build
         return {"version": v, "base": "%s.%s" % (major, minor), "build": build,
                 "when": None, "human": human}
