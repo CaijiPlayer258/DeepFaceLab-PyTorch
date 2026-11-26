@@ -1687,14 +1687,46 @@
   }
   window.mgAddFaceNext = mgAddFaceNext;
 
+  /* 角标 = **库里真实的脸数**，不是「本次点了几次 +」。
+
+     以前这里是纯前端累加：只加不减、换视频不清零、从不问后端。于是出现过
+     角标 20、点进去「总脸数 4」—— 两个数字语义不同，用户只会觉得坏了一处。
+     现在：真实数量由 refreshDbBadge() 从 /api/merge/faces 拉；bump 只在乐观
+     更新时临时 +N，下一次刷新会被真值覆盖。 */
+  function mgDbBadgeSet(n) {
+    var el = document.getElementById("mgDbBadge");
+    if (!el) return;
+    var v = Math.max(0, parseInt(n, 10) || 0);
+    el.textContent = String(v);
+    el.hidden = v === 0;
+  }
+
   function mgDbBadgeBump(delta) {
     var el = document.getElementById("mgDbBadge");
     if (!el) return 0;
     var n = Math.max(0, (parseInt(el.textContent, 10) || 0) + (delta == null ? 1 : delta));
     el.textContent = String(n);
     el.hidden = n === 0;
+    /* 乐观 +1 之后异步问一次真值 —— 若后端判成 replaced，数字会自己退回去 */
+    setTimeout(mgDbBadgeRefresh, 400);
     return n;
   }
+
+  /* 从后端拿全库真实脸数。失败就保持现状，不弹错（这只是个角标）。 */
+  function mgDbBadgeRefresh() {
+    try {
+      var q = "?project=" + encodeURIComponent(window.__mergeInputDir || "");
+      fetch("/api/merge/faces" + q).then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (!d || !Array.isArray(d.faces)) return;
+          var live = d.faces.filter(function (f) { return !f.trashed; }).length;
+          mgDbBadgeSet(live);
+        })
+        .catch(function () {});
+    } catch (e) { /* 忽略 */ }
+  }
+  window.mgDbBadgeRefresh = mgDbBadgeRefresh;
+  window.mgDbBadgeSet = mgDbBadgeSet;
   window.mgDbBadgeBump = mgDbBadgeBump;
 
   /* 从当前合成帧里裁这一块当飞行缩略图（纯 dataURL，画布不会跨域污染） */
@@ -1842,6 +1874,8 @@
        视频模式下它永远是空串，于是画面里明明有视频，点「人脸数据库」也弹
        「还没有素材」（「＋」那边再弹一条就自相矛盾了）。 */
     var entry = document.getElementById("mgDbEntry");
+    /* 进合成器就把真实脸数拿一次 —— 别等用户点「＋」才让角标有内容 */
+    mgDbBadgeRefresh();
     if (entry && !entry.dataset.bound) {
       entry.dataset.bound = "1";
       entry.addEventListener("click", function () {
@@ -1849,6 +1883,7 @@
           toast("人脸数据库没有加载", "face_db.js 版本不匹配，刷新页面再试", "error");
           return;
         }
+        mgDbBadgeRefresh();
         window.FaceDB.open({
           project: window.__mergeInputDir || "",   /* 空 = 后端落到默认库 */
           mode: "export",
