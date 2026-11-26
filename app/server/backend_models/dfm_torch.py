@@ -92,6 +92,10 @@ def _flag(name, default="0"):
     return str(_env(name, default)).lower() in ("1", "true", "yes", "on")
 
 
+# 一句话速查（放在模块顶部附近，用户看日志能自己找过来）：
+#   DFL_DFM_GRAPH_B=            留空 = 整段关掉 CUDA Graph（并发撞车时最省心的开关）
+#   DFL_DFM_GRAPH_WARM=8        调大预热；仍失败说明不是 cuDNN 首次形状
+#   CUDA_LAUNCH_BLOCKING=1      让 CUDA 错误同步落在真正的算子上（很慢，只用于诊断）
 def _env_batches(name, default="1,2,4,8"):
     """\"1,2,4,8\" -> {1,2,4,8}；**显式留空** -> set()（一个都不捕获，全走 eager）。
 
@@ -523,10 +527,16 @@ class DfmTorch:
             # 真正的错因在 __context__ 里：外面这句 901（capture invalidated）是**派生**的，
             # 原始那条（900 / CUDNN_STATUS_INTERNAL_ERROR_DEVICE_ALLOCATION_FAILED 之类）
             # 挂在 e.__context__ 上。以前只记 str(e)，等于把真因丢了。
+            def _one(v, n=220):
+                # torch 的异常文本自带换行（CUDA kernel errors might be...），
+                # 直接塞进日志会被拆成好几行，用户复制出来只剩 "← 真因: R"。
+                # 压成单行，前后各留一点，够定位就行。
+                t = " ".join(str(v).split())
+                return t[:n]
             _ctx = getattr(e, "__context__", None)
             _ctx_txt = ("" if _ctx is None
-                        else " ← 真因: %s: %s" % (type(_ctx).__name__, str(_ctx)[:200]))
-            self.g_fail[b] = "%s: %s%s" % (type(e).__name__, str(e)[:240], _ctx_txt)
+                        else " ← 真因: %s: %s" % (type(_ctx).__name__, _one(_ctx)))
+            self.g_fail[b] = "%s: %s%s" % (type(e).__name__, _one(e), _ctx_txt)
             # ★ 一次失败要**全局禁用**，不能只关这一档。
             # 原因：captures_underway 是 torch 的**进程级**状态。子代理 B 扫 c10_cuda.dll 的
             # 字符串确认：那句 assert 在 c10/cuda/CUDACachingAllocator.cpp:3475（**不是**

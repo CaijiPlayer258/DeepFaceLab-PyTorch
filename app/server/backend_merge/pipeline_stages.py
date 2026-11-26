@@ -1188,8 +1188,18 @@ def _dfm_session(dfm: str, lane: int = 0):
                               if getattr(sess, "graph_on", False) else "关"))
             except Exception as _e:                     # noqa: BLE001
                 # 起不来就明确回落到 onnx —— 但**必须喊出来**，不许静默换后端
-                _stage_log("换脸：torch 后端起不来（%s: %s）→ 回落到 onnxruntime CUDA"
-                           % (type(_e).__name__, str(_e)[:200]))
+                # 压成单行：torch 的异常自带换行（CUDA kernel errors might be...），
+                # 直接 %s 会被拆成好几行，用户复制日志时后半截就丢了。
+                _e1 = " ".join(str(_e).split())[:300]
+                _hint = ""
+                if "captures_underway" in _e1:
+                    _hint = ("（同一进程里已经有一次 CUDA Graph 捕获失败过 —— 分配器认为"
+                             "「仍在捕获中」，之后任何分配都会被拒。这是并发问题，不是配置问题；"
+                             "设 DFL_DFM_GRAPH_B= 留空可整段关掉）")
+                elif "previous error during capture" in _e1:
+                    _hint = "（别条线程在捕获窗口里做了 CUDA 同步/分配，详见上一行 ★）"
+                _stage_log("换脸：torch 后端起不来（%s: %s）→ 回落到 onnxruntime CUDA%s"
+                           % (type(_e).__name__, _e1, _hint))
                 use_torch = False
                 sess = None
                 backend = "ort-cuda"
