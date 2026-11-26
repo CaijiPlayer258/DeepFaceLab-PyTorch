@@ -185,6 +185,13 @@ _VID_MAX_RECORDS = 20000           # 逐帧记录（给验收 / 排障看）
 # 逐帧日志同时落一份到 <成片>.log：状态接口只回最后 50 行，整片每帧都走了 dfm
 # 这件事得有个能 grep 的地方（用户要的是「日志显示每帧都走了 dfm」）。
 _VID_LOG_LOCK = threading.Lock()
+# 阶段性日志的判据（见 _vid_log 里的自动 echo）。
+# 逐帧那类（「第 1234 帧 …」）一个词都不含，所以不会把进程日志刷爆。
+_VID_ECHO_HINT = __import__("re").compile(
+    "完成|结束|失败|错误|报错|取消|中断|开始|启动|进入|导出模式|加载|模型|"
+    "编码|收尾|内存|显存|攒批|帧预算|批次|趟|回落|回退|警告|跳过|"
+    "超时|重试|OOM|对不起|装不下|拒绝")
+
 _VID_LOG_FH = {"fh": None, "path": ""}
 
 
@@ -214,8 +221,25 @@ def _vid_close_log() -> str:
     return path
 
 
-def _vid_log(msg):
+def _vid_log(msg, echo=False):
+    """记一条导出日志。三条去处：<视频>_merged.log / 内存 log / （可选）stdout。
+
+    `echo=True` 才会同时 print 一份到 _server_output.log。为什么默认不 echo：
+    逐帧的日志（每帧一张脸一行）echo 出来会把进程日志刷爆。
+
+    但**阶段性的**几行（开始 / 模型 / 编码 / 失败 / 完成）必须 echo —— 否则用户
+    反馈「导出卡住」时，_server_output.log 里只剩 [req] 那一行，什么都看不出来：
+    <视频>_merged.log 要到 _start_video_export 的第 569 行才打开，而真出问题往往
+    就在那之前。
+    """
     line = str(msg)[:300]
+    # 自动 echo 的判据：含这些词的**都是阶段性的**，一次导出最多几十行；
+    # 逐帧日志（每帧一张脸一行）不含它们，所以不会被刷屏。
+    if echo or _VID_ECHO_HINT.search(line) is not None:
+        try:
+            print("[vid] " + line, flush=True)
+        except Exception:                                 # noqa: BLE001
+            pass
     with _VID_LOG_LOCK:
         fh = _VID_LOG_FH.get("fh")
         if fh is not None:
