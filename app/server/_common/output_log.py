@@ -76,12 +76,6 @@ class _Tee(io.TextIOBase):
                 self._s.flush()      # 每行都推出去：这些日志是给排障用的，不能攒
         except Exception:
             pass
-
-    def isatty(self):
-        try:
-            return bool(self._s is not None and self._s.isatty())
-        except Exception:
-            return False
         if not s:
             return 0
         global _seq
@@ -102,18 +96,6 @@ class _Tee(io.TextIOBase):
             pass
         return len(s)
 
-    def flush(self):
-        try:
-            if self._s is not None:
-                self._s.flush()
-        except Exception:
-            pass
-
-    def isatty(self):
-        try:
-            return bool(self._s is not None and self._s.isatty())
-        except Exception:
-            return False
 
     @property
     def encoding(self):
