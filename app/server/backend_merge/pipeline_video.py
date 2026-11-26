@@ -430,13 +430,22 @@ def _start_video_export(body: dict):
                 else "快速导出（fused）"))
     _mode_pick = ("passes" if (len(_dfm_set) > 1 or _bool_val(body.get("force_passes"), False))
                   else "fused")
+    # ★ 用户日志里出现过「[req] 之后什么都没有」—— _vid_log 只写文件不 print，
+    #   所以只能靠这一条判断请求到底走到哪一步。dry_run 也打，便于和真跑对照。
+    print("[export] 进入导出：mode=%s fused=%s dry_run=%s video=%s"
+          % (_mode_pick, fused, _bool_val(body.get("dry_run"), False),
+             str(body.get("video") or "")[-40:]), flush=True)
     with _merge_job_lock:
         _merge_job["mode"] = _mode_pick
         _merge_job["mode_why"] = ("distinct dfm=%d（库里有 %d 个组，不参与判定）"
                                   % (len(_dfm_set), len(_lib_dfms)))
     if _mode_pick == "passes" and fused:
         return _start_passes_export(body)
+    _t_cfg = __import__("time").monotonic()
     cfg = _fused_cfg(body) if fused else _stage_cfg(body, "frames", chain=True)
+    print("[export] cfg 已算好（%.2fs）：总帧 %s · 区间 %s · 模型 %s"
+          % (__import__("time").monotonic() - _t_cfg, cfg.get("total"),
+             cfg.get("range_key"), str(cfg.get("dfm") or "")[-32:]), flush=True)
     if not fused:
         cfg["stages"] = list(_STAGE_ORDER)
     # ---- 显存闸门：**在这里**判（HTTP 400），不能在 worker 线程里判 ----
@@ -461,6 +470,7 @@ def _start_video_export(body: dict):
     # dry_run 是预检（前端拖一次滑杆就打一次）：**不卸**预览模型，靠「可回收计入可用」
     # 拿到同样的结论；真起手这一拍才卸（reclaim_first），因为那时模型才真的要腾地方。
     _dry = _bool_val(body.get("dry_run"), False)
+    print("[export] 显存闸门：dfms=%s dry_run=%s force=%s" % (_dfms, _dry, _force), flush=True)
     if fused:
         plan = _vram_guard(_dfms,
                            {"mode": "frames", "frames": int(cfg.get("frame_budget_want") or 0),
