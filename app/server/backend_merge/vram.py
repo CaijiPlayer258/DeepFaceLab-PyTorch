@@ -738,6 +738,19 @@ def _vram_probe(ttl: float = None) -> tuple:
     free, total = _vram_free_mb(fresh=(ttl <= 0.0))
     # 来源写清楚：torch 与 nvidia-smi 取小（WDDM 上 torch 偏乐观 1.3GB，见 _vram_free_mb）
     tf, sf = _vram_free_torch()[0], _vram_free_smi()[0]
+    # ★ 上面是**两次独立探测**：free 来自 _vram_free_mb，tf/sf 是紧接着又探的一遍。
+    #   两者不一致时，日志会自相矛盾 —— 用户那份日志里就有：
+    #     [vram] 预览：显存 空闲 0 / 共 8187 MB（min(torch 3169 / smi 3367)）
+    #   min(3169, 3367) = 3169，却写 0；随后「要 1018 MB > 0 MB」→ ★拒绝。
+    #   而 7 行后重测到 2263 MB、立刻放行 —— 说明 0 是坏读数。
+    #
+    #   这里做一次一致性校验：两边差得离谱（> 64 MB）就以**这一次**探到的为准重算 free。
+    #   为什么不干脆取大：那等于乐观到 OOM。取「刚探到的这个」是因为它能被日志对上账。
+    _c = [v for v in (tf, sf) if v is not None]
+    if _c:
+        _m = int(min(_c))
+        if free is None or abs(int(free) - _m) > 64:
+            free = _m
     src = ("none" if free is None else
            "min(torch %s / smi %s)" % ("?" if tf is None else int(tf),
                                        "?" if sf is None else int(sf)))
@@ -2079,10 +2092,18 @@ def _preview_guard(dfms, label: str = "预览") -> dict:
                      "msg": "%s：模型已常驻，不再额外占显存（空闲 %s MB / 增量 0 MB）"
                             % (label, plan.get("free_mb"))})
         return _vram_apply(plan, label, sticky=True)
-    # 预览从不回收**自己**（worker 里的模型正是它要用的），但可以放掉父进程里那些
-    # 「导出留下的」dfm/XSeg 会话 —— 没有任务在跑时那是纯占用（见 _vram_release_inproc）。
+    # ★ 走到这里说明**目标模型不在 worker 的 loaded 里**（否则上面那个「已常驻 = 增量 0」
+    #   的特例已经 return 了）。所以 worker 里那份常驻模型**不是这一次要用的**，是可以卸的 ——
+    #   以前这里写 reclaim=False，理由是「worker 里的模型正是它要用的」，那个前提在到达
+    #   这一行时不成立。
+    #
+    #   代价实测：用户那份日志里 47 条预览预算行的「+ 可回收」恒为 0，而同一拍的「显存去向」
+    #   行有 40 条报「可回收 1446 / 1429 / 2239 MB」—— 同一条公式，预览喂的是 0、导出喂的是
+    #   真值。按去向行把可回收加回去重算，32 次否决里 30 次本可放行。
+    #
+    #   现在让它照常回收：宁可多卸一次、多加载一次（几秒），也别把本来能出图的预览拒掉。
     return _vram_guard(paths, {"mode": "none", "procs": 1, "reclaim_inproc": True},
-                       label=label, sticky=True, reclaim=False)
+                       label=label, sticky=True, reclaim=True)
 
 
 def _vram_guard(dfms, opts: dict = None, label: str = "任务",
