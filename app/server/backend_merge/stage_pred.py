@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from .pipeline_stages import _src_landmarks   # 68 点坐标系校验
 import numpy as np
 import os
 import queue
@@ -253,7 +254,7 @@ def _stage_do_pred(cfg: dict) -> dict:
                     crops = []
                     for ap in paths:
                         m = read_dfljpg_meta(ap) or {}
-                        lm = m.get("source_landmarks") or m.get("landmarks")
+                        lm = _src_landmarks(m, "stage_pred")
                         if not lm or len(lm) != 68:
                             crops.append((ap.stem, None, None))
                             continue
@@ -384,7 +385,7 @@ def _stage_do_pred(cfg: dict) -> dict:
                 for ap in groups[gi2][1]:
                     m = read_dfljpg_meta(ap) or {}
                     metas.append({"ap": ap,
-                                  "lm": m.get("source_landmarks") or m.get("landmarks"),
+                                  "lm": _src_landmarks(m, "stage_pred"),
                                   "box": m.get("source_rect") or None})
                 plans = _stage_pred_assign(cfg, frame, metas)
                 for meta_f, use_dfm in zip(metas, plans):

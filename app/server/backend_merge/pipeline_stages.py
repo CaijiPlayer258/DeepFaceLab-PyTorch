@@ -382,9 +382,43 @@ def _stage_dst_face_mat(meta: dict, size: int = 256):
     """
     import numpy as np
 
+# 68 点的「坐标系」只有一种是对的：source_landmarks = **原帧**坐标。
+# landmarks 是 DFLJPG 里那份**芯片空间**（aligned 图上）的坐标 —— 拿它当原帧坐标
+# 去 warp，裁出来的是一块错地方的像素，embedding 变噪声，这张脸要么永远不匹配、
+# 要么撞到错的组。4.1 自己写的 DFLJPG 两个键都有，所以只有「直接拿 facelib 产的
+# aligned」才会缺；旧行为是 `source_landmarks or landmarks` 静默兜底。
+# 这里不改兜底结果（改了老数据全废），但把「用了兜底」这件事记下来 —— 该抛错的
+# 地方不该一声不响。
+_SR_LM_WARNED = set()
+
+
+def _src_landmarks(meta, tag="") -> object:
+    """原帧坐标的 68 点。缺 source_landmarks 时回落到 landmarks，并记一次警告。"""
     if not isinstance(meta, dict):
         return None
-    lm = meta.get("source_landmarks") or meta.get("landmarks")
+    lm = meta.get("source_landmarks")
+    if lm and len(lm) == 68:
+        return lm
+    lm2 = meta.get("landmarks")
+    if lm2 and len(lm2) == 68:
+        try:
+            _k = str(tag or "")
+            if _k not in _SR_LM_WARNED:
+                _SR_LM_WARNED.add(_k)
+                from .loud import note as _note_lm
+                _note_lm("读 aligned 的 68 点",
+                          RuntimeError("DFLJPG 缺 source_landmarks（%s）" % (_k or "?")),
+                          "这批数据的 landmarks 可能是芯片空间坐标 —— 拿它当原帧坐标"
+                          "用会 warp 到错地方（脸不匹配/撞错组）。建议重新提取一遍",
+                          print)
+        except Exception:                                  # noqa: BLE001
+            pass
+        return lm2
+    return None
+
+    if not isinstance(meta, dict):
+        return None
+    lm = _src_landmarks(meta, "stages:aligned")
     mat_a = meta.get("image_to_face_mat")
     if not lm or len(lm) != 68 or not mat_a:
         return None
@@ -1625,7 +1659,7 @@ def _stage_merge_face_inputs(cache, ap, cfg) -> dict:
     pred_dir = _stage_pred_dir(cache)
     mask_dir = _stage_mask_dir(cache)
     m = read_dfljpg_meta(ap) or {}
-    lm = m.get("source_landmarks") or m.get("landmarks")
+    lm = _src_landmarks(m, "stages:pred")
     if not lm or len(lm) != 68:
         return None
     pred = _stage_read_image(pred_dir / (key + ".png"))
