@@ -540,11 +540,28 @@ def main():
         # 超分滑块随每一发请求走（env 在 spawn 时就定死了，改不动）
         # 人脸超分滑块随请求走：worker 是**独立解释器**，spawn 之后父进程再改 env 它也看不见，
         # 所以每一发都按这一发带的 sr 重设一次（预览才看得见 GPEN 的效果）。
-        try:
-            from .knobs import apply_sr as _apply_sr
-            _apply_sr(req.get("sr"))
-        except Exception:                                  # noqa: BLE001
-            pass
+        # ★ 这个 worker 是拷到 %TEMP%/.../preview_worker_<sha>.py 当**脚本**跑的 ——
+        #   相对 import（from .knobs）在脚本模式下必然 ImportError，而它整段包在
+        #   except 里，失败得一声不响。于是「超分滑块随请求走」这件事从来没生效过。
+        #   先按绝对名试（脚本模式的 sys.path 里父进程已经塞了 app/），再退相对。
+        _apply_sr = None
+        for _imp in (lambda: __import__("server.backend_merge.knobs", fromlist=["apply_sr"]).apply_sr,
+                     lambda: __import__("backend_merge.knobs", fromlist=["apply_sr"]).apply_sr):
+            try:
+                _apply_sr = _imp()
+                break
+            except Exception:                              # noqa: BLE001
+                continue
+        if _apply_sr is None:
+            try:
+                from .knobs import apply_sr as _apply_sr   # 正常包内 import 时的兜底
+            except Exception:                              # noqa: BLE001
+                _apply_sr = None
+        if _apply_sr is not None:
+            try:
+                _apply_sr(req.get("sr"))
+            except Exception:                              # noqa: BLE001
+                pass
         if cmd == "exit":
             break
         # 请求可以带裸字节块：头的 "blobs": [n1, n2, …] 就是后面几块的字节数。

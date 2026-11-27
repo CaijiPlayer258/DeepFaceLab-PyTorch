@@ -1394,6 +1394,9 @@ def merge_preview(body: dict):
                    #   q95。于是「原图」的脸在视频模式首绘里仍带着一圈 JPEG 痕迹，
                    #   而回包的 data URL 前缀硬编码成 data:image/jpeg（下面 :1428）。
                    "fmt": fmt, "quality": int(quality),
+                   # sr 也要进来：preview.py 的 common 会把它转发给 worker，
+                   # worker 每一发按它重设超分档（worker 是独立解释器，env 改不动）。
+                   "sr": _sr_lv,
                    "stop": stop, "state": state,
                    "no_swap": _face_ids_val(
                        "no_swap_faces", body.get("no_swap_faces"))}

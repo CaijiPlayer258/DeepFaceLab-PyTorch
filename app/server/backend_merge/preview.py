@@ -1133,8 +1133,13 @@ def _swap_desc(job: dict, frame, boxes, best, box_xyxy, box_wh, timings,
     models = job.get("models")
     fmt = str(job.get("fmt") or "jpg").strip().lower()
     q = int(job.get("quality") or _PREVIEW_QUALITY)
+    # ★ sr 必须随每一发走：worker 是**独立解释器**，spawn 之后父进程再改 env 它也看不见
+    #   （preview_worker.py:541 的注释写的就是这件事）。而这里以前根本没放 sr ——
+    #   于是 worker 那边 `req.get("sr")` 恒 None，超分滑块在 /preview、/preview-frame
+    #   这两条路上一点效果都没有，只有主路 /api/merge/frame（compose 里内联做 GPEN）
+    #   看得见。用户滑到 512 档，视频模式首绘里脸上完全没有 GPEN 的痕迹。
     common = {"xseg": str(job.get("xseg") or ""), "config": dict(job["config"]),
-              "jpeg_quality": int(q), "fmt": fmt}
+              "jpeg_quality": int(q), "fmt": fmt, "sr": job.get("sr")}
     no_swap = {int(x) for x in (job.get("no_swap") or ())}
     boxes = list(boxes or [])
 
