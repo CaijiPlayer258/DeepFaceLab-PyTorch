@@ -266,6 +266,10 @@ def _faces_from_fwd(det, fwd, ctx, min_face=16):
     dets = np.hstack([boxes[order], scores[order, None]]).astype(np.float32)
     kpss = kpss[order]
     keep = det._nms(dets, det.nms_thresh)
+    # 三个「脸悄悄消失」的环节各记一笔：用户在成片里看到「明明有脸却没换」时，
+    # 这三条是唯一能告诉他丢在哪儿的线索。以前全在函数里静默蒸发。
+    #   命中 N 个候选 → NMS 留 K → min_face 再砍 M。
+    _n_cand, _n_nms = int(dets.shape[0]), int(len(keep))
 
     out = []
     for i in keep:
@@ -280,6 +284,22 @@ def _faces_from_fwd(det, fwd, ctx, min_face=16):
                                 round(float(x2), 1), round(float(y2), 1)],
                         "kps": [[round(float(p[0]), 1), round(float(p[1]), 1)] for p in kp],
                         "score": round(float(d[4]), 4)})
+    # 只在真的丢了东西时打一行（正常情况下绝大多数帧不会命中，不会刷屏）。
+    _n_out = len(out)
+    if _n_cand > _n_out:
+        try:
+            if _n_cand - _n_nms > 0 or _n_nms - _n_out > 0:
+                from ..backend_merge.loud import note as _note_det
+                _note_det("检测这一帧的脸上限",
+                          RuntimeError("候选 %d → NMS 后 %d → min_face(%s px) 后 %d"
+                                       % (_n_cand, _n_nms, min_face, _n_out)),
+                          ("有 %d 张被 NMS 按 IoU>%.2f 合并掉了（贴脸/拥抱/镜面里的小脸"
+                           "会这样消失），另 %d 张按「裁进画面后小于 %s px」丢掉"
+                           % (max(0, _n_cand - _n_nms), float(det.nms_thresh),
+                              max(0, _n_nms - _n_out), min_face)),
+                          print)
+        except Exception:                                  # noqa: BLE001
+            pass
     out.sort(key=lambda x: -x["score"])
     return out
 
