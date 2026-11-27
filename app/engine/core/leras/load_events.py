@@ -62,7 +62,7 @@ class LoadResult(object):
 
     __slots__ = ("ok", "reason", "module", "path", "expected_shapes",
                  "found_shapes", "detail", "affected", "candidates",
-                 "fallback_path", "skipped", "partial")
+                 "fallback_path", "skipped", "partial", "meta")
 
     def __init__(self, module=None, path=None, ok=False, reason=REASON_MISSING,
                  detail="", expected_shapes=None, found_shapes=None,
@@ -82,6 +82,10 @@ class LoadResult(object):
         self.skipped = False
         # partial: 只加载了形状对得上的参数（优化器状态跨分辨率复用时会出现）
         self.partial = False
+        # meta: 存档自带的小元数据（目前是 {"iter": N}，见 Saveable.save_weights）。
+        #   以前没这个槽位，赋上去会抛 AttributeError 并被调用方的 except 吞掉 ——
+        #   于是「.pth 里记了 iter」和「能读到 iter」是两回事。
+        self.meta = {}
 
     def __bool__(self):
         return self.ok

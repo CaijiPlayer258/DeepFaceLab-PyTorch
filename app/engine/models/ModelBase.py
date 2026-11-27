@@ -757,6 +757,53 @@ class ModelBase(object):
             io.log_info(f'磁盘空间不足 ({free/(1024**3):.1f}GB)，删除旧备份 {oldest.name}')
             pathex.delete_all_files(oldest)
 
+    def _reconcile_iter(self):
+        """用 .pth 自带的 iter 和 data.dat 对账。
+
+        data.dat 和 .pth 是两个文件，save() 先写权重再写 dat —— 崩在中间就是
+        「权重新、dat 旧」。以前无从判断（加载只信 data.dat 的 iter），恢复后会从
+        更小的 iter 重跑一段，看着像白跑。b52 起 save_weights 把 iter 写进了 .pth
+        的同一个 zip（同一次原子替换），所以现在能对账。
+
+        **只往上取**：权重比 dat 新时用权重的 iter（权重是真的写进去了）；反过来
+        权重比 dat 旧也往上取 —— 因为 dat 的 loss_history 是那份 dat 的，训练进度
+        按大的算不会重复。两条都只影响「显示和 ETA」，不碰权重本身。
+        """
+        try:
+            names = list(self.get_model_filename_list() or [])
+        except Exception:                                    # noqa: BLE001
+            return
+        if not names:
+            return
+        _best = 0
+        for _fn in names:
+            try:
+                _p = Path(self.get_strpath_storage_for_file(_fn))
+                if not _p.is_file():
+                    continue
+                with zipfile.ZipFile(str(_p)) as _zf:
+                    if '_meta.json' not in _zf.namelist():
+                        continue
+                    _best = max(_best, int(json.loads(
+                        _zf.read('_meta.json').decode('utf-8')).get('iter') or 0))
+            except Exception:                                # noqa: BLE001
+                continue
+        if _best <= 0:
+            return
+        _cur = int(self.iter or 0)
+        if _best == _cur:
+            return
+        if _best > _cur:
+            io.log_info("[!] data.dat 里的 iter（%d）比权重里的（%d）旧 —— "
+                        "说明上次保存时权重写完了、data.dat 没写成（断电/被杀）。"
+                        "按权重的 iter 继续，不会重复跑那一段。" % (_cur, _best))
+            self.iter = _best
+        else:
+            io.log_info("[!] data.dat 里的 iter（%d）比权重里的（%d）新 —— "
+                        "说明上次保存时 data.dat 写完了、权重没写成。"
+                        "权重是旧的（训练会从旧的权重继续），但进度按 %d 显示。"
+                        % (_cur, _best, _cur))
+
     def _load_model_data(self):
         """读 data.dat —— 有参数缓存就走快路径，否则老路径全量解析。
 
@@ -786,6 +833,7 @@ class ModelBase(object):
             io.log_info(f"正在加载模型：{self.model_name} ...（参数缓存，"
                         f"{(time.time() - t_cache) * 1000:.0f} ms"
                         f"{'，损失曲线后台加载中' if self._loss_partial else ''}）")
+            self._reconcile_iter()
             return
 
         io.log_info(f"正在加载模型：{self.model_name} ...")
@@ -796,6 +844,7 @@ class ModelBase(object):
             self.loss_history = model_data.get('loss_history', [])
             self.sample_for_preview = model_data.get('sample_for_preview', None)
             self.choosed_gpu_indexes = model_data.get('choosed_gpu_indexes', None)
+        self._reconcile_iter()
         _write_params_cache(self.model_data_path, self)   # 下次就走快路径
 
     # ---------- 模型卡片用的预览快照 ----------
@@ -1028,6 +1077,12 @@ class ModelBase(object):
         # 先落权重、再写 dat。反过来的话，正好在两次写之间断电/崩溃，
         # dat 里的 iter 会比权重新一拍 —— 恢复后从更大的 iter 接着跑，
         # 曲线看着像“白跑了一段”，而且不会有任何报错。
+        # 让 save_weights 把当前 iter 写进 .pth（和权重同一个原子替换）——
+        # 加载时 _reconcile_iter 用它和 data.dat 对账。
+        try:
+            self._save_iter = int(self.iter)
+        except Exception:                                    # noqa: BLE001
+            self._save_iter = None
         self.onSave()
 
         # encoding 必须显式给：Path.write_text 的默认值是这个进程的 locale（Windows 上

@@ -141,6 +141,17 @@ class Saveable():
                 zf.writestr(f"param_{i}.npy", npy_bytes)
             if _names_blob is not None:
                 zf.writestr("_names.json", _names_blob)
+            # ★ 迭代数也写进来：data.dat 和 .pth 是两个文件，崩在两次写之间就是
+            #   「权重新、dat 旧」。以前无从判断（加载只信 data.dat 的 iter），
+            #   恢复后会从更小的 iter 重跑一段，看着像白跑。有了这条就能对账。
+            #   和权重同一个 zip → 同一次原子替换，不会出现「iter 写了、权重没写」。
+            try:
+                _it = getattr(self, "_save_iter", None)
+                if _it is not None:
+                    zf.writestr("_meta.json",
+                                json.dumps({"ver": 1, "iter": int(_it)}))
+            except Exception:                            # noqa: BLE001
+                pass
 
         # 名字旁挂：老 .pth 只有 param_i，位置一变就错配（LIAE 开关 warp 的根因）。
         # 这里把「每个位置对应哪个参数」写出来，加载时优先按名字对齐；没有旁挂的
@@ -261,6 +272,7 @@ class Saveable():
             # New format: zip of .npy files (memory-efficient save)
             try:
                 _inline_names = None
+                _inline_meta = None
                 with zipfile.ZipFile(filepath, 'r') as zf:
                     d = {}
                     for name in zf.namelist():
@@ -275,12 +287,22 @@ class Saveable():
                                 _inline_names = zf.read(name).decode('utf-8')
                             except Exception:                # noqa: BLE001
                                 _inline_names = None
+                        elif name == '_meta.json':
+                            # 存档自带 iter：调用方拿它和 data.dat 对账
+                            try:
+                                _inline_meta = json.loads(zf.read(name).decode('utf-8'))
+                            except Exception:                # noqa: BLE001
+                                _inline_meta = None
             except Exception as e:
                 res.reason = _lev.REASON_CORRUPT
                 res.detail = ("zip+npy 读取失败：%s: %s" % (type(e).__name__, e))
                 print("[WARN] Failed to load zip+npy weights from '%s': %s."
                       % (os.fspath(filepath), e))
                 return res
+            try:
+                res.meta = dict(_inline_meta or {})       # {"iter": N} 或 {}
+            except Exception:                            # noqa: BLE001
+                pass
             remap = self._name_remap(filepath, inline=_inline_names)
             if remap == "MISMATCH":
                 res.ok = False
