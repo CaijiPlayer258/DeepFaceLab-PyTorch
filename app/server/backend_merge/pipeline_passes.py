@@ -123,9 +123,14 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
     #   以前直接原样传，于是区间首帧（0 起 S-1）被跳过 —— 只丢 1 帧，不致命，
     #   但既然对账就一并对齐。end 不用动：0 起开区间 [S, E) 的末帧正是 1 起闭区间的 E。
     _start0 = max(0, int(cfg.get("start") or 0) - 1)
+    # ★ with_kps=True：68 点每张脸约 350ms（pass0.py:147 自己写的），而分趟导出
+    #   会让**每个模型各算一遍同一张脸**（3 个模型 = 算 3 遍）。在 Pass 0 算一次
+    #   存进 index.json，后面每趟直接读，省掉 (N-1) 倍。这是「分趟导出慢一个量级」
+    #   的主因之一，和正确性无关但用户感知最强。
     idx = scan(video, models=models, plan_payload=cfg.get("plan_payload"),
                start=_start0,
                end=(int(cfg["end"]) if cfg.get("end") else None), log=log,
+               with_kps=True,
                on_frame=_scan_frame)
     total_faces = int(idx.get("swap_faces") or 0)
     if not total_faces:

@@ -132,10 +132,25 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
                 x, y, w, h = [float(v) for v in (f.get("box") or ())]
             except Exception:                                # noqa: BLE001
                 continue
-            from .compose import _frame_landmarks
-            # _frame_landmarks 要的是 {box:[x1,y1,x2,y2]}；index 里存的是 [x,y,w,h]
-            det = {"box": [x, y, x + w, y + h], "kps": f.get("kps5") or []}
-            lm = _frame_landmarks(img, det, [x, y, x + w, y + h])
+            # ★ index.json 里有 kps68 就直接用（Pass 0 用 with_kps=True 算好存进去的）。
+            #   每张脸算一次 68 点约 350ms，而分趟导出是**每个模型各读一遍同一张表** ——
+            #   3 个模型就是同一张脸算 3 遍，白白多花 2/3 的时间。
+            #   没有 kps68（老项目的旧 index.json、或别的调用方）才回退去算。
+            _k68 = f.get("kps68")
+            if _k68:
+                try:
+                    lm = np.asarray(_k68, np.float32)
+                    if lm.shape != (68, 2):
+                        lm = None
+                except Exception:                          # noqa: BLE001
+                    lm = None
+            else:
+                lm = None
+            if lm is None:
+                from .compose import _frame_landmarks
+                # _frame_landmarks 要的是 {box:[x1,y1,x2,y2]}；index 里存的是 [x,y,w,h]
+                det = {"box": [x, y, x + w, y + h], "kps": f.get("kps5") or []}
+                lm = _frame_landmarks(img, det, [x, y, x + w, y + h])
             if lm is None:
                 continue
             # 和预览同一个口径：界面选了 full_face / head 就得按它取景，否则同一张脸
