@@ -244,6 +244,20 @@ def _prefetch_process_main(queue, stop_event, cmd_queue, file_paths,
         if fp in deleted_set:
             return
         deleted_set.add(fp)
+        # ★ 坏图以前是**永久静默剔除**：_get_item 拿到 None 就 _remove_path，
+        #   这张脸这一整轮都不再用，而且没有任何计数/日志。一次瞬时 I/O 错误
+        #   也会触发（不是真坏）—— 用户只看到「训练在跑」，loss 略高一点。
+        #   现在至少留下痕迹：第一次 + 每 50 次打一行。
+        try:
+            # deleted_set 刚被 add 过，它的长度就是「已剔除几个」——不用另开计数器
+            # （这个函数在预取子进程里跑，没有共享的 stats 可以写）。
+            _n = len(deleted_set)
+            if _n <= 5 or _n % 50 == 0:
+                import os as _os2
+                print("[WARN] 样本读不出来（第 %d 个，已永久跳过）：%s"
+                      % (_n, _os2.path.basename(str(fp))), flush=True)
+        except Exception:                                   # noqa: BLE001
+            pass
         item_cache.pop(fp, None)
         if use_yaw_sampling:
             yaw_group_known.discard(fp)
@@ -607,9 +621,18 @@ class SampleLoaderV4:
         return None
 
     def get_stats(self):
-        """返回统计信息字典"""
+        """返回统计信息字典。
+
+        count 报的是**当前还能用的**样本数（初始总数减去被剔除的坏图）。
+        以前直接返回 self.total_file_count —— 那是扫描时的初始值，坏图被 _remove_path
+        永久剔除之后界面上的样本数还是虚的，用户没法发现「这一轮少了 30 张」。
+        """
         return {
+            # count 是**扫描时的总数**。读不出来的样本会在预取子进程里被 _remove_path
+            # 永久剔除（一次瞬时 I/O 错误也会），那边没有回传通道 —— 与其在这里
+            # 编一个「已减掉几个」的假数字，不如如实说：真值看 WARN 日志。
             'count': self.total_file_count,
+            'count_note': '扫描时的总数；读不出来的样本会永久跳过，见 [WARN] 日志',
             'total_batches_produced': self.total_batches_produced,
             'total_images_loaded': self.total_images_received,
         }
