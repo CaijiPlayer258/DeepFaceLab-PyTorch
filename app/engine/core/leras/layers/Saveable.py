@@ -78,15 +78,26 @@ class Saveable():
             out.append("%s#%d" % (self.name or "w", len(out)))
         return out
 
-    def _name_remap(self, filepath):
-        """读旁挂名字 → {当前索引: 文件内索引}；None=按位置；"MISMATCH"=对不上。"""
-        p = Path(str(filepath) + '.names.json')
-        if not p.is_file():
-            return None
-        try:
-            d = json.loads(p.read_text(encoding='utf-8'))
-        except Exception:
-            return None
+    def _name_remap(self, filepath, inline=None):
+        """读名字映射 → {当前索引: 文件内索引}；None=按位置；"MISMATCH"=对不上。
+
+        inline：zip 内 `_names.json` 的内容（**权威来源**）。给了就用它，不再碰旁挂 ——
+        旁挂可能属于下一次保存（见 save_weights 的注释），读它反而会错配。
+        """
+        d = None
+        if inline:
+            try:
+                d = json.loads(inline)
+            except Exception:                                # noqa: BLE001
+                d = None
+        if d is None:
+            p = Path(str(filepath) + '.names.json')
+            if not p.is_file():
+                return None
+            try:
+                d = json.loads(p.read_text(encoding='utf-8'))
+            except Exception:                                # noqa: BLE001
+                return None
         saved = d.get('keys') or []
         if not saved:
             return None
@@ -109,10 +120,27 @@ class Saveable():
         weights = self.get_weights()
 
         # 逐权重写入 zip（不建大 dict），每个权重存为 param_{i}.npy
+        # ★ names 写进**同一个 zip**（条目 `_names.json`）。
+        #   以前它是旁挂文件、而且在 .pth 之前 os.replace —— 崩在两次替换之间就是
+        #   「新 names.json + 旧 .pth」：加载时按新名字重排旧权重，明明是同一个存档
+        #   却把动量串到另一条支路，而且**不会报错**（key 集合恰好一样时能过所有检查）。
+        #   写进 zip 之后只有一次 os.replace，权重和名字要么一起生效、要么都不生效。
+        #   旁挂文件仍然照写（老工具/人工排查要用），但加载以 zip 内的为准。
+        _names_blob = None
+        try:
+            _keys = self._weight_keys()
+            _shapes = [list(int(x) for x in w.shape) for w in weights]
+            _names_blob = json.dumps(
+                {"ver": 1, "name": self.name, "keys": _keys, "shapes": _shapes},
+                ensure_ascii=False)
+        except Exception:                                    # noqa: BLE001
+            _names_blob = None
         with zipfile.ZipFile(p_tmp, 'w', zipfile.ZIP_STORED) as zf:
             for i, w in enumerate(weights):
                 npy_bytes = self._weight_to_npy_bytes(w, force_dtype=force_dtype)
                 zf.writestr(f"param_{i}.npy", npy_bytes)
+            if _names_blob is not None:
+                zf.writestr("_names.json", _names_blob)
 
         # 名字旁挂：老 .pth 只有 param_i，位置一变就错配（LIAE 开关 warp 的根因）。
         # 这里把「每个位置对应哪个参数」写出来，加载时优先按名字对齐；没有旁挂的
@@ -232,6 +260,7 @@ class Saveable():
         if fmt == 'zip_npy':
             # New format: zip of .npy files (memory-efficient save)
             try:
+                _inline_names = None
                 with zipfile.ZipFile(filepath, 'r') as zf:
                     d = {}
                     for name in zf.namelist():
@@ -240,13 +269,19 @@ class Saveable():
                             with zf.open(name) as entry:
                                 buf = io.BytesIO(entry.read())
                                 d[key] = np.load(buf, allow_pickle=False)
+                        elif name == '_names.json':
+                            # zip 内的名字映射是权威的（和权重同一个原子替换）
+                            try:
+                                _inline_names = zf.read(name).decode('utf-8')
+                            except Exception:                # noqa: BLE001
+                                _inline_names = None
             except Exception as e:
                 res.reason = _lev.REASON_CORRUPT
                 res.detail = ("zip+npy 读取失败：%s: %s" % (type(e).__name__, e))
                 print("[WARN] Failed to load zip+npy weights from '%s': %s."
                       % (os.fspath(filepath), e))
                 return res
-            remap = self._name_remap(filepath)
+            remap = self._name_remap(filepath, inline=_inline_names)
             if remap == "MISMATCH":
                 res.ok = False
                 res.reason = _lev.REASON_SHAPE
