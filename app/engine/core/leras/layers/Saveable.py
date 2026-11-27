@@ -183,6 +183,25 @@ class Saveable():
         res = _lev.LoadResult(module=self.name or type(self).__name__,
                               path=os.fspath(p))
         self.last_load_result = res
+        # ★ layout 指纹的检查以前只写在 load_weights() 里，而训练走的是**这一个**
+        #   （load_weights_ex）—— 训练路径**完全绕过** layout_matches()，所以那个保护
+        #   是死的。连带 Adam._restore_sched_state()（恢复平台期状态）也只在
+        #   load_weights 里调，于是 _loss_hist/_best_loss 无论怎样都恢复不了。
+        #   验收脚本 test_train_invariants.py 测的正是 load_weights 那条**没人走**的路，
+        #   通过时给人「这层有保护」的错觉。
+        _lm = getattr(self, "layout_matches", None)
+        if callable(_lm):
+            try:
+                if not _lm(filename):
+                    res.ok = False
+                    res.reason = "shape"
+                    res.detail = ("布局指纹不一致（layout.json 的 tag 与当前网络不同）—— "
+                                  "分辨率/架构开关变过，这份动量不能按位置套上去")
+                    _lev.emit_event(_lev.make_event(
+                        self.name or type(self).__name__, res))
+                    return res
+            except Exception:                               # noqa: BLE001
+                pass
 
         filepath = p
         if not filepath.exists():
