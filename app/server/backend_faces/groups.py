@@ -23,6 +23,7 @@
 """
 from __future__ import annotations
 
+import collections
 import os
 import threading
 from pathlib import Path
@@ -40,7 +41,9 @@ DEFAULT_THRESHOLD = 0.35
 BACKFILL_PER_GET = 120          # 一次 GET 最多补算多少张脸（大库不卡住列表）
 PROFILE_COMPUTE_LIMIT = 40      # 合成时临时补算的上限（预览要快）
 
-_PROFILES = {}
+# OrderedDict 不是装饰：group_profiles 的淘汰要 move_to_end/popitem(last=False)
+# 才是真 LRU（以前用 dict + pop(next(iter(...))) 是插入序 = FIFO，访问过救不回来）。
+_PROFILES = collections.OrderedDict()
 _PROFILES_LOCK = threading.Lock()
 _PROFILES_MAX = 8
 
@@ -336,11 +339,20 @@ def _profiles_uncached(project: Path, index: dict, compute_limit: int) -> list:
         if gid not in groups:
             continue
         used = per_group.get(gid, 0)
+        # ★ 预算只数「**这次真的算出来的**」。以前是 `per_group[gid] = used + 1`，
+        #   而 face_vector 内部先 read_vector（已有 .npy 就直接返回）—— 于是老脸
+        #   也在吃预算。index 是按入库时序排的（老的在前），结果：**只要前 40 张
+        #   已有特征，第 41 张起的新脸在任何一次导出里都不会进均值**。
+        #   实测（compute_limit=40）：100 张里前 40 有 .npy → 本次新算 0 张；
+        #   65 张里前 5 有 → 新算 35 张。用户往一个很胖的组里补 30 张更清楚的脸，
+        #   相似度分布一点不变，而换个只有 3 张脸的新组立刻生效 —— 就是这个。
+        _had = read_vector(project, str(f.get("id") or "")) is not None
         vec = face_vector(project, f, compute=(used < compute_limit))
         if vec is None:
             continue
         buckets.setdefault(gid, []).append(vec)
-        per_group[gid] = used + 1
+        if not _had:
+            per_group[gid] = used + 1          # 只有新算的才计入预算
     out = []
     for gid in sorted(buckets, key=store._group_num):
         mats = np.stack(buckets[gid])
@@ -361,16 +373,19 @@ def group_profiles(project: Path, index: dict = None,
             index = store.load_index(project)
         except store.FacesError:
             return []
-    sig = library_signature(project)
+    # ★ compute_limit 必须进键：group_profiles(..., compute_limit=0)（「只读不补算」）
+    #   和默认 40 是两种不同结果，混用一个键会让前者拿到后者算出来的东西。
+    sig = (library_signature(project), int(compute_limit))
     with _PROFILES_LOCK:
         hit = _PROFILES.get(sig)
-    if hit is not None:
-        return hit
+        if hit is not None:
+            _PROFILES.move_to_end(sig)          # 真 LRU：访问过的不该先被淘汰
+            return hit
     out = _profiles_uncached(project, index, compute_limit)
     with _PROFILES_LOCK:
         _PROFILES[sig] = out
         while len(_PROFILES) > _PROFILES_MAX:
-            _PROFILES.pop(next(iter(_PROFILES)))
+            _PROFILES.popitem(last=False)       # 淘汰最久没用过的（以前是插入序 = FIFO）
     return out
 
 
@@ -392,9 +407,20 @@ def group_id_for_dfm(index: dict, dfm: str) -> str:
 # 匹配 / 落库决策
 # ============================================================
 def match_vector(vec, profiles: list, threshold: float) -> dict:
-    """向量 vs 一组组均值 → 最像的那个组 + 是否过阈值。"""
+    """向量 vs 一组组均值 → 最像的那个组 + 是否过阈值。
+
+    orphan 组不参与 argmax：orphan = 组还在、脸还在，但对应的 .dfm 已经不在磁盘
+    上了（用户在模型页删/改名了它，store.sync_groups 会标 orphan）。以前照样算
+    argmax —— 同一张脸以 0.55 命中 orphan 组 → 调用方 _dfm_by_name 拿不到文件 →
+    matched=False → 不换；而真模型那一组（0.40，也过 0.35 阈值）明明能用却不换。
+    用户看到的是「某个人突然不换了，日志也不说为什么」。
+    """
     best = None
+    _skipped = 0
     for prof in profiles or []:
+        if prof.get("orphan") or not str(prof.get("dfm") or "").strip():
+            _skipped += 1
+            continue
         try:
             sim = emb_mod.cosine(vec, prof["vec"])
         except Exception:                                   # noqa: BLE001
@@ -402,7 +428,7 @@ def match_vector(vec, profiles: list, threshold: float) -> dict:
         if best is None or sim > best["similarity"]:
             best = {"group": prof["group"], "dfm": prof["dfm"],
                     "name": prof["name"], "similarity": round(float(sim), 4),
-                    "n": int(prof.get("n") or 0)}
+                    "n": int(prof.get("n") or 0), "orphan_skipped": int(_skipped)}
     if best is None:
         return {"group": "", "dfm": "", "name": "", "similarity": None,
                 "matched": False, "threshold": float(threshold)}

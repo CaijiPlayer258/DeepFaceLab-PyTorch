@@ -1431,9 +1431,29 @@ def _stage_pred_assign(cfg: dict, frame, metas: list) -> list:
                 profiles = []
         cache["profiles"] = profiles or []
         if not cache["profiles"]:
-            cache["off"] = True                             # 库不可用 -> 退回单模型
+            # ★ 这里以前是 `cache["off"] = True`，然后 return [single] * len(metas) ——
+            #   也就是「库选了但算不出 profiles」时，**这一帧的每一张脸都用左栏那个 dfm**。
+            #   这和 docs/12-FACE-DB.md:264 的正向实现正相反：「匹配不上的脸保持原像素，
+            #   绝不兜给第 0 个模型」；compose.py 的预览那条就是这么做的。
+            #   能走到这儿又全程不报错的路很自然：faces_project 指向上一个视频的库
+            #   （换视频后前端 window.__mergeFaceLib 还是旧的）、组刚建还没加脸、
+            #   index.json 读坏、embedding 全部算不出来。
+            #   用户看到的是：预览「没人匹配 → 原帧」，一按导出，成片里每张脸都变成
+            #   同一个人，而日志照打「人脸库归组」、unmatched 还是 0。
+            #   现在改成全部 no_swap（空 dfm = 这张脸不换、保留原像素）。
+            cache["off"] = True                             # 库不可用 -> 全部保持原像素
+            cache["off_reason"] = ("库不可用（library=%r）"
+                                   % (cfg.get("library") or cfg.get("faces_project") or ""))
     if cache.get("off"):
-        return [single] * len(metas)
+        try:
+            from .loud import note as _note_off
+            _note_off("分段导出的人脸库归组",
+                      RuntimeError(str(cache.get("off_reason") or "库不可用")),
+                      "这一帧 %d 张脸全部保持原像素（不会兜给左栏那个模型）" % len(metas),
+                      print)
+        except Exception:                                  # noqa: BLE001
+            pass
+        return [""] * len(metas)
     threshold = cfg.get("face_threshold")
     threshold = float(_fg.DEFAULT_THRESHOLD if threshold is None else threshold)
     out = []
