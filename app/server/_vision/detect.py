@@ -598,6 +598,9 @@ class TinyMogDet:
             blob *= (1.0 / 128.0)
             outs = _s1.run(None, {_in1: blob})
 
+        # 每帧从 0 开始累计（下面每个 stride 取 max，不清零会跨帧累积）
+        # 只在单张路径清：batch 路径一次算 N 张脸，清了会把前面的抹掉。
+        _DET_MISS["last_max"] = 0.0
         scores_list, boxes_list, kps_list = [], [], []
         for idx, stride in enumerate(self.STEPS):
             scores = outs[idx * 3].reshape(-1)
@@ -613,7 +616,11 @@ class TinyMogDet:
             #   严得多 —— 这是「benchmark 好、实际差」的一半原因。
             try:
                 _mx = float(scores.max()) if scores.size else 0.0
-                _DET_MISS["last_max"] = _mx
+                # ★ 取**所有 stride 的最大**，不是最后一个覆盖的。
+                #   这个循环每个 stride 都走一遍，直接赋值的话留下来的是
+                #   stride 32 的最高分（小 anchor，通常是 0.03），而真正的
+                #   人脸在 stride 8/16 上是 0.7 —— 实测把 0.66 记成 0.031。
+                _DET_MISS["last_max"] = max(float(_DET_MISS.get("last_max") or 0.0), _mx)
                 _DET_MISS["threshold"] = float(self.thresh)
             except Exception:                              # noqa: BLE001
                 pass
