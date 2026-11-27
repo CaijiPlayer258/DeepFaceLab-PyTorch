@@ -740,12 +740,7 @@ def compose_aligned_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
         for fw, mw, roi_f, roi_u8, (x0, y0, x1, y1) in layers:
             sub = work[y0:y1, x0:x1]
             blended = _blend_layer(sub, fw, mw, mode, dst_u8=roi_u8)
-            _bh, _bw = blended.shape[:2]
-            if (_bh, _bw) != (y1 - y0, x1 - x0):
-                import cv2 as _cv2
-                blended = _cv2.resize(np.asarray(blended, np.float32),
-                                      (x1 - x0, y1 - y0), interpolation=_cv2.INTER_LINEAR)
-                timings["shape_fix"] = timings.get("shape_fix", 0) + 1
+            blended = _fit_to_roi(blended, (y0, y1, x0, x1), timings, "aligned/多脸")
             work[y0:y1, x0:x1] = blended
         out = np.clip(work * 255.0, 0, 255).astype(np.uint8)
     timings["blend_ms"] = timings.get("blend_ms", 0.0) + (time.time() - t_b) * 1000.0
