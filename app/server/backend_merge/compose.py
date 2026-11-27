@@ -1034,7 +1034,18 @@ def _sr_level_of(payload: dict) -> int:
     """payload.sr → 0..100（和 knobs._sr_level 同一套解析；缓存身份要用它）。"""
     try:
         from .knobs import _sr_level as _lv
-        return int(_lv((payload or {}).get("sr")))
+        # ★ 顶层 sr 优先，其次 settings.sr —— 和 routes._sr_of_payload 对齐。
+        #   以前只读顶层，而前端 mgCmpBody 把滑块放在 settings 里；预览那条路
+        #   （POST /api/merge/frame → _frame_payload）档位恒 0，compose.py 里的
+        #   整段超分一次都不执行。六宫格 mgFdbgBody 在顶层补了 sr，所以它对 ——
+        #   这就是「调试有、预览没有」的直接原因。
+        _p = payload or {}
+        _top = _p.get("sr")
+        if _top is None or (isinstance(_top, str) and not _top.strip()):
+            _st = _p.get("settings")
+            if isinstance(_st, dict):
+                _top = _st.get("sr")
+        return int(_lv(_top))
     except Exception:                                      # noqa: BLE001
         return 0
 
@@ -1494,7 +1505,7 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
     # 任何变化（用户报的「前端合成没有 GPEN 效果」）。payload.sr = 滑块值 0..100。
     try:
         from .knobs import apply_sr as _apply_sr
-        _apply_sr(payload.get("sr") if isinstance(payload, dict) else None)
+        _apply_sr(_sr_level_of(payload) if isinstance(payload, dict) else None)
     except Exception:                                      # noqa: BLE001
         pass
 
@@ -1712,14 +1723,22 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
     # 直接在当前这张图上检一次（~35ms），坐标天然对齐，代价可以接受。
     try:
         from . import facesr as _sr
+        from .knobs import apply_sr as _apply_sr
         _lv = _sr_level_of(payload)
+        if _lv > 0:
+            _apply_sr(_lv)          # 先落 env：下面 enabled() 读的就是它
         if _lv > 0 and _sr.enabled():
-            from .knobs import apply_sr as _apply_sr
-            _apply_sr(_lv)
             _bs = _detect_boxes(out, detector, thresh) or []
             for _b in _bs:
                 try:
-                    _x, _y, _bw, _bh = [int(round(float(v))) for v in (_b.get("box") or _b)]
+                    # ★ _detect_boxes 给的是 xyxy（见 _face_debug_payload 的
+                    #   `x1, y1, x2, y2 = ...`），这里以前直接当成 [x, y, w, h] 用 ——
+                    #   于是超分区域宽=右边 x、高=下边 y，比真脸大一倍还多，
+                    #   还会被下面的 min() 往左上挪。改成先换算出 w/h。
+                    _x1, _y1, _x2, _y2 = [float(v) for v in (_b.get("box") or _b)]
+                    _x, _y = int(round(_x1)), int(round(_y1))
+                    _bw = int(round(max(0.0, _x2 - _x1)))
+                    _bh = int(round(max(0.0, _y2 - _y1)))
                 except Exception:                              # noqa: BLE001
                     continue
                 if _bw <= 8 or _bh <= 8:

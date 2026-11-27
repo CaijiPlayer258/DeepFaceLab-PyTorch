@@ -210,6 +210,11 @@
       fmt: (ns.length ? "png" : "jpg"),
       model: mgFaceSingleModel(),
       models: mgFaceModelsPayload(),
+      /* ★ 超分档位必须**顶层**也发一份：预览走 POST /api/merge/frame →
+         compose._frame_payload，它的 _sr_level_of / apply_sr 只认顶层 sr。
+         以前只在 settings 里放，那边恒 0 —— 「调试六宫格有效果、预览没有」
+         就是这个差别（mgFdbgBody 第 365 行早就在顶层补了）。 */
+      sr: (window.mgSrLevel ? window.mgSrLevel() : 0),
       settings: mgCmpSettings()
     };
   }
