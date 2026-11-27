@@ -136,12 +136,16 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
             mat = get_transform_mat(np.asarray(lm, np.float32), size, FaceType.WHOLE_FACE, scale=1.0)
             warped = cv2.warpAffine(img, mat, (size, size), flags=cv2.INTER_CUBIC)
             ins.append(np.clip(warped.astype(np.float32) / 255.0, 0, 1))
-            warped_u8 = warped
-            mats.append((f, mat, lm))
+            # ★ 每张脸自己的裁剪必须跟着它一起存。以前是 `warped_u8 = warped` 覆盖同一个
+            #   变量，然后第二个循环里 `mask_batch([pred, warped_u8])` 拿到的永远是**最后一张
+            #   脸**的图 —— 同一帧 2 张脸以上时，第 0..n-2 张脸的 xseg-dst 遮罩是用别人的剪影
+            #   算出来的。默认 mask_mode=8（xseg_prd × xseg_dst）就中，表现是脸被切掉一块
+            #   或者贴进一块不该贴的肤色；单脸帧完全正常 —— 正好是「预览对、导出一部分帧不对」。
+            mats.append((f, mat, lm, warped))
         if not ins:
             continue
         outs = _dfm_run_batch(ent, np.stack(ins, axis=0), want_u8=True)
-        for (f, _mat, lm), got in zip(mats, outs):
+        for (f, _mat, lm, _warped_u8), got in zip(mats, outs):
             try:
                 pred, prd, _dst = got[0], got[1], (got[2] if len(got) > 2 else None)
             except Exception:                                # noqa: BLE001
@@ -161,7 +165,7 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
             if _xseg is not None:
                 try:
                     _ms = _xseg.mask_batch([np.asarray(p, np.float32) / 255.0,
-                                            np.clip(warped_u8.astype(np.float32) / 255.0, 0, 1)],
+                                            np.clip(_warped_u8.astype(np.float32) / 255.0, 0, 1)],
                                            out_size=256) or []
                     if len(_ms) >= 2:
                         buf[key + "_xprd"] = np.asarray(_ms[0], np.float32) * 255.0
@@ -171,6 +175,19 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
                     _ln("pass_swap 算 XSeg 遮罩", _e, "这张脸只有 dfm 遮罩，合成口径会和导出一致性变差", log)
             buf[key + "_pred"] = p
             buf[key + "_mask"] = m
+            # DFM 的第三路输出是 dst 遮罩（模型自带的）。以前 `_dst` 解出来就扔了 ——
+            # 后果是 merge_final 只能给合成传 dst_dfm=None，于是 mask_mode=3（dst）、
+            # 4（prd×dst）、5（prd+dst）、9 这几档在导出侧退化：3 直接掉进
+            # compose._prepare_mask 的 `wrk is None → np.ones`，整块 S×S 方框贴回原帧。
+            # 六阶段那条路一直是存 `_dstdm` 的（pipeline_stages 里读 <key>_dstdm.png），
+            # 这里对齐。
+            if _dst is not None:
+                _d8 = np.asarray(_dst)
+                if _d8.dtype != np.uint8:
+                    _d8 = np.clip(_d8 * 255.0, 0, 255).astype(np.uint8)
+                if _d8.ndim == 3:
+                    _d8 = _d8[:, :, 0]
+                buf[key + "_dstdm"] = _d8
             done += 1
         if buf_from is not None and (frame - buf_from) >= int(chunk_frames):
             _flush()

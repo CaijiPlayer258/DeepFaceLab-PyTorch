@@ -138,6 +138,7 @@ def merge(video, passes, out_path=None, cfg=None, frames=None, log=print,
                 continue
             _xp = _arr.get(k + "_xprd")
             _xd = _arr.get(k + "_xdst")
+            _dstm = _arr.get(k + "_dstdm")   # DFM 自带的 dst 遮罩（mask_mode 3/4/5/9 要用）
             faces.append({"landmarks": np.asarray(lm, np.float32),
                           "pred": np.asarray(pred, np.float32) / 255.0,
                           "prd_dfm": np.asarray(mask, np.float32) / 255.0,
@@ -145,7 +146,7 @@ def merge(video, passes, out_path=None, cfg=None, frames=None, log=print,
                           # （没有它时实测差 34 LSB，差异全在脸框内）
                           "xseg_prd": (np.asarray(_xp, np.float32) / 255.0) if _xp is not None else None,
                           "xseg_dst": (np.asarray(_xd, np.float32) / 255.0) if _xd is not None else None,
-                          "dst_dfm": None})
+                              'dst_dfm': (np.asarray(_dstm, np.float32) / 255.0) if _dstm is not None else None})
         out = compose_frame(img, faces, cfg, {}) if faces else img
         # 注：GPU seamless（compose_gpu.seamless_merge）需要把 compose 的图层准备
         # （warp / 遮罩 / 色彩迁移）整段搬到 GPU 上下文里，属于单独一单的活。
