@@ -178,14 +178,30 @@ def _prepare_mask(face: dict, frame_shape, cfg: dict, size: int, timings: dict,
         wrk = cv2.resize(np.asarray(wrk, np.float32), (int(size), int(size)),
                          interpolation=cv2.INTER_CUBIC)        # 4.0:880-881
     if erode != 0 or blur != 0:                                # 4.0:882-892
-        pad = 32
-        msk = np.pad(np.asarray(wrk, np.float32), pad)
+        # ★ 三点和预览对齐（merger.py:604-624），以前都不一样：
+        #   ① pad 以前写死 32，预览是 `np.pad(..., input_size)` = 整张画布那么大。
+        #      腐蚀/膨胀接近 ±100、或遮罩贴到画布边时，32 的边不够，pad 区被
+        #      反射出来的像素会顶成硬边 —— 画布四角出现方框感。
+        #   ② 预览在 pad 之前先把 `< 1/255` 的清成 0（软边尾巴）。
+        #   ③ 预览在 blur 之前把外圈 `input_size + blur//2` 的宽带清 0（画布外没有脸），
+        #      导出没有这一步，于是 blur 会把画布边缘的遮罩往外晕出一圈。
+        wrk = np.asarray(wrk, np.float32)
+        wrk[wrk < (1.0 / 255.0)] = 0.0
+        pad = int(size)
+        msk = np.pad(wrk, pad)
         if erode > 0:
             msk = cv2.erode(msk, cv2.getStructuringElement(
                 cv2.MORPH_ELLIPSE, (erode, erode)), iterations=1)
         elif erode < 0:
             msk = cv2.dilate(msk, cv2.getStructuringElement(
                 cv2.MORPH_ELLIPSE, (-erode, -erode)), iterations=1)
+        # 画布外本来就没有脸：pad 区（宽度 pad）清 0 即可，不用预览那种
+        # `input_size + blur//2` 的宽带（那是因为它 pad 了整整一个画布）。
+        _clip = pad
+        msk[:_clip, :] = 0
+        msk[-_clip:, :] = 0
+        msk[:, :_clip] = 0
+        msk[:, -_clip:] = 0
         if blur > 0:
             b = blur + (1 - blur % 2)
             msk = cv2.GaussianBlur(msk, (b, b), 0)
