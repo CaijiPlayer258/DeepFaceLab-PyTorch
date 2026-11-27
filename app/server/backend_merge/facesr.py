@@ -108,14 +108,14 @@ def size() -> int:
     return 256 if level() <= _FULL else 512
 
 
-def _model_path() -> Path:
+def _model_path(sz: int = None) -> Path:
     p = str(os.environ.get("DFL_SR_MODEL") or "").strip()
     if p:
         return Path(p)
-    return _weights_dir() / ("gpen_bfr_%d.onnx" % size())
+    return _weights_dir() / ("gpen_bfr_%d.onnx" % (int(sz) if sz else size()))
 
 
-def _engine_path() -> Path | None:
+def _engine_path(sz: int = None) -> Path | None:
     """weights/_engine/ 下与本机 SM 匹配的 GPEN 引擎（没有就 None）。"""
     try:
         from ..backend_models.engines import sm_of
@@ -130,19 +130,20 @@ def _engine_path() -> Path | None:
         if not root.is_dir():
             continue
         for suf in (".bf16.engine", ".fp32.engine", ".engine"):
-            cand = root / ("gpen_bfr_%d.%d%s" % (size(), sm, suf))
+            cand = root / ("gpen_bfr_%d.%d%s" % ((int(sz) if sz else size()), sm, suf))
             if cand.is_file():
                 return cand
-        hits = sorted(root.glob("gpen_bfr_%d*.engine" % size()))
+        hits = sorted(root.glob("gpen_bfr_%d*.engine" % (int(sz) if sz else size())))
         if hits:
             return hits[0]
     return None
 
 
-def _build_session():
+def _build_session(sz: int = None):
     """惰性建会话；失败把原因记在 _SESS["why"] 里（调用方只读不猜）。"""
     want = str(os.environ.get("DFL_SR_BACKEND") or "auto").strip().lower()
-    eng = _engine_path()
+    # ★ sz 必须显式传下去：靠 env 反查会让「键 = 512、里面装的却是 256 引擎」——
+    eng = _engine_path(sz)
     if want in ("auto", "trt") and eng is not None:
         try:
             from ..backend_models.trt_session import TrtSession
@@ -155,7 +156,7 @@ def _build_session():
             _SESS["_why"] = "TRT 引擎加载失败（%s）：%s" % (eng.name, str(e)[:160])
             if want == "trt":
                 return None, "trt", eng.name
-    onnx = _model_path()
+    onnx = _model_path(sz)
     if not onnx.is_file():
         _SESS["_why"] = "找不到模型 %s（DFL_SR_MODEL 可指定）" % onnx
         return None, "", ""
@@ -179,7 +180,7 @@ def session(sz=None):
     with _LOCK:
         rec = _SESS.get(sz)
         if rec is None:
-            obj, backend, name = _build_session()
+            obj, backend, name = _build_session(sz)
             rec = {"obj": obj, "backend": backend, "name": name, "why": _SESS.pop("_why", "")}
             _SESS[sz] = rec
             if obj is None:
