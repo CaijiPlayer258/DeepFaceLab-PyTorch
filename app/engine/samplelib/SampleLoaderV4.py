@@ -580,6 +580,28 @@ class SampleLoaderV4:
             time.sleep(0.002)
 
         if batch:
+            # ★ 不足一个 batch 时**补齐**（有放回采样），别把短 batch 往上送。
+            #   以前是 `if batch: return batch` —— prefetch 线程退出 / 预取跟不上时
+            #   get_batch() 可能只拿到 3 个样本，网络照吃（np.stack 不挑长度）。
+            #   于是**有效 batch 会随机变小**，loss 方差和等效学习率一起变，而日志里
+            #   batch_size 永远显示配置值 —— 曲线抖得莫名其妙，找不到原因。
+            #   （数据集比 batch_size 还小时则永远小。）
+            #   补齐的语义 = 这一批里有几张被重复采样，标准做法，统计学上等价于
+            #   「这个 mini-batch 只有这么多种样本」。
+            if len(batch) < self.batch_size:
+                _short = len(batch)
+                _pad = 0
+                while len(batch) < self.batch_size:
+                    batch.append(random.choice(batch[:_short]))
+                    _pad += 1
+                if not getattr(self, "_short_batch_warned", False):
+                    self._short_batch_warned = True
+                    try:
+                        print("[WARN] 预取跟不上：这一批只有 %d 个样本（要 %d），"
+                              "已按有放回采样补齐 %d 个。数据量太少或磁盘/解码太慢时会出现。"
+                              % (_short, self.batch_size, _pad), flush=True)
+                    except Exception:                      # noqa: BLE001
+                        pass
             self.total_batches_produced += 1
             return batch
         return None
