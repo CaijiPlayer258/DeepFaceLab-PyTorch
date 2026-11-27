@@ -285,6 +285,18 @@ def _stage_do_faces(cfg: dict) -> dict:
                     if _why:
                         _stage_log("切脸拒收 %s 第 %d 张：%s"
                                    % (frames[rows[pos]].name, k, _why))
+                    # ★ 拒收原因要落盘，不能只滚一行日志。以前 append_bad_frame
+                    #   全仓只有 backend_extract/align_stream 在调，4.1 的这条链从不
+                    #   写 _bad_frames.txt —— 于是 DFL_ALIGN_GATE 的 warn 模式在这里
+                    #   等于空转：拒了哪几张、为什么拒，事后没有任何东西可复盘
+                    #   （align.py:612 的 _say 只打到 stdout，滚过去就没了）。
+                    try:
+                        from .._vision.align import append_bad_frame as _abf
+                        _abf(aligned_dir, _stage_face_name(rows[pos], k),
+                             {"bad": True, "span": 0.0, "iod": 0.0,
+                              "reason": str(_why or "对齐没有返回可用的脸")[:120]})
+                    except Exception:                      # noqa: BLE001
+                        pass
                     continue
                 # 配对键 / 68 点 / face_mat 三样都写进 DFLJPG 的 APP15
                 meta_f.update({
