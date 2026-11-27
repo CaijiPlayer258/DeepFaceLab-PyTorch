@@ -884,7 +884,17 @@
   window.mgFaceSingleModel = mgFaceSingleModel;
 
   /* ---------- 右栏参数 → 请求里的 settings ---------- */
-  var MG_MASK_INT = { "prd": 1, "dst": 2, "prd×dst": 3 };   /* 位标志：1=prd 2=dst 3=both */
+  /* 遮罩模式 → 后端 mask_mode 整数。**必须和后端同一套编号**：
+     compose.py:121  maskcfg.py:11 的官方定义是
+       0 full · 1 dst · 2 prd · 3 learned-dst · 4 prd×dst · 5 prd+dst
+       6 xseg-prd · 7 xseg-dst · 8 xseg-prd×xseg-dst · 9 全部相乘
+     而这里以前写的是 {prd:1, dst:2, prd×dst:3} —— prd 和 dst 直接反了，
+     prd×dst 落到 3（=dst）。后端 _mask_mode_int 收到整数是**原样返回**的
+     （maskcfg.py:22-23 不查表），所以它真的按 dst 跑。
+     DFM 系列和 XSeg 系列要分开算：选了 XSeg 就得落到 6/7/8，否则合成用的
+     遮罩和导出差一整套（预览 dfm-dst vs 导出 xseg-prd×xseg-dst）。 */
+  var MG_MASK_INT = { "prd": 2, "dst": 1, "prd×dst": 4, "full": 0 };
+  var MG_MASK_INT_XSEG = { "prd": 6, "dst": 7, "prd×dst": 8 };
   function mgSegVal(key, dflt) {
     var b = document.querySelector('#p-merge .seg[data-k="' + key + '"] b.on');
     if (!b) return dflt;
@@ -945,7 +955,9 @@
   function mgCmpSettings() {
     var ct = String((document.getElementById("mgColor") || {}).value || "mt");
     var mm = mgSegVal("mask", "prd×dst") || "prd×dst";
-    var maskInt = (MG_MASK_INT[mm] == null) ? 3 : MG_MASK_INT[mm];
+    var _msrc = mgSegVal("seg", "XSegLite");
+    var _tbl = /xseg/i.test(String(_msrc)) ? MG_MASK_INT_XSEG : MG_MASK_INT;
+    var maskInt = (_tbl[mm] == null) ? (_tbl === MG_MASK_INT_XSEG ? 8 : 4) : _tbl[mm];
     var erode = mgNumVal("mgErode", 0);
     var blur = mgNumVal("mgBlur", 4);
     /* 融合方式的真源 = 「模式」下拉（4 个）。右边那个两档分段（叠加/无缝）
