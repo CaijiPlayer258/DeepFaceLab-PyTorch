@@ -1087,6 +1087,10 @@
       });
     }).then(function (d) {
       if (seq !== MG_CMP.seq) return null;            /* 过期响应：丢掉 */
+      /* ★ 再比一次帧号：seq 只挡「又发了一发」，挡不住「用户已经换了帧、
+         但新帧的 /frame 还没发起」那段窗口 —— 旧帧的结果会照贴到新帧上。
+         （/preview 那条路早就有这个双保险，/frame 这边以前只比 seq。） */
+      if (mgCmpFrameIdx() !== frame) return null;
       MG_CMP.ctl = null;
       MG_CMP.lastMs = ((window.performance && performance.now) ? performance.now() : Date.now()) - t0;
       mgCmpBusyClear();

@@ -1372,7 +1372,21 @@ function mgStageEmpty(on) {
         model: mgFaceSingleModel(),
         /* 多选契约：models=[{name, faces}]；单模型时 faces=[]（= 全部脸，向后兼容） */
         models: (window.mgFaceModelsPayload ? window.mgFaceModelsPayload() : mgModelsPayload()),
-        settings: mgPreviewSettings()
+        settings: mgPreviewSettings(),
+        /* ★ 超分档位**顶层也要发**。后端有两套读法：routes._sr_of_payload 认
+           settings.sr 兜底，但 routes.py 的缓存键（_sr_lv）和发给 worker 的 job
+           只读顶层 —— 少了这一行会出现三件事：
+             ① [eff] 日志里出现 {level:100, size:256, strength:0.0} 这种自相矛盾的
+                字典（level 来自 env、size/strength 来自顶层 sr=0），看着像竞态，
+                其实只是两个数据源拼出来的；
+             ② 响应缓存对「只改超分滑块」不失效 —— 命中就直接 return，
+                连 _sr_apply_resp 都跳过，于是同一个 t 复问拿到旧档位的图；
+             ③ worker 收到的 sr 恒 0。
+           和 mgFdbgBody、mgCmpBody 保持一致。 */
+        sr: (window.mgSrLevel ? window.mgSrLevel() : 0),
+        /* 这两项同理：不补的话第 1 张会把用户点成「原图」的脸照样换掉。 */
+        no_swap_faces: (window.mgFaceNoSwapIds ? window.mgFaceNoSwapIds() : []),
+        fmt: ((window.mgSrLevel && window.mgSrLevel() > 0) ? "png" : "jpg")
       };
     }
 
@@ -1421,13 +1435,22 @@ function mgStageEmpty(on) {
           return null;
         }
         mgHint("");
-        window.mgShowOverlay(d.png);
-        if (window.mgTimingMark) window.mgTimingMark("t_frame");
+        /* ★ 这张**不贴**。视频模式下一次切帧会写两次 #mgPreview：这一发（/api/merge/preview）
+           是 4.0 引擎 + 椭圆遮罩的超分，「整脸替换」的观感像彩色铅笔描的；150ms 后
+           /api/merge/frame 补的那张才是 4.1 compose + XSeg 遮罩的正确结果。两张像素不同，
+           所以用户看到「先闪一张油画感的、再被好的覆盖」。
+           这里改成只让 /frame 出图 —— 宁可多等这一发的时间，也不要闪。
+           只有在 /frame 这条路不可用（没有 mgCmpSoon）时才回退到贴这张。 */
+        var _canCmp = !!(window.mgCmpSoon && !(opt && opt.fromFallback));
+        if (!_canCmp) {
+          window.mgShowOverlay(d.png);
+          if (window.mgTimingMark) window.mgTimingMark("t_frame");
+        }
         /* 这张是「左栏那一个模型换全部脸」的老结果（/api/merge/preview 不认人脸库）；
            合成视图要的是「每张脸按人脸库自动分配 dfm」。紧接着让 /api/merge/frame
            补一张正确的 —— 它的缓存键没变就直接命中，不会重复渲染。
            从 /frame 兜底回来那次（fromFallback）不再触发，否则两条路互相踢皮球。 */
-        if (!(opt && opt.fromFallback) && window.mgCmpSoon) window.mgCmpSoon();
+        if (_canCmp) window.mgCmpSoon();
         /* 框不在这里画：检测是「帧变了」那一刻单独并发发的（见 mgFrameChange）。
            这一发只负责把合成图贴上去 —— 谁先回来谁先渲染，谁也不等谁。 */
         return d;
