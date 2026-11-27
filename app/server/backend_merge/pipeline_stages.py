@@ -1496,20 +1496,53 @@ def _stage_pred_assign(cfg: dict, frame, metas: list) -> list:
         return [""] * len(metas)
     threshold = cfg.get("face_threshold")
     threshold = float(_fg.DEFAULT_THRESHOLD if threshold is None else threshold)
+    # ★ 跨帧轨迹（见 backend_faces/track.py）：这一帧被遮挡导致 embedding 掉下去时，
+    #   只要「同一位置、上一帧确定过」就沿用 —— 否则分段导出的成片里那张脸会
+    #   突然变回原样、下一帧又换回来。和预览/fused 用的是同一份实现。
+    _tk = None
+    try:
+        from ..backend_faces.track import FaceTracker
+        _tkc = cfg.setdefault("_pred_tracker", {})
+        if "t" not in _tkc:
+            _tkc["t"] = FaceTracker()
+        _tk = _tkc["t"]
+    except Exception:                                   # noqa: BLE001
+        _tk = None
+    try:
+        _fi = int(metas[0].get("frame") or 0) if metas else 0
+    except Exception:                                   # noqa: BLE001
+        _fi = 0
+    _boxes = [{"box": m.get("box") or [0, 0, 0, 0]} for m in metas]
     out = []
-    for m in metas:
+    _faces = []
+    for _i, m in enumerate(metas):
         dfm = ""
+        _sim = None
         try:
             lm = np.asarray(m.get("lm"), np.float32)
             box = m.get("box")
             crop, _mf = align_face_68(frame, lm, box, 512)
             vec = _fg.embed_crop(crop) if crop is not None else None
             best = _fg.match_vector(vec, cache["profiles"], threshold) if vec is not None else None
+            if best:
+                _sim = best.get("similarity")
             if best and best.get("matched") and best.get("dfm"):
                 dfm = _dfm_by_name(best["dfm"]) or ""
         except Exception:                                   # noqa: BLE001
             dfm = ""
         out.append(dfm or "")
+        _faces.append({"idx": int(_i), "face": int(_i),
+                       "group": "" , "group_name": "",
+                       "dfm": dfm or "", "model": dfm or "",
+                       "similarity": _sim, "matched": bool(dfm)})
+    if _tk is not None and _faces:
+        try:
+            _plan = {"faces": _faces, "models": [], "unmatched": [],
+                     "threshold": threshold}
+            _plan = _tk.smooth(_fi, _boxes, _plan, threshold)
+            out = [str(f.get("dfm") or "") for f in _plan["faces"]]
+        except Exception:                               # noqa: BLE001
+            pass
     return out
 
 

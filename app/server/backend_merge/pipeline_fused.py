@@ -2451,6 +2451,17 @@ def _fused_run(cfg: dict) -> dict:
                 _vid_log("  └ 缺：%s" % _m)
     except Exception:                                   # noqa: BLE001
         pass
+    # 跨帧人脸轨迹的汇总：沿用了多少次（用户报「遮挡时脸闪回原样」时看这行）
+    try:
+        from .compose import _TRACKERS as _TKS
+        for _tk in list(_TKS.values()):
+            _sum = _tk.summary()
+            if _sum:
+                _vid_log("快速导出：" + _sum)
+            _tk.stats.update({"frames": 0, "carried": 0, "rejected_low_sim": 0,
+                              "new_tracks": 0, "expired": 0})
+    except Exception:                                   # noqa: BLE001
+        pass
     # 检测侧：一帧都没过阈值的帧有多少、它们的最高分是多少 —— 直接回答
     # 「检测不到是模型问题还是阈值问题」。
     try:

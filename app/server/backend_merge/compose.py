@@ -1191,6 +1191,35 @@ def _face_vector_from_frame(frame, det_box, box_xyxy):
         return None
 
 
+# ---- 跨帧人脸轨迹（见 backend_faces/track.py）----
+# 每一条「视频 + 模式 + 名字」一个 tracker。上限 8 条：同一进程里通常只跑一单，
+# 但项目模式会同时碰几条，留点余量。
+_TRACKERS = {}
+_TRACKERS_MAX = 8
+
+
+def _tracker_for(ident):
+    from ..backend_faces.track import FaceTracker
+    # _source_ident 返回的是 **list**（不可哈希）—— 这里统一转成字符串键。
+    ident = ident if isinstance(ident, str) else json.dumps(ident, ensure_ascii=False,
+                                                           sort_keys=True, default=str)
+    tk = _TRACKERS.get(ident)
+    if tk is None:
+        if len(_TRACKERS) >= _TRACKERS_MAX:
+            _TRACKERS.pop(next(iter(_TRACKERS)))
+        tk = FaceTracker()
+        _TRACKERS[ident] = tk
+    return tk
+
+
+def _track_smooth(ident, idx: int, boxes, plan, threshold):
+    """在自动判定外面套一层轨迹平滑。失败绝不影响主流程。"""
+    try:
+        return _tracker_for(ident).smooth(int(idx), boxes, plan, threshold)
+    except Exception:                                       # noqa: BLE001
+        return plan
+
+
 def _auto_face_plan(payload: dict, frame, snap: dict, mode: str, name: str,
                     idx: int, detector: str, thresh: float, boxes=None):
     """按人脸库自动决定每张脸用哪个 dfm。返回 None = 这次不走自动。
@@ -1279,6 +1308,10 @@ def _auto_face_plan(payload: dict, frame, snap: dict, mode: str, name: str,
             "boxes": boxes, "threshold": float(threshold), "library": str(library),
             "profiles": len(profiles), "detected": len(boxes),
             "matched": sum(1 for f in faces if f["matched"])}
+    # ★ 跨帧轨迹：这一帧被遮挡（头发/手/别人身体）导致 embedding 掉下去时，
+    #   只要「同一个位置、上一帧确定过归属」就沿用 —— 否则成片里那张脸会
+    #   突然变回原样、下一帧又换回来（闪烁）。见 backend_faces/track.py。
+    plan = _track_smooth(_source_ident(snap, mode, name), idx, boxes, plan, threshold)
     _auto_cache_put(key, plan)
     return plan
 
