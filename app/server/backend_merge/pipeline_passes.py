@@ -232,8 +232,11 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
             _p(45 + int(45 * min(1.0, n / max(1, idx.get("frames") or n))),
                "分趟导出：合流 %d 帧" % n, n, int(idx.get("frames") or 0))
 
+        # 区间必须一起传下去：以前只给了 scan()，merge() 从第 0 帧写照整片 ——
+        # 「选 100~200 帧导出」静默变成全长，音画不错位但范围选择完全失效。
+        _end0 = (int(cfg["end"]) if cfg.get("end") else None)
         res = merge(video, metas, cfg=dict(cfg.get("config") or {}), png_dir=str(png_dir),
-                    on_frame=_on_merged, log=log)
+                    on_frame=_on_merged, log=log, start=_start0, end=_end0)
         _p(92, "分趟导出：编码 …", meta={"phase": "encode"})
         try:
             _ff = MR._resolve_ffmpeg("", "", Path("."))
@@ -245,7 +248,13 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
         fps = float(res.get("fps") or 25.0)
         cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
                "-framerate", "%.6g" % fps, "-start_number", "1",
-               "-i", str(png_dir / "%08d.png"), "-i", str(video),
+               "-i", str(png_dir / "%08d.png"),
+               # 音频要跟视频段对齐：段是从 _start0 开始的，而 -c:a copy 直接拷整条，
+               # 不 seek 就是「视频从 100 帧起、音频从 0 起」—— 音画整段错开。
+               # -ss 放在 -i 之前是输入 seek（关键帧对齐，够用；精确 seek 会重编码，
+               # 这里必须 copy 所以只能这样）。
+               ] + (["-ss", "%.6f" % (float(_start0) / fps)] if _start0 else []) + [
+               "-i", str(video),
                "-map", "0:v:0", "-map", "1:a:0?",
                "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
                "-c:v", enc, "-crf", str(int(crf)), "-preset", preset,

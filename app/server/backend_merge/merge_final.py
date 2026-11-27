@@ -32,7 +32,8 @@ def _load_chunks(pool: Path, names) -> dict:
 
 
 def merge(video, passes, out_path=None, cfg=None, frames=None, log=print,
-          limit=None, prefetch=2, png_dir=None, on_frame=None) -> dict:
+          limit=None, prefetch=2, png_dir=None, on_frame=None,
+          start=0, end=None) -> dict:
     """passes = [pass_<model>.json 的路径, ...]（顺序无关，按帧号合并）。"""
     import cv2
     from .compose import compose_frame
@@ -114,14 +115,24 @@ def merge(video, passes, out_path=None, cfg=None, frames=None, log=print,
     #
     # 用户说的「人脸位置根本对不上」和「两小时的片子只换了 50 分钟」是同一个 bug
     # 的两个说法：不是几何错位，是**时间轴错位**。
+    # 区间：start/end 都是 **0 起**（调用方负责把界面的 1 起换过来）。
+    # 以前这两个参数根本不存在，于是「选 100~200 帧导出」静默变成整片 ——
+    # 音画不错开，只是范围选择完全失效，用户只会觉得「怎么还是全长」。
+    _start = max(0, int(start or 0))
     _last = int(total) - 1 if int(total) > 0 else 0
     if by_frame:
         _last = max(_last, max(by_frame))
-    cur = -1
+    if end is not None:
+        _last = min(_last, int(end) - 1)
+    if _last < _start:
+        _last = _start
+    cur = _start - 1
+    if _start > 0:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, _start)   # 顺序读，只在开头 seek 一次
     cur_frame = 0
     written = 0
     swapped = 0
-    for frame in range(0, _last + 1):
+    for frame in range(_start, _last + 1):
         while cur < frame:
             if not cap.grab():
                 break
