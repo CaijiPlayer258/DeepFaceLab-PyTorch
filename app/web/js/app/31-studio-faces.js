@@ -132,7 +132,12 @@
            导出和预览共用这一份，别让两条路各说一套。
            （blend 在上面只写一次 —— 同一个对象里写两次，后面的会把前面的盖掉。） */
         ct_mode: byId('mgColor') || 'mt',
-        mask_mode_num: ({ 'prd': 1, 'dst': 2, 'prd×dst': 3 })[segOf('mask')] || 3,
+        /* 后端编号（compose.py:121 / maskcfg.py:11）：1 dst · 2 prd · 4 prd×dst；
+           XSeg 系列是 6/7/8。以前这里写的是 {prd:1, dst:2, prd×dst:3} —— 和
+           10-merge-settings.js 那套一样是错的（prd/dst 反了，prd×dst 落成 dst）。
+           这个字段目前**没有消费者**（全仓库只有这一处出现），但留着错编号迟早被接上，
+           所以按后端对齐。真正的请求走 mgCmpSettings()，那边已经分 DFM/XSeg 两张表。 */
+        mask_mode_num: ({ 'prd': 2, 'dst': 1, 'prd×dst': 4 })[segOf('mask')] || 4,
         mask_erode: tiny('遮罩腐蚀'),
         mask_blur: tiny('遮罩羽化'),
         erode_mask: tiny('遮罩腐蚀'),
