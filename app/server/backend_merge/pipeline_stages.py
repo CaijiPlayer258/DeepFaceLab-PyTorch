@@ -363,25 +363,6 @@ def _stage_read_frame(path):
     return cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
 
 
-def _stage_dst_face_mat(meta: dict, size: int = 256):
-    """aligned/*.jpg → 合成画布(size) 的仿射矩阵（2×3）；元数据不全返回 None。
-
-    **为什么不是「直接 resize 到 256」**：这条链的「合成画布」是 facelib 那一套
-    （compose_frame 用 get_transform_mat 把 pred 反贴回原帧），所以 dst 遮罩必须落在
-    同一张画布上 —— 否则 mask_mode 8/7 的遮罩会整体错开，贴回原帧就是边缘多一条
-    挖进脸里的缝。
-
-    **2026-12 更正**：_align.align_mat_from_68 现在只拟合 33 点、与 facelib 逐位等价
-    （见 app/docs/24-ALIGN-WHOLEFACE.md），重切之后的 aligned 芯片本来就是 facelib
-    画布，所以这张补偿矩阵对它们约等于恒等。历史数据（重切前切的）仍然需要它：那时
-    两张画布确实不是同一张（1203 张实测中位缩放差 0.36%、旋转 2.5°，尾部到 13%；
-    早期在 256 画布上量到的是「残差 6.1~7.2 px、缩放差 5.5%」）。
-
-    这里把 aligned 先按 image_to_face_mat 的逆变换放回原帧坐标，再用法线（facelib）
-    变换压到 size —— 一张矩阵、一次重采样，像素仍然来自 aligned 本身，不需要 1080p 原帧。
-    """
-    import numpy as np
-
 # 68 点的「坐标系」只有一种是对的：source_landmarks = **原帧**坐标。
 # landmarks 是 DFLJPG 里那份**芯片空间**（aligned 图上）的坐标 —— 拿它当原帧坐标
 # 去 warp，裁出来的是一块错地方的像素，embedding 变噪声，这张脸要么永远不匹配、
@@ -416,6 +397,31 @@ def _src_landmarks(meta, tag="") -> object:
         return lm2
     return None
 
+
+def _stage_dst_face_mat(meta: dict, size: int = 256):
+    """aligned/*.jpg → 合成画布(size) 的仿射矩阵（2×3）；元数据不全返回 None。
+
+    **为什么不是「直接 resize 到 256」**：这条链的「合成画布」是 facelib 那一套
+    （compose_frame 用 get_transform_mat 把 pred 反贴回原帧），所以 dst 遮罩必须落在
+    同一张画布上 —— 否则 mask_mode 8/7 的遮罩会整体错开，贴回原帧就是边缘多一条
+    挖进脸里的缝。
+
+    **2026-12 更正**：_align.align_mat_from_68 现在只拟合 33 点、与 facelib 逐位等价
+    （见 app/docs/24-ALIGN-WHOLEFACE.md），重切之后的 aligned 芯片本来就是 facelib
+    画布，所以这张补偿矩阵对它们约等于恒等。历史数据（重切前切的）仍然需要它：那时
+    两张画布确实不是同一张（1203 张实测中位缩放差 0.36%、旋转 2.5°，尾部到 13%；
+    早期在 256 画布上量到的是「残差 6.1~7.2 px、缩放差 5.5%」）。
+
+    这里把 aligned 先按 image_to_face_mat 的逆变换放回原帧坐标，再用法线（facelib）
+    变换压到 size —— 一张矩阵、一次重采样，像素仍然来自 aligned 本身，不需要 1080p 原帧。
+    """
+    import numpy as np
+
+    # ★ 上面 _src_landmarks 挪出去了：它以前被插在 _stage_dst_face_mat 的 body 中间，
+    #   函数被切成两半 —— 这个函数只剩 docstring + import，**恒返回 None**，而真正的
+    #   矩阵计算变成 _src_landmarks 里 return 之后的死代码。后果不是「少一条警告」：
+    #   _stage_read_dst_face 每张都返回 (None, "缺 68 点")，dst 遮罩整片缺失，
+    #   mask_mode 7/8 掉回兜底或整段失败（fused 也一样）。
     if not isinstance(meta, dict):
         return None
     lm = _src_landmarks(meta, "stages:aligned")

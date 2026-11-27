@@ -1294,6 +1294,12 @@ def merge_preview(body: dict):
     detector = _detector_val(body.get("detector"))
     thresh = _float_val("thresh", body.get("thresh"), 0.0, 1.0, 0.5)
     xseg = _xseg_of(body)
+    # fmt(png|jpg) / quality：前端「有脸点成原图」时会发 png，要求那几张逐像素相同。
+    _fmt = str(body.get("fmt") or "jpg").strip().lower()
+    if _fmt not in ("png", "jpg", "jpeg"):
+        _fmt = "jpg"
+    fmt = "png" if _fmt == "png" else "jpg"
+    quality = _int_val("quality", body.get("quality"), 1, 100, _PREVIEW_QUALITY)
 
     # ---- 生效配置（预览：配置没变就不重复打，否则播放时每帧一行会淹掉日志）----
     _pcfg = {"settings": settings, "config": cfg,
@@ -1381,6 +1387,13 @@ def merge_preview(body: dict):
                    "models": models,
                    "xseg": xseg, "config": cfg,
                    "detector": detector, "thresh": float(thresh),
+                   # ★ fmt/quality 以前没进 job，而 preview.py:1102/1134 是读这两个键的
+                   #   —— 前端在「有脸被点成原图」时会把整发请求切成 fmt=png（为了让
+                   #   那几张脸逐像素相同），结果这里既不设 send_lossless、也不传
+                   #   quality，worker 按 _PREVIEW_QUALITY(92) 编 JPEG，输入帧还先过
+                   #   q95。于是「原图」的脸在视频模式首绘里仍带着一圈 JPEG 痕迹，
+                   #   而回包的 data URL 前缀硬编码成 data:image/jpeg（下面 :1428）。
+                   "fmt": fmt, "quality": int(quality),
                    "stop": stop, "state": state,
                    "no_swap": _face_ids_val(
                        "no_swap_faces", body.get("no_swap_faces"))}
@@ -1425,7 +1438,10 @@ def merge_preview(body: dict):
     if not jpg:
         raise _BadInput("预览没有产出图", 500)
 
-    resp = _ok(png="data:image/jpeg;base64," + _b64.b64encode(jpg).decode("ascii"),
+    # 前缀要跟着实际编码走：以前硬编码 data:image/jpeg，而前端拿 png 请求去贴 ——
+    # 贴上去的是 jpeg 却当成 png 用，某些路径（逐像素比较、无损合成）会出问题。
+    _mime = "image/png" if fmt == "png" else "image/jpeg"
+    resp = _ok(png="data:" + _mime + ";base64," + _b64.b64encode(jpg).decode("ascii"),
                 ms=int(round((time.time() - t_start) * 1000.0)),
                 box=res.get("box"), has_face=bool(res.get("has_face")),
                 no_faces=bool(res.get("no_faces")),
