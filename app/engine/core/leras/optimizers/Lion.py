@@ -103,10 +103,17 @@ class Lion(nn.OptimizerBase):
         for k in sorted(bl.keys()):
             out.append(torch.nn.Parameter(
                 torch.tensor(float(bl[k]), dtype=torch.float32), requires_grad=False))
+        # ★ 必须**无条件**追加（空列表就是一个长度 0 的张量）。以前是 `if lh:` ——
+        #   而 _loss_hist 只在 lr_plateau_factor < 1.0（平台期自动降 lr）时才积累。
+        #   于是 get_weights() 的**项数可变**：存的时候 5 项（多一个 sched），
+        #   重启后新建的优化器 _loss_hist 是空的、_weight_keys() 只有 4 项 →
+        #   _name_remap 判 MISMATCH → load_weights_ex 直接 ok=False → **整份动量/
+        #   二阶矩/iterations 被丢弃并 reset_state()**。iterations 归零意味着 warmup、
+        #   余弦相位、平台期判定全部从头开始，而日志只说「参数名字与当前网络对不上
+        #   （结构变过）」—— 指向了完全错误的方向。
         lh = getattr(self, '_loss_hist', None) or []
-        if lh:
-            out.append(torch.nn.Parameter(
-                torch.tensor([float(v) for v in lh], dtype=torch.float32), requires_grad=False))
+        out.append(torch.nn.Parameter(
+            torch.tensor([float(v) for v in lh], dtype=torch.float32), requires_grad=False))
         return out
 
     def initialize_variables(self, trainable_weights, vars_on_cpu=True, lr_dropout_on_cpu=False):
