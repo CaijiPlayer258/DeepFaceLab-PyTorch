@@ -404,7 +404,18 @@ def _blend_layer(src, fw, mw, mode: str, dst_u8=None):
     m_roi = mw[r] if mw.ndim == 3 else mw[r][..., None]
     if "seamless" in mode:
         try:
-            mw_bin = np.clip(mw * 255, 0, 255).astype(np.uint8)
+            # ★ 二值阈值要和预览一致。preview 那边（merger.py:324-332）是找
+            #   「最小的、有非零像素的 i/10」当门槛（通常是 0.1）；这里以前直接用
+            #   np.clip(mw*255).astype(uint8)，等于把 mw > 0.002 全算进去 ——
+            #   Poisson 的作用域差了将近 50 倍（整圈羽化边都被拉进 seamlessClone），
+            #   同样的参数下接缝合/贴片感不一样。
+            _m2 = mw[..., 0] if mw.ndim == 3 else mw
+            _thr = 1.0 / 255.0
+            for _i in range(1, 10):
+                if bool((_m2 > _i / 10.0).any()):
+                    _thr = _i / 10.0
+                    break
+            mw_bin = np.clip((_m2 > _thr).astype(np.float32) * 255.0, 0, 255).astype(np.uint8)
             fw_u8 = np.clip(fw * 255, 0, 255).astype(np.uint8)
             m2b = mw_bin[..., 0] if mw_bin.ndim == 3 else mw_bin
             coords = cv2.findNonZero(m2b)
@@ -538,7 +549,13 @@ def compose_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
         t_ct = time.time()
         if ct:
             dw = cv2.warpAffine(roi_f, fwd, (sz, sz), flags=cv2.INTER_CUBIC)
-            fo = _color_transfer(fo, dw, wrk, ct, timings)
+            # ★ 色域迁移用的遮罩要**二值**，和预览一致：merger.py:306-307 是
+            #   `mask_area = wrk.copy(); mask_area[mask_area > 0] = 1.0`。
+            #   这里以前直接传 erode/blur 之后的连续软遮罩 —— mt 的公式是软加权
+            #   Σ(x·m)/Σm，权重从 0/1 变成 0..1，均值和方差都会变，整张脸偏色。
+            _ctm = np.asarray(wrk, np.float32).copy()
+            _ctm[_ctm > 0] = 1.0
+            fo = _color_transfer(fo, dw, _ctm, ct, timings)
         if "hist-match" in mode:
             dw2 = cv2.warpAffine(roi_f, fwd, (sz, sz), flags=cv2.INTER_CUBIC)
             fo = _imagelib().color_hist_match(fo, dw2, hist_match_threshold=hm_thr)
