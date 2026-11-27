@@ -71,7 +71,12 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
     if want_xseg:
         try:
             from .pipeline_stages import _mask_src as _msfn
-            _mask_src = _msfn({})          # 界面选的遮罩来源（XSegLite / XSeg / DFM）
+            # ★ _mask_src 返回的是 **dict**（{source, model, label, ...}），不是字符串。
+            #   以前这里 str(...) 之后传给 _stage_xseg，norm_model("<dict repr>") 认不出
+            #   → 回落 lite→xseg 的顺序 → **永远加载 XSegLite**，用户选 XSeg 也没用。
+            #   而下面那句「遮罩来源与导出一致」是照着这个假的 label 打的。
+            _ms = _msfn(settings or {})    # 界面选的遮罩来源（XSegLite / XSeg / DFM）
+            _mask_src = str((_ms or {}).get("model") or "")
         except Exception as _e:                                # noqa: BLE001
             from .loud import note as _ln
             _ln("pass_swap 取遮罩来源", _e, "遮罩来源按空处理（可能少一张遮罩）", log)
@@ -159,11 +164,20 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
             p = np.asarray(pred)
             if p.dtype != np.uint8:
                 p = np.clip(p * 255.0, 0, 255).astype(np.uint8)
-            m = np.asarray(prd)
-            if m.dtype != np.uint8:
-                m = np.clip(m * 255.0, 0, 255).astype(np.uint8)
-            if m.ndim == 3:
-                m = m[:, :, 0]
+            # prd 可能是 None：_dfm_run_batch 在输出路数 < 3 时会明确返回 None
+            # （pipeline_stages.py:1372-1375）。以前只判了 _dst，没判 prd ——
+            # np.asarray(None) * 255.0 直接 TypeError，整趟导出崩在这里。
+            if prd is None:
+                from .loud import note as _ln2
+                _ln2("pass_swap 取 dfm 的 prd 遮罩", RuntimeError("这个模型没有 prd 输出"),
+                     "这张脸只按 dfm 的 pred 贴，遮罩按全 1 处理", log)
+                m = np.full((p.shape[0], p.shape[1]), 255, np.uint8)
+            else:
+                m = np.asarray(prd)
+                if m.dtype != np.uint8:
+                    m = np.clip(m * 255.0, 0, 255).astype(np.uint8)
+                if m.ndim == 3:
+                    m = m[:, :, 0]
             key = "f%06d_%d" % (int(f["frame"]), int(f["idx"]))
             if buf_from is None:
                 buf_from = int(f["frame"])

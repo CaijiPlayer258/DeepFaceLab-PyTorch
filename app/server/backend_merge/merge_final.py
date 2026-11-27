@@ -126,9 +126,22 @@ def merge(video, passes, out_path=None, cfg=None, frames=None, log=print,
         _last = min(_last, int(end) - 1)
     if _last < _start:
         _last = _start
+    _short_at = -1
+    expected_faces = len(keys)
+    swapped_faces = 0
     cur = _start - 1
     if _start > 0:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, _start)   # 顺序读，只在开头 seek 一次
+        # ★ seek 必须验：set 失败时捕获器还停在 0，而 cur 已经当成 _start-1，
+        #   于是第 k 帧的画面会被当成 _start+k 帧去贴脸 —— 区间导出整段错位。
+        _ok_seek = bool(cap.set(cv2.CAP_PROP_POS_FRAMES, _start))
+        if not _ok_seek:
+            from .loud import note as _note_seek
+            _note_seek("merge 定位到起始帧", RuntimeError("cap.set 返回 False"),
+                       "区间起点可能不准，改用逐个 grab 走位", log)
+            _cur_probe = 0
+            while _cur_probe < _start and cap.grab():
+                _cur_probe += 1
+            cur = _cur_probe - 1
     cur_frame = 0
     written = 0
     swapped = 0
@@ -139,6 +152,10 @@ def merge(video, passes, out_path=None, cfg=None, frames=None, log=print,
             cur += 1
         ok, img = cap.retrieve()
         if not ok or img is None:
+            # EOF（正常）和「中途解不出来」（坏帧）在这里长得一样，但后果差很远：
+            # 后者会让成片从某一帧开始整段缺失，而调用方照样报「已完成」。
+            # 记一笔，收尾时和「应该写到第几帧」对账。
+            _short_at = int(frame)
             break                     # 读到 EOF：源片比 total 短，别再空转
         faces = []
         _rows = by_frame.get(frame) or []
@@ -164,6 +181,7 @@ def merge(video, passes, out_path=None, cfg=None, frames=None, log=print,
                           "xseg_prd": (np.asarray(_xp, np.float32) / 255.0) if _xp is not None else None,
                           "xseg_dst": (np.asarray(_xd, np.float32) / 255.0) if _xd is not None else None,
                               'dst_dfm': (np.asarray(_dstm, np.float32) / 255.0) if _dstm is not None else None})
+        swapped_faces += len(faces)
         out = compose_frame(img, faces, cfg, {}) if faces else img
         # 注：GPU seamless（compose_gpu.seamless_merge）需要把 compose 的图层准备
         # （warp / 遮罩 / 色彩迁移）整段搬到 GPU 上下文里，属于单独一单的活。
@@ -185,6 +203,20 @@ def merge(video, passes, out_path=None, cfg=None, frames=None, log=print,
     if vw is not None:
         vw.release()
     cap.release()
+    if _short_at >= 0 and _short_at < _last:
+        from .loud import note as _note_short
+        _note_short("merge 逐帧读源片",
+                   RuntimeError("第 %d 帧起解不出来（要到第 %d 帧）" % (_short_at, _last)),
+                   "成片会缺第 %d 帧之后的内容" % _short_at, log)
+    # ★ 池里的脸数和真正贴上去的对账。chunk 读不开（:63）、数组缺一个（:154）都会
+    #   静默 continue —— 用户看到的是「某些帧的脸没换」，日志里一个字都没有。
+    _missing = int(expected_faces) - int(swapped_faces)
+    if _missing > 0:
+        from .loud import note as _note_miss
+        _note_miss("merge 取池里的人脸",
+                   RuntimeError("池里有 %d 张脸，实际只贴上 %d 张"
+                                % (int(expected_faces), int(swapped_faces))),
+                   "有 %d 张脸没换（chunk 损坏或缺失）" % _missing, log)
     res = {"out": str(out_path), "frames": int(written), "swapped": int(swapped),
            "faces_keys": int(len(keys)), "source_frames": int(total),
            # fps 必须回传：pipeline_passes 要用它给 ffmpeg 定 -framerate。

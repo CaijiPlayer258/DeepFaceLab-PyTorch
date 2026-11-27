@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import threading
@@ -245,6 +246,14 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
         except Exception as e:                                 # noqa: BLE001
             note("passes 找 ffmpeg", e, "无法编码，这一单会失败", log)
             raise
+        # ★ 成片以前**从来没落到 out 上**：ffmpeg 只写 .part.mp4，之后没有 os.replace，
+        #   而 finally 又把 png_dir 删了 —— 于是 job 报 ok=True / pct=100 / out=<承诺路径>，
+        #   磁盘上却只有一个 <名字>.part.mp4，而本仓所有其他路径都把 .part 当半截文件
+        #   （pipeline_stages.py:1718-1726 还会主动删掉它）。
+        try:
+            out.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as _e:                                # noqa: BLE001
+            note("passes 建输出目录", _e, "编码可能失败", log)
         part = Path(str(out)).with_suffix(".part.mp4")
         fps = float(res.get("fps") or 25.0)
         cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
@@ -260,6 +269,10 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
                "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
                "-c:v", enc, "-crf", str(int(crf)), "-preset", preset,
                "-pix_fmt", "yuv420p", "-c:a", "copy",
+               # ★ 音频必须跟着截断。只给 -ss 不给 -t 的话，声音会从 seek 点一直拷到
+               #   源片结尾 —— 成片时长 = 音轨剩余长度 > 画面长度，片尾画面冻住、声音还在走。
+               #   对照 _merge_runner.py:704-705 那边是有 `-t` 的（还多吃 0.02s 防切片）。
+               "-t", "%.6f" % (max(1, int(res.get("frames") or 1)) / max(1e-6, fps)),
                "-progress", "pipe:1", "-nostats", str(part)]
         import subprocess as sp
         _n_all = max(1, int(res.get("frames") or 1))
@@ -287,6 +300,13 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
         pr.wait()
         if pr.returncode:
             raise RuntimeError("编码失败（ffmpeg %s）：%s" % (pr.returncode, _err[-400:]))
+        # 编码成功才改名：半截的 .part 留给排障，不要覆盖掉上一次的好成片。
+        try:
+            os.replace(str(part), str(out))
+        except Exception as _e:                                # noqa: BLE001
+            note("passes 把 .part 改名成成片", _e,
+                 "成片还在 %s 这个临时名上" % part, log)
+            raise
     finally:
         shutil.rmtree(str(png_dir), ignore_errors=True)
 
