@@ -63,6 +63,22 @@ def resolve(model, workspace, engine_workspace=None) -> dict:
     请求的模型文件不存在时**退到另一个**（老行为），但 fallback=True 让调用方必须回显出来。
     """
     want = norm_model(model)
+    # ★ 给了名字但认不出来 —— 这是最容易踩的一格：norm_model 返回 "" 之后
+    #   下面按 [lite, xseg] 回落，而 fallback 只在「认出来了且与找到的不同」时才
+    #   置 True，所以认不出时 fallback 恒 False，调用方**没有任何办法知道被换了**。
+    #   norm_model('1')='xseg'、('2')='lite' 这两个尤其危险：把 mask_mode 整数当
+    #   模型名传进来就能静默换一个模型。现在显式记一笔。
+    _raw_req = str(model or "").strip()
+    _unrec = bool(_raw_req and not want)
+    if _unrec:
+        try:
+            from ..backend_merge.loud import note as _note_xs
+            _note_xs("解析遮罩模型名",
+                     RuntimeError("遮罩模型名 %r 认不出来" % _raw_req),
+                     "按 XSegLite 优先回落 —— 实际加载的可能不是你指定的那个",
+                     print)
+        except Exception:                                  # noqa: BLE001
+            pass
     roots = model_roots(workspace, engine_workspace)
     order = ([want] if want else ["lite", "xseg"]) + \
             [k for k in ("lite", "xseg") if k != want]
@@ -80,10 +96,13 @@ def resolve(model, workspace, engine_workspace=None) -> dict:
                         md5 = ""
                     return {"request": want or "auto", "key": key, "path": cand,
                             "label": MODEL_LABEL[key], "engine": MODEL_ENGINE[key],
-                            "fallback": bool(want and want != key), "md5": md5,
+                            # 认不出也算「和请求的不是同一个」，否则调用方看不出被换过。
+                            "fallback": bool((want and want != key) or _unrec),
+                            "request_unrecognized": bool(_unrec), "md5": md5,
                             "candidates": tried}
     return {"request": want or "auto", "key": "", "path": None, "label": "",
-            "engine": "", "fallback": False, "md5": "", "candidates": tried}
+            "engine": "", "fallback": bool(_unrec), "request_unrecognized": bool(_unrec),
+            "md5": "", "candidates": tried}
 
 
 class XSegMasker:
