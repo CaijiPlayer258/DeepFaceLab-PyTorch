@@ -120,9 +120,17 @@ def detect_lane(*, k=0, det_obj=None, n_workers=1, time, _get, q_dec, ticks, END
                     _put(q_det, END)
                 break
             ticks.add("detect", time.perf_counter() - t)
-            # 和 ② 切脸同一个次序（按 x1 排）：脸序号 = 这个顺序，compose 也按它贴
-            job.boxes = sorted(list(boxes or []),
-                               key=lambda b: float((b.get("box") or [0, 0, 0, 0])[0]))
+            # ★ 不要重排。人脸序号（faces:[k]）的契约是 **det.detect() 返回的顺序**
+            #   = 置信度降序（_vision/detect.py:283/662 末尾有 sort），预览
+            #   （preview.py:1135-1136）、前端 no_swap_faces、passes 的 index.json
+            #   （pass0.py:84）全都按这个序。这里以前按 x1 升序重排，于是
+            #   「从左数第 k 张」和「置信度第 k 张」被混成同一个 k —— 多脸帧里
+            #   models:[{faces:[0]}] / no_swap_faces:[0] 会落到**另一张脸**上，
+            #   换错人比不换更糟。而且 _auto_face_plan 的缓存键不含 box 顺序，
+            #   两边共用缓存时还会命中邻帧的分配表。
+            #   fused 内部本来就自洽（f['k'] 和 compose 都按同一份 boxes），
+            #   所以这里只是把基准换成和前端一致的那一个。
+            job.boxes = list(boxes or [])
             job.rec["detected"] = len(job.boxes)
             _stage_tick("det")               # 交接点：检测 → 对齐/预处理
             _put(q_det, job)

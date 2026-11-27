@@ -1582,7 +1582,12 @@ def _fused_run(cfg: dict) -> dict:
                         try:
                             sz = int(_dfm_session(f["dfm"])[2])
                             fmat = get_transform_mat(np.asarray(f["lm"], np.float32), sz,
-                                                     FaceType.WHOLE_FACE, scale=1.0)
+                                                     # ★ 必须和贴回同一个 face_type。compose.py:587 的 fmat 现在读
+                     #   cfg['face_type']（_face_type_of），这里要是还写死 WHOLE_FACE，
+                     #   取脸用整脸画布、贴回用 head/full 画布 —— 成片里整张脸被放大/上移
+                     #   一截，尺度错、不是错位一点点。预览（preview_worker 把 face_type
+                     #   交给引擎，取+贴一致）和 passes（pass_swap 两处都用同一份）都不会。
+                     _face_type_of(comp_cfg), scale=1.0)
                             warped = cv2.warpAffine(job.frame, fmat, (sz, sz),
                                                     flags=cv2.INTER_CUBIC)
                             f["dfm_in"] = np.clip(warped.astype(np.float32) / 255.0, 0, 1)
@@ -1891,15 +1896,22 @@ def _fused_run(cfg: dict) -> dict:
     # ---- ⑤ 合成（CPU：compose_frame；GPU：compose_frame_gpu，DFL_COMPOSE_GPU=1）----
     def _compose_args_gpu(job):
         """GPU 入口直接吃 uint8 —— 省掉 CPU 上的 5 次 astype(/255)（实测 1.2ms/张脸）。"""
-        # 尺寸自检：这一格要送进 compose，形状不对会在合成最后一步炸（见 _pred_shape_complain）
-        if f["pred_u8"] is not None and (f["pred_u8"].ndim != 3
-                or f["pred_u8"].shape[0] != f["pred_u8"].shape[1]):
-            from .compose import _pred_shape_complain as _pc
-            _pc("fused:pred_u8", f["pred_u8"].shape, "dfm=%s" % (str(f.get("dfm") or "")[-40:]))
-        return [{"landmarks": f["lm"], "pred": f["pred_u8"],
-                 "prd_dfm": f.get("prd_u8"), "dst_dfm": f.get("dstdfm_u8"),
-                 "xseg_prd": f.get("xseg_prd_u8"), "xseg_dst": f.get("xseg_dst_u8")}
-                for f in (job.faces or [])]
+        # ★ 以前这段自检写在**语句层**（推导式之外），那里 f 根本没绑定 ——
+        #   于是 DFL_COMPOSE_GPU=1 时第一帧就 NameError，被 _fused_run 的 except 抓住、
+        #   整单退回 CPU 合成。也就是说 GPU 合成这条路从来没跑通过，而 cfg 里
+        #   compose_backend 还是 'gpu'，status 也照旧显示 gpu。
+        #   现在自检挪进循环，逻辑不变但 f 一定有值。
+        args = []
+        for f in (job.faces or []):
+            if f["pred_u8"] is not None and (f["pred_u8"].ndim != 3
+                    or f["pred_u8"].shape[0] != f["pred_u8"].shape[1]):
+                from .compose import _pred_shape_complain as _pc
+                _pc("fused:pred_u8", f["pred_u8"].shape,
+                    "dfm=%s" % (str(f.get("dfm") or "")[-40:]))
+            args.append({"landmarks": f["lm"], "pred": f["pred_u8"],
+                         "prd_dfm": f.get("prd_u8"), "dst_dfm": f.get("dstdfm_u8"),
+                         "xseg_prd": f.get("xseg_prd_u8"), "xseg_dst": f.get("xseg_dst_u8")})
+        return args
 
     def _compose_args_cpu(job):
         args = []
@@ -2233,7 +2245,12 @@ def _fused_run(cfg: dict) -> dict:
     try:
         # 帧尺寸从 probe 拿：cfg 里根本没有 frame_wh 这个键（以前读它 → 永远 False），
         # 于是 4K 也去开 CUDA Graph → 卡在「启动快速导出…」，前端看起来毫无反应。
-        _pw, _ph = int(_pr.get("width") or 0), int(_pr.get("height") or 0)
+        # ★ _vid_probe 返回的是 w/h（_media/encoder.py:67-68），不是 width/height。
+        #   上一版把 frame_wh 换成 width/height，还是同一个坑：读不到 → _big 恒 False
+        #   → 4K 照样开 CUDA Graph → 复现注释里那个「重放挂住、45s 看门狗判死」。
+        #   两种写法都认，先试短的（真源），再兜长的。
+        _pw = int(_pr.get("w") or _pr.get("width") or 0)
+        _ph = int(_pr.get("h") or _pr.get("height") or 0)
         _big = bool(_pw and _ph and _pw * _ph >= 2560 * 1440)
     except Exception:                                      # noqa: BLE001
         _big = False
