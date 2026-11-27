@@ -346,7 +346,17 @@ class RetinaFaceDet:
         if workspace is not None:
             try:
                 from ..backend_models.engines import try_engine
-                self.sess = try_engine(workspace, engine_name or Path(model_path).stem, model_path)
+                # ★ use_graph=False 不能省：TRT 的 CUDA Graph 捕获和 torch 的
+                #   （DFM 后端）落在同一线程上会直接炸 ——
+                #     RuntimeError: captures_underway.empty() INTERNAL ASSERT FAILED
+                #     at c10/cuda/CUDAGraph.cpp
+                #   实测后果是一串连锁：检测器 graph 捕获失败 → 前向 21.8ms（正常 5~8）；
+                #   DFM 的 torch 后端起不来 → 退回 onnxruntime-CUDA（33ms/张，还多占
+                #   ORT arena 的显存）→ 预览被判显存不足 → 整个导出掉速一半以上。
+                #   engines.py:78 的注释早就写了「跑流水线直接卡死 → 改 False」，
+                #   但 try_engine 的默认值一直是 True，这里没显式传就吃到了默认。
+                self.sess = try_engine(workspace, engine_name or Path(model_path).stem,
+                                       model_path, use_graph=False, own_stream=True)
             except Exception as e:                             # noqa: BLE001
                 _det_log(("retina", "try", str(model_path)),
                          "[RetinaFaceDet] TRT 引擎查找出错（%r）→ 回退 onnxruntime" % (e,))

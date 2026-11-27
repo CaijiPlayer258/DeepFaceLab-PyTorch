@@ -2064,6 +2064,14 @@
       /* 一律交给 MergePages.show：name==="main" 时它会清 .mgp-on，
       否则回主视图后主容器还被 .mgp-on 的 CSS 藏着 */
       if (window.MergePages) window.MergePages.show(name);
+      /* ★ 切进「导出设置」时把上一次的**结果面板**收起来。
+         以前它只在「返回导出设置」那颗按钮里清（20-progress-fused.js 的 toSet2），
+         而用户是**换一个视频重新进导出页**——结果面板还留着上一个视频的「导出完成」，
+         看起来像这次已经跑完了。 */
+      if (name === "settings" && typeof window.mgpResultHide === "function") {
+        window.mgpResultHide();
+        if (window.mgpRejectHide) window.mgpRejectHide();
+      }
       document.querySelector("#p-merge .mgbody") &&
         (document.querySelector("#p-merge .mgbody").style.display = (name === "main") ? "" : "none");
     }

@@ -215,8 +215,8 @@ def _note(info, **kw):
             pass
 
 
-def try_engine(workspace, name, onnx_path, sm=None, precision="bf16", use_graph=True,
-               graph_max_batch=None, info=None):
+def try_engine(workspace, name, onnx_path, sm=None, precision="bf16", use_graph=False,
+               graph_max_batch=None, info=None, own_stream=None):
     """有匹配的引擎（MD5 + SM + TRT 版本都对）就返回 TrtSession，否则 None。
 
     info: 可选 dict，函数会往里写「这次到底用了什么、没命中是为什么」：
@@ -273,7 +273,11 @@ def try_engine(workspace, name, onnx_path, sm=None, precision="bf16", use_graph=
             # _trt_session 那条日志的 %-格式化 bug（batch>1 直接 TypeError）。
             sess = TrtSession(str(p), use_graph=use_graph,
                               graph_max_batch=(1 if graph_max_batch is None
-                                               else int(graph_max_batch)))
+                                               else int(graph_max_batch)),
+                              # own_stream=True：检测器独占一条 CUDA 流，不和 torch 抢默认流。
+                              # 这是 use_graph 互撞（captures_underway.empty()）的另一半 ——
+                              # 两条路共用一个流时，TRT 的捕获会把 torch 的捕获踩掉。
+                              own_stream=own_stream)
         except Exception as e:                                 # noqa: BLE001
             _note(info, reason="引擎 %s 加载失败（%r）" % (p.name, e))
             _trt_log((name, prec, p.name),

@@ -5215,6 +5215,26 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 }
 
 /* 底部动作区：取消（次要）+ 开始导出（主） */
+/* 「开始导出」按下后到后端真正开始出帧之间有一段静默期（大视频尤其长：
+   探测帧数 + 建检测器 + 载模型 + 分配显存，实测 3~15s）。这段时间按钮什么都没变，
+   用户会反复点 —— 这里给它一个明确的「正在启动」态：变灰、不可点、左边一个转圈。 */
+#mgStartExport.is-loading,
+#mgStartExport[disabled]{
+  opacity: .55;
+  cursor: default;
+  pointer-events: none;
+}
+#mgStartExport .btn-spin{
+  display: inline-block;
+  width: 12px; height: 12px;
+  margin-right: 6px;
+  vertical-align: -2px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: mgbtnspin .7s linear infinite;
+}
+@keyframes mgbtnspin{ to{ transform: rotate(360deg) } }
 .mgp-footrow { display: flex; gap: 8px; }
 .mgp-footrow .btn {
   flex: 1 1 0;

@@ -526,6 +526,27 @@
        0 个模型直接挡回去（页面上这颗按钮本来就该是禁的，这里再兜一层）。
        参数一律从 MergePages.settings() 现取：编码器 / 质量 / 格式 / 每帧进程 /
        保留 cache / 帧范围，都是用户在设置页上改完的那一份，不会被重置。 */
+    /* 「开始导出」的忙碌态：按下 → 变灰 + 转圈 + 文案「启动中」，直到管线真正
+       开始出帧（或失败）再恢复。没有它，大视频那 3~15 秒的静默期里用户会反复点，
+       每次点击都发一次 POST，后端排一串。 */
+    window.mgExportBusy = function (on, text) {
+      var b = $("mgStartExport");
+      var b2 = $("mgStartExport2");
+      [b, b2].forEach(function (el) {
+        if (!el) return;
+        if (on) {
+          if (el.dataset.label == null) el.dataset.label = el.textContent || "开始导出";
+          el.classList.add("is-loading");
+          el.disabled = true;
+          el.innerHTML = '<span class="btn-spin"></span>' + (text || "启动中");
+        } else {
+          el.classList.remove("is-loading");
+          el.disabled = false;
+          el.textContent = el.dataset.label || "开始导出";
+        }
+      });
+    };
+
     var startGo = $("mgStartExport");
     if (startGo && !startGo.dataset.bound) {
       startGo.dataset.bound = "1";
@@ -537,7 +558,9 @@
         }
         var p = (window.MergePages && window.MergePages.settings)
           ? window.MergePages.settings() : {};
-        mgRunExport(p);
+        if (window.mgExportBusy) window.mgExportBusy(true, "启动中");
+        Promise.resolve().then(function () { return mgRunExport(p); })
+          .catch(function () { if (window.mgExportBusy) window.mgExportBusy(false); });
       });
     }
 
