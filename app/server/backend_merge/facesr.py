@@ -172,9 +172,10 @@ def _build_session():
         return None, "", ""
 
 
-def session():
-    """返回 (会话, 原因)。按当前 size 取自己的那一份（见 _SESS 的注释）。"""
-    sz = size()
+def session(sz=None):
+    """返回 (会话, 原因)。按 sz 取自己的那一份（不传就现读 env，见 _SESS 的注释）。"""
+    if sz is None:
+        sz = size()
     with _LOCK:
         rec = _SESS.get(sz)
         if rec is None:
@@ -188,6 +189,22 @@ def session():
         return rec["obj"], (rec.get("why") or "")
 
 
+def snapshot() -> dict:
+    """**一次**把 (level, strength, size) 读出来 —— 三者必须来自同一刻。
+
+    为什么要它：这三个都读 env DFL_SR，而 env 会被并发的另一个请求
+    （/api/merge/frame 的 apply_sr(0)）清掉。分开读就会出现日志里那种
+    自相矛盾的字典：{"level":100, "strength":0.0, "size":256} ——
+    紧接着 apply_roi 按 256 的输入喂 512 的模型，GPEN 输出崩成「彩色铅笔描的」。
+    """
+    lv = level()
+    if lv <= 0:
+        return {"level": 0, "strength": 0.0, "size": 256}
+    a = lv / _FULL if lv <= _FULL else (lv - _FULL) / _FULL
+    return {"level": int(lv), "strength": float(a),
+            "size": 256 if lv <= _FULL else 512}
+
+
 def info() -> dict:
     """给 [eff] / status 用的回显（报当前 size 那一份会话）。"""
     rec = _SESS.get(size()) or {}
@@ -199,10 +216,17 @@ def info() -> dict:
 _RUN_LOCK = threading.Lock()
 
 
-def _run(nchw):
+def _run(nchw, sz=None):
     """串行推理：合成车道是 8 条线程，同一个会话**不能**并发 run（TRT/ORT 都会崩）。
-    GPU 本来也是串行的，锁住不损失吞吐。"""
-    obj, why = session()
+
+    ★ sz 必须由调用方**固定一次**传进来。以前这里自己 session() → size() 再读一遍
+    env，而 env 会被并发的另一个请求（/api/merge/frame 的 apply_sr(0)）清掉：
+    入口读到 512（按 512 resize 输入）、这里读到 256（用 256 的会话）→
+    **512 的输入喂 256 的模型**，GPEN 输出直接崩成「彩色铅笔描的」。
+    info() 里出现 level=100 / strength=0.0 / size=256 这种自相矛盾的字典，也是同一个
+    竞态的证据（三次读 env 读到了不同的值）。
+    """
+    obj, why = (session(sz) if sz is not None else session())
     if obj is None:
         return None
     with _RUN_LOCK:
@@ -215,7 +239,7 @@ def _infer(obj, nchw):
     return out[0] if isinstance(out, (list, tuple)) else out
 
 
-def apply_roi(roi_u8, mask_f, alpha: float, timings: dict | None = None):
+def apply_roi(roi_u8, mask_f, alpha: float, timings: dict | None = None, sz: int = None):
     """在**帧空间**的脸区域上跑一次超分并按 mask*alpha 混回。
 
     roi_u8 : 合成之后这块 ROI 的 uint8 BGR
@@ -232,7 +256,7 @@ def apply_roi(roi_u8, mask_f, alpha: float, timings: dict | None = None):
     if m.ndim == 3:
         m = m[..., 0]
     if m.shape[:2] != roi_u8.shape[:2]:
-        m = cv2.resize(m, (roi_u8.shape[1], roi_u8.shape[0]), interpolation=cv2.INTER_NEAREST)
+        m = cv2.resize(m, (roi_u8.shape[1], roi_u8.shape[0]), interpolation=cv2.INTER_LINEAR)
     # ★ 推理用**整块 ROI**，混合才用遮罩 —— 这两个必须分开。
     #   以前按 np.nonzero(m > 0.02) 的 bbox 裁一块送去推理：XSeg 遮罩只盖皮肤，
     #   不含额头/下巴/耳朵，GPEN 拿到的是一张「残缺的脸」，输出的五官位置就错，
@@ -241,7 +265,11 @@ def apply_roi(roi_u8, mask_f, alpha: float, timings: dict | None = None):
     #   这也正是「调试六宫格看着正常」的原因：那条路的掩膜是盖满整块 panel 的椭圆，
     #   bbox 就是整块，等于整块推理。
     t0 = time.time()
-    sz = size()
+    # ★ 尺寸由调用方钉死一次传进来最好（sz 参数）。不传才现读 env ——
+    #   现读有竞态：env 会被并发的另一个请求（/api/merge/frame 的 apply_sr(0)）清掉。
+    if sz is None:
+        sz = size()
+    sz = int(sz)
     _ch, _cw = roi_u8.shape[:2]
     if _ch < 8 or _cw < 8:
         return roi_u8
@@ -256,7 +284,7 @@ def apply_roi(roi_u8, mask_f, alpha: float, timings: dict | None = None):
     x = big.astype(np.float32) / 255.0
     x = (x - 0.5) / 0.5
     nchw = np.transpose(x, (2, 0, 1))[None, ...].astype(np.float32)
-    out = _run(nchw)
+    out = _run(nchw, sz)          # sz 固定一次传下去，见 _run 的说明
     if out is None:
         timings["sr_ms"] = timings.get("sr_ms", 0.0) + (time.time() - t0) * 1000.0
         return roi_u8

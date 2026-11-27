@@ -1771,7 +1771,9 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
                     if _cv is not None and _cm is not None and _cv.size and _cm.size:
                         _cmf = np.clip(_cm.astype(np.float32) / 255.0, 0.0, 1.0)
                         # ① 画布上超分（这次喂的是它训练时见过的对齐脸）
-                        _sr_canvas = _sr.apply_roi(_cv, _cmf, _sr.strength())
+                        # 一次读全（level/strength/size 必须来自同一刻，见 facesr.snapshot）
+                        _sp = _sr.snapshot()
+                        _sr_canvas = _sr.apply_roi(_cv, _cmf, _sp["strength"], sz=_sp["size"])
                         if _sr_canvas is not None and _sr_canvas.size:
                             # ② 把「超分增量」warp 回画面（只搬 SR 信号，不重采样 dst）
                             # ★ 方向！get_transform_mat 给的是**帧 → 画布**，
@@ -2054,7 +2056,8 @@ def _face_debug_payload(payload: dict) -> dict:
                 _cv2.ellipse(_m, (_w // 2, _h // 2), (max(1, _w // 2 - 2), max(1, _h // 2 - 2)),
                             0, 0, 360, 1.0, -1)
                 _m = _cv2.GaussianBlur(_m, (0, 0), max(1.0, min(_w, _h) * 0.02))
-                _img = _sr.apply_roi(_img, _m, _sr.strength())
+                _sp2 = _sr.snapshot()
+                _img = _sr.apply_roi(_img, _m, _sp2["strength"], sz=_sp2["size"])
                 _ok2, _buf = _cv2.imencode(".png", _img)
                 if _ok2:
                     _pn["png"] = "data:image/png;base64," + _b64d.b64encode(_buf).decode("ascii")
