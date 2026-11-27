@@ -24,7 +24,7 @@ from pathlib import Path
 MAX_LINES = 6000          # 内存里留多少行
 MAX_FILE = 8 * 1024 * 1024  # 落盘超过这个大小就轮转
 _FILE = None
-_lock = threading.Lock()
+_lock = threading.RLock()   # RLock：write 内部要嵌套（原流 + 环形缓冲 + 落盘）
 _buf: "collections.deque" = collections.deque(maxlen=MAX_LINES)
 _seq = 0                  # 累计行号（环形淘汰后仍然连续，前端靠它做增量）
 _installed = False
@@ -70,15 +70,29 @@ class _Tee(io.TextIOBase):
             pass
 
     def write(self, s):                                     # noqa: D401
+        if not s:
+            return 0
+        # ★ **整段持锁**。以前只有 _buf.append 那一小段在锁里，写原流这一步是裸的，
+        #   于是多线程同时 print 会交错 —— 用户那份日志里就出现过两条撕裂行：
+        #     L51942 `\ufffd没有一档塞得进预算）（可用 206 MB）`
+        #     L52013 `)）+ 可回收 0 MB`
+        #   （前者丢了行首、后者只剩个尾巴，两条旁边还有内容重复的行）。
+        #   锁换成 RLock 是因为下面 _append_file 也要进同一把锁。
+        global _seq
+        with _lock:
+            self._write_locked(s)
+        return len(s)
+
+    def _write_locked(self, s):
+        global _seq                  # ← 必须在这里也声明：拆成两个方法后它成了局部名，
+                                     #   `_seq += 1` 会抛 UnboundLocalError，被下面的
+                                     #   except 吞掉 —— 表现是「一行都不进缓冲、也不落盘」。
         try:
             if self._s is not None:
                 self._s.write(s)
                 self._s.flush()      # 每行都推出去：这些日志是给排障用的，不能攒
         except Exception:
             pass
-        if not s:
-            return 0
-        global _seq
         try:
             # 只按 \n 断行：4.0 大量用 print(end='\r') 原地刷新，splitlines() 会把
             # 那些 \r 也当换行，界面上一半是空行。行尾的 \r 顺手剥掉。
@@ -87,10 +101,9 @@ class _Tee(io.TextIOBase):
                 lines.pop()
             if not lines:
                 return len(s)
-            with _lock:
-                for ln in lines:
-                    _seq += 1
-                    _buf.append((_seq, ln))
+            for ln in lines:
+                _seq += 1
+                _buf.append((_seq, ln))
             _append_file(s if s.endswith("\n") else s + "\n")
         except Exception:
             pass
