@@ -308,24 +308,39 @@ def library_signature(project: Path) -> str:
 
 
 def _profiles_uncached(project: Path, index: dict, compute_limit: int) -> list:
+    """每个组一个均值向量。
+
+    ★ 补算预算是**每组** compute_limit 张，不是全库共用一个计数器。
+
+    以前是全局计数器：`compute=(computed < compute_limit)`，且 `computed` 每算成一张就 +1。
+    后果是大库直接塌掉 —— 库里有 10 个组、前 4 个组的 40 张脸把预算吃光之后，
+    第 5 个组往后的脸全是 `compute=False`；那些脸如果还没有 .npy 特征（新加的都没），
+    `face_vector` 返回 None 被 `continue` 跳过 → 该组 `buckets` 为空 → **整个组不进
+    profiles** → `match_vector` 永远选不到它 → **那个 dfm 永远不换脸**。
+
+    用户的原话就是这样：「人脸数据库选得多了就不怎么换脸了」。
+
+    现在每组各自计数，保证每个有脸的组都至少能凑出自己的均值。
+    """
     groups = {}
     for g in index["groups"]:
         if not str(g.get("dfm") or "").strip():
             continue
         groups[g["id"]] = g
     buckets = {}
-    computed = 0
+    per_group = {}
     for f in index["faces"]:
         if f.get("trashed"):
             continue
         gid = str(f.get("group") or "")
         if gid not in groups:
             continue
-        vec = face_vector(project, f, compute=(computed < compute_limit))
+        used = per_group.get(gid, 0)
+        vec = face_vector(project, f, compute=(used < compute_limit))
         if vec is None:
             continue
         buckets.setdefault(gid, []).append(vec)
-        computed += 1
+        per_group[gid] = used + 1
     out = []
     for gid in sorted(buckets, key=store._group_num):
         mats = np.stack(buckets[gid])

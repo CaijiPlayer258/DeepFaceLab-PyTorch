@@ -930,6 +930,12 @@ _LOAD_HEARTBEAT = {"t": 0.0}
 
 def _beat_load():
     _LOAD_HEARTBEAT["t"] = time.time()
+# 这个 dfm 已经证明 torch 后端起不来（CUDA Graph 捕获被污染 / captures_underway）。
+# 记下来就不用每次重试 —— 否则缓存键（|torch:bf16w vs 回落后的裸 key）对不上，
+# 每次都 miss、每次都重读 353MB 权重并新建一份 ORT 会话。实测那份日志里重载了 3446 次、
+# 纯加载 87 分钟，而 _dfm_session 是**每帧每张脸调一次**的。
+_DFM_TORCH_DEAD = set()
+
 _DFM_SESS = {}          # dfm -> (sess, input_name, size, nchw, providers)
 _INFER_CALLS = collections.Counter()   # 各阶段真正跑了几次推理（验收要断言合成阶段 = 0）
 
@@ -1091,6 +1097,8 @@ def _dfm_session(dfm: str, lane: int = 0):
     # ---- 后端选择：默认 torch（精度 bf16w）；DFL_DFM_BACKEND=onnx 是回退档 ----
     _bkind, _bdtype, _bwhy = _dfm_backend_sel()
     use_torch = (_bkind == "torch" and not cpu)
+    if use_torch and key in _DFM_TORCH_DEAD:
+        use_torch = False       # 这个 dfm 的 torch 后端已经证明起不来，别再试一遍
     if _bkind == "torch" and cpu:
         _stage_log("换脸：DFL_DFM_BACKEND=torch 但这条链已强制 CPU（DFL_ALLOW_CPU_FALLBACK=1）"
                    " → 仍走 onnxruntime CPU EP（torch 的 CPU 前向比 ORT CPU 更慢，没有意义）")
@@ -1201,6 +1209,7 @@ def _dfm_session(dfm: str, lane: int = 0):
                 _stage_log("换脸：torch 后端起不来（%s: %s）→ 回落到 onnxruntime CUDA%s"
                            % (type(_e).__name__, _e1, _hint))
                 use_torch = False
+                _DFM_TORCH_DEAD.add(key)    # 本进程内不再为这个 dfm 试 torch
                 sess = None
                 backend = "ort-cuda"
                 ckey = key + ("|cpu" if cpu else "") + _lane_tag  # 别把 onnx 会话挂在 torch 的 key 上
