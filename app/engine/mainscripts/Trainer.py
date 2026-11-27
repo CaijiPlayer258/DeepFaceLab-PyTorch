@@ -812,6 +812,27 @@ def trainerThread (s2c, c2s, e,
         except Exception as e:
             print ('Error: %s' % (str(e)))
             traceback.print_exc()
+            # ★ 崩了也要先把当前进度存下来。以前这里只有 print + traceback，然后
+            #   break —— OOM / 坏样本 / 任何异常都会让「上一次备份之后的所有迭代」
+            #   白跑（用户感知：跑了三小时，进度退回两小时前）。
+            #   保存本身失败也无所谓（大概率是同一个 OOM），但不能不试。
+            _is_oom = ("out of memory" in str(e).lower()
+                       or type(e).__name__ in ("OutOfMemoryError", "CudaError"))
+            if _is_oom:
+                io.log_info("[!] 显存不够（OOM）。先把当前进度存一份，再退出 —— "
+                            "下次启动会从这里续跑。想继续跑就调小 batch_size。")
+                try:
+                    import torch as _torch
+                    _torch.cuda.empty_cache()
+                except Exception:                                  # noqa: BLE001
+                    pass
+            else:
+                io.log_info("[!] 训练异常终止。先把当前进度存一份，再退出。")
+            try:
+                model.save()
+                io.log_info("[+] 已保存到 iter %d" % int(getattr(model, 'iter', 0) or 0))
+            except Exception as _se:                           # noqa: BLE001
+                io.log_info("[!] 保存也没成功（%s）—— 磁盘上还是上一次备份" % str(_se)[:120])
         break
     # 清理进程锁
     try:
