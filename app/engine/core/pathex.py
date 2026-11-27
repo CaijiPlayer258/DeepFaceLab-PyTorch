@@ -136,9 +136,13 @@ def write_bytes_safe(p, bytes_data):
     p_tmp.write_bytes(bytes_data)
     for _retry in range(5):
         try:
-            if p.exists():
-                p.unlink()
-            p_tmp.rename(p)
+            # ★ 直接 os.replace：它在 Windows 上是**一步原子**的（目标存在也能覆盖）。
+            #   以前是 `if p.exists(): p.unlink()` 然后 `p_tmp.rename(p)` —— 两步，
+            #   断电/被杀落在中间，目标文件就**直接蒸发**了（不是写坏一半，是没了）。
+            #   对 data.dat 来说这等于「模型被当成全新模型」（iter=0、options 空、
+            #   重问配置）；对 .pth 来说是随机初始化。
+            import os as _os
+            _os.replace(str(p_tmp), str(p))
             return
         except PermissionError:
             if _retry < 4:

@@ -120,16 +120,25 @@ class Saveable():
         try:
             keys = self._weight_keys()
             shapes = [list(int(x) for x in w.shape) for w in weights]
-            (p.parent / (p.name + '.names.json')).write_text(
+            # ★ names.json 也要原子写，而且要在**权重替换之前**写好（见下）。
+            #   以前是裸 write_text：截断之后 _name_remap 解析失败 return None，
+            #   加载会静默退回「按位置索引」且 ok=True —— 正是这个机制当初要消灭的
+            #   「动量串到另一条支路」。
+            _np = p.parent / (p.name + '.names.json')
+            _tmp = _np.parent / (_np.name + '.tmp')
+            _tmp.write_text(
                 json.dumps({"ver": 1, "name": self.name, "keys": keys, "shapes": shapes},
                            ensure_ascii=False),
                 encoding="utf-8")
+            os.replace(str(_tmp), str(_np))
         except Exception:
             pass
 
-        if p.exists():
-            p.unlink()
-        p_tmp.rename(p)
+        # ★ os.replace 是**一步原子**的（Windows 上也一样，目标存在照样覆盖）。
+        #   以前 `if p.exists(): p.unlink()` + `p_tmp.rename(p)` 是两步 —— 断电/被杀
+        #   落在中间，目标 .pth **直接蒸发**（不是写坏一半，是没了），加载会报 missing
+        #   → 随机初始化，而 data.dat 还在 → 看起来像「训练记录丢了」。
+        os.replace(str(p_tmp), str(p))
 
     @staticmethod
     def _detect_format(filepath):
