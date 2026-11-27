@@ -187,7 +187,11 @@ def _prepare_mask(face: dict, frame_shape, cfg: dict, size: int, timings: dict,
         #      导出没有这一步，于是 blur 会把画布边缘的遮罩往外晕出一圈。
         wrk = np.asarray(wrk, np.float32)
         wrk[wrk < (1.0 / 255.0)] = 0.0
-        pad = int(size)
+        # pad 只要**大于核半径**就够 —— 预览那边的 np.pad(..., input_size) 是整张
+        # 画布那么大（256/416），数学上和「pad = 半径 + 几像素」等价，代价却是
+        # (3·size)² 的临时数组：416 时 pad 后是 1248²，逐帧逐脸跑不动。
+        _rad = max(int(erode) // 2, int(blur) // 2, 0)
+        pad = max(16, _rad + 4)
         msk = np.pad(wrk, pad)
         if erode > 0:
             msk = cv2.erode(msk, cv2.getStructuringElement(
