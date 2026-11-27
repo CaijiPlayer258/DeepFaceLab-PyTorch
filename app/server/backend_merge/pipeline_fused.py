@@ -1498,6 +1498,15 @@ def _fused_run(cfg: dict) -> dict:
                                                 borderValue=(0, 0, 0))
                         lm68a = lm.landmarks68(coarse)
                         if lm68a is None:
+                            # ★ 这一格以前**完全静默**。2D106 模型没加载上 / 权重不在 /
+                            #   推理返回空的时候，每张脸都在这里 continue —— 于是
+                            #   「切脸」有计数、「换脸」永远是 0、节点一直黄，
+                            #   而日志里一个字都没有。用户报的就是这个现象。
+                            got["z_lm68"] = int(got.get("z_lm68") or 0) + 1
+                            if int(got["z_lm68"]) <= 3:
+                                _vid_log("快速导出：第 %d 帧第 %d 张脸 68 点算不出来"
+                                         "（2D106 模型没加载上？检查 weights/insightface_2d106.onnx）"
+                                         % (job.idx, k))
                             continue
                         pts = landmarks68_in_source(lm68a, cmat)
                         crop, meta_f = align_face_68(
@@ -1511,6 +1520,7 @@ def _fused_run(cfg: dict) -> dict:
                         continue
                     if crop is None or not meta_f:
                         got["skipped"] += 1
+                        got["z_alignfail"] = int(got.get("z_alignfail") or 0) + 1
                         _why = ((meta_f or {}).get("reject_reason")
                                 if isinstance(meta_f, dict) else "")
                         if _why:
@@ -1548,14 +1558,34 @@ def _fused_run(cfg: dict) -> dict:
                                                               job.idx)
                 ticks.add("embed", time.perf_counter() - t)
                 job.plan = plan
+                # ★ 三档「这一帧不换」以前全静默 —— 用户看到的是「换脸一直 0、节点一直
+                #   黄、但合成还在跑」，完全不知道是哪一档。三档的处置完全不同：
+                #     library-none  库选了、但这帧一张脸都没命中（阈值 0.35 / 组建错 / 库空）
+                #     no-detect     检测器一个框都没给（阈值太高 / 脸太小 / 视频太糊）
+                #     align-fail    有框但对齐全失败（68 点闸门 / 5 点退化 / 裁太小）
+                _nb = int(got.get("z_library") or 0)
+                _nd = int(got.get("z_nodetect") or 0)
                 if plan is not None and not models:
                     job.faces = []          # 有库但这帧一张都不像：整帧保持原像素
                     job.rec["branch"] = "library-none"
+                    got["z_library"] = _nb + 1
                 elif not faces:
                     job.faces = []
-                    job.rec["branch"] = "copy"
+                    # ★ 这两档以前混在一起（都叫 copy），但原因和处置完全不同：
+                    #     no-detect   检测器一个框都没给 → 调低阈值 / 脸太小 / 视频太糊
+                    #     align-fail  有框但对齐全失败 → 68 点闸门 / 5 点退化 / 裁太小(<32px)
+                    #   用户报「换脸一直 0、节点一直黄」，先看是哪一档。
+                    if not (job.boxes or []):
+                        job.rec["branch"] = "no-detect"
+                        got["z_nodetect"] = _nd + 1
+                    else:
+                        job.rec["branch"] = "align-fail"
+                        got["z_alignfail"] = int(got.get("z_alignfail") or 0) + 1
                 else:
                     job.rec["branch"] = "library" if plan is not None else "single"
+                    if int(job.idx or 0) % 60 == 0:
+                        _vid_log("快速导出：第 %d 帧 · 检测 %d 张脸 · 这一帧换 %d 张"
+                                 % (job.idx, len(job.boxes or []), len(faces)))
                     # 和预览同口径的一行：检测几张 / 分配几条 / 实际换几张 / 各自用谁
                     if os.environ.get("DFL_DEBUG_FACES"):
                         _named = {int(x) for _m in (models or []) for x in (_m.get("faces") or [])}
@@ -2400,6 +2430,21 @@ def _fused_run(cfg: dict) -> dict:
                 if not errors:
                     errors.append("raw 管道收尾: %r" % (e,))
 
+    # 收尾汇总：四档「没换」各多少帧。用户「换脸一直是 0」时先看这行。
+    try:
+        _zl = int(got.get("z_library") or 0)
+        _zd = int(got.get("z_nodetect") or 0)
+        _za = int(got.get("z_alignfail") or 0)
+        _z68 = int(got.get("z_lm68") or 0)
+        if _zl or _zd or _za or _z68:
+            _vid_log("快速导出：没换脸的帧 —— 库没命中 %d · 检测没框 %d · 对齐失败 %d · "
+                     "68 点算不出 %d 张" % (_zl, _zd, _za, _z68))
+            _vid_log("  └ 处置：库没命中→看人脸库里有没有这个人的脸（阈值 0.35）；"
+                     "检测没框→调低 face_threshold / 换检测器；"
+                     "对齐失败→看 [align] rejected 与「脸太小」；"
+                     "68 点算不出→查 weights/insightface_2d106.onnx 能不能加载")
+    except Exception:                                   # noqa: BLE001
+        pass
     written = int(got["frames"] or 0)
     if _fused_cancelled():
         raise _StageCancel()
