@@ -689,6 +689,16 @@ def add_faces(project: Path, crops: list, source: dict,
                     old["align"] = _text(align)
                     old["idx"] = idx
                     _drop_thumb(project, old["id"])
+                    # ★ 特征向量也要一起作废。PNG 换成新脸了，而 emb/<id>.npy 还是
+                    #   上一张脸的向量 —— 组均值从此按旧脸算，缩略图却是新脸，
+                    #   而且没有任何不一致信号（library_signature 只看 index.json 和
+                    #   emb/ 目录的 mtime，内容变了它不知道）。
+                    #   drop_vector 一直存在但全仓零调用，就是缺这一处。
+                    try:
+                        from .groups import drop_vector as _drop_vec
+                        _drop_vec(project, old["id"])
+                    except Exception:                      # noqa: BLE001
+                        pass
                     rec = dict(old)
                     rec["replaced"] = True
                     records.append(rec)

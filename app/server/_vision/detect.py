@@ -12,6 +12,7 @@ import contextlib
 import threading
 from pathlib import Path
 
+import os
 import numpy as np
 
 # 检测器的"回退/换引擎"只讲一次，别每帧刷屏；但一定要讲 —— 静默回退是上一次
@@ -546,14 +547,27 @@ class TinyMogDet:
     def _forward(self, canvas):
         S = self.input_size
         outs = None
+        # ★ 单张和批量必须是**同一份权重**。int8 引擎 max_batch=1 时会另建一个 bf16
+        #   的 sess_batch（:511），于是「同一帧」走 detect() 用 int8、走 detect_batch()
+        #   用 bf16 —— 两份量化不同，小脸上的分数和框会差一点。而 faces:[k] 的契约
+        #   就是 det.detect() 的返回顺序（fused_lanes.py:123-128）：同一份 cache 的
+        #   前一半帧（批量）和后一半帧（批量失败退回逐帧）里，「第 k 张脸」可能不是
+        #   同一张 —— 多模型点名时就是换错人。
+        #   有 sess_batch 就单张也用它（bf16 跑 batch=1 没问题），代价是 int8 那点
+        #   速度；一致性优先于这 1ms。DFL_DET_UNIFY=0 可关。
+        _unify = str(os.environ.get("DFL_DET_UNIFY") or "1").strip().lower() not in (
+            "0", "false", "no", "off")
+        _s1 = (self.sess_batch if (_unify and self.sess_batch is not None) else self.sess)
+        _in1 = (self.batch_input_name if (_s1 is self.sess_batch and
+                getattr(self, "batch_input_name", None)) else self.input_name)
         # 优先走 GPU 预处理：640² 的 BGR→RGB + CHW + 归一化在 numpy 里要 1ms 以上
-        if getattr(self.sess, "run_tensor", None) is not None:
+        if getattr(_s1, "run_tensor", None) is not None:
             try:
                 import torch
                 t = torch.from_numpy(np.ascontiguousarray(canvas)).cuda()
                 t = t.permute(2, 0, 1).flip(0).float()
                 t = (t - 127.5) * (1.0 / 128.0)
-                outs = self.sess.run_tensor({self.input_name: t})
+                outs = _s1.run_tensor({_in1: t})
             except Exception as e:                             # noqa: BLE001
                 # GPU 预处理这条路炸了就退回 numpy blob（结果一样），但必须留痕
                 _det_log("run_tensor_fail",
@@ -565,7 +579,7 @@ class TinyMogDet:
             blob[0] = canvas[:, :, ::-1].transpose(2, 0, 1)
             blob -= 127.5
             blob *= (1.0 / 128.0)
-            outs = self.sess.run(None, {self.input_name: blob})
+            outs = _s1.run(None, {_in1: blob})
 
         scores_list, boxes_list, kps_list = [], [], []
         for idx, stride in enumerate(self.STEPS):
