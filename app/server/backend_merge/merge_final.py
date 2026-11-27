@@ -99,24 +99,37 @@ def merge(video, passes, out_path=None, cfg=None, frames=None, log=print,
             out_path = str(video.with_name(video.stem + "_passes.mp4"))
         vw = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
 
+    # ★ 逐帧走完整条片 —— **没有脸的帧也必须写出去**。
+    #
+    # 以前是 `for frame in sorted(by_frame)`：只遍历「池里有脸」的帧，于是成片帧数
+    # = 有脸的帧数而不是源片帧数。ffmpeg 用 -framerate fps -start_number 1 编码、
+    # -c:a copy 直接拷音轨 → 视频被压成「有脸那几段」的总长、音轨还是原长，
+    # 两者从第一个没脸的帧开始就错开。
+    #
+    # 用户说的「人脸位置根本对不上」和「两小时的片子只换了 50 分钟」是同一个 bug
+    # 的两个说法：不是几何错位，是**时间轴错位**。
+    _last = int(total) - 1 if int(total) > 0 else 0
+    if by_frame:
+        _last = max(_last, max(by_frame))
     cur = -1
     cur_frame = 0
     written = 0
     swapped = 0
-    for frame in sorted(by_frame):
+    for frame in range(0, _last + 1):
         while cur < frame:
             if not cap.grab():
                 break
             cur += 1
         ok, img = cap.retrieve()
         if not ok or img is None:
-            continue
+            break                     # 读到 EOF：源片比 total 短，别再空转
         faces = []
-        _need = {key_chunk.get(k + "_pred") for _i, k in by_frame[frame]}
+        _rows = by_frame.get(frame) or []
+        _need = {key_chunk.get(k + "_pred") for _i, k in _rows}
         for _nm in _need:
             if _nm:
                 _chunk_arrays(_nm)
-        for _idx, k in sorted(by_frame[frame]):
+        for _idx, k in sorted(_rows):
             _arr = cache.get(key_chunk.get(k + "_pred")) or {}
             pred = _arr.get(k + "_pred")
             mask = _arr.get(k + "_mask")
