@@ -2436,6 +2436,17 @@ def _fused_run(cfg: dict) -> dict:
                 if not errors:
                     errors.append("raw 管道收尾: %r" % (e,))
 
+    # 检测侧的一次性汇总：多少帧有候选被合并/丢掉。以前是每帧打一行 note()，
+    # 1439 帧刷了 1254 行、占整份日志 87%，真正的错误全被淹了（b28 的锅）。
+    try:
+        from .._vision.detect import _DET_DROP as _dd
+        if int(_dd.get("frames") or 0):
+            _vid_log("快速导出：检测合并统计 —— %d 帧有候选被合并/丢弃 · 共合并 %d 个候选 ·"
+                     " 共丢弃 %d 个小脸（这是检测器的正常行为，不是错误）"
+                     % (int(_dd["frames"]), int(_dd["merged"]), int(_dd["small"])))
+            _dd.update({"frames": 0, "merged": 0, "small": 0})
+    except Exception:                                   # noqa: BLE001
+        pass
     # 收尾汇总：四档「没换」各多少帧。用户「换脸一直是 0」时先看这行。
     try:
         _zl = int(got.get("z_library") or 0)

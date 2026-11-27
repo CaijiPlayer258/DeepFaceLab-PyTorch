@@ -247,6 +247,9 @@ def _stream_ctx(det):
     return fn() if fn is not None else _NULL_CTX
 
 
+_DET_DROP = {"frames": 0, "merged": 0, "small": 0}
+
+
 def _faces_from_fwd(det, fwd, ctx, min_face=16):
     """前向输出（canvas 坐标）→ 原图坐标的人脸列表。
 
@@ -287,18 +290,19 @@ def _faces_from_fwd(det, fwd, ctx, min_face=16):
                         "score": round(float(d[4]), 4)})
     # 只在真的丢了东西时打一行（正常情况下绝大多数帧不会命中，不会刷屏）。
     _n_out = len(out)
+    # ★ 这是**统计**，不是错误：一张脸被检成 4 个候选、NMS 合成 1 个，是检测器的
+    #   正常工作方式。b28 我把它写成每帧都打 note()，结果用户一次导出 1439 帧
+    #   刷了 1254 行 —— 整份日志 87% 是这个，真正的错误全被淹了。
+    #   现在：只统计不逐帧打；收尾由 pipeline_fused 报一行汇总（见那里的 z_* 计数）。
+    global _DET_DROP
     if _n_cand > _n_out:
         try:
             if _n_cand - _n_nms > 0 or _n_nms - _n_out > 0:
-                from ..backend_merge.loud import note as _note_det
-                _note_det("检测这一帧的脸上限",
-                          RuntimeError("候选 %d → NMS 后 %d → min_face(%s px) 后 %d"
-                                       % (_n_cand, _n_nms, min_face, _n_out)),
-                          ("有 %d 张被 NMS 按 IoU>%.2f 合并掉了（贴脸/拥抱/镜面里的小脸"
-                           "会这样消失），另 %d 张按「裁进画面后小于 %s px」丢掉"
-                           % (max(0, _n_cand - _n_nms), float(det.nms_thresh),
-                              max(0, _n_nms - _n_out), min_face)),
-                          print)
+                _DET_DROP["frames"] = int(_DET_DROP.get("frames") or 0) + 1
+                _DET_DROP["merged"] = int(_DET_DROP.get("merged") or 0) + max(0, _n_cand - _n_nms)
+                _DET_DROP["small"] = int(_DET_DROP.get("small") or 0) + max(0, _n_nms - _n_out)
+                _k = 0
+
         except Exception:                                  # noqa: BLE001
             pass
     out.sort(key=lambda x: -x["score"])
