@@ -193,10 +193,17 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
                 yield _im.tobytes()
 
         gen = _file_gen()
+        # ★ 目录/图片输入喂的是 **BGR**（W*H*3），视频输入喂的是 **NV12**（W*H*3/2）。
+        #   _decode 里那句 `len(raw) != W*H*3//2` 只对视频成立 —— 目录模式下每一帧
+        #   都被当成「长度不对」continue 掉，于是 1080p 图 6220800 字节 vs 期望的
+        #   3110400，**一张脸都切不出来**，结尾还报「完成：解码 0 帧 · 0 张人脸」。
+        #   routes.py 明确放行目录、UI 也提示可以拖目录，所以这条很容易踩。
+        _dir_input = True
         first_frame = _probe.tobytes()
         _resume_n = len(done_idx)
         _diff = _note_resume_src(face_dir, src, W, H, 0.0, _resume_n)
     else:
+        _dir_input = False
         in_params = _hwaccel.input_params(str(src))     # 触发（或命中）一次探测，下面复用
         norm = _hwaccel.normalize_filter()              # 硬解：先回 yuv420p 再转 BGR
         if norm:
@@ -507,12 +514,20 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
             cost["read"] += _t() - t_a
             if stop.is_set() or not JOB.running:
                 break
-            if len(raw) != W * H * 3 // 2:      # NV12：Y 平面 W*H + UV 交错 W*H/2
+            _want = (W * H * 3) if _dir_input else (W * H * 3 // 2)
+            if len(raw) != _want:
+                # 视频是 NV12（Y 平面 W*H + UV 交错 W*H/2），目录是 BGR 裸字节。
+                # 长度对不上只可能是管道错位/半帧 —— 跳过，但记一笔（以前静默）。
+                with lock:
+                    stats["bad_len"] = int(stats.get("bad_len") or 0) + 1
                 continue
             if idx not in done_idx:
                 # NV12 → BGR 一次搞定（比管道里多传 3MB 划算，实测 2~3ms）
-                frame = cv2.cvtColor(np.frombuffer(raw, np.uint8).reshape(H * 3 // 2, W),
-                                     cv2.COLOR_YUV2BGR_NV12)
+                if _dir_input:
+                    frame = np.frombuffer(raw, np.uint8).reshape(H, W, 3)
+                else:
+                    frame = cv2.cvtColor(np.frombuffer(raw, np.uint8).reshape(H * 3 // 2, W),
+                                         cv2.COLOR_YUV2BGR_NV12)
                 put((idx, frame))
             idx += 1
             with lock:
