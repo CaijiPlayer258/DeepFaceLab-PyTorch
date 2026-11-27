@@ -1474,6 +1474,13 @@ def merge_preview(body: dict):
         with _PREVIEW_HIT_LOCK:
             _PREVIEW_HIT.clear()
             _PREVIEW_HIT[hit_sig] = resp
+    # ★ 超分必须在**回写缓存之前**做，否则缓存里存的是没超分的那一版，
+    #   下一次命中缓存又变回没超分（表现是「第一帧有效、之后失效」）。
+    resp = _sr_apply_resp(resp, body)
+    if hit_sig:
+        with _PREVIEW_HIT_LOCK:
+            _PREVIEW_HIT.clear()
+            _PREVIEW_HIT[hit_sig] = resp
     return resp
 
 
@@ -1565,7 +1572,7 @@ def merge_preview_frame(body: dict):
                            "faces": list(m["faces"])} for m in models]
         resp["faces"] = list(res.get("faces") or [])
         resp["swaps"] = int(res.get("swaps") or 0)
-    return resp
+    return _sr_apply_resp(resp, body)
 
 
 @router.post("/api/merge/preview/warm")
