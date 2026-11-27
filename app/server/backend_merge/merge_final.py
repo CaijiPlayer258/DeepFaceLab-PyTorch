@@ -62,16 +62,22 @@ def merge(video, passes, out_path=None, cfg=None, frames=None, log=print,
         except Exception:                                     # noqa: BLE001
             continue
     cache = collections.OrderedDict()
-    _MAX_CHUNKS = 2
+    # 缓存上限**不是常量**：它至少得能装下「同一帧要用的全部 chunk」。
+    # 以前写死 2，于是 3 个模型在同一帧都有脸时：先读 A、B，再读 C 就把 A 挤出去，
+    # 紧接着取 A 的数组拿到 None → continue → 那张脸**直接不贴，而且一行日志都没有**。
+    # 现在由 _chunk_arrays 按当次需求动态抬高下限（只会变大，不会缩小）。
+    _CACHE = {"max": 2}
 
-    def _chunk_arrays(nm):
+    def _chunk_arrays(nm, need=1):
+        if need > _CACHE["max"]:
+            _CACHE["max"] = int(need)
         hit = cache.get(nm)
         if hit is not None:
             cache.move_to_end(nm)
             return hit
         arrs = _load_chunks(pool, [nm])
         cache[nm] = arrs
-        while len(cache) > _MAX_CHUNKS:
+        while len(cache) > _CACHE["max"]:
             cache.popitem(last=False)
         return arrs
 
@@ -128,7 +134,7 @@ def merge(video, passes, out_path=None, cfg=None, frames=None, log=print,
         _need = {key_chunk.get(k + "_pred") for _i, k in _rows}
         for _nm in _need:
             if _nm:
-                _chunk_arrays(_nm)
+                _chunk_arrays(_nm, need=len(_need))
         for _idx, k in sorted(_rows):
             _arr = cache.get(key_chunk.get(k + "_pred")) or {}
             pred = _arr.get(k + "_pred")
