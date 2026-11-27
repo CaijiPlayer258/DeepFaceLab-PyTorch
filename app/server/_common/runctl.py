@@ -429,6 +429,29 @@ def _train_worker(name: str, cpu_only: bool):
         # 重排过了，传物理 0,2 会让引擎取不到 2 号逻辑卡，两卡退化成单卡。
         if _engine_has_flag("--force-gpu-idxs"):
             cmd += ["--force-gpu-idxs", _dev["force_gpu_idxs"]]
+            # ★ 有 --force-gpu-idxs **不等于**真的会用多卡：引擎里只有 Quick96 建了
+            #   DataParallel（Model_Quick96/Model_pytorch.py:117-120），SAEHD 没有 ——
+            #   nn.initialize() 也只取 device_config.devices[0]（nn.py:58-63）。
+            #   于是勾两卡时启动横幅会列出两张、看着像多卡，实际只有一张在算，
+            #   速度不变、也没人告警（以前那条告警只覆盖「引擎没有这个参数」的模型）。
+            if len(_dev["physical"]) > 1:
+                _model_arch = ""
+                try:
+                    _o2 = (_pk.loads(_model_dat(name).read_bytes()).get("options")
+                           or {}) if _model_dat(name) else {}
+                    _model_arch = str(_o2.get("archi") or _o2.get("model") or "")
+                except Exception:                          # noqa: BLE001
+                    pass
+                _supported = ("quick96" in str(name or "").lower()
+                              or "quick96" in _model_arch.lower())
+                if not _supported:
+                    _w = ("device=%s 选了 %d 张卡，但这个模型**只有第一张在算** —— "
+                          "引擎里只有 Quick96 建了 DataParallel，SAEHD/其它架构都只用 "
+                          "device[0]（CUDA_VISIBLE_DEVICES=%s 已生效）。"
+                          "想提速请调 batch_size，不是加卡。"
+                          % (_dev["raw"], len(_dev["physical"]), _dev["cuda_visible"]))
+                    print("[trainer] " + _w, flush=True)
+                    _dev = dict(_dev, warn=((_dev.get("warn") + "；") if _dev.get("warn") else "") + _w)
         elif len(_dev["physical"]) > 1:
             # env 已经把可见集合限住了，但引擎会自己挑一张 → 多卡会退化成单卡。
             # 与其让用户以为在双卡训练，不如直接说出来。
