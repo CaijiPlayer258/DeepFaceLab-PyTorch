@@ -169,6 +169,12 @@ def merge(video, passes, out_path=None, cfg=None, frames=None, log=print,
     cap.release()
     res = {"out": str(out_path), "frames": int(written), "swapped": int(swapped),
            "faces_keys": int(len(keys)), "source_frames": int(total),
+           # fps 必须回传：pipeline_passes 要用它给 ffmpeg 定 -framerate。
+           # 以前这里没有这个键，那边 `float(res.get("fps") or 25.0)` 就永远拿 25 ——
+           # 30fps 的源片编出来会被拉长 30/25 = 1.2 倍，而音轨是 -c:a copy 原速，
+           # 于是从第一秒起音画就漂，越到后面越离谱。（fused / 分段两条路的 fps 都
+           # 来自 _vid_probe，只有 passes 这条掉了。）
+           "fps": float(fps),
            "elapsed_s": round(time.time() - t0, 1), "size": [w, h]}
     log("[merge] %d 帧（其中 %d 帧贴了脸）· %dx%d · %.1fs · %s"
         % (res["frames"], res["swapped"], w, h, res["elapsed_s"], out_path))

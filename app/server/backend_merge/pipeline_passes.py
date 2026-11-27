@@ -117,8 +117,13 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
         except Exception:                                     # noqa: BLE001
             pass
 
+    # ★ cfg["start"] 的契约是**1 起**（pipeline_stages.py 里明写「start_frame 从 1 数起」，
+    #   前端也是 frameFrom > 0 才发），而 scan() 的 start 是 **0 起下标**。
+    #   以前直接原样传，于是区间首帧（0 起 S-1）被跳过 —— 只丢 1 帧，不致命，
+    #   但既然对账就一并对齐。end 不用动：0 起开区间 [S, E) 的末帧正是 1 起闭区间的 E。
+    _start0 = max(0, int(cfg.get("start") or 0) - 1)
     idx = scan(video, models=models, plan_payload=cfg.get("plan_payload"),
-               start=int(cfg.get("start") or 0),
+               start=_start0,
                end=(int(cfg["end"]) if cfg.get("end") else None), log=log,
                on_frame=_scan_frame)
     total_faces = int(idx.get("swap_faces") or 0)

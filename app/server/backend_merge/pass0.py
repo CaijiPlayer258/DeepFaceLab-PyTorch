@@ -61,13 +61,24 @@ def scan(video, detector="tinymog", thresh=0.5, plan_payload=None, models=None,
     # 只在开始时 seek 一次，之后**顺序读**。每帧都 cap.set(POS_FRAMES) 会让解码器
     # 反复回退到关键帧（实测 40 帧要 18.5s），顺序读只要 35ms/帧。
     cap.set(cv2.CAP_PROP_POS_FRAMES, i0)
-    _cur = i0
+    # ★ 这里以前是 `_cur = i0` + `cap.read()`，语义上等于「每轮走 2 帧」：
+    #   read() = grab() + retrieve()，它自己就把解码器往前推了一帧，而下面的
+    #   while 又按 _cur 补 grab。实测（逐帧编码唯一颜色再读回来验）：
+    #     index.json 记 frame=k，实际检测的是第 2k 帧（0→0, 1→2, 2→4 …）；
+    #     80 帧的片子，标签到 40 就 EOF —— **只扫了前一半**。
+    #   后果正是用户报的那两条：只有前一半帧有人脸（「两小时只换了 50 分钟」，
+    #   理论正好一半），而记在 k 的框其实属于 2k 帧那张脸，pass_swap 拿它去贴
+    #   第 k 帧就是「人脸位置对不上」（时间轴错位，不是几何错位）。
+    #
+    #   现在和 pass_swap / merge_final 用同一个 cur 约定：_cur 指向「已经读过的
+    #   最后一帧」，-1 表示一帧都没读；取帧用 retrieve()（不前进）。
+    _cur = i0 - 1
     while idx < i1:
         while _cur < idx:                     # stride>1 时把中间的帧读掉
             if not cap.grab():
                 break
             _cur += 1
-        ok, frame = cap.read()
+        ok, frame = cap.retrieve()
         if not ok or frame is None:
             break
         boxes = list(_detect_boxes(frame, detector, thresh) or [])
