@@ -1125,6 +1125,21 @@ class ModelBase(object):
 
         bckp_filename_list = [self.get_strpath_storage_for_file(filename) for _, filename in self.get_model_filename_list()]
         bckp_filename_list += [str(self.get_summary_path()), str(self.model_data_path)]
+        # ★ 旁挂文件也要一起备份。names.json 是「每个位置对应哪个参数」的映射 ——
+        #   没有它，加载会退回**按位置索引**，而位置索引正是当初要消灭的「动量串到
+        #   另一条支路」（LIAE 开关 warp 的根因）。layout.json 是同类的布局指纹。
+        #   从 autobackups/01 恢复出来的 .pth 缺这两样，却恰好是恢复场景最需要它们的
+        #   时候 —— 而以前备份清单里只有 .pth + summary.txt + data.dat。
+        try:
+            # get_strpath_storage_for_file('x') = <saved_models>/<name>_x，取 .parent 就是模型目录
+            _model_dir = Path(self.get_strpath_storage_for_file('x')).parent
+            _mn = str(self.get_model_name())      # 只收**本模型**的旁挂，别把别人的也拷进来
+            for _pat in ("%s_*.names.json" % _mn, "%s_*.layout.json" % _mn):
+                for _side in sorted(_model_dir.glob(_pat)):
+                    if _side.is_file() and str(_side) not in bckp_filename_list:
+                        bckp_filename_list.append(str(_side))
+        except Exception:                                   # noqa: BLE001
+            pass
 
         for i in range(n, 0, -1):
             idx_str = '%.2d' % i
