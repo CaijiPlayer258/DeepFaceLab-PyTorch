@@ -1611,13 +1611,19 @@ def _fused_run(cfg: dict) -> dict:
                         # 模型尺寸按「这张脸归谁的 dfm」定（多模型时各不相同）。
                         try:
                             sz = int(_dfm_session(f["dfm"])[2])
+                            # ★ _face_type_of 在 compose.py 里。b23 把它用到这里时**忘了
+                            #   import** —— NameError 被下面那句 except 吞掉，于是每张脸
+                            #   都「warp 失败」，job.faces 永远为空：换脸 0、遮罩 0、
+                            #   dfm 节点一直黄，而合成照样出帧（空 faces 原样输出）。
+                            #   函数内 import：pipeline_fused 和 compose 本来就互相引用。
+                            from .compose import _face_type_of as _ft_of
                             fmat = get_transform_mat(np.asarray(f["lm"], np.float32), sz,
                                                      # ★ 必须和贴回同一个 face_type。compose.py:587 的 fmat 现在读
                      #   cfg['face_type']（_face_type_of），这里要是还写死 WHOLE_FACE，
                      #   取脸用整脸画布、贴回用 head/full 画布 —— 成片里整张脸被放大/上移
                      #   一截，尺度错、不是错位一点点。预览（preview_worker 把 face_type
                      #   交给引擎，取+贴一致）和 passes（pass_swap 两处都用同一份）都不会。
-                     _face_type_of(comp_cfg), scale=1.0)
+                     _ft_of(comp_cfg), scale=1.0)
                             warped = cv2.warpAffine(job.frame, fmat, (sz, sz),
                                                     flags=cv2.INTER_CUBIC)
                             f["dfm_in"] = np.clip(warped.astype(np.float32) / 255.0, 0, 1)
