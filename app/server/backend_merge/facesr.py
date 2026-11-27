@@ -233,24 +233,23 @@ def apply_roi(roi_u8, mask_f, alpha: float, timings: dict | None = None):
         m = m[..., 0]
     if m.shape[:2] != roi_u8.shape[:2]:
         m = cv2.resize(m, (roi_u8.shape[1], roi_u8.shape[0]), interpolation=cv2.INTER_NEAREST)
-    ys, xs = np.nonzero(m > 0.02)
-    if xs.size == 0:
-        return roi_u8
-    x0, x1 = int(xs.min()), int(xs.max()) + 1
-    y0, y1 = int(ys.min()), int(ys.max()) + 1
-    crop = roi_u8[y0:y1, x0:x1]
-
+    # ★ 推理用**整块 ROI**，混合才用遮罩 —— 这两个必须分开。
+    #   以前按 np.nonzero(m > 0.02) 的 bbox 裁一块送去推理：XSeg 遮罩只盖皮肤，
+    #   不含额头/下巴/耳朵，GPEN 拿到的是一张「残缺的脸」，输出的五官位置就错，
+    #   混回去表现为眼睛变黑线、嘴唇变色块。
+    #   （实测同一张画布：mask 全 1 → 输出正常；用 XSeg 遮罩 → 崩。）
+    #   这也正是「调试六宫格看着正常」的原因：那条路的掩膜是盖满整块 panel 的椭圆，
+    #   bbox 就是整块，等于整块推理。
     t0 = time.time()
     sz = size()
-    # ★ 保持宽高比：以前直接 resize 成 (sz, sz)，400×248 的脸框被拉成 512×512
-    #   （横向 1.6 倍、纵向 0.5 倍），GPEN 按变形的脸推理，缩回去眼睛/嘴唇就歪了 ——
-    #   表现是「预览里的超分风格和调试界面完全不一样」。调试那条路的输入本来是
-    #   正方形 panel，所以从来没暴露这个 bug。
-    #   做法：长边缩到 sz，短边居中 pad（复制边缘），推理完再裁回原比例。
-    _ch, _cw = crop.shape[:2]
+    _ch, _cw = roi_u8.shape[:2]
+    if _ch < 8 or _cw < 8:
+        return roi_u8
+    # 长边缩到 sz、短边居中 pad（复制边缘），推理完裁回 —— 保持宽高比，
+    # 否则 400×248 会被横向拉 1.6×、纵向压 0.5×，出来的脸是变形的。
     _sc = float(sz) / float(max(_ch, _cw))
     _nh, _nw = max(1, int(round(_ch * _sc))), max(1, int(round(_cw * _sc)))
-    big = cv2.resize(crop, (_nw, _nh), interpolation=cv2.INTER_LINEAR)
+    big = cv2.resize(roi_u8, (_nw, _nh), interpolation=cv2.INTER_LINEAR)
     _pt, _pb = (sz - _nh) // 2, sz - _nh - (sz - _nh) // 2
     _pl, _pr = (sz - _nw) // 2, sz - _nw - (sz - _nw) // 2
     big = cv2.copyMakeBorder(big, _pt, _pb, _pl, _pr, cv2.BORDER_REPLICATE)
@@ -267,11 +266,8 @@ def apply_roi(roi_u8, mask_f, alpha: float, timings: dict | None = None):
     sr = np.clip(y, 0, 255).astype(np.uint8)
     sr = sr[_pt:_pt + _nh, _pl:_pl + _nw]          # 裁掉 pad
     sr = cv2.resize(sr, (_cw, _ch), interpolation=cv2.INTER_LINEAR)
-
-    sub_m = m[y0:y1, x0:x1][..., None]
-    w = np.clip(sub_m * float(alpha), 0.0, 1.0)
-    mixed = (sr.astype(np.float32) * w + crop.astype(np.float32) * (1.0 - w))
-    out_roi = roi_u8.copy()
-    out_roi[y0:y1, x0:x1] = np.clip(mixed, 0, 255).astype(np.uint8)
+    # 混合：这里**才**用遮罩。整块结果都在，遮罩只决定贴哪一部分。
+    w = np.clip(m[..., None] * float(alpha), 0.0, 1.0)
+    mixed = (sr.astype(np.float32) * w + roi_u8.astype(np.float32) * (1.0 - w))
     timings["sr_ms"] = timings.get("sr_ms", 0.0) + (time.time() - t0) * 1000.0
-    return out_roi
+    return np.clip(mixed, 0, 255).astype(np.uint8)

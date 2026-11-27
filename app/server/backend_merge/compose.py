@@ -1774,7 +1774,11 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
                         _sr_canvas = _sr.apply_roi(_cv, _cmf, _sr.strength())
                         if _sr_canvas is not None and _sr_canvas.size:
                             # ② 把「超分增量」warp 回画面（只搬 SR 信号，不重采样 dst）
-                            _M = np.asarray(_mat, np.float64)
+                            # ★ 方向！get_transform_mat 给的是**帧 → 画布**，
+                            #   warp 回画面必须用它的**逆**。以前直接拿去 warp，
+                            #   等于把画布又转了一次（画面上能看到超分区域整体
+                            #   旋转 + 偏到脸外），而调试六宫格不受影响（它不 warp）。
+                            _M = cv2.invertAffineTransform(np.asarray(_mat, np.float64))
                             _H, _W = out.shape[:2]
                             _d_canvas = (_sr_canvas.astype(np.float32)
                                          - _cv.astype(np.float32))
@@ -1862,7 +1866,7 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
                      [(f.get("idx"), f.get("dfm_name") or f.get("model") or "") for f in (res.get("faces") or [])]),
                   flush=True)
     # worker 顺手算的每张脸遮罩随响应出去（只给父进程的超分用，前端不用管）：
-    # 没有它，/frame 那边只能退回椭圆 → 头发/背景一起被锐化。
+    # 前端不用管它；/frame 的超分靠它决定「只贴遮罩内」的那一块。
     try:
         resp["per_face"] = list(res.get("per_face") or [])
     except Exception:                                      # noqa: BLE001
