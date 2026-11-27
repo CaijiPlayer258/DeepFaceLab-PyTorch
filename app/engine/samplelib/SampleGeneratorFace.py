@@ -146,22 +146,42 @@ class SampleGeneratorFace(SampleGeneratorBase):
         while True:
             batches = None
 
-            indexes = index_host.multi_get(bs)
+            # 必须是可写的 list —— 下面「跳过坏样本」那条路要往 indexes[n_batch] 里换一个替补。
+            indexes = list(index_host.multi_get(bs))
             ct_indexes = ct_index_host.multi_get(bs) if ct_samples is not None else None
 
             t = time.time()
             for n_batch in range(bs):
-                sample_idx = indexes[n_batch]
-                sample = samples[sample_idx]
-
-                ct_sample = None
-                if ct_samples is not None:
-                    ct_sample = ct_samples[ct_indexes[n_batch]]
-
-                try:
-                    x, = SampleProcessor.process ([sample], self.sample_process_options, self.output_sample_types, self.debug, ct_sample=ct_sample)
-                except:
-                    raise Exception ("Exception occured in sample %s. Error: %s" % (sample.filename, traceback.format_exc() ) )
+                # ★ 一张坏图不该让整场训练停下来。以前是 `except: raise Exception(...)` ——
+                #   子进程把 traceback 塞队列 → 父进程 raise RuntimeError → train_one_iter 抛
+                #   → Train 外层 `except: print; break`。**一张截断的 jpg 就能让几小时的
+                #   训练结束**，而且不保存（b37 之前连 save 都不做）。
+                #   现在：跳过这张、从 index_host 再取一个替补，batch 大小保持不变
+                #  （不能让它变小 —— 那会悄悄改变有效 lr）。连续失败 200 次才认输。
+                _tries = 0
+                while True:
+                    sample_idx = indexes[n_batch]
+                    sample = samples[sample_idx]
+                    ct_sample = None
+                    if ct_samples is not None:
+                        ct_sample = ct_samples[ct_indexes[n_batch]]
+                    try:
+                        x, = SampleProcessor.process ([sample], self.sample_process_options, self.output_sample_types, self.debug, ct_sample=ct_sample)
+                        break
+                    except Exception as _e:
+                        _tries += 1
+                        try:
+                            _bn = str(getattr(sample, 'filename', '?')).replace(chr(92), '/').split('/')[-1]
+                        except Exception:
+                            _bn = '?'
+                        if _tries <= 5 or _tries % 50 == 0:
+                            print("[WARN] 样本 %s 处理失败（第 %d 次）：%s: %s —— 跳过，换一张"
+                                  % (_bn, _tries, type(_e).__name__, str(_e)[:120]), flush=True)
+                        if _tries >= 200:
+                            raise RuntimeError("连续 %d 个样本都处理失败，最后一个是 %s：%s"
+                                               % (_tries, _bn, str(_e)[:200]))
+                        indexes[n_batch] = index_host.multi_get(1)[0]
+                        continue
 
                 if batches is None:
                     batches = [ [] for _ in range(len(x)) ]
