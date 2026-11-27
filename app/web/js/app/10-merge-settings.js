@@ -1660,10 +1660,9 @@
              : ((d && d.source === "chip") ? "（按 chip 的模型）" : "");
       /* 后端按 (video, frame, idx) 去重：已有就回 replaced=true —— 那是**更新**，
          不能再报「已加入」（否则连点 5 次会看到 5 条「已加入」却只有 1 张脸）。 */
-      if (d && d.replaced) {
-        toast("已更新该帧的人脸", fid + (where ? " · " + where : "") + by + why + how,
-              "success");
-      } else {
+      /* 重复点同一帧同一张脸（replaced）**不弹 toast**：库没变大、角标也不涨，
+         用户看数字就知道；再弹一条「已更新」只会让人以为又加了一张。 */
+      if (!(d && d.replaced)) {
         toast("已加入人脸数据库", (where ? fid + " · " + where : fid) + by + why +
               (d && d.created ? " · 新建了库" : "") + how, "success");
         /* 角标只数「新增」：更新没有让库变大，不该涨 */
