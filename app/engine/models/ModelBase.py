@@ -1000,6 +1000,28 @@ class ModelBase(object):
         if self._crash_detected:
             io.log_info(f'[Crash Detector] 检测到训练崩溃，取消本次自动备份')
             return
+        # ★ 本轮有「存档坏了」类加载失败时，不许覆盖。
+        #   加载失败的处理是「重置权重 + 清优化器 + 打事件」，然后**照常进入训练**。
+        #   而 save() 以前只有 _crash_detected 一个闸门 —— 于是训练跑起来之后，
+        #   第一个 backup_interval 一到，磁盘上那份**可能还能救**的 .pth 就被随机
+        #   初始化后的权重复盖了。（转换工具那条路反而做了这件事：export_dfm 加载
+        #   失败会直接炸。）
+        #   只挡 corrupt / shape 两种 —— missing 是首次训练的正常状态，renamed 有
+        #   fallback 兜底，放行。
+        try:
+            from core.leras import load_events as _lev_save
+            # 事件是在**失败时**才 emit 的（emit_event 只在 load 失败/重置那条路调），
+            # 所以不需要再判 ok，只看 reason。
+            _bad = [e for e in _lev_save.recent_events()
+                    if str(e.get("reason") or "") in ("corrupt", "shape")]
+            if _bad:
+                _mods = sorted({str(e.get("module") or "?") for e in _bad})
+                io.log_info("[!] 本轮有存档加载失败（%s）—— 取消这次备份，"
+                            "免得用随机初始化的权重复盖掉磁盘上那份可能还能救的存档。"
+                            % " / ".join(_mods[:4]))
+                return
+        except Exception:                                   # noqa: BLE001
+            pass
 
         self._ensure_disk_space()
 
