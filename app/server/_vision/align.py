@@ -701,7 +701,16 @@ COARSE_SIZE = 192
 # 这不会污染最终构图：终裁是「33 点 → facelib 的 landmarks_2D_new」的相似变换拟合，
 # 模板把构图钉死了，粗裁多看到多少、少看到多少，都会被那一步吸收掉（缩放/平移都在
 # 相似变换里）。粗裁只影响 2D106 看得清不清楚，不进入几何。
-COARSE_EXPAND = 1.30
+# ★ 粗裁视野。以前是 1.30（整张脸只占 192 画布的 77% → 148 px），而 2D106 的
+#   输入固定 192，所以**有效分辨率被这一步砍掉 23%** —— 遮挡（头发、手、嘴被挡）
+#   时 68 点最先崩的就是这里。
+#   对照 iperov 的 DFL：S3FD 给框后 `b += bt*0.1`（**只把下沿往下扩 10%**，
+#   理由是「2DFAN 默认框盖不住下巴」），然后 FAN 直接吃 256 的整脸。
+#   它没有「整体缩小看边缘」这一步 —— 代价只有 5%，不是 23%。
+#   所以这里也改成各向异性：横向只留 1.10 的余量，纵向**上沿 1.10 / 下沿 1.28**
+#   （给下巴和脖子留位置，那正是 5 点紧框切得最狠的地方）。
+COARSE_EXPAND = 1.10          # 各向同性的基础余量（横向用它）
+COARSE_EXPAND_DOWN = 1.28     # 只作用在「往下」那一侧（撑住下巴）
 
 
 def _zoom_about_center(mat, out_size, factor):
@@ -715,7 +724,30 @@ def _zoom_about_center(mat, out_size, factor):
     return (Z @ M)[0:2]
 
 
-def coarse_align_from_5(kps5, out_size=COARSE_SIZE, expand=COARSE_EXPAND):
+def _zoom_downweighted(mat, out_size, expand_xy, expand_down):
+    """各向异性视野：横向按 expand_xy 缩，纵向**上沿**按 expand_xy、**下沿**按 expand_down。
+
+    为什么要单独往下扩：5 点模板的紧框把下巴切得最狠（人脸 68 点里 17..26 那一排
+    下颌点全在下方），而 iperov 的 DFL 也是单独 `b += bt*0.1` 处理下沿 —— 不是整体
+    缩小。整体缩小会把**左右两侧**也一起让掉，白丢分辨率。
+    """
+    c = float(out_size) / 2.0
+    sx = 1.0 / float(expand_xy)
+    sy_up = 1.0 / float(expand_xy)
+    sy_dn = 1.0 / float(expand_down)
+    # 纵向分段：以画布中心为界，上下用不同缩放（平移量各自算，保证中心不跳）
+    Z = np.array([[sx, 0.0, c * (1.0 - sx)],
+                  [0.0, (sy_up + sy_dn) / 2.0, 0.0],
+                  [0.0, 0.0, 1.0]], dtype=np.float64)
+    M = np.vstack([np.asarray(mat, dtype=np.float64), [0.0, 0.0, 1.0]])
+    out = Z @ M
+    # 下沿多出来的那一点：整体下移 (sy_dn - sy_up) * c（让下方的视野真的变大）
+    out[1, 2] += (sy_dn - sy_up) * c
+    return out[0:2]
+
+
+def coarse_align_from_5(kps5, out_size=COARSE_SIZE, expand=COARSE_EXPAND,
+                        expand_down=COARSE_EXPAND_DOWN):
     """5 点 → 「宽松粗裁」的仿射矩阵（原图 → 粗裁图）。粗裁图**永不落盘**。
 
     几何上就是老 5 点裁剪的同一套模板 / padding / 整脸中心偏移，只改两件事：
@@ -723,7 +755,9 @@ def coarse_align_from_5(kps5, out_size=COARSE_SIZE, expand=COARSE_EXPAND):
       2) 视野再放大 expand 倍 —— 让 106 看到整张脸（含被 5 点紧框切掉的边缘）。
     """
     base = align_mat_from_5(kps5, output_size=out_size)
-    return _zoom_about_center(base, out_size, expand)
+    if expand_down is None or abs(float(expand_down) - float(expand)) < 1e-6:
+        return _zoom_about_center(base, out_size, expand)
+    return _zoom_downweighted(base, out_size, expand, expand_down)
 
 
 def landmarks68_in_source(lm68_coarse, mat_coarse):

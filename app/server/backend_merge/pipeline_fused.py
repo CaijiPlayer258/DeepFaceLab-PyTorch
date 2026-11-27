@@ -2451,6 +2451,21 @@ def _fused_run(cfg: dict) -> dict:
                 _vid_log("  └ 缺：%s" % _m)
     except Exception:                                   # noqa: BLE001
         pass
+    # 检测侧：一帧都没过阈值的帧有多少、它们的最高分是多少 —— 直接回答
+    # 「检测不到是模型问题还是阈值问题」。
+    try:
+        from .._vision.detect import _DET_MISS as _dm
+        if int(_dm.get("frames") or 0):
+            _vid_log("快速导出：%d 帧一张脸都没过阈值（阈值 %.2f）· 这些帧的最高分是 %.3f"
+                     "%s"
+                     % (int(_dm["frames"]), float(_dm.get("threshold") or 0),
+                        float(_dm.get("best") or 0),
+                        " —— 最高分低于阈值，说明是**阈值太严**，不是模型没加载"
+                        if float(_dm.get("best") or 0) > 0.2 else
+                        " —— 最高分连 0.2 都不到，多半是空镜/远景，不是漏检"))
+            _dm.update({"frames": 0, "best": 0.0})
+    except Exception:                                   # noqa: BLE001
+        pass
     # 检测侧的一次性汇总：多少帧有候选被合并/丢掉。以前是每帧打一行 note()，
     # 1439 帧刷了 1254 行、占整份日志 87%，真正的错误全被淹了（b28 的锅）。
     try:

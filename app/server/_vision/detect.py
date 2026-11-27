@@ -247,6 +247,7 @@ def _stream_ctx(det):
     return fn() if fn is not None else _NULL_CTX
 
 
+_DET_MISS = {"frames": 0, "best": 0.0, "threshold": 0.0}
 _DET_DROP = {"frames": 0, "merged": 0, "small": 0}
 
 
@@ -274,6 +275,18 @@ def _faces_from_fwd(det, fwd, ctx, min_face=16):
     # 这三条是唯一能告诉他丢在哪儿的线索。以前全在函数里静默蒸发。
     #   命中 N 个候选 → NMS 留 K → min_face 再砍 M。
     _n_cand, _n_nms = int(dets.shape[0]), int(len(keep))
+    # ★ 一帧都没过阈值时，把「最高分是多少」记一笔 —— 用户报「检测不到」时，
+    #   这一条能立刻区分「模型没加载」和「分数不够（阈值太高）」。
+    #   TinyMog 的分数分布本来就偏低（实测中位 0.69），0.5 的绝对门比 S3FD 严得多。
+    if _n_nms == 0 and int(dets.shape[0]) > 0:
+        try:
+            _top = float(dets[:, 4].max())
+            _DET_MISS["frames"] = int(_DET_MISS.get("frames") or 0) + 1
+            if _top > float(_DET_MISS.get("best") or 0.0):
+                _DET_MISS["best"] = _top
+            _DET_MISS["threshold"] = float(det.thresh)
+        except Exception:                                  # noqa: BLE001
+            pass
 
     out = []
     for i in keep:
@@ -593,8 +606,24 @@ class TinyMogDet:
                 self._centers_cache[key] = self._centers(stride, S)
             centers = self._centers_cache[key]
 
+            # ★ 记这一帧的原始最高分（**阈值之前**）。用户报「检测不到」时，
+            #   这一条能立刻区分「模型没加载」（最高分≈0）和「阈值太严」
+            #   （最高分 0.3~0.5）。TinyMog 的分数分布本来就偏低（实测中位 0.69），
+            #   0.5 的绝对门比 S3FD 严得多 —— 这是「benchmark 好、实际差」的一半原因。
+            try:
+                _mx = float(scores.max()) if scores.size else 0.0
+                if _mx > float(_DET_MISS.get("best") or 0.0):
+                    _DET_MISS["best"] = _mx
+                _DET_MISS["threshold"] = float(self.thresh)
+            except Exception:                              # noqa: BLE001
+                pass
             # 只在命中阈值的索引上取值：不再整表 stack / where 两遍
             keep = np.flatnonzero(scores >= self.thresh)
+            if keep.size == 0:
+                try:
+                    _DET_MISS["frames"] = int(_DET_MISS.get("frames") or 0) + 1
+                except Exception:                          # noqa: BLE001
+                    pass
             if keep.size == 0:
                 continue
             n = min(len(scores), len(centers))
