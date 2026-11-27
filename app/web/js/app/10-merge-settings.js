@@ -2072,6 +2072,14 @@
         window.mgpResultHide();
         if (window.mgpRejectHide) window.mgpRejectHide();
       }
+      /* ★ 进「导出进度 / 流水线视图」= 后端真的开跑了，这时候才把「开始导出」的
+         「启动中」态复位。之前是按下按钮后跟着那一发 POST 的 Promise 复位 ——
+         那个 Promise 只覆盖发请求，不管后端探帧数/建检测器/载模型/分配显存（3~15s），
+         所以按钮会在静默期里恢复成可点，用户又去点第二次。 */
+      if (name === "progress") {
+        clearTimeout(window.__mgBusyT);
+        if (window.mgExportBusy) window.mgExportBusy(false);
+      }
       document.querySelector("#p-merge .mgbody") &&
         (document.querySelector("#p-merge .mgbody").style.display = (name === "main") ? "" : "none");
     }

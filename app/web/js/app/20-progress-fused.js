@@ -425,13 +425,16 @@
           .then(function (d) {
             var st = (d && d.data) || d || {};
             if (!st.ok) {
+              if (window.mgExportBusy) window.mgExportBusy(false);   /* 没起来：把「启动中」放回去 */
               mgToastErr("pj-unavailable", "不能走 DFL 项目模式", String(st.why || ""), "warn", 6000);
               return;
             }
             if (window.mgpjStart) window.mgpjStart(st.dir);
+            if (window.mgExportBusy) window.mgExportBusy(false);   /* 没起来：把「启动中」放回去 */
             else toast("导出未启动", "项目导出模块没加载", "error");
           })
           .catch(function (e) {
+            if (window.mgExportBusy) window.mgExportBusy(false);   /* 没起来：把「启动中」放回去 */
             toast("导出未启动", String((e && e.message) || e).slice(0, 120), "error");
           });
         return;
@@ -508,6 +511,7 @@
         if (window.mgStep) window.mgStep("progress");
         pollMergeExport();
       }).catch(function (e) {
+        if (window.mgExportBusy) window.mgExportBusy(false);   /* 没起来：把「启动中」放回去 */
         window.__mergeExporting = false;
         toast("合成未启动", String((e && e.message) || e).slice(0, 120), "error");
       });
@@ -558,9 +562,22 @@
         }
         var p = (window.MergePages && window.MergePages.settings)
           ? window.MergePages.settings() : {};
+        /* 按下就进「启动中」，**一直转**到流水线视图出现为止（见 mgStep 里 name==="progress"
+           那一处）。不要在这里跟着 mgRunExport 的 Promise 走：那个 Promise 只覆盖发请求，
+           真正的静默期是后端探帧数 + 建检测器 + 载模型 + 分配显存（3~15s），它不等这些。 */
         if (window.mgExportBusy) window.mgExportBusy(true, "启动中");
-        Promise.resolve().then(function () { return mgRunExport(p); })
-          .catch(function () { if (window.mgExportBusy) window.mgExportBusy(false); });
+        /* 兜底：60s 内没切到流水线视图就复位，免得后端静默卡死时按钮永远转圈 */
+        clearTimeout(window.__mgBusyT);
+        window.__mgBusyT = setTimeout(function () {
+          if (window.__mergeStep !== "progress" && window.mgExportBusy) window.mgExportBusy(false);
+        }, 60000);
+        try {
+          mgRunExport(p);
+        } catch (e) {
+          /* 同步抛（参数不合法之类）就当场复位，否则按钮会一直卡在启动中 */
+          if (window.mgExportBusy) window.mgExportBusy(false);
+          throw e;
+        }
       });
     }
 
