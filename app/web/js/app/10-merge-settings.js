@@ -1719,8 +1719,9 @@
       fetch("/api/merge/faces" + q).then(function (r) { return r.json(); })
         .then(function (d) {
           if (!d || !Array.isArray(d.faces)) return;
-          var live = d.faces.filter(function (f) { return !f.trashed; }).length;
-          mgDbBadgeSet(live);
+          /* **含回收站**，和面板块里的「总脸数」同一个口径（fdbStatTotal = faces.length）。
+             回收站另有自己的计数。以前角标排除了 trashed，正好又和页内差一个数。 */
+          mgDbBadgeSet(d.faces.length);
         })
         .catch(function () {});
     } catch (e) { /* 忽略 */ }
