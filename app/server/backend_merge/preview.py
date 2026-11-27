@@ -81,8 +81,22 @@ def _sr_frame_bytes(blob: bytes, box, np, cv2) -> bytes:
         if img is None:
             return blob
         h, w = img.shape[:2]
-        x, y, bw, bh = [int(v) for v in (box or [])]
+        # ★ box 拿不到就**不超分**（不能拿整帧顶：超分模型是给人脸训的，
+        #   整张 1280x720 过一遍既慢又不是它该干的活）。
+        #   box 必须是一个有效的 [x, y, w, h]；拿不到就明说，别静默跳过 ——
+        #   以前 `x, y, bw, bh = [...]` 解包直接抛 ValueError，被外层 except 吞成
+        #   一行 [sr] 预览跳过，表现就是「开了超分但没效果」而日志里没人看。
+        _b = list(box or [])
+        if len(_b) != 4:
+            print("[sr] 跳过：这一帧没有有效的人脸框（box=%r）" % (box,), flush=True)
+            return blob
+        try:
+            x, y, bw, bh = [int(v) for v in _b]
+        except (TypeError, ValueError):
+            print("[sr] 跳过：盒坐标不是整数（box=%r）" % (box,), flush=True)
+            return blob
         if bw <= 8 or bh <= 8:
+            print("[sr] 跳过：人脸框太小（%dx%d）" % (bw, bh), flush=True)
             return blob
         x = max(0, min(x, w - bw))
         y = max(0, min(y, h - bh))

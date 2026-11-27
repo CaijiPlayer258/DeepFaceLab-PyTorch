@@ -412,7 +412,10 @@ def main():
                     pass                          # 调试视图本身就是输出
                 else:
                     out = _paste_face(frame, out, it.get("box"), np, cv2)
-            per = [{"dfm": dfm, "size": size}]
+            # ★ box 一起回：父进程的超分（_sr_apply_resp）要用人脸框才知道
+            #   该把哪一块送去 GPEN。以前这里只有 dfm/size，父进程 resp[box] 恒空，
+            #   _sr_frame_bytes 解包失败 → 静默跳过 —— 表现是「开了超分没效果」。
+            per = [{"dfm": dfm, "size": size, "box": list(it.get("box") or [])}]
         else:
             # ---- 多模型：同一张帧上按顺序一张脸一张脸贴 ----
             # load 是这次「声明要用」的整组；先装进显存，免得到第 2 张脸才付加载时间。
@@ -453,7 +456,8 @@ def main():
                 else:
                     out = fo
                 per.append({"dfm": f_dfm, "size": size_k,
-                            "ms": round((time.time() - t_k) * 1000.0, 1)})
+                            "ms": round((time.time() - t_k) * 1000.0, 1),
+                            "box": list(fc.get("box") or [])})
         # 出图：默认 jpg（预览一直是这条）。fmt=raw 给「父进程自己编 PNG」用 ——
         # 1080x1920 的 PNG 在 worker 里要 132~145ms/帧，挪到父进程的落盘线程里
         # 就能和别的帧的换脸重叠，而且逐像素无损（PNG 是 0 损失，raw 也是）。
@@ -472,6 +476,7 @@ def main():
                 raise RuntimeError("JPEG 编码失败")
             blob_out = buf.tobytes()
         return ({"ok": True, "size": (per[0]["size"] if per else 256), "fmt": fmt,
+                 "box": (per[0].get("box") if per else []),
                  "swap_ms": round((time.time() - t0) * 1000.0, 1),
                  "shape": [int(out.shape[0]), int(out.shape[1])],
                  "swaps": len(per), "per_face": per,

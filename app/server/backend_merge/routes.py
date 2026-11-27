@@ -131,7 +131,17 @@ def _sr_apply_resp(resp: dict, payload: dict) -> dict:
             return resp
         import base64 as _b64s, numpy as _np, cv2 as _cv2
         from .preview import _sr_frame_bytes
+        # box 优先用 resp[box]；没有就从 resp[faces][0] 里取（预览 worker 那条路
+        # 只有 faces 有框，resp[box] 是空的 —— 以前这里直接解包抛 ValueError，
+        # 被 except 吞成一行 [sr] 预览跳过，表现就是「开了超分没效果」）。
         box = resp.get("box")
+        if not box:
+            try:
+                _f0 = (resp.get("faces") or [None])[0]
+                if isinstance(_f0, dict) and _f0.get("box"):
+                    box = list(_f0["box"])
+            except Exception:                            # noqa: BLE001
+                box = None
         for key in ("jpg", "img", "png"):
             u = resp.get(key)
             if not isinstance(u, str) or not u:
@@ -1291,7 +1301,12 @@ def merge_preview(body: dict):
         dfm, model_name = _dfm_of(body)
     settings = _settings_val(body.get("settings"))
     cfg = _merge_settings_to_config(settings)
-    detector = _detector_val(body.get("detector"))
+    # 和 _face_debug_payload 一样读**两处**。以前只读顶层的 body[detector]，
+    # 而前端（mgCmpBody）把 detector 放在 settings 里发 —— 这里恒空，
+    # _detector_val(None) 落到默认档 tinymog。用户在界面上选 RetinaFace，
+    # 预览却一直用 TinyMog：那张脸 TinyMog 检不到就不画框、走无脸分支，
+    # 连带超分也没图可超（jpg 字段是 None）。看起来像「换个检测器更差」。
+    detector = _detector_val(body.get("detector") or settings.get("detector"))
     thresh = _float_val("thresh", body.get("thresh"), 0.0, 1.0, 0.5)
     xseg = _xseg_of(body)
     # fmt(png|jpg) / quality：前端「有脸点成原图」时会发 png，要求那几张逐像素相同。
