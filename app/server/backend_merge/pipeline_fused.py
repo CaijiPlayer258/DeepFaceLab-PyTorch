@@ -2687,7 +2687,11 @@ def _fused_worker(cfg: dict):
             _STAGE_JOB.update({"running": False})
         # 流水线实况收单：不再涨，但**保留** lanes/ticks —— 进度页那张图在「完成」
         # 那一刻要还是满的（收单就清空的话，界面会当场塌成一排占位格）。
-        _STAGE_METER.stop()
+        try:
+            _STAGE_METER.stop()
+        except Exception:                                  # noqa: BLE001
+            # 裸调用：这里一抛，后面的终态/显存释放/日志收单全都到不了
+            pass
         # 强制尝试失败：先回滚现场（放掉本进程会话 + 重算当下的账 + 改写 err）再收尾 ——
         # 见 _vram_oom_rollback / _vram_forced_rollback。顺序反了用户看到的就是
         # 「导出失败」，而不是「确实不够，已回滚」。

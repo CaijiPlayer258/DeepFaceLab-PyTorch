@@ -173,6 +173,19 @@ def _prepare_mask(face: dict, frame_shape, cfg: dict, size: int, timings: dict,
             if m is not None:
                 wrk = wrk * np.asarray(m, np.float32)
     if wrk is None:
+        # ★ 这一步是「整块 S×S 方框贴回原帧」—— 用户看到的是一块生硬的方块。
+        #   触发条件是 mask_mode 要的那张图没拿到：3/7 拿不到 dst 就直接落到这里；
+        #   4/5/8/9 则是少乘一项、遮罩多一圈。以前这里**一个字都不打**，用户只看到坏画面。
+        #   常见入口是 mask_source 与 mask_mode 互相矛盾（选了 DFM 却发 mask_mode=8），
+        #   或者 dfm 只有 2 个出参（len(outs)<3 → prd/dst 都是 None）。
+        from .loud import note as _note_mask
+        _note_mask("合成准备遮罩",
+                   RuntimeError("mask_mode=%d 要的图没拿到（prd_dfm=%s dst_dfm=%s "
+                                "xseg_prd=%s xseg_dst=%s）"
+                                % (int(mask_mode or 0), prd_dfm is not None,
+                                   dst_dfm is not None, xseg_prd is not None,
+                                   xseg_dst is not None)),
+                   "这张脸会按整块方框贴回原帧（不是贴合脸型的遮罩）", print)
         wrk = np.ones((int(size), int(size)), np.float32)      # 4.0:878-879
     if wrk.shape[:2] != (int(size), int(size)):
         wrk = cv2.resize(np.asarray(wrk, np.float32), (int(size), int(size)),

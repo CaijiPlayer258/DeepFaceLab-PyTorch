@@ -343,6 +343,15 @@ class _FusedRawWriter(threading.Thread):
                     self.live["n"] -= 1
                 self.on_frame(job)
                 self.on_progress(self.n)
+        except BaseException as e:                              # noqa: BLE001
+            # ★ 写者猝死必须让调用方看见。以前这里只有 finally（置 _dead），
+            #   而 pipeline_fused.py:2557 是靠 `if raw_w.err` 判「管道坏了」的 ——
+            #   err 永远是空 → 判不出来 → ffmpeg 拿到 EOF 出一支短片，
+            #   再 os.replace 成成片名、状态写「完成」。正是本项目自己说的
+            #   「静默产出坏片比失败更糟」。
+            if not self.err:
+                self.err = "%s: %s" % (e.__class__.__name__, str(e)[:300])
+            raise
         finally:
             self.seconds = time.perf_counter() - t0
             self._dead = True
