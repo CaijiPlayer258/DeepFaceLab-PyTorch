@@ -217,7 +217,11 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
 
         r = pass_run(video, pool_idx, nm, str(m["dfm"]), log=log, on_stage=_on_stage,
                      want_xseg=True, on_face=_on_face,
-                     face_type=str((cfg.get("config") or {}).get("face_type") or "whole_face"))
+                     face_type=str((cfg.get("config") or {}).get("face_type") or "whole_face"),
+                     # settings 要一起传：pass_swap 里的 _mask_src 靠它决定加载
+                     # XSegLite 还是 XSeg。不传就是空 dict → _mask_src 按 mask_mode
+                     # 推断成 XSegLite（用户选了 XSeg 也不生效）。
+                     settings=cfg.get("settings"))
         done_faces += int(r.get("faces") or 0)
         if r.get("faces"):
             metas.append(r["path"])

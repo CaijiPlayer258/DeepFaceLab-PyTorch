@@ -26,7 +26,7 @@ def _pool_dir(video: Path) -> Path:
 
 def run(video, index_path, model_name, dfm_path, chunk_frames=16,
         limit=None, log=print, out_dir=None, want_xseg=False, on_face=None,
-        on_stage=None, face_type="whole_face") -> dict:
+        on_stage=None, face_type="whole_face", settings=None) -> dict:
     """跑一趟：只处理 index.json 里属于 model_name 的脸。
 
     返回 {model, faces, chunks, size, elapsed_s, path}。
@@ -75,7 +75,9 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
             #   以前这里 str(...) 之后传给 _stage_xseg，norm_model("<dict repr>") 认不出
             #   → 回落 lite→xseg 的顺序 → **永远加载 XSegLite**，用户选 XSeg 也没用。
             #   而下面那句「遮罩来源与导出一致」是照着这个假的 label 打的。
-            _ms = _msfn(settings or {})    # 界面选的遮罩来源（XSegLite / XSeg / DFM）
+            # 兜底：settings 是关键字参数，调用方没给时是 None（不是未定义）——
+            # 但只要有人少传一个位置参数就可能变成 NameError，所以显式取。
+            _ms = _msfn(locals().get("settings") or {})   # 界面选的遮罩来源（XSegLite / XSeg / DFM）
             _mask_src = str((_ms or {}).get("model") or "")
         except Exception as _e:                                # noqa: BLE001
             from .loud import note as _ln
