@@ -2436,6 +2436,21 @@ def _fused_run(cfg: dict) -> dict:
                 if not errors:
                     errors.append("raw 管道收尾: %r" % (e,))
 
+    # ★ 自检摘要进日志：用户贴 <视频>_merged.log 时，一眼就能看出他装的是不是
+    #   「修好的那一版」。版本号会说谎（只拷了几个文件 / 改了源码没重启），
+    #   特征探测不会 —— 见 app/server/_selfcheck.py。
+    try:
+        from .._selfcheck import selfcheck as _sc_fn
+        _sc = _sc_fn()
+        if _sc.get("ok"):
+            _vid_log("自检：这份安装是完整的（%d 项修复全在）" % len(_sc.get("items") or []))
+        else:
+            _vid_log("自检：★ 这份安装缺 %d 项修复 —— 报的症状按新代码查不出来，先更新"
+                     % len(_sc.get("missing") or []))
+            for _m in (_sc.get("missing") or [])[:8]:
+                _vid_log("  └ 缺：%s" % _m)
+    except Exception:                                   # noqa: BLE001
+        pass
     # 检测侧的一次性汇总：多少帧有候选被合并/丢掉。以前是每帧打一行 note()，
     # 1439 帧刷了 1254 行、占整份日志 87%，真正的错误全被淹了（b28 的锅）。
     try:

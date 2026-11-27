@@ -41,6 +41,25 @@ def version() -> dict:
     return U.parse_version()          # {version, base, when, human}
 
 
+@router.get("/selfcheck")
+def selfcheck() -> dict:
+    """这份安装是不是「修好的那一版」—— **不读版本号，直接探测特征串**。
+
+    为什么需要它：用户可能只拷了几个文件、或者改了源码没重启，`version.txt`
+    写着 b45 而跑着 b23 的代码。版本号会说谎，`inspect.getsource` 不会。
+    返回 ok=False 时 missing 里就是缺哪几项修复 —— 直接告诉用户该更新。
+    """
+    from ._selfcheck import selfcheck as _sc
+    out = dict(U.parse_version() or {})
+    try:
+        chk = _sc()
+        out.update(chk)
+    except Exception as e:                                 # noqa: BLE001
+        out.update({"ok": None, "missing": [], "items": [],
+                    "error": "%s: %s" % (e.__class__.__name__, str(e)[:200])})
+    return out
+
+
 @router.post("/apply")
 def apply(body: ApplyBody = Body(default=ApplyBody())) -> dict:
     return U.apply(body.asset)
