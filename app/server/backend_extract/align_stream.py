@@ -734,10 +734,26 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
         try: gen.close()
         except Exception: pass
 
+    # ★ 断流对账。imageio 的读循环在 ffmpeg 中途死掉时是「读到 b'' → return」，
+    #   **不抛异常**；_decode 收到 StopIteration 就当正常收尾。于是源片被截断、
+    #   管道半路断、ffmpeg 被杀，全都表现为「进度 100% / 完成 / 帧数少于原片」，
+    #   而训练和合成照常开始 —— 用户拿到的是一份缺了一截的数据集。
+    #   拿 total_est（目录=文件数，视频=dur×fps）对账：差超过 2% 且至少 3 帧就判
+    #   没跑完。取消不算（那是用户自己停的）。
+    _short = (0 if cancelled else max(0, int(total_est) - int(stats["seen"])))
+    _truncated = bool(_short >= max(3, int(total_est * 0.02 + 0.999)))
+    if _truncated:
+        _log("[align] ★ 解码提前结束：只读到 %d / %d 帧（差 %d）—— 源片可能被截断、"
+             "管道中途断了，或 ffmpeg 被杀。这一份 aligned/ 不完整。"
+             % (stats["seen"], total_est, _short))
     wall = max(1e-6, time.time() - t0)
+
     # 最近一次抽取的实测数字：给 benchmark / 自检脚本读，不依赖解析 stdout
     _jobs._LAST_EXTRACT = {
-        "ok": True, "error": "",
+        "ok": not _truncated,
+        "error": ("解码提前结束：读到 %d / %d 帧" % (stats["seen"], total_est))
+                 if _truncated else "",
+        "short": int(_short), "total_est": int(total_est),
         "align": _amode, "lm106": lm106 is not None,
         "mode": mode, "frames": stats["seen"], "faces": stats["made"],
         "skipped": stats["skipped"], "rejected": stats["rejected"],
@@ -753,8 +769,9 @@ def _align_stream(src: str, face_dir: Path, fps: float = 2.0, rotate: int = 0,
         "hwaccel": _hwaccel.current(),
     }
     # 一行结论：模式 / 帧 / 脸 / 跳过 / 墙钟。自检脚本和人都直接看这行。
-    _log("[align] 完成：DFL_ALIGN=%s 帧=%d 脸=%d 跳过=%d%s%s 墙钟=%.2fs (%.1f 帧/秒)"
-         % (_amode, stats["seen"], stats["made"], stats["skipped"],
+    _log("[align] %s：DFL_ALIGN=%s 帧=%d 脸=%d 跳过=%d%s%s 墙钟=%.2fs (%.1f 帧/秒)"
+         % (("★ 没跑完" if _truncated else "完成"),
+            _amode, stats["seen"], stats["made"], stats["skipped"],
             ("（其中外点判异常 %d）" % stats["rejected_outlier"])
             if stats["rejected_outlier"] else "",
             (("（其中 5 点退化 %d）" % stats["rejected_gate"]) if _gm == "strict"
