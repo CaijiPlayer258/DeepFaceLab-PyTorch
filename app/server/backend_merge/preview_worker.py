@@ -415,7 +415,23 @@ def main():
             # ★ box 一起回：父进程的超分（_sr_apply_resp）要用人脸框才知道
             #   该把哪一块送去 GPEN。以前这里只有 dfm/size，父进程 resp[box] 恒空，
             #   _sr_frame_bytes 解包失败 → 静默跳过 —— 表现是「开了超分没效果」。
-            per = [{"dfm": dfm, "size": size, "box": list(it.get("box") or [])}]
+            # ★ 遮罩一起回：父进程的超分要「只作用在遮罩内」（不然头发/背景
+            #   一起被锐化）。这份 _fmask 是 MergeMaskedFace 顺手算出来的，
+            #   父进程再用它一次 —— 比在那边重跑 XSeg 省 1.5~4 ms/张。
+            _mk_b64 = ""
+            try:
+                if _fmask is not None and getattr(_fmask, "size", 0):
+                    _mk8 = np.clip(np.asarray(_fmask, np.float32) * 255.0, 0, 255).astype(np.uint8)
+                    if _mk8.shape[:2] != (256, 256):
+                        _mk8 = cv2.resize(_mk8, (256, 256), interpolation=cv2.INTER_LINEAR)
+                    _ok8, _buf8 = cv2.imencode(".png", _mk8, [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
+                    if _ok8:
+                        import base64 as _b64
+                        _mk_b64 = _b64.b64encode(_buf8.tobytes()).decode("ascii")
+            except Exception:                          # noqa: BLE001
+                _mk_b64 = ""
+            per = [{"dfm": dfm, "size": size, "box": list(it.get("box") or []),
+                    "mask": _mk_b64}]
         else:
             # ---- 多模型：同一张帧上按顺序一张脸一张脸贴 ----
             # load 是这次「声明要用」的整组；先装进显存，免得到第 2 张脸才付加载时间。
@@ -455,9 +471,25 @@ def main():
                         out = _paste_face(out, fo, fc.get("box"), np, cv2)
                 else:
                     out = fo
+                # ★ 遮罩随 per 回传：父进程的超分要「只作用在遮罩内」（不然头发/背景
+                #   一起被锐化），而这份 _fmask 是 MergeMaskedFace 顺手算出来的 ——
+                #   父进程再用它一次，比在那边重跑 XSeg 省 1.5~4 ms/张。
+                _mk_b64 = ""
+                try:
+                    if _fmask is not None and getattr(_fmask, "size", 0):
+                        _mk8 = np.clip(np.asarray(_fmask, np.float32) * 255.0, 0, 255).astype(np.uint8)
+                        if _mk8.shape[:2] != (256, 256):
+                            _mk8 = cv2.resize(_mk8, (256, 256), interpolation=cv2.INTER_LINEAR)
+                        _ok8, _buf8 = cv2.imencode(".png", _mk8, [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
+                        if _ok8:
+                            import base64 as _b64
+                            _mk_b64 = _b64.b64encode(_buf8.tobytes()).decode("ascii")
+                except Exception:                          # noqa: BLE001
+                    _mk_b64 = ""
                 per.append({"dfm": f_dfm, "size": size_k,
                             "ms": round((time.time() - t_k) * 1000.0, 1),
-                            "box": list(fc.get("box") or [])})
+                            "box": list(fc.get("box") or []),
+                            "mask": _mk_b64})
         # 出图：默认 jpg（预览一直是这条）。fmt=raw 给「父进程自己编 PNG」用 ——
         # 1080x1920 的 PNG 在 worker 里要 132~145ms/帧，挪到父进程的落盘线程里
         # 就能和别的帧的换脸重叠，而且逐像素无损（PNG 是 0 损失，raw 也是）。

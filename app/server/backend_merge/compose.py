@@ -1728,8 +1728,13 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
         if _lv > 0:
             _apply_sr(_lv)          # 先落 env：下面 enabled() 读的就是它
         if _lv > 0 and _sr.enabled():
+            # ★ 超分只作用在**XSeg 遮罩内**的人脸：椭圆掩膜会把头发/背景一起锐化
+            #   （用户报的「背景也连着被超分」）。
+            #   **不在这里再算一次遮罩** —— worker 的 MergeMaskedFace 已经把它算出来了，
+            #   让它随 per[] 回传（desc["mask"]），这里直接用。重复调 XSeg 等于同一张脸
+            #   算两遍遮罩，白花 1.5~4 ms/张。
             _bs = _detect_boxes(out, detector, thresh) or []
-            for _b in _bs:
+            for _bi, _b in enumerate(_bs):
                 try:
                     # ★ _detect_boxes 给的是 xyxy（见 _face_debug_payload 的
                     #   `x1, y1, x2, y2 = ...`），这里以前直接当成 [x, y, w, h] 用 ——
@@ -1745,10 +1750,30 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
                     continue
                 _x = max(0, min(_x, out.shape[1] - _bw))
                 _y = max(0, min(_y, out.shape[0] - _bh))
-                _m = np.zeros((_bh, _bw), np.float32)
-                cv2.ellipse(_m, (_bw // 2, _bh // 2),
-                            (max(1, _bw // 2 - 2), max(1, _bh // 2 - 2)), 0, 0, 360, 1.0, -1)
-                _m = cv2.GaussianBlur(_m, (0, 0), max(1.0, min(_bw, _bh) * 0.03))
+                # ★ 掩膜用 **worker 已经算好的那份 XSeg 遮罩**（res.per_face[i].mask），
+                #   不再在这里跑一次 XSeg —— 同一张脸算两遍遮罩白花 1.5~4 ms/张。
+                #   拿不到才退回椭圆，并打一行说明（椭圆会把头发/背景一起锐化）。
+                _m = None
+                try:
+                    _pf = (res.get("per_face") or [])
+                    _mb64 = (_pf[_bi].get("mask") if _bi < len(_pf) else "") or ""
+                    if _mb64:
+                        import base64 as _b64m
+                        _mk8 = cv2.imdecode(np.frombuffer(_b64m.b64decode(_mb64), np.uint8),
+                                            cv2.IMREAD_GRAYSCALE)
+                        if _mk8 is not None and getattr(_mk8, "size", 0):
+                            _m = cv2.resize(_mk8.astype(np.float32) / 255.0, (_bw, _bh),
+                                            interpolation=cv2.INTER_LINEAR)
+                            _m = np.clip(_m, 0.0, 1.0)
+                except Exception:                      # noqa: BLE001
+                    _m = None
+                if _m is None:
+                    print("[sr] 没拿到 worker 的遮罩，退回椭圆（头发/背景也会被锐化）",
+                          flush=True)
+                    _m = np.zeros((_bh, _bw), np.float32)
+                    cv2.ellipse(_m, (_bw // 2, _bh // 2),
+                                (max(1, _bw // 2 - 2), max(1, _bh // 2 - 2)), 0, 0, 360, 1.0, -1)
+                _m = cv2.GaussianBlur(_m, (0, 0), max(1.0, min(_bw, _bh) * 0.02))
                 out[_y:_y + _bh, _x:_x + _bw] = _sr.apply_roi(
                     out[_y:_y + _bh, _x:_x + _bw], _m, _sr.strength())
             if not want_png:
@@ -1822,6 +1847,12 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
                      [(m.get("name"), list(m.get("faces") or [])) for m in (models or [])],
                      [(f.get("idx"), f.get("dfm_name") or f.get("model") or "") for f in (res.get("faces") or [])]),
                   flush=True)
+    # worker 顺手算的每张脸遮罩随响应出去（只给父进程的超分用，前端不用管）：
+    # 没有它，/frame 那边只能退回椭圆 → 头发/背景一起被锐化。
+    try:
+        resp["per_face"] = list(res.get("per_face") or [])
+    except Exception:                                      # noqa: BLE001
+        pass
     _compose_store(sig, resp)
     return resp
 

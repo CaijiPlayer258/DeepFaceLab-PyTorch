@@ -1289,7 +1289,11 @@ def _preview_finish(desc: dict, resp: dict, img, timings, t0) -> dict:
 
     out = {"jpg": img, "img": img, "box": desc.get("box"), "has_face": True,
            "no_faces": False, "swapped": True, "timings": timings,
-           "model_size": resp.get("size"), "note": ""}
+           "model_size": resp.get("size"), "note": "",
+           # ★ worker 顺手算出来的每张脸遮罩（per_face[].mask，256² PNG 的 base64）。
+           #   父进程的超分要「只作用在遮罩内」——拿这份比再跑一遍 XSeg 省
+           #   1.5~4 ms/张。没有就用空列表，超分那边退回椭圆并打日志。
+           "per_face": list(resp.get("per_face") or [])}
     if str(resp.get("fmt") or "").strip().lower() == "raw":
         # worker 回的是裸 BGR：PNG 由落盘那一侧编（见 _proj_out_raw）。
         shp = list(resp.get("shape") or [])
