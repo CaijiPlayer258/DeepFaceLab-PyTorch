@@ -77,6 +77,19 @@ def _frames_run(src: str, dst: str, fps: float = 2.0, rotate: int = 0,
             JOB.running = False
             JOB.done = JOB.done or JOB.total
             JOB.total = max(JOB.total, JOB.done)
+            # ★ 不要无条件把失败/取消覆盖成「完成」。_align_stream 里有 4 个
+            #   _job_fail 分支（检测器缺失 / 空目录 / 首图读不出 / 视频打不开）都只是
+            #   `return 0`，以及取消路径会置 ok=False —— 而这里以前一律
+            #   `ok=True / pct=100 / error="" / 完成：对齐 0 张人脸`，于是用户看到
+            #   「红条一闪 → 完成 0 张脸」，只有 _LAST_EXTRACT.ok 能看出真相（界面不读）。
+            if not JOB.ok:
+                # 已经明确失败/取消：把状态定在失败上，别往下改成成功。
+                JOB.pct = max(0, min(99, int(JOB.pct or 0)))
+                if not JOB.error:
+                    JOB.error = "提取没有正常完成"
+                if not JOB.msg:
+                    JOB.msg = "失败：%s" % JOB.error
+                return n
             JOB.pct = 100
             JOB.ok = True
             JOB.error = ""
