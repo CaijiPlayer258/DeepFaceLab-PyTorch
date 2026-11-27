@@ -146,7 +146,7 @@ def _prepare_mask(face: dict, frame_shape, cfg: dict, size: int, timings: dict,
         hull = get_image_hull_mask(frame_shape, lm)
         m1 = fmat
         if m1 is None:
-            m1 = get_transform_mat(lm, int(size), FaceType.WHOLE_FACE, scale=1.0)
+            m1 = get_transform_mat(lm, int(size), _face_type_of(cfg), scale=1.0)
         wrk = cv2.warpAffine(hull, m1, (int(size), int(size)),
                              flags=cv2.INTER_CUBIC)
     elif mask_mode in (2, 4, 5):
@@ -343,6 +343,27 @@ def _color_transfer(fo, dw, wrk_mask, code: int, timings: dict):
 
 
 # ---------------- 反贴 + 融合（4.0:937-966） ----------------
+# 人脸类型：界面那一项（mgFaceType）以前只有预览读，导出三处全写死 WHOLE_FACE。
+# 两条路各自自洽所以不是硬错位，但 get_transform_mat 里 HALF/FULL/HEAD 的 padding
+# 和 WHOLE_FACE 的 7% 下移都不同 —— 同一张脸喂给 dfm 的取景不一样，贴回去五官的
+# 大小和朝向就会差一截。默认值是 whole_face，所以只有改过这一项的用户才会中。
+_FACE_TYPE_MAP = {"half_face": "HALF", "midfull_face": "MID_FULL",
+                  "full_face": "FULL", "whole_face": "WHOLE_FACE",
+                  "head": "HEAD"}
+
+
+def _face_type_of(cfg) -> int:
+    """cfg['face_type']（字符串）→ facelib FaceType 整数；认不出就 WHOLE_FACE。"""
+    try:
+        from facelib import FaceType
+    except Exception:                                       # noqa: BLE001
+        return 0
+    raw = str((cfg or {}).get("face_type") or "").strip().lower().replace("-", "_")
+    name = _FACE_TYPE_MAP.get(raw)
+    if not name:
+        return FaceType.WHOLE_FACE
+    return int(getattr(FaceType, name, FaceType.WHOLE_FACE))
+
 def _roi_of_face(mat, size: int, frame_shape, margin: int = 8):
     """S×S 画布在原帧里的包围盒（外扩 margin，保证三次插值的取样全在 ROI 内）。
 
@@ -538,7 +559,7 @@ def compose_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
         if fo.ndim != 3 or fo.shape[0] != fo.shape[1]:
             _pred_shape_complain("compose_frame", fo.shape)
         sz = int(fo.shape[0])
-        fmat = get_transform_mat(lm, sz, FaceType.WHOLE_FACE, scale=1.0)   # S->帧
+        fmat = get_transform_mat(lm, sz, _face_type_of(cfg), scale=1.0)   # S->帧
         wrk = _prepare_mask(f, frame_bgr.shape, cfg, sz, timings)          # 遮罩准备
 
         box = _roi_of_face(fmat, sz, frame_bgr.shape) if roi else None

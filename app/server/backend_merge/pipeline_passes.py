@@ -210,7 +210,8 @@ def run(cfg, log=print, progress=None, cancelled=None) -> dict:
                 pass
 
         r = pass_run(video, pool_idx, nm, str(m["dfm"]), log=log, on_stage=_on_stage,
-                     want_xseg=True, on_face=_on_face)
+                     want_xseg=True, on_face=_on_face,
+                     face_type=str((cfg.get("config") or {}).get("face_type") or "whole_face"))
         done_faces += int(r.get("faces") or 0)
         if r.get("faces"):
             metas.append(r["path"])

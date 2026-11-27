@@ -26,7 +26,7 @@ def _pool_dir(video: Path) -> Path:
 
 def run(video, index_path, model_name, dfm_path, chunk_frames=16,
         limit=None, log=print, out_dir=None, want_xseg=False, on_face=None,
-        on_stage=None) -> dict:
+        on_stage=None, face_type="whole_face") -> dict:
     """跑一趟：只处理 index.json 里属于 model_name 的脸。
 
     返回 {model, faces, chunks, size, elapsed_s, path}。
@@ -133,7 +133,13 @@ def run(video, index_path, model_name, dfm_path, chunk_frames=16,
             lm = _frame_landmarks(img, det, [x, y, x + w, y + h])
             if lm is None:
                 continue
-            mat = get_transform_mat(np.asarray(lm, np.float32), size, FaceType.WHOLE_FACE, scale=1.0)
+            # 和预览同一个口径：界面选了 full_face / head 就得按它取景，否则同一张脸
+            # 喂给 dfm 的构图和预览不同，贴回去五官大小/朝向会差一截。
+            _ft = {"half_face": FaceType.HALF, "midfull_face": FaceType.MID_FULL,
+                   "full_face": FaceType.FULL, "whole_face": FaceType.WHOLE_FACE,
+                   "head": FaceType.HEAD}.get(str(face_type or "").strip().lower(),
+                                              FaceType.WHOLE_FACE)
+            mat = get_transform_mat(np.asarray(lm, np.float32), size, _ft, scale=1.0)
             warped = cv2.warpAffine(img, mat, (size, size), flags=cv2.INTER_CUBIC)
             ins.append(np.clip(warped.astype(np.float32) / 255.0, 0, 1))
             # ★ 每张脸自己的裁剪必须跟着它一起存。以前是 `warped_u8 = warped` 覆盖同一个
