@@ -190,7 +190,10 @@ _VID_LOG_LOCK = threading.Lock()
 _VID_ECHO_HINT = __import__("re").compile(
     "完成|结束|失败|错误|报错|取消|中断|开始|启动|进入|导出模式|加载|模型|"
     "编码|收尾|内存|显存|攒批|帧预算|批次|趟|回落|回退|警告|跳过|"
-    "超时|重试|OOM|对不起|装不下|拒绝")
+    # 「检测」必须在这里：_det_ep_line 那行（选了 GPU 还是 CPU 检测、为什么、两边多少 ms）
+    # 走的是 _vid_log，只写 <视频>_merged.log。用户报「导出慢」时，那行是唯一能看出
+    # 「检测跑到 CPU 上了（8.9~12.5ms vs GPU 1.4ms）」的地方 —— 不进 stdout 就等于没有。
+    "超时|重试|OOM|对不起|装不下|拒绝|检测|EP|xseg|XSeg|遮罩|对齐|align|分配|复用")
 
 _VID_LOG_FH = {"fh": None, "path": ""}
 
