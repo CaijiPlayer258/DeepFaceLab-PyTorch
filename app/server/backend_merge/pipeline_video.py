@@ -193,7 +193,14 @@ _VID_ECHO_HINT = __import__("re").compile(
     # 「检测」必须在这里：_det_ep_line 那行（选了 GPU 还是 CPU 检测、为什么、两边多少 ms）
     # 走的是 _vid_log，只写 <视频>_merged.log。用户报「导出慢」时，那行是唯一能看出
     # 「检测跑到 CPU 上了（8.9~12.5ms vs GPU 1.4ms）」的地方 —— 不进 stdout 就等于没有。
-    "超时|重试|OOM|对不起|装不下|拒绝|检测|EP|xseg|XSeg|遮罩|对齐|align|分配|复用")
+    # passes 路径（pass0 → pass_swap → merge_final）整个走 log=_vid_log，**一个字都不进 stdout**：
+    # pipeline_video.py:788 `_pp.run(cfg, log=_vid_log, ...)`。于是 [pass]/[pass0]/[merge] 全在
+    # <视频>_merged.log 里，而它们的文本是英文开头（[pass] enter model=… want_xseg=…），
+    # 一个中文关键词都不含 —— 下面这个过滤器也放过了它们。用户那份日志里 [pass] 命中 0 次、
+    # 但有 [stage] 的模型加载，看着像「没跑 passes 就撤了」，其实是两层都没进 stdout。
+    # 加上 pass|merge|scan|pool|chunk，这几类进 stdout 就够定位阶段了（逐帧那类仍静默）。
+    "超时|重试|OOM|对不起|装不下|拒绝|检测|EP|xseg|XSeg|遮罩|对齐|align|分配|复用|"
+    "pass|pass0|merge|scan|pool|chunk|趟|池")
 
 _VID_LOG_FH = {"fh": None, "path": ""}
 
