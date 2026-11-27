@@ -519,6 +519,27 @@ def _pred_shape_complain(where: str, shape, extra: str = "") -> None:
           flush=True)
     _tb.print_stack(file=__import__("sys").stdout)
 
+def _hist_match_masked(fo, dw, mask, thr: int):
+    """hist-match，直方图只在遮罩内统计 —— 和预览 merger._apply_hist_mask 一致。
+
+    预览的做法是「遮罩外涂白」：hist_mask = mask（masked_hist_match=True 时），
+    然后 `img * hist_mask + (1 - hist_mask)`。这样遮罩外的像素全部变成 1.0，
+    对直方图的贡献是一个尖峰，等价于「不参与统计」。
+
+    导出以前直接 color_hist_match(fo, dw2, thr)，整张画布（含画布外的黑边）都进统计 ——
+    同一帧、同样的参数，拉出来的直方图完全不同。默认模式是 seamless，只有选了
+    hist-match / seamless-hist-match 才走到这里。
+    """
+    import numpy as _np
+    m = _np.asarray(mask, _np.float32)
+    if m.ndim == 2:
+        m = m[:, :, None]
+    m = _np.clip(m, 0.0, 1.0)
+    white = (1.0 - m)
+    hm1 = _np.clip(_np.asarray(fo, _np.float32) * m + white, 0.0, 1.0)
+    hm2 = _np.clip(_np.asarray(dw, _np.float32) * m + white, 0.0, 1.0)
+    return _imagelib().color_hist_match(hm1, hm2, hist_match_threshold=thr)
+
 def compose_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
                   roi: bool = True) -> np.ndarray:
     """一帧的合成（纯 CPU）：遮罩准备 → 色彩迁移 → 融合 → 反贴回原帧。
@@ -545,7 +566,7 @@ def compose_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
         return frame_bgr
     mode = str(cfg.get("mode") or "overlay").strip().lower()
     ct = ct_code(cfg.get("color_transfer_mode", cfg.get("ct_mode")))
-    hm_thr = int(cfg.get("hist_match_threshold", 255) or 255)
+    hm_thr = int(cfg.get("hist_match_threshold", 238) or 238)
     h, w = frame_bgr.shape[:2]
     layers = []
 
@@ -595,7 +616,7 @@ def compose_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
             fo = _color_transfer(fo, dw, _ctm, ct, timings)
         if "hist-match" in mode:
             dw2 = cv2.warpAffine(roi_f, fwd, (sz, sz), flags=cv2.INTER_CUBIC)
-            fo = _imagelib().color_hist_match(fo, dw2, hist_match_threshold=hm_thr)
+            fo = _hist_match_masked(fo, dw2, wrk, hm_thr)
         timings["ct_ms"] = timings.get("ct_ms", 0.0) + (time.time() - t_ct) * 1000.0
 
         t_p = time.time()
@@ -717,7 +738,7 @@ def compose_aligned_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
         return frame_bgr
     mode = str(cfg.get("mode") or "overlay").strip().lower()
     ct = ct_code(cfg.get("color_transfer_mode", cfg.get("ct_mode")))
-    hm_thr = int(cfg.get("hist_match_threshold", 255) or 255)
+    hm_thr = int(cfg.get("hist_match_threshold", 238) or 238)
     h, w = frame_bgr.shape[:2]
     layers = []
 
@@ -764,7 +785,7 @@ def compose_aligned_frame(frame_bgr, faces, cfg: dict, timings: dict = None,
             if ct:
                 fo = _color_transfer(fo, dw, wrk, ct, timings)
             if "hist-match" in mode:
-                fo = _imagelib().color_hist_match(fo, dw, hist_match_threshold=hm_thr)
+                fo = _hist_match_masked(fo, dw, wrk, hm_thr)
         timings["ct_ms"] = timings.get("ct_ms", 0.0) + (time.time() - t_ct) * 1000.0
 
         t_p = time.time()
