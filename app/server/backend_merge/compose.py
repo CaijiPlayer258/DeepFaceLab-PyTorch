@@ -1750,32 +1750,46 @@ def _frame_payload(idx: int, payload: dict, default_w: int = 900) -> dict:
                     continue
                 _x = max(0, min(_x, out.shape[1] - _bw))
                 _y = max(0, min(_y, out.shape[0] - _bh))
-                # ★ 掩膜用 **worker 已经算好的那份 XSeg 遮罩**（res.per_face[i].mask），
-                #   不再在这里跑一次 XSeg —— 同一张脸算两遍遮罩白花 1.5~4 ms/张。
-                #   拿不到才退回椭圆，并打一行说明（椭圆会把头发/背景一起锐化）。
-                _m = None
-                try:
-                    _pf = (res.get("per_face") or [])
-                    _mb64 = (_pf[_bi].get("mask") if _bi < len(_pf) else "") or ""
-                    if _mb64:
-                        import base64 as _b64m
-                        _mk8 = cv2.imdecode(np.frombuffer(_b64m.b64decode(_mb64), np.uint8),
-                                            cv2.IMREAD_GRAYSCALE)
-                        if _mk8 is not None and getattr(_mk8, "size", 0):
-                            _m = cv2.resize(_mk8.astype(np.float32) / 255.0, (_bw, _bh),
-                                            interpolation=cv2.INTER_LINEAR)
-                            _m = np.clip(_m, 0.0, 1.0)
-                except Exception:                      # noqa: BLE001
-                    _m = None
-                if _m is None:
-                    print("[sr] 没拿到 worker 的遮罩，退回椭圆（头发/背景也会被锐化）",
-                          flush=True)
-                    _m = np.zeros((_bh, _bw), np.float32)
-                    cv2.ellipse(_m, (_bw // 2, _bh // 2),
-                                (max(1, _bw // 2 - 2), max(1, _bh // 2 - 2)), 0, 0, 360, 1.0, -1)
-                _m = cv2.GaussianBlur(_m, (0, 0), max(1.0, min(_bw, _bh) * 0.02))
-                out[_y:_y + _bh, _x:_x + _bw] = _sr.apply_roi(
-                    out[_y:_y + _bh, _x:_x + _bw], _m, _sr.strength())
+                # ★ 在**对齐画布**上超分，再 warp 回画面 —— 和调试六宫格同一条几何。
+                #   为什么不能直接超分画面里的矩形：GPEN-BFR 是对齐脸训的，
+                #   喂一块带头发/背景、还会被各向异性拉伸的画面矩形，它会重绘崩坏
+                #   （实测：眼睛变成一条黑线、嘴唇变成色块）。六宫格一直正常就是
+                #   因为它吃的是画布。
+                #   画布中间量由 worker 随 per_face 回传：canvas（画布上的合成图）、
+                #   canvas_mask（画布 alpha）、mat（画布 → 画面）。
+                _pf = (res.get("per_face") or [])
+                _rec = _pf[_bi] if _bi < len(_pf) else None
+                _canvas_b64 = (_rec.get("canvas") if _rec else "") or ""
+                _cmask_b64 = (_rec.get("canvas_mask") if _rec else "") or ""
+                _mat = (_rec.get("mat") if _rec else None)
+                if _canvas_b64 and _cmask_b64 and _mat:
+                    import base64 as _b64c
+                    _cv = cv2.imdecode(np.frombuffer(_b64c.b64decode(_canvas_b64), np.uint8),
+                                       cv2.IMREAD_COLOR)
+                    _cm = cv2.imdecode(np.frombuffer(_b64c.b64decode(_cmask_b64), np.uint8),
+                                       cv2.IMREAD_GRAYSCALE)
+                    if _cv is not None and _cm is not None and _cv.size and _cm.size:
+                        _cmf = np.clip(_cm.astype(np.float32) / 255.0, 0.0, 1.0)
+                        # ① 画布上超分（这次喂的是它训练时见过的对齐脸）
+                        _sr_canvas = _sr.apply_roi(_cv, _cmf, _sr.strength())
+                        if _sr_canvas is not None and _sr_canvas.size:
+                            # ② 把「超分增量」warp 回画面（只搬 SR 信号，不重采样 dst）
+                            _M = np.asarray(_mat, np.float64)
+                            _H, _W = out.shape[:2]
+                            _d_canvas = (_sr_canvas.astype(np.float32)
+                                         - _cv.astype(np.float32))
+                            _d_frame = cv2.warpAffine(_d_canvas, _M, (_W, _H),
+                                                      flags=cv2.INTER_LINEAR,
+                                                      borderMode=cv2.BORDER_CONSTANT,
+                                                      borderValue=(0, 0, 0))
+                            _a_frame = cv2.warpAffine(_cmf, _M, (_W, _H),
+                                                      flags=cv2.INTER_LINEAR,
+                                                      borderMode=cv2.BORDER_CONSTANT,
+                                                      borderValue=0)
+                            # ③ 按画布 alpha 混回：边界和合成遮罩完全重合，看不见接缝
+                            _wgt = np.clip(_a_frame, 0.0, 1.0)[..., None]
+                            out = np.clip(out.astype(np.float32) + _d_frame * _wgt,
+                                          0, 255).astype(np.uint8)
             if not want_png:
                 img = _encode_frame(out, maxw, fmt, quality)
     except Exception as _e:                                    # noqa: BLE001

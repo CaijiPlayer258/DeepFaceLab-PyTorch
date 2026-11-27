@@ -399,9 +399,14 @@ def main():
             # input_size 显式传进去，不靠模块级 _merger._model_input_size：
             # 批处理里两个线程同时写那个全局，另一帧就会按错的边长 warp
             # （多模型、输入尺寸不同时必现）。
+            # capture：把这次合成的**画布中间量**顺出来，供父进程的超分用。
+            # GPEN 是对齐脸训的，只有把**画布**（不是画面里的矩形框）喂给它，
+            # 输出才和调试六宫格一致；喂画面矩形会重绘崩坏（眼睛变黑线、嘴变色块）。
+            _cap = {}
             fo, _fmask = MergeMaskedFace(frame, lm, cfg,
                                          _predictor(sess, inp_name, size, nchw),
-                                         xseg_256_extract_func=xs, input_size=size)
+                                         xseg_256_extract_func=xs, input_size=size,
+                                         capture=_cap)
             if fo is None or not hasattr(fo, "shape"):
                 raise RuntimeError("MergeMaskedFace 没返回图")
             out = fo
@@ -421,17 +426,54 @@ def main():
             _mk_b64 = ""
             try:
                 if _fmask is not None and getattr(_fmask, "size", 0):
+                    # ★ **不要缩**：_fmask 是整帧坐标的遮罩（MergeMasked 第 627 行
+                    #   warp 回画面，形状 (H, W, 1) 和 frame 一致）。缩到 256² 就
+                    #   丢了它和画面的对应关系，父进程再怎么缩放都对不上，表现是
+                    #   「超分区域被截断 / 和原图重影」。原尺寸发过去，父进程直接
+                    #   按脸框裁一刀就完事（灰度 PNG，1080p 约 30~50 KB）。
                     _mk8 = np.clip(np.asarray(_fmask, np.float32) * 255.0, 0, 255).astype(np.uint8)
-                    if _mk8.shape[:2] != (256, 256):
-                        _mk8 = cv2.resize(_mk8, (256, 256), interpolation=cv2.INTER_LINEAR)
-                    _ok8, _buf8 = cv2.imencode(".png", _mk8, [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
+                    if _mk8.ndim == 3:
+                        _mk8 = _mk8[..., 0]
+                    _ok8, _buf8 = cv2.imencode(".png", _mk8, [int(cv2.IMWRITE_PNG_COMPRESSION), 6])
                     if _ok8:
                         import base64 as _b64
                         _mk_b64 = _b64.b64encode(_buf8.tobytes()).decode("ascii")
             except Exception:                          # noqa: BLE001
                 _mk_b64 = ""
-            per = [{"dfm": dfm, "size": size, "box": list(it.get("box") or []),
-                    "mask": _mk_b64}]
+            # ★ 画布中间量：GPEN 是对齐脸训的，只有**画布**喂给它，输出才和
+            #   调试六宫格一致（喂画面里的矩形会让它重绘崩坏）。
+            #   merged_face / effective_mask 都是 (size,size)，mat 是「画布 → 画面」。
+            _cap_pack = {}
+            try:
+                _mf = _cap.get("merged_face")
+                _em = _cap.get("effective_mask")
+                if _mf is not None and getattr(_mf, "size", 0):
+                    _m8 = np.clip(np.asarray(_mf, np.float32) * 255.0, 0, 255).astype(np.uint8)
+                    _okv, _bufv = cv2.imencode(".jpg", _m8, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
+                    if _okv:
+                        import base64 as _b64c
+                        _cap_pack["canvas"] = _b64c.b64encode(_bufv.tobytes()).decode("ascii")
+                if _em is not None and getattr(_em, "size", 0):
+                    _e8 = np.clip(np.asarray(_em, np.float32) * 255.0, 0, 255).astype(np.uint8)
+                    if _e8.ndim == 3:
+                        _e8 = _e8[..., 0]
+                    _okv2, _bufv2 = cv2.imencode(".png", _e8, [int(cv2.IMWRITE_PNG_COMPRESSION), 6])
+                    if _okv2:
+                        import base64 as _b64c2
+                        _cap_pack["canvas_mask"] = _b64c2.b64encode(_bufv2.tobytes()).decode("ascii")
+                # 画布 → 画面 的仿射（用 worker 自己那组 68 点算，别让父进程另算）
+                try:
+                    from facelib import LandmarksProcessor as _LP
+                    _ft = getattr(cfg, "face_type", None)
+                    _mat = _LP.get_transform_mat(lm, int(size), face_type=_ft)
+                    _cap_pack["mat"] = np.asarray(_mat, np.float64).round(6).tolist()
+                    _cap_pack["canvas_size"] = int(size)
+                except Exception:                      # noqa: BLE001
+                    pass
+            except Exception:                          # noqa: BLE001
+                _cap_pack = {}
+            per = [dict({"dfm": dfm, "size": size, "box": list(it.get("box") or []),
+                         "mask": _mk_b64}, **_cap_pack)]
         else:
             # ---- 多模型：同一张帧上按顺序一张脸一张脸贴 ----
             # load 是这次「声明要用」的整组；先装进显存，免得到第 2 张脸才付加载时间。
@@ -456,9 +498,11 @@ def main():
                 # 调试视图本身就是整帧输出，再叠第二张会把上一张盖掉 —— 每张都
                 # 从原帧出发；正常模式贴的就是上一次的结果，多张脸能叠在一起。
                 src = frame if str(cfg.mode) == "debug" else out
+                _cap = {}
                 fo, _fmask = MergeMaskedFace(src, lm_k, cfg,
                                              _predictor(sess_k, in_k, size_k, nchw_k),
-                                             xseg_256_extract_func=xs, input_size=size_k)
+                                             xseg_256_extract_func=xs, input_size=size_k,
+                                             capture=_cap)
                 if fo is None or not hasattr(fo, "shape"):
                     raise RuntimeError("第 %d 张脸：MergeMaskedFace 没返回图" % (k + 1))
                 if fo.ndim != 3 or fo.shape[2] != 3:
@@ -477,19 +521,50 @@ def main():
                 _mk_b64 = ""
                 try:
                     if _fmask is not None and getattr(_fmask, "size", 0):
+                        # 不要缩：_fmask 是整帧坐标的遮罩（形状和 frame 一致），
+                        # 缩到 256² 就丢了和画面的对应关系。
                         _mk8 = np.clip(np.asarray(_fmask, np.float32) * 255.0, 0, 255).astype(np.uint8)
-                        if _mk8.shape[:2] != (256, 256):
-                            _mk8 = cv2.resize(_mk8, (256, 256), interpolation=cv2.INTER_LINEAR)
-                        _ok8, _buf8 = cv2.imencode(".png", _mk8, [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
+                        if _mk8.ndim == 3:
+                            _mk8 = _mk8[..., 0]
+                        _ok8, _buf8 = cv2.imencode(".png", _mk8, [int(cv2.IMWRITE_PNG_COMPRESSION), 6])
                         if _ok8:
                             import base64 as _b64
                             _mk_b64 = _b64.b64encode(_buf8.tobytes()).decode("ascii")
                 except Exception:                          # noqa: BLE001
                     _mk_b64 = ""
-                per.append({"dfm": f_dfm, "size": size_k,
-                            "ms": round((time.time() - t_k) * 1000.0, 1),
-                            "box": list(fc.get("box") or []),
-                            "mask": _mk_b64})
+                # ★ 画布中间量（同单脸那条）：GPEN 吃画布才和调试六宫格一致
+                _cap_pack = {}
+                try:
+                    _mf = _cap.get("merged_face")
+                    _em = _cap.get("effective_mask")
+                    if _mf is not None and getattr(_mf, "size", 0):
+                        _m8 = np.clip(np.asarray(_mf, np.float32) * 255.0, 0, 255).astype(np.uint8)
+                        _okv, _bufv = cv2.imencode(".jpg", _m8, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
+                        if _okv:
+                            import base64 as _b64c
+                            _cap_pack["canvas"] = _b64c.b64encode(_bufv.tobytes()).decode("ascii")
+                    if _em is not None and getattr(_em, "size", 0):
+                        _e8 = np.clip(np.asarray(_em, np.float32) * 255.0, 0, 255).astype(np.uint8)
+                        if _e8.ndim == 3:
+                            _e8 = _e8[..., 0]
+                        _okv2, _bufv2 = cv2.imencode(".png", _e8, [int(cv2.IMWRITE_PNG_COMPRESSION), 6])
+                        if _okv2:
+                            import base64 as _b64c2
+                            _cap_pack["canvas_mask"] = _b64c2.b64encode(_bufv2.tobytes()).decode("ascii")
+                    try:
+                        from facelib import LandmarksProcessor as _LP
+                        _ft = getattr(cfg, "face_type", None)
+                        _mat = _LP.get_transform_mat(lm_k, int(size_k), face_type=_ft)
+                        _cap_pack["mat"] = np.asarray(_mat, np.float64).round(6).tolist()
+                        _cap_pack["canvas_size"] = int(size_k)
+                    except Exception:                  # noqa: BLE001
+                        pass
+                except Exception:                      # noqa: BLE001
+                    _cap_pack = {}
+                per.append(dict({"dfm": f_dfm, "size": size_k,
+                                 "ms": round((time.time() - t_k) * 1000.0, 1),
+                                 "box": list(fc.get("box") or []),
+                                 "mask": _mk_b64}, **_cap_pack))
         # 出图：默认 jpg（预览一直是这条）。fmt=raw 给「父进程自己编 PNG」用 ——
         # 1080x1920 的 PNG 在 worker 里要 132~145ms/帧，挪到父进程的落盘线程里
         # 就能和别的帧的换脸重叠，而且逐像素无损（PNG 是 0 损失，raw 也是）。

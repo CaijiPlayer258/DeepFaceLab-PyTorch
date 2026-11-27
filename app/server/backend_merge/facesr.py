@@ -242,7 +242,18 @@ def apply_roi(roi_u8, mask_f, alpha: float, timings: dict | None = None):
 
     t0 = time.time()
     sz = size()
-    big = cv2.resize(crop, (sz, sz), interpolation=cv2.INTER_LINEAR)
+    # ★ 保持宽高比：以前直接 resize 成 (sz, sz)，400×248 的脸框被拉成 512×512
+    #   （横向 1.6 倍、纵向 0.5 倍），GPEN 按变形的脸推理，缩回去眼睛/嘴唇就歪了 ——
+    #   表现是「预览里的超分风格和调试界面完全不一样」。调试那条路的输入本来是
+    #   正方形 panel，所以从来没暴露这个 bug。
+    #   做法：长边缩到 sz，短边居中 pad（复制边缘），推理完再裁回原比例。
+    _ch, _cw = crop.shape[:2]
+    _sc = float(sz) / float(max(_ch, _cw))
+    _nh, _nw = max(1, int(round(_ch * _sc))), max(1, int(round(_cw * _sc)))
+    big = cv2.resize(crop, (_nw, _nh), interpolation=cv2.INTER_LINEAR)
+    _pt, _pb = (sz - _nh) // 2, sz - _nh - (sz - _nh) // 2
+    _pl, _pr = (sz - _nw) // 2, sz - _nw - (sz - _nw) // 2
+    big = cv2.copyMakeBorder(big, _pt, _pb, _pl, _pr, cv2.BORDER_REPLICATE)
     x = big.astype(np.float32) / 255.0
     x = (x - 0.5) / 0.5
     nchw = np.transpose(x, (2, 0, 1))[None, ...].astype(np.float32)
@@ -254,7 +265,8 @@ def apply_roi(roi_u8, mask_f, alpha: float, timings: dict | None = None):
     y = np.transpose(y, (1, 2, 0))
     y = (y * 0.5 + 0.5) * 255.0
     sr = np.clip(y, 0, 255).astype(np.uint8)
-    sr = cv2.resize(sr, (crop.shape[1], crop.shape[0]), interpolation=cv2.INTER_LINEAR)
+    sr = sr[_pt:_pt + _nh, _pl:_pl + _nw]          # 裁掉 pad
+    sr = cv2.resize(sr, (_cw, _ch), interpolation=cv2.INTER_LINEAR)
 
     sub_m = m[y0:y1, x0:x1][..., None]
     w = np.clip(sub_m * float(alpha), 0.0, 1.0)
