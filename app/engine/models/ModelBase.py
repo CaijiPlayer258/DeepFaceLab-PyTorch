@@ -1268,7 +1268,15 @@ class ModelBase(object):
         ct = self.options.get('crash_threshold', 0.0)
         if ct > 0.0:
             recent = self.loss_history[-100:]
-            self._crash_detected = any(max(l) > ct for l in recent)
+            # ★ NaN/Inf 也算 crash。以前只有 `max(l) > ct` —— 而 **`nan > 4.0` 恒为
+            #   False**（IEEE 754 的规定），所以 loss 变成 nan 之后这个探测器**永远
+            #   不响**，save() 的闸门一直开着，backup_interval 一到就把 NaN 权重写成
+            #   .pth、再转进 autobackups/01，好存档一代代被挤出去（max_backups 次后
+            #   挤没）。整套保护看起来是有的，实际对 NaN 完全失效。
+            import math as _math
+            self._crash_detected = any(
+                (not all(_math.isfinite(float(v)) for v in l)) or max(l) > ct
+                for l in recent)
 
         if self.should_save_preview_history():
             plist = []
