@@ -485,7 +485,11 @@ def run(cfg: dict):
     it_lock = threading.Lock()
     shut_lock = threading.Lock()
     live = {"read": int(n_read), "cmp": int(n_cmp)}
-    q = int(cfg.get("quality") or 92)
+    # ★ 92 是**预览**的传输质量（preview.py:46），不是导出落盘的画质。以前 92 从这里
+    #   渗进导出：routes.py 的 export-project 默认 quality = _PREVIEW_QUALITY，于是
+    #   同样一单换条路（项目 vs 分段），merged/*.jpg 差一档；分段链用的是 100
+    #   （pipeline_stages.py:1894）。对齐到 100。
+    q = int(cfg.get("quality") or 100)
 
     def _put(qq, item):
         while not quit_event.is_set():

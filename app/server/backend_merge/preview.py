@@ -997,15 +997,41 @@ def _used_names(models, loaded, applied=None) -> list:
 
 
 def _xseg_of(body: dict) -> str:
-    """遮罩模型：body 显式给 > workspace 里的 XSegLite > XSeg。都没有就空串。"""
+    """遮罩模型：body 显式给 > settings.mask_source 指的 > workspace 里的 XSegLite > XSeg。
+
+    ★ 以前**完全无视 settings.mask_source**：用户选了 XSeg，这里仍按「Lite 优先」挑
+    xseglite.onnx —— 而分段导出那边是按 mask_source 精确加载的（_stage_xseg）。
+    同一份请求的回包里就自相矛盾：`xseg` 字段（routes 走这个函数）= ...XSegLite/
+    xseglite.onnx，而 `eff.mask_source` = "XSeg"。表现是同一帧预览和导出的遮罩
+    形状/边缘贴合度不同，而两边日志都说自己用的是 XSeg。
+
+    注意前端 mgCmpBody 从不发 xseg_onnx（只发 mask_source: DFM|XSeg|XSegLite），
+    所以下面这段 mask_source 分支才是主路。
+    """
     xr = body.get("xseg_onnx") or body.get("mask_onnx") or body.get("xseg")
     if str(xr or "").strip():
         xp = _norm_path(xr)
         if not xp.is_file():
             raise _BadInput("找不到 XSeg 模型：%s" % xp, 404)
         return str(xp)
-    for c in (Path(WORKSPACE) / "model" / "XSegLite" / "xseglite.onnx",
-              Path(WORKSPACE) / "model" / "XSeg" / "XSeg.onnx"):
+    # 界面上的「遮罩来源」：三段 DFM | XSeg | XSegLite。可能藏在 settings 里。
+    _st = body.get("settings") if isinstance(body.get("settings"), dict) else {}
+    _src = str((body.get("mask_source") or _st.get("mask_source")
+                or _st.get("mask_model") or "")).strip().lower().replace("_", "").replace("-", "")
+    _lite = Path(WORKSPACE) / "model" / "XSegLite" / "xseglite.onnx"
+    _full = Path(WORKSPACE) / "model" / "XSeg" / "XSeg.onnx"
+    if _src in ("dfm", "model", "learned", "learnedmask", "none", "off", "0"):
+        return ""                       # 用模型自带遮罩，不加载外部 XSeg
+    if _src in ("xseg", "xsegprddst", "xsegdst", "xsegprd", "1"):
+        if _full.is_file():
+            return str(_full)
+        raise _BadInput("遮罩来源选了 XSeg，但 %s 不存在" % _full, 404)
+    if _src in ("xseglite", "lite", "xseglite2", "2"):
+        if _lite.is_file():
+            return str(_lite)
+        raise _BadInput("遮罩来源选了 XSegLite，但 %s 不存在" % _lite, 404)
+    # 没给来源（老前端 / 别的调用方）：维持原来的 Lite 优先。
+    for c in (_lite, _full):
         if c.is_file():
             return str(c)
     return ""
@@ -1074,7 +1100,9 @@ def _plain_frame(job: dict, frame, box_wh, timings, note="", has_face=True,
                 "swapped": False, "timings": timings,
                 "note": note, "faces": [], "models_used": [], "swaps": 0}
     fmt = str(job.get("fmt") or "jpg").strip().lower()
-    img = _img_bytes(frame, fmt, 88)
+    # 88 是历史遗留的硬编码：同一个 /preview 里「没脸帧」88、「有脸帧」92，
+    # 用户看不出为什么两张图的画质不一样。统一到 _PREVIEW_QUALITY。
+    img = _img_bytes(frame, fmt, _PREVIEW_QUALITY)
     return {"jpg": img, "img": img, "box": box_wh, "has_face": bool(has_face),
             "no_faces": bool(no_faces), "swapped": False, "timings": timings,
             "note": note, "faces": [], "models_used": [], "swaps": 0}

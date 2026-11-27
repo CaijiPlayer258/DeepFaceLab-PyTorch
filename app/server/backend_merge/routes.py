@@ -1336,9 +1336,16 @@ def merge_preview(body: dict):
             _sr_lv = _lv((body or {}).get("sr"))
         except Exception:                                   # noqa: BLE001
             _sr_lv = 0
+        # ★ no_swap_faces 必须进键。以前只进了 job（下面 :1378），键里没有 ——
+        #   于是「把这张脸勾成原图」后前端重发同一个 t，命中整份旧响应：
+        #   脸上还是换过的，而 timings.cache_hit=1 还理直气壮。
+        #   settings 是整份带进去的，所以改 erode/blur/mask_mode/face_type 都会失效，
+        #   这个独立 body 字段是唯一的洞。
         hit_sig = json.dumps([list(_grab_key(video)), round(float(t), 3),
                               str(dfm), str(xseg), detector, float(thresh),
                               cfg, settings, int(_sr_lv),
+                              sorted(_face_ids_val("no_swap_faces",
+                                                       (body or {}).get("no_swap_faces"))),
                               [[m["name"], m["dfm"], list(m["faces"])]
                                for m in (models or [])]], sort_keys=True, default=str)
     except Exception:
@@ -1503,7 +1510,7 @@ def merge_preview_frame(body: dict):
     thresh = _float_val("thresh", body.get("thresh"), 0.0, 1.0, 0.5)
     xseg = _xseg_of(body)
     fmt = "png" if str(body.get("fmt") or "jpg").strip().lower() == "png" else "jpg"
-    quality = _int_val("quality", body.get("quality"), 1, 100, _PREVIEW_QUALITY)
+    quality = _int_val("quality", body.get("quality"), 1, 100, 100)   # 落盘画质，和分段链一致（别用预览的 92）
 
     # 显存闸门（和 /preview 同一口径）：装不下就 400 + 数字，别去起 worker 试
     plan = _preview_guard([m["dfm"] for m in (models or []) if m.get("dfm")] or [str(dfm)])
@@ -1658,7 +1665,7 @@ def merge_export_project(body: dict):
     detector = _detector_val(body.get("detector"))
     thresh = _float_val("thresh", body.get("thresh"), 0.0, 1.0, 0.5)
     xseg = _xseg_of(body)
-    quality = _int_val("quality", body.get("quality"), 1, 100, _PREVIEW_QUALITY)
+    quality = _int_val("quality", body.get("quality"), 1, 100, 100)   # 落盘画质，和分段链一致（别用预览的 92）
     force = bool(body.get("force"))
     # 并行度：N 个 worker 进程，各持自己的 dfm session（原版 stage4 的同一个语义）；
     # batch = 一条请求里带几帧（= worker 内部同时跑几帧）。
