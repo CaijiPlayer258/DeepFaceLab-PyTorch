@@ -42,6 +42,7 @@
     zoom: 1,          /* 当前缩放档位，对应 PPF */
     ppf: 2,           /* pxPerFrame */
     dragging: false,
+    edgeHold: 0,      /* 指针压在边缘的累计次数：越久滚得越快（工业软件的拖边加速） */
     playing: false,
     timer: null,
     data: null
@@ -357,7 +358,18 @@
     var stack = $('mtlStack');
     if (!stack) return -1;
     var rect = stack.getBoundingClientRect();
-    return clampFrame((clientX - HEAD_GRAB - rect.left) / S.ppf);
+    var x = clientX - HEAD_GRAB - rect.left;
+    /* 吸边：指针已经越过「最后一帧的中心」就一律给末帧。
+       不这么做的话，每个缩放档位最后几帧都会差几个 —— 因为内容宽度是
+       ceil(total*ppf)，而末帧的中心在 (total-1)*ppf，两者之间有个小于 1px 的缝，
+       各档位的 ppf 不同，取整出来的误差就不同（实测 1/8 差 8 帧、1/32 差 40 帧），
+       用户看到的就是「每个比例的最后一帧都不一样」。 */
+    /* 阈值给 4px：滚动到底时指针离内容右端总差几个像素（滚动条本身、边框、取整），
+       卡在「正好越过末帧中心」太严 —— 实测 1/8 档指针只能到 x=13360，末帧中心在
+       13362，差 2px 就不触发，于是还是差 8 帧。 */
+    if (S.total > 0 && x >= (S.total - 1) * S.ppf - 4) return S.total - 1;
+    if (S.total > 0 && x <= 0) return 0;
+    return clampFrame(x / S.ppf);
   }
 
   function onDown(e) {
@@ -372,6 +384,7 @@
       HEAD_GRAB = e.clientX - hx;
     }
     S.dragging = true;
+    S.edgeHold = 0;
     stopPlay();
     var root = $('mergeTracks');
     if (root) root.className = root.className.indexOf('is-dragging') < 0 ? root.className + ' is-dragging' : root.className;
@@ -381,13 +394,42 @@
 
   function onMove(e) {
     if (!S.dragging) return;
+    var sc = $('mtlScroll');
+    /* ★ 拖到视口边缘时自动滚 —— 按**指针位置**判断，不是按播放头位置。
+       按播放头判断会正反馈（滚动 → 播放头相对视口更靠边 → 再滚 → 飞到底）；
+       按指针判断是稳定的：指针不动，滚到指针底下那一点就停。
+       没有这段的时候，拖播放头最多只能到「视口宽 ÷ ppf」那一帧 ——
+       1:1 档是 600 帧、1/32 档是 19168 帧，每个档位能到的「最后一帧」都不一样，
+       用户必须先把滚动条拖到底才碰得到片尾。 */
+    if (sc && sc.clientWidth) {
+      var r = sc.getBoundingClientRect();
+      var edge = Math.min(80, Math.max(24, sc.clientWidth * 0.08));
+      var base = 0, sign = 0;
+      if (e.clientX > r.right - edge) {
+        sign = 1;
+        base = Math.ceil(edge - (r.right - e.clientX)) * 2 + 4;
+      } else if (e.clientX < r.left + edge) {
+        sign = -1;
+        base = Math.ceil(edge - (e.clientX - r.left)) * 2 + 4;
+      }
+      if (sign) {
+        /* 按住边缘不动 → 加速度。只按比例给固定步长的话，1:1 档（内容 10 万像素）
+           拖到边上也滚不动：实测按住 30 拍只走 4740px。这里让步长随停留拍数线性放大，
+           8 拍以后进入快档，几秒就能滑到片尾；指针一离开边缘立刻清零，不影响逐帧微调。 */
+        S.edgeHold = Math.min(60, S.edgeHold + 1);
+        var mult = 1 + Math.floor(S.edgeHold / 4);
+        sc.scrollLeft += sign * base * mult;
+      } else {
+        S.edgeHold = 0;
+      }
+    }
     setFrame(frameAt(e.clientX));
     e.preventDefault();
   }
-
   function onUp() {
     if (!S.dragging) return;
     S.dragging = false;
+    S.edgeHold = 0;
     HEAD_GRAB = 0;
     var root = $('mergeTracks');
     if (root) root.className = root.className.replace(/\s*is-dragging/g, '');
