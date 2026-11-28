@@ -92,6 +92,52 @@ def _flag(name, default="0"):
     return str(_env(name, default)).lower() in ("1", "true", "yes", "on")
 
 
+def _ort_cuda_in_use() -> bool:
+    """本进程里有没有 **正在跑 CUDA** 的 onnxruntime 会话。
+
+    为什么要问它：torch 的 CUDA Graph 捕获窗口内，只要有 ORT 在做
+    cudaStreamSynchronize / cudaMalloc，捕获就会作废，而且一次失败会把整个 CUDA
+    context 弄脏（_GRAPH_OFF 的事后止损只关图重放，救不回来）。这是架构级冲突，
+    没法靠加锁根治 —— 只能在「这条路上有 ORT」时不去捕。
+
+    去看项目自己已知的几处会话缓存（检测器 / 超分 / 遮罩 / 2d106），
+    而不是 onnxruntime.get_available_providers()：后者只说明**装了** CUDA EP，
+    不代表有人在用（纯 TRT 引擎跑全链路时它是闲的，那种情况应该照常开图）。
+    """
+    try:
+        cands = []
+        # 检测器（TinyMog / RetinaFace 的 ORT 兜底都挂在这里）
+        try:
+            from .. import app as _appmod
+            cands.extend(list((getattr(_appmod, "_det_cache", {}) or {}).values()))
+        except Exception:
+            pass
+        # 超分（gpen 的 ORT 兜底）
+        try:
+            from ..backend_merge import facesr as _sr
+            cands.extend([(v or {}).get("obj") for v in (getattr(_sr, "_SESS", {}) or {}).values()])
+        except Exception:
+            pass
+        # 遮罩（XSeg / XSegLite）
+        try:
+            from ..backend_merge import pipeline_stages as _ps
+            cands.extend([(v or {}).get("obj") if isinstance(v, dict) else v
+                          for v in (getattr(_ps, "_XSEG_SESS", {}) or {}).values()])
+        except Exception:
+            pass
+        for c in cands:
+            if c is None or not hasattr(c, "get_providers"):
+                continue
+            try:
+                if any("CUDA" in str(p) for p in (c.get_providers() or [])):
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
 # 一句话速查（放在模块顶部附近，用户看日志能自己找过来）：
 #   DFL_DFM_GRAPH_B=            留空 = 整段关掉 CUDA Graph（并发撞车时最省心的开关）
 #   DFL_DFM_GRAPH_WARM=8        调大预热；仍失败说明不是 cuDNN 首次形状
@@ -220,8 +266,20 @@ class DfmTorch:
         #     换脸：torch 后端起不来 → dfm 走 onnxruntime(CUDAExecutionProvider)
         #   _GRAPH_OFF 事后止损也救不回来 —— 第一次捕获已经把 CUDA context 弄脏，
         #   之后连 eager 都起不来，整条链路掉到 ORT（33ms/张，还多占 arena 显存）。
-        #   要开就显式设 DFL_DFM_GRAPH=1（台架 A/B 用）。
-        self.graph_on = _flag("DFL_DFM_GRAPH", "0")
+        # ★ 三态（不再写死）：
+        #     DFL_DFM_GRAPH=1     强制开（台架 A/B 用）
+        #     DFL_DFM_GRAPH=0     强制关
+        #     不设 / =auto        **自动**：本进程里已有 ORT-CUDA 会话 → 关；没有 → 开
+        #   自动那一档才是对的：纯 TRT 链路（检测/遮罩/超分都命中引擎）时 ORT 闲着，
+        #   图重放能省 7~20ms/批；一旦有任何一条路掉到 ORT-CUDA，就必须放弃捕获，
+        #   否则第一次失败就把 context 弄脏，连 eager 都起不来。
+        _gv = str(_env("DFL_DFM_GRAPH", "auto")).strip().lower()
+        if _gv in ("1", "true", "yes", "on"):
+            self.graph_on = True
+        elif _gv in ("0", "false", "no", "off"):
+            self.graph_on = False
+        else:
+            self.graph_on = not _ort_cuda_in_use()
         self.g_batches = _env_batches("DFL_DFM_GRAPH_B", "1,2,4,8")
         try:
             self.g_warm = max(1, int(_env("DFL_DFM_GRAPH_WARM", "3") or 3))
