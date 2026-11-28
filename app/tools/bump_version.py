@@ -48,22 +48,49 @@ def parse_version(v: str) -> dict:
     return {"version": v, "base": base, "build": build, "human": human}
 
 
+def _count_today_releases(today: _dt.date) -> int:
+    """数 git 里今天有几个 release 提交（标题形如 release: 4.1-1128-bN）。"""
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["git", "log", "--since=%s 00:00:00" % today.isoformat(),
+             "--until=%s 23:59:59" % today.isoformat(),
+             "--pretty=%s", "--grep", "^release: 4\\.1-"],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=10)
+        lines = [x for x in (out.stdout or "").splitlines() if x.strip()]
+        return len(lines)
+    except Exception:
+        return 0
+
+
 def next_build(today: _dt.date, current: str) -> int:
-    """当天已经发过就用下一个 b 号。"""
+    """当天已经发过就用下一个 b 号。
+
+    ★ 自愈：如果 version.txt 里的 b 号明显不合理（比如当天日期却写着 b70），
+    按 git 里同一天的 release 提交数重新推。这样即使以前手工传歪了，下一次也会归位。
+    """
     m = _FMT.match((current or "").strip())
     if not m:
         return 1
     base, mmdd, b = m.groups()
     if int(mmdd[:2]) != today.month or int(mmdd[2:]) != today.day:
         return 1
-    return int(b or 1) + 1
+    cur_b = int(b or 1)
+    # ★ 自愈：手里的号比「当天真实发布数 + 1」还大 → 说明是被手工传歪的历史包袱，
+    #   按当天真实数重排。（比如 11-28 当天只发了 3 版，version.txt 却写着 b70。）
+    real = _count_today_releases(today)
+    if real > 0 and cur_b > real + 1:
+        return real + 1
+    return cur_b + 1
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--at", default="", help="指定日期，如 2026-12-01")
     ap.add_argument("--base", default=BASE)
-    ap.add_argument("--build", type=int, default=0, help="b 号；不填则自动")
+    # ★ 不提供 --build：b 号就是「当天第几个版本」，由 next_build 自己数。
+    #   以前留了这个口子，结果被一路手工传成 b55/b56/…/b70 —— 11 月 28 日当天
+    #   只有三个版本，号却写着 b70，看起来像发了 69 次。
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -73,7 +100,7 @@ def main() -> int:
         cur = VERSION_FILE.read_text(encoding="utf-8-sig").strip()
     except Exception:
         pass
-    build = args.build or next_build(when.date(), cur)
+    build = next_build(when.date(), cur)
     v = make_version(when, args.base, build)
     info = parse_version(v)
     print("version :", v)
