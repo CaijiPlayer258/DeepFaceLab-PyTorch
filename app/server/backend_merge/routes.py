@@ -1290,8 +1290,10 @@ def merge_preview(body: dict):
     t = _float_val("t", body.get("t"), 0.0, None, 0.0)
     dur = _video_duration(video)
     if dur > 0:
-        if t > dur + 0.5:
-            raise _BadInput("t=%.2fs 超出了视频长度（%.2fs）" % (t, dur))
+        # ★ 超时长**不再 400**。以前 t > dur + 0.5 直接抛 _BadInput，而前端失败分支
+        #   会进 3s 冷却、而且**永远不会** mgCmpSoon() 让 /api/merge/frame 补一张 ——
+        #   于是画面就钉在上一帧不动（用户报的「超过第 500 帧就不动」就是这个）。
+        #   现在一律钳到末尾并照常出图；t 本来就是钳过的，钳位不会让画面跳。
         t = min(t, max(0.0, dur - 0.05))
 
     models = _models_of(body)                 # None = 老的单模型路径

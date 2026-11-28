@@ -1,0 +1,2886 @@
+{
+ "steps": [
+  {
+   "req": 0,
+   "snap": {
+    "tlFrame": 0,
+    "ct": 0,
+    "ctFrame": 0,
+    "dur": 47.971995,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "srcLen": 60,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 0
+    },
+    "ovl": {
+     "disp": "none",
+     "len": 0
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 0,
+     "wait": false
+    },
+    "gate": null,
+    "bound": "1",
+    "hint": "本帧无人脸",
+    "note": ""
+   },
+   "tags": {
+    "mgFrameChange": 1,
+    "mgVideoSeek": 1,
+    "mgPreviewSoon": 1,
+    "mvDetect": 1,
+    "fetch": 5,
+    "mtl:frame": 1,
+    "done": 5,
+    "mgPreviewNow": 1
+   },
+   "log": [
+    {
+     "tp": 4,
+     "tag": "mgFrameChange",
+     "a": [
+      "0"
+     ],
+     "why": "timeline",
+     "f": ""
+    },
+    {
+     "tp": 4,
+     "tag": "mgVideoSeek",
+     "a": [
+      "0"
+     ],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 4,
+     "tag": "mgPreviewSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 4,
+     "tag": "mvDetect",
+     "a": [
+      "0"
+     ],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 4,
+     "tag": "fetch",
+     "u": "/api/merge/detect/0?model=TinyMog&thresh=0.5",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 5,
+     "tag": "mtl:frame",
+     "n": 0
+    },
+    {
+     "tp": 95,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 103,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 128,
+     "tag": "mgPreviewNow",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 230,
+     "tag": "done",
+     "u": "/api/merge/detect/0?model=TinyMo",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1093,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1101,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2099,
+     "tag": "fetch",
+     "u": "/api/models",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2100,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2109,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2154,
+     "tag": "done",
+     "u": "/api/models",
+     "st": 200,
+     "f": "",
+     "t": ""
+    }
+   ]
+  },
+  {
+   "req": 120,
+   "snap": {
+    "tlFrame": 120,
+    "ct": 4,
+    "ctFrame": 120,
+    "dur": 47.971995,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "srcLen": 60,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 4
+    },
+    "ovl": {
+     "disp": "none",
+     "len": 0
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 0,
+     "wait": false
+    },
+    "gate": null,
+    "bound": "1",
+    "hint": "本帧无人脸",
+    "note": "正在合成…"
+   },
+   "tags": {
+    "mgFrameChange": 1,
+    "mgVideoSeek": 1,
+    "mvDetect": 1,
+    "fetch": 5,
+    "mtl:frame": 1,
+    "v:seeking": 1,
+    "v:suspend": 14,
+    "done": 4,
+    "mgPreviewSoon": 2,
+    "v:seeked": 1,
+    "mgPreviewNow": 1,
+    "mgCmpSoon": 1
+   },
+   "log": [
+    {
+     "tp": 4,
+     "tag": "mgFrameChange",
+     "a": [
+      "120"
+     ],
+     "why": "timeline",
+     "f": ""
+    },
+    {
+     "tp": 5,
+     "tag": "mgVideoSeek",
+     "a": [
+      "120"
+     ],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 5,
+     "tag": "mvDetect",
+     "a": [
+      "120"
+     ],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 5,
+     "tag": "fetch",
+     "u": "/api/merge/detect/120?model=TinyMog&thresh=0.5",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 5,
+     "tag": "mtl:frame",
+     "n": 120
+    },
+    {
+     "tp": 9,
+     "tag": "v:seeking",
+     "ct": 4,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 442,
+     "tag": "v:suspend",
+     "ct": 4,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 457,
+     "tag": "v:suspend",
+     "ct": 4,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 470,
+     "tag": "v:suspend",
+     "ct": 4,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 481,
+     "tag": "v:suspend",
+     "ct": 4,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 498,
+     "tag": "v:suspend",
+     "ct": 4,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 512,
+     "tag": "v:suspend",
+     "ct": 4,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 527,
+     "tag": "done",
+     "u": "/api/merge/detect/120?model=Tiny",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 543,
+     "tag": "mgPreviewSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 554,
+     "tag": "v:suspend",
+     "ct": 4,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 571,
+     "tag": "v:suspend",
+     "ct": 4,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 571,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 573,
+     "tag": "v:seeked",
+     "ct": 4,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 574,
+     "tag": "mgPreviewSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 579,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 590,
+     "tag": "v:suspend",
+     "ct": 4,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 606,
+     "tag": "v:suspend",
+     "ct": 4,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 620,
+     "tag": "v:suspend",
+     "ct": 4,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 637,
+     "tag": "v:suspend",
+     "ct": 4,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 651,
+     "tag": "v:suspend",
+     "ct": 4,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 667,
+     "tag": "v:suspend",
+     "ct": 4,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 697,
+     "tag": "mgPreviewNow",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 698,
+     "tag": "fetch",
+     "u": "/api/merge/preview",
+     "f": "120",
+     "t": "4"
+    },
+    {
+     "tp": 1571,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1582,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1849,
+     "tag": "done",
+     "u": "/api/merge/preview",
+     "st": 200,
+     "f": "120",
+     "t": "4"
+    },
+    {
+     "tp": 1854,
+     "tag": "mgCmpSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 2007,
+     "tag": "fetch",
+     "u": "/api/merge/frame",
+     "f": "120",
+     "t": "4"
+    }
+   ]
+  },
+  {
+   "req": 300,
+   "snap": {
+    "tlFrame": 300,
+    "ct": 10,
+    "ctFrame": 300,
+    "dur": 47.971995,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "srcLen": 60,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 10
+    },
+    "ovl": {
+     "disp": "none",
+     "len": 0
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 0,
+     "wait": false
+    },
+    "gate": null,
+    "bound": "1",
+    "hint": "本帧无人脸",
+    "note": "正在合成…"
+   },
+   "tags": {
+    "mgFrameChange": 1,
+    "mgVideoSeek": 1,
+    "mvDetect": 1,
+    "fetch": 7,
+    "mtl:frame": 1,
+    "v:seeking": 1,
+    "v:seeked": 1,
+    "mgPreviewSoon": 2,
+    "done": 7,
+    "mgPreviewNow": 2,
+    "v:suspend": 13,
+    "mgCmpSoon": 1
+   },
+   "log": [
+    {
+     "tp": 6,
+     "tag": "mgFrameChange",
+     "a": [
+      "300"
+     ],
+     "why": "timeline",
+     "f": ""
+    },
+    {
+     "tp": 7,
+     "tag": "mgVideoSeek",
+     "a": [
+      "300"
+     ],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 7,
+     "tag": "mvDetect",
+     "a": [
+      "300"
+     ],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 7,
+     "tag": "fetch",
+     "u": "/api/merge/detect/300?model=TinyMog&thresh=0.5",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 7,
+     "tag": "mtl:frame",
+     "n": 300
+    },
+    {
+     "tp": 13,
+     "tag": "v:seeking",
+     "ct": 10,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 14,
+     "tag": "v:seeked",
+     "ct": 10,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 2,
+     "paused": true
+    },
+    {
+     "tp": 14,
+     "tag": "mgPreviewSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 57,
+     "tag": "fetch",
+     "u": "/api/models",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 57,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 80,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 124,
+     "tag": "done",
+     "u": "/api/models",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 145,
+     "tag": "mgPreviewNow",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 190,
+     "tag": "done",
+     "u": "/api/merge/frame",
+     "st": 200,
+     "f": "120",
+     "t": "4"
+    },
+    {
+     "tp": 208,
+     "tag": "v:suspend",
+     "ct": 10,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 229,
+     "tag": "v:suspend",
+     "ct": 10,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 240,
+     "tag": "v:suspend",
+     "ct": 10,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 255,
+     "tag": "v:suspend",
+     "ct": 10,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 268,
+     "tag": "v:suspend",
+     "ct": 10,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 296,
+     "tag": "v:suspend",
+     "ct": 10,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 310,
+     "tag": "v:suspend",
+     "ct": 10,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 326,
+     "tag": "v:suspend",
+     "ct": 10,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 345,
+     "tag": "v:suspend",
+     "ct": 10,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 362,
+     "tag": "v:suspend",
+     "ct": 10,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 384,
+     "tag": "v:suspend",
+     "ct": 10,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 402,
+     "tag": "v:suspend",
+     "ct": 10,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 421,
+     "tag": "v:suspend",
+     "ct": 10,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 642,
+     "tag": "done",
+     "u": "/api/merge/detect/300?model=Tiny",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 644,
+     "tag": "mgPreviewSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 766,
+     "tag": "mgPreviewNow",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 767,
+     "tag": "fetch",
+     "u": "/api/merge/preview",
+     "f": "300",
+     "t": "10"
+    },
+    {
+     "tp": 1058,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1068,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1954,
+     "tag": "done",
+     "u": "/api/merge/preview",
+     "st": 200,
+     "f": "300",
+     "t": "10"
+    },
+    {
+     "tp": 1956,
+     "tag": "mgCmpSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 2071,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2078,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2118,
+     "tag": "fetch",
+     "u": "/api/merge/frame",
+     "f": "300",
+     "t": "10"
+    }
+   ]
+  },
+  {
+   "req": 480,
+   "snap": {
+    "tlFrame": 480,
+    "ct": 16,
+    "ctFrame": 480,
+    "dur": 47.971995,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "srcLen": 60,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 16
+    },
+    "ovl": {
+     "disp": "block",
+     "len": 225383
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 225383,
+     "wait": false
+    },
+    "gate": null,
+    "bound": "1",
+    "hint": "本帧无人脸",
+    "note": ""
+   },
+   "tags": {
+    "mgFrameChange": 1,
+    "mgVideoSeek": 1,
+    "mvDetect": 1,
+    "fetch": 6,
+    "mtl:frame": 1,
+    "v:seeking": 1,
+    "done": 7,
+    "v:suspend": 14,
+    "v:seeked": 1,
+    "mgPreviewSoon": 2,
+    "mgPreviewNow": 1,
+    "mgCmpSoon": 1
+   },
+   "log": [
+    {
+     "tp": 5,
+     "tag": "mgFrameChange",
+     "a": [
+      "480"
+     ],
+     "why": "timeline",
+     "f": ""
+    },
+    {
+     "tp": 5,
+     "tag": "mgVideoSeek",
+     "a": [
+      "480"
+     ],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 5,
+     "tag": "mvDetect",
+     "a": [
+      "480"
+     ],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 5,
+     "tag": "fetch",
+     "u": "/api/merge/detect/480?model=TinyMog&thresh=0.5",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 6,
+     "tag": "mtl:frame",
+     "n": 480
+    },
+    {
+     "tp": 13,
+     "tag": "v:seeking",
+     "ct": 16,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 222,
+     "tag": "done",
+     "u": "/api/merge/frame",
+     "st": 200,
+     "f": "300",
+     "t": "10"
+    },
+    {
+     "tp": 237,
+     "tag": "v:suspend",
+     "ct": 16,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 260,
+     "tag": "v:suspend",
+     "ct": 16,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 278,
+     "tag": "v:suspend",
+     "ct": 16,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 288,
+     "tag": "v:suspend",
+     "ct": 16,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 302,
+     "tag": "v:suspend",
+     "ct": 16,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 313,
+     "tag": "v:suspend",
+     "ct": 16,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 339,
+     "tag": "v:suspend",
+     "ct": 16,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 352,
+     "tag": "v:suspend",
+     "ct": 16,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 355,
+     "tag": "v:seeked",
+     "ct": 16,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 355,
+     "tag": "mgPreviewSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 359,
+     "tag": "done",
+     "u": "/api/merge/detect/480?model=Tiny",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 361,
+     "tag": "mgPreviewSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 368,
+     "tag": "v:suspend",
+     "ct": 16,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 379,
+     "tag": "v:suspend",
+     "ct": 16,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 391,
+     "tag": "v:suspend",
+     "ct": 16,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 408,
+     "tag": "v:suspend",
+     "ct": 16,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 430,
+     "tag": "v:suspend",
+     "ct": 16,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 447,
+     "tag": "v:suspend",
+     "ct": 16,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 484,
+     "tag": "mgPreviewNow",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 485,
+     "tag": "fetch",
+     "u": "/api/merge/preview",
+     "f": "480",
+     "t": "16"
+    },
+    {
+     "tp": 547,
+     "tag": "fetch",
+     "u": "/api/models",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 548,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 560,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 588,
+     "tag": "done",
+     "u": "/api/models",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1441,
+     "tag": "done",
+     "u": "/api/merge/preview",
+     "st": 200,
+     "f": "480",
+     "t": "16"
+    },
+    {
+     "tp": 1445,
+     "tag": "mgCmpSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 1546,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1554,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1608,
+     "tag": "fetch",
+     "u": "/api/merge/frame",
+     "f": "480",
+     "t": "16"
+    },
+    {
+     "tp": 2253,
+     "tag": "done",
+     "u": "/api/merge/frame",
+     "st": 200,
+     "f": "480",
+     "t": "16"
+    }
+   ]
+  },
+  {
+   "req": 500,
+   "snap": {
+    "tlFrame": 500,
+    "ct": 16.667,
+    "ctFrame": 500,
+    "dur": 47.971995,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "srcLen": 60,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 16.667
+    },
+    "ovl": {
+     "disp": "block",
+     "len": 211035
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 211035,
+     "wait": false
+    },
+    "gate": null,
+    "bound": "1",
+    "hint": "本帧无人脸",
+    "note": ""
+   },
+   "tags": {
+    "mgFrameChange": 1,
+    "mgVideoSeek": 1,
+    "mvDetect": 1,
+    "fetch": 7,
+    "mtl:frame": 1,
+    "v:seeking": 1,
+    "v:suspend": 3,
+    "v:seeked": 1,
+    "mgPreviewSoon": 2,
+    "done": 7,
+    "mgPreviewNow": 2,
+    "mgCmpSoon": 1
+   },
+   "log": [
+    {
+     "tp": 4,
+     "tag": "mgFrameChange",
+     "a": [
+      "500"
+     ],
+     "why": "timeline",
+     "f": ""
+    },
+    {
+     "tp": 4,
+     "tag": "mgVideoSeek",
+     "a": [
+      "500"
+     ],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 4,
+     "tag": "mvDetect",
+     "a": [
+      "500"
+     ],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 4,
+     "tag": "fetch",
+     "u": "/api/merge/detect/500?model=TinyMog&thresh=0.5",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 5,
+     "tag": "mtl:frame",
+     "n": 500
+    },
+    {
+     "tp": 13,
+     "tag": "v:seeking",
+     "ct": 16.667,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 24,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 26,
+     "tag": "v:suspend",
+     "ct": 16.667,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 31,
+     "tag": "v:seeked",
+     "ct": 16.667,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 31,
+     "tag": "mgPreviewSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 35,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 56,
+     "tag": "v:suspend",
+     "ct": 16.667,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 75,
+     "tag": "v:suspend",
+     "ct": 16.667,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 165,
+     "tag": "mgPreviewNow",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 342,
+     "tag": "done",
+     "u": "/api/merge/detect/500?model=Tiny",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 343,
+     "tag": "mgPreviewSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 476,
+     "tag": "mgPreviewNow",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 478,
+     "tag": "fetch",
+     "u": "/api/merge/preview",
+     "f": "500",
+     "t": "16.667"
+    },
+    {
+     "tp": 1032,
+     "tag": "fetch",
+     "u": "/api/models",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1033,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1047,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1098,
+     "tag": "done",
+     "u": "/api/models",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1287,
+     "tag": "done",
+     "u": "/api/merge/preview",
+     "st": 200,
+     "f": "500",
+     "t": "16.667"
+    },
+    {
+     "tp": 1292,
+     "tag": "mgCmpSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 1451,
+     "tag": "fetch",
+     "u": "/api/merge/frame",
+     "f": "500",
+     "t": "16.667"
+    },
+    {
+     "tp": 2002,
+     "tag": "done",
+     "u": "/api/merge/frame",
+     "st": 200,
+     "f": "500",
+     "t": "16.667"
+    },
+    {
+     "tp": 2035,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2047,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    }
+   ]
+  },
+  {
+   "req": 505,
+   "snap": {
+    "tlFrame": 505,
+    "ct": 16.833,
+    "ctFrame": 505,
+    "dur": 47.971995,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "srcLen": 60,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 16.833
+    },
+    "ovl": {
+     "disp": "block",
+     "len": 212235
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 212235,
+     "wait": false
+    },
+    "gate": null,
+    "bound": "1",
+    "hint": "本帧无人脸",
+    "note": ""
+   },
+   "tags": {
+    "mgFrameChange": 1,
+    "mgVideoSeek": 1,
+    "mvDetect": 1,
+    "fetch": 6,
+    "mtl:frame": 1,
+    "v:seeking": 1,
+    "v:seeked": 1,
+    "mgPreviewSoon": 2,
+    "v:suspend": 1,
+    "mgPreviewNow": 2,
+    "done": 6,
+    "mgCmpSoon": 1
+   },
+   "log": [
+    {
+     "tp": 5,
+     "tag": "mgFrameChange",
+     "a": [
+      "505"
+     ],
+     "why": "timeline",
+     "f": ""
+    },
+    {
+     "tp": 5,
+     "tag": "mgVideoSeek",
+     "a": [
+      "505"
+     ],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 5,
+     "tag": "mvDetect",
+     "a": [
+      "505"
+     ],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 5,
+     "tag": "fetch",
+     "u": "/api/merge/detect/505?model=TinyMog&thresh=0.5",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 6,
+     "tag": "mtl:frame",
+     "n": 505
+    },
+    {
+     "tp": 15,
+     "tag": "v:seeking",
+     "ct": 16.833,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 23,
+     "tag": "v:seeked",
+     "ct": 16.833,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 23,
+     "tag": "mgPreviewSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 49,
+     "tag": "v:suspend",
+     "ct": 16.833,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 144,
+     "tag": "mgPreviewNow",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 356,
+     "tag": "done",
+     "u": "/api/merge/detect/505?model=Tiny",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 358,
+     "tag": "mgPreviewSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 483,
+     "tag": "mgPreviewNow",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 484,
+     "tag": "fetch",
+     "u": "/api/merge/preview",
+     "f": "505",
+     "t": "16.833"
+    },
+    {
+     "tp": 514,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 523,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1236,
+     "tag": "done",
+     "u": "/api/merge/preview",
+     "st": 200,
+     "f": "505",
+     "t": "16.833"
+    },
+    {
+     "tp": 1239,
+     "tag": "mgCmpSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 1402,
+     "tag": "fetch",
+     "u": "/api/merge/frame",
+     "f": "505",
+     "t": "16.833"
+    },
+    {
+     "tp": 1525,
+     "tag": "fetch",
+     "u": "/api/models",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1526,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1537,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1576,
+     "tag": "done",
+     "u": "/api/models",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1999,
+     "tag": "done",
+     "u": "/api/merge/frame",
+     "st": 200,
+     "f": "505",
+     "t": "16.833"
+    }
+   ]
+  },
+  {
+   "req": 600,
+   "snap": {
+    "tlFrame": 600,
+    "ct": 20,
+    "ctFrame": 600,
+    "dur": 47.971995,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "srcLen": 60,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 20
+    },
+    "ovl": {
+     "disp": "none",
+     "len": 212235
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 212235,
+     "wait": false
+    },
+    "gate": null,
+    "bound": "1",
+    "hint": "本帧无人脸",
+    "note": "正在合成…"
+   },
+   "tags": {
+    "mgFrameChange": 1,
+    "mgVideoSeek": 1,
+    "mvDetect": 1,
+    "fetch": 6,
+    "mtl:frame": 1,
+    "v:seeking": 1,
+    "done": 6,
+    "v:seeked": 1,
+    "mgPreviewSoon": 2,
+    "v:suspend": 3,
+    "mgPreviewNow": 2,
+    "mgCmpSoon": 1
+   },
+   "log": [
+    {
+     "tp": 5,
+     "tag": "mgFrameChange",
+     "a": [
+      "600"
+     ],
+     "why": "timeline",
+     "f": ""
+    },
+    {
+     "tp": 6,
+     "tag": "mgVideoSeek",
+     "a": [
+      "600"
+     ],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 6,
+     "tag": "mvDetect",
+     "a": [
+      "600"
+     ],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 6,
+     "tag": "fetch",
+     "u": "/api/merge/detect/600?model=TinyMog&thresh=0.5",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 7,
+     "tag": "mtl:frame",
+     "n": 600
+    },
+    {
+     "tp": 14,
+     "tag": "v:seeking",
+     "ct": 20,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 15,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 18,
+     "tag": "v:seeked",
+     "ct": 20,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 18,
+     "tag": "mgPreviewSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 34,
+     "tag": "v:suspend",
+     "ct": 20,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 53,
+     "tag": "v:suspend",
+     "ct": 20,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 75,
+     "tag": "v:suspend",
+     "ct": 20,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 142,
+     "tag": "mgPreviewNow",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 574,
+     "tag": "done",
+     "u": "/api/merge/detect/600?model=Tiny",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 575,
+     "tag": "mgPreviewSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 697,
+     "tag": "mgPreviewNow",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 698,
+     "tag": "fetch",
+     "u": "/api/merge/preview",
+     "f": "600",
+     "t": "20"
+    },
+    {
+     "tp": 1008,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1021,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1924,
+     "tag": "done",
+     "u": "/api/merge/preview",
+     "st": 200,
+     "f": "600",
+     "t": "20"
+    },
+    {
+     "tp": 1927,
+     "tag": "mgCmpSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 2003,
+     "tag": "fetch",
+     "u": "/api/models",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2004,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2012,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2046,
+     "tag": "done",
+     "u": "/api/models",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2083,
+     "tag": "fetch",
+     "u": "/api/merge/frame",
+     "f": "600",
+     "t": "20"
+    }
+   ]
+  },
+  {
+   "req": 900,
+   "snap": {
+    "tlFrame": 900,
+    "ct": 30,
+    "ctFrame": 900,
+    "dur": 47.971995,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "srcLen": 60,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 30
+    },
+    "ovl": {
+     "disp": "block",
+     "len": 208499
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 208499,
+     "wait": false
+    },
+    "gate": null,
+    "bound": "1",
+    "hint": "本帧无人脸",
+    "note": ""
+   },
+   "tags": {
+    "mgFrameChange": 1,
+    "mgVideoSeek": 1,
+    "mvDetect": 1,
+    "fetch": 7,
+    "mtl:frame": 1,
+    "v:seeking": 1,
+    "done": 8,
+    "v:suspend": 16,
+    "v:seeked": 1,
+    "mgPreviewSoon": 2,
+    "mgPreviewNow": 1,
+    "mgCmpSoon": 1
+   },
+   "log": [
+    {
+     "tp": 7,
+     "tag": "mgFrameChange",
+     "a": [
+      "900"
+     ],
+     "why": "timeline",
+     "f": ""
+    },
+    {
+     "tp": 7,
+     "tag": "mgVideoSeek",
+     "a": [
+      "900"
+     ],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 8,
+     "tag": "mvDetect",
+     "a": [
+      "900"
+     ],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 8,
+     "tag": "fetch",
+     "u": "/api/merge/detect/900?model=TinyMog&thresh=0.5",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 9,
+     "tag": "mtl:frame",
+     "n": 900
+    },
+    {
+     "tp": 20,
+     "tag": "v:seeking",
+     "ct": 30,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 410,
+     "tag": "done",
+     "u": "/api/merge/frame",
+     "st": 200,
+     "f": "600",
+     "t": "20"
+    },
+    {
+     "tp": 425,
+     "tag": "v:suspend",
+     "ct": 30,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 443,
+     "tag": "v:suspend",
+     "ct": 30,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 460,
+     "tag": "v:suspend",
+     "ct": 30,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 473,
+     "tag": "v:suspend",
+     "ct": 30,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 483,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 486,
+     "tag": "v:suspend",
+     "ct": 30,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 500,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 512,
+     "tag": "v:suspend",
+     "ct": 30,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 527,
+     "tag": "v:suspend",
+     "ct": 30,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 539,
+     "tag": "v:suspend",
+     "ct": 30,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 564,
+     "tag": "v:suspend",
+     "ct": 30,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 574,
+     "tag": "v:suspend",
+     "ct": 30,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 586,
+     "tag": "v:suspend",
+     "ct": 30,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 588,
+     "tag": "v:seeked",
+     "ct": 30,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 588,
+     "tag": "mgPreviewSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 607,
+     "tag": "v:suspend",
+     "ct": 30,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 612,
+     "tag": "done",
+     "u": "/api/merge/detect/900?model=Tiny",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 613,
+     "tag": "mgPreviewSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 621,
+     "tag": "v:suspend",
+     "ct": 30,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 636,
+     "tag": "v:suspend",
+     "ct": 30,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 649,
+     "tag": "v:suspend",
+     "ct": 30,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 669,
+     "tag": "v:suspend",
+     "ct": 30,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 746,
+     "tag": "mgPreviewNow",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 747,
+     "tag": "fetch",
+     "u": "/api/merge/preview",
+     "f": "900",
+     "t": "30"
+    },
+    {
+     "tp": 853,
+     "tag": "done",
+     "u": "/api/merge/analyze?step=24&model",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1487,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1494,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1733,
+     "tag": "done",
+     "u": "/api/merge/preview",
+     "st": 200,
+     "f": "900",
+     "t": "30"
+    },
+    {
+     "tp": 1739,
+     "tag": "mgCmpSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 1895,
+     "tag": "fetch",
+     "u": "/api/merge/frame",
+     "f": "900",
+     "t": "30"
+    },
+    {
+     "tp": 2405,
+     "tag": "done",
+     "u": "/api/merge/frame",
+     "st": 200,
+     "f": "900",
+     "t": "30"
+    },
+    {
+     "tp": 2482,
+     "tag": "fetch",
+     "u": "/api/models",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2482,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2490,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    }
+   ]
+  },
+  {
+   "req": 1200,
+   "snap": {
+    "tlFrame": 1200,
+    "ct": 40,
+    "ctFrame": 1200,
+    "dur": 47.971995,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "srcLen": 60,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 40
+    },
+    "ovl": {
+     "disp": "block",
+     "len": 220463
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 220463,
+     "wait": false
+    },
+    "gate": null,
+    "bound": "1",
+    "hint": "本帧无人脸",
+    "note": ""
+   },
+   "tags": {
+    "mgFrameChange": 1,
+    "mgVideoSeek": 1,
+    "mvDetect": 1,
+    "fetch": 5,
+    "mtl:frame": 1,
+    "v:seeking": 1,
+    "v:suspend": 6,
+    "v:seeked": 1,
+    "mgPreviewSoon": 2,
+    "mgPreviewNow": 2,
+    "done": 5,
+    "mgCmpSoon": 1
+   },
+   "log": [
+    {
+     "tp": 3,
+     "tag": "mgFrameChange",
+     "a": [
+      "1200"
+     ],
+     "why": "timeline",
+     "f": ""
+    },
+    {
+     "tp": 3,
+     "tag": "mgVideoSeek",
+     "a": [
+      "1200"
+     ],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 3,
+     "tag": "mvDetect",
+     "a": [
+      "1200"
+     ],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 3,
+     "tag": "fetch",
+     "u": "/api/merge/detect/1200?model=TinyMog&thresh=0.5",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 3,
+     "tag": "mtl:frame",
+     "n": 1200
+    },
+    {
+     "tp": 4,
+     "tag": "v:seeking",
+     "ct": 40,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 20,
+     "tag": "v:suspend",
+     "ct": 40,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 22,
+     "tag": "v:seeked",
+     "ct": 40,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 22,
+     "tag": "mgPreviewSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 39,
+     "tag": "v:suspend",
+     "ct": 40,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 55,
+     "tag": "v:suspend",
+     "ct": 40,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 69,
+     "tag": "v:suspend",
+     "ct": 40,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 85,
+     "tag": "v:suspend",
+     "ct": 40,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 117,
+     "tag": "v:suspend",
+     "ct": 40,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 151,
+     "tag": "mgPreviewNow",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 482,
+     "tag": "done",
+     "u": "/api/merge/detect/1200?model=Tin",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 483,
+     "tag": "mgPreviewSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 615,
+     "tag": "mgPreviewNow",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 616,
+     "tag": "fetch",
+     "u": "/api/merge/preview",
+     "f": "1200",
+     "t": "40"
+    },
+    {
+     "tp": 968,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 982,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1481,
+     "tag": "done",
+     "u": "/api/merge/preview",
+     "st": 200,
+     "f": "1200",
+     "t": "40"
+    },
+    {
+     "tp": 1484,
+     "tag": "mgCmpSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 1637,
+     "tag": "fetch",
+     "u": "/api/merge/frame",
+     "f": "1200",
+     "t": "40"
+    },
+    {
+     "tp": 1965,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1971,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2082,
+     "tag": "done",
+     "u": "/api/merge/frame",
+     "st": 200,
+     "f": "1200",
+     "t": "40"
+    }
+   ]
+  },
+  {
+   "req": 1300,
+   "snap": {
+    "tlFrame": 1300,
+    "ct": 43.333,
+    "ctFrame": 1300,
+    "dur": 47.971995,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "srcLen": 60,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 43.333
+    },
+    "ovl": {
+     "disp": "none",
+     "len": 220463
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 0,
+     "wait": false
+    },
+    "gate": null,
+    "bound": "1",
+    "hint": "本帧无人脸",
+    "note": ""
+   },
+   "tags": {
+    "mgFrameChange": 1,
+    "mgVideoSeek": 1,
+    "mvDetect": 1,
+    "fetch": 5,
+    "mtl:frame": 1,
+    "v:seeking": 1,
+    "v:suspend": 3,
+    "v:seeked": 1,
+    "mgPreviewSoon": 1,
+    "mgPreviewNow": 1,
+    "done": 5
+   },
+   "log": [
+    {
+     "tp": 3,
+     "tag": "mgFrameChange",
+     "a": [
+      "1300"
+     ],
+     "why": "timeline",
+     "f": ""
+    },
+    {
+     "tp": 3,
+     "tag": "mgVideoSeek",
+     "a": [
+      "1300"
+     ],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 3,
+     "tag": "mvDetect",
+     "a": [
+      "1300"
+     ],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 3,
+     "tag": "fetch",
+     "u": "/api/merge/detect/1300?model=TinyMog&thresh=0.5",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 4,
+     "tag": "mtl:frame",
+     "n": 1300
+    },
+    {
+     "tp": 9,
+     "tag": "v:seeking",
+     "ct": 43.333,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 23,
+     "tag": "v:suspend",
+     "ct": 43.333,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 34,
+     "tag": "v:suspend",
+     "ct": 43.333,
+     "dur": 47.972,
+     "rs": 1,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 36,
+     "tag": "v:seeked",
+     "ct": 43.333,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 2,
+     "paused": true
+    },
+    {
+     "tp": 36,
+     "tag": "mgPreviewSoon",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 43,
+     "tag": "v:suspend",
+     "ct": 43.333,
+     "dur": 47.972,
+     "rs": 4,
+     "ns": 1,
+     "paused": true
+    },
+    {
+     "tp": 169,
+     "tag": "mgPreviewNow",
+     "a": [],
+     "why": "",
+     "f": ""
+    },
+    {
+     "tp": 309,
+     "tag": "done",
+     "u": "/api/merge/detect/1300?model=Tin",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 449,
+     "tag": "fetch",
+     "u": "/api/models",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 450,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 457,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 483,
+     "tag": "done",
+     "u": "/api/models",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1459,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1465,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2458,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2465,
+     "tag": "done",
+     "u": "/api/merge/export/status",
+     "st": 200,
+     "f": "",
+     "t": ""
+    }
+   ]
+  }
+ ],
+ "goto": true,
+ "app": {
+  "mv": "function",
+  "tl": true,
+  "v": true,
+  "bu": "function",
+  "ready": "complete"
+ },
+ "instr": "[\"mgFrameChange:ok\",\"mgVideoSeek:ok\",\"mgPreviewSoon:ok\",\"mgPreviewNow:ok\",\"mgCmpSoon:ok\",\"mgCmpNow:ok\",\"mvDetect:ok\",\"mgSyncTimeline:ok\",\"fetch:ok\"]",
+ "afterOpen": {
+  "tlFrame": 0,
+  "ct": 0,
+  "ctFrame": 0,
+  "dur": 47.971995,
+  "rs": 4,
+  "ns": 1,
+  "paused": true,
+  "err": null,
+  "srcLen": 60,
+  "mv": {
+   "frames": 1439,
+   "fps": 30,
+   "t": 0
+  },
+  "ovl": {
+   "disp": "none",
+   "len": 0
+  },
+  "gv": {
+   "streamDown": false,
+   "playing": false,
+   "pngLen": 0,
+   "wait": true
+  },
+  "gate": null,
+  "bound": "1",
+  "hint": "选择视频后显示",
+  "note": ""
+ },
+ "afterOpen2": {
+  "tlFrame": 0,
+  "ct": 0,
+  "ctFrame": 0,
+  "dur": 47.971995,
+  "rs": 4,
+  "ns": 1,
+  "paused": true,
+  "err": null,
+  "srcLen": 60,
+  "mv": {
+   "frames": 1439,
+   "fps": 30,
+   "t": 0
+  },
+  "ovl": {
+   "disp": "none",
+   "len": 0
+  },
+  "gv": {
+   "streamDown": false,
+   "playing": false,
+   "pngLen": 0,
+   "wait": false
+  },
+  "gate": null,
+  "bound": "1",
+  "hint": "这一帧没有检测到人脸",
+  "note": ""
+ },
+ "console": [
+  "{\"entry\": {\"source\": \"network\", \"level\": \"error\", \"text\": \"Failed to load resource: the server responded with a status of 404 (Not Found)\", \"timestamp\": 1795830840462.011, \"url\": \"http://127.0.0.1:8760/api/face\", \"networkRequestId\": \"38144.247\"}}",
+  "{\"type\": \"info\", \"args\": [{\"type\": \"string\", \"value\": \"[face] 没有保存过的 68 点（正常）：这一帧没有关键点（还没保存过 face68.json）\"}], \"executionContextId\": 2, \"timestamp\": 1795830840493.593, \"stackTrace\": {\"callFrames\": [{\"functionName\": \"\", \"scriptId\": \"10\", \"url\": \"http://127.0.0.1:8760/static/js/app.js?v=mwnoij94\", \"lin",
+  "{\"timestamp\": 1795830840633.92, \"exceptionDetails\": {\"exceptionId\": 1, \"text\": \"Uncaught\", \"lineNumber\": 14273, \"columnNumber\": 12, \"scriptId\": \"10\", \"url\": \"http://127.0.0.1:8760/static/js/app.js?v=mwnoij94\", \"stackTrace\": {\"callFrames\": [{\"functionName\": \"bind\", \"scriptId\": \"10\", \"url\": \"http://12",
+  "{\"entry\": {\"source\": \"recommendation\", \"level\": \"verbose\", \"text\": \"[DOM] Password field is not contained in a form: (More info: https://www.chromium.org/developers/design-documents/create-amazing-password-forms) %o\", \"timestamp\": 1795830840660.019, \"url\": \"http://127.0.0.1:8760/#home\", \"args\": [{\"t",
+  "{\"entry\": {\"source\": \"recommendation\", \"level\": \"verbose\", \"text\": \"[DOM] Password field is not contained in a form: (More info: https://www.chromium.org/developers/design-documents/create-amazing-password-forms) %o\", \"timestamp\": 1795830840660.324, \"url\": \"http://127.0.0.1:8760/#home\", \"args\": [{\"t",
+  "{\"entry\": {\"source\": \"intervention\", \"level\": \"info\", \"text\": \"Images loaded lazily and replaced with placeholders. Load events are deferred. See https://go.microsoft.com/fwlink/?linkid=2048113\", \"timestamp\": 1795830840726.437, \"url\": \"http://127.0.0.1:8760/#home\"}}",
+  "{\"entry\": {\"source\": \"network\", \"level\": \"error\", \"text\": \"Failed to load resource: the server responded with a status of 404 (Not Found)\", \"timestamp\": 1795830840864.749, \"url\": \"http://127.0.0.1:8760/favicon.ico\", \"networkRequestId\": \"38144.312\"}}"
+ ]
+}

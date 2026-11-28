@@ -1432,6 +1432,10 @@ function mgStageEmpty(on) {
           st.png = "";
           mgHideOverlay();
           mgHint("这一帧没有检测到人脸");
+          /* ★ 别把整条链掐死：这一帧 /preview 说没人脸，但 /api/merge/frame 那条路
+            是按帧号解码的，它照样能出图（没人脸就回原图）。以前这里直接 return，
+            于是尾部没人脸的帧（或 t 被钳住的帧）画面就永远停在上一次。 */
+          if (!(opt && opt.fromFallback) && window.mgCmpSoon) window.mgCmpSoon();
           return null;
         }
         mgHint("");

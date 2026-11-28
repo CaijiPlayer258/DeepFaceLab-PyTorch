@@ -43,23 +43,31 @@ def _video_duration(p) -> float:
         if hit and hit[0] == sig:
             return hit[1]
     dur = 0.0
+    # ★ 顺序反过来了：以前**先**用 cv2 的 FRAME_COUNT/FPS 算时长，算不出来才走 imageio。
+    #   cv2 那两个是**容器元数据**，VFR / 没写索引的 mp4 会偏 —— 这个值又是
+    #   /api/merge/preview 的时长闸门，偏短就会让「拖到某帧之后每一发 preview 都 400」，
+    #   前端进 3s 冷却、画面彻底钉死（用户报的「超过第 500 帧就不动」）。
+    #   现在先读 imageio 的 immeta（只读容器头，不整片解码，快），它和真实时长一致；
+    #   cv2 只当退路。
     try:
-        import cv2
-        cap = cv2.VideoCapture(str(pp))
-        try:
-            fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-            n = float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0)
-            if fps > 0 and n > 0:
-                dur = n / fps
-        finally:
-            cap.release()
+        import imageio.v3 as _iio
+        _meta = _iio.immeta(str(pp), plugin="FFMPEG")
+        _d = float(_meta.get("duration") or 0.0)
+        if _d > 0:
+            dur = _d
     except Exception:
         dur = 0.0
     if not dur:
         try:
-            import imageio_ffmpeg
-            _n, secs = imageio_ffmpeg.count_frames_and_secs(str(pp))
-            dur = float(secs or 0.0)
+            import cv2
+            cap = cv2.VideoCapture(str(pp))
+            try:
+                fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+                n = float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0)
+                if fps > 0 and n > 0:
+                    dur = n / fps
+            finally:
+                cap.release()
         except Exception:
             dur = 0.0
     with _DUR_LOCK:

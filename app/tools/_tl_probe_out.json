@@ -1,0 +1,1541 @@
+{
+ "steps": [
+  {
+   "req": 0,
+   "snap": {
+    "tlFrame": 0,
+    "diag": {
+     "total": 1439,
+     "frame": 0,
+     "zoom": 1,
+     "ppf": 2,
+     "contentWidth": 2878,
+     "scrollLeft": 0,
+     "clientWidth": 0,
+     "ready": true,
+     "hostFrames": 1439,
+     "hostPath": "D:\\MyProject\\DeepFaceLab-PyTorch-4.1\\workspace\\9月29日 (5).mp4"
+    },
+    "ct": 0,
+    "ctFrame": 0,
+    "dur": 47.971995,
+    "durFrame": 1439,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 0,
+     "video": true
+    },
+    "ovl": {
+     "disp": "none",
+     "len": 0,
+     "head": ""
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 0,
+     "wait": false
+    },
+    "hint": "这一帧没有检测到人脸",
+    "cmpNote": {
+     "hidden": true,
+     "text": "正在合成…"
+    }
+   },
+   "tags": {
+    "mtl:frame": 1,
+    "fetch": 3,
+    "fetch-done": 3
+   },
+   "log": [
+    {
+     "tp": 2,
+     "tag": "mtl:frame",
+     "n": 0
+    },
+    {
+     "tp": 825,
+     "tag": "fetch",
+     "url": "/api/models",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 826,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 834,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 860,
+     "tag": "fetch-done",
+     "url": "/api/models",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 1832,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 1839,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    }
+   ]
+  },
+  {
+   "req": 120,
+   "snap": {
+    "tlFrame": 120,
+    "diag": {
+     "total": 1439,
+     "frame": 120,
+     "zoom": 1,
+     "ppf": 2,
+     "contentWidth": 2878,
+     "scrollLeft": 0,
+     "clientWidth": 0,
+     "ready": true,
+     "hostFrames": 1439,
+     "hostPath": "D:\\MyProject\\DeepFaceLab-PyTorch-4.1\\workspace\\9月29日 (5).mp4"
+    },
+    "ct": 0,
+    "ctFrame": 0,
+    "dur": 47.971995,
+    "durFrame": 1439,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 0,
+     "video": true
+    },
+    "ovl": {
+     "disp": "none",
+     "len": 0,
+     "head": ""
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 0,
+     "wait": false
+    },
+    "hint": "这一帧没有检测到人脸",
+    "cmpNote": {
+     "hidden": true,
+     "text": "正在合成…"
+    }
+   },
+   "tags": {
+    "mtl:frame": 1,
+    "fetch": 3,
+    "fetch-done": 3
+   },
+   "log": [
+    {
+     "tp": 1,
+     "tag": "mtl:frame",
+     "n": 120
+    },
+    {
+     "tp": 616,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 622,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 1610,
+     "tag": "fetch",
+     "url": "/api/models",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 1610,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 1620,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 1649,
+     "tag": "fetch-done",
+     "url": "/api/models",
+     "st": 200,
+     "t": ""
+    }
+   ]
+  },
+  {
+   "req": 300,
+   "snap": {
+    "tlFrame": 300,
+    "diag": {
+     "total": 1439,
+     "frame": 300,
+     "zoom": 1,
+     "ppf": 2,
+     "contentWidth": 2878,
+     "scrollLeft": 0,
+     "clientWidth": 0,
+     "ready": true,
+     "hostFrames": 1439,
+     "hostPath": "D:\\MyProject\\DeepFaceLab-PyTorch-4.1\\workspace\\9月29日 (5).mp4"
+    },
+    "ct": 0,
+    "ctFrame": 0,
+    "dur": 47.971995,
+    "durFrame": 1439,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 0,
+     "video": true
+    },
+    "ovl": {
+     "disp": "none",
+     "len": 0,
+     "head": ""
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 0,
+     "wait": false
+    },
+    "hint": "这一帧没有检测到人脸",
+    "cmpNote": {
+     "hidden": true,
+     "text": "正在合成…"
+    }
+   },
+   "tags": {
+    "mtl:frame": 1,
+    "fetch": 2,
+    "fetch-done": 2
+   },
+   "log": [
+    {
+     "tp": 2,
+     "tag": "mtl:frame",
+     "n": 300
+    },
+    {
+     "tp": 415,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 423,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 1406,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 1414,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    }
+   ]
+  },
+  {
+   "req": 480,
+   "snap": {
+    "tlFrame": 480,
+    "diag": {
+     "total": 1439,
+     "frame": 480,
+     "zoom": 1,
+     "ppf": 2,
+     "contentWidth": 2878,
+     "scrollLeft": 0,
+     "clientWidth": 0,
+     "ready": true,
+     "hostFrames": 1439,
+     "hostPath": "D:\\MyProject\\DeepFaceLab-PyTorch-4.1\\workspace\\9月29日 (5).mp4"
+    },
+    "ct": 0,
+    "ctFrame": 0,
+    "dur": 47.971995,
+    "durFrame": 1439,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 0,
+     "video": true
+    },
+    "ovl": {
+     "disp": "none",
+     "len": 0,
+     "head": ""
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 0,
+     "wait": false
+    },
+    "hint": "这一帧没有检测到人脸",
+    "cmpNote": {
+     "hidden": true,
+     "text": "正在合成…"
+    }
+   },
+   "tags": {
+    "mtl:frame": 1,
+    "fetch": 4,
+    "fetch-done": 3
+   },
+   "log": [
+    {
+     "tp": 1,
+     "tag": "mtl:frame",
+     "n": 480
+    },
+    {
+     "tp": 201,
+     "tag": "fetch",
+     "url": "/api/models",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 202,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 210,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 246,
+     "tag": "fetch-done",
+     "url": "/api/models",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 1196,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 1202,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 2205,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    }
+   ]
+  },
+  {
+   "req": 495,
+   "snap": {
+    "tlFrame": 495,
+    "diag": {
+     "total": 1439,
+     "frame": 495,
+     "zoom": 1,
+     "ppf": 2,
+     "contentWidth": 2878,
+     "scrollLeft": 0,
+     "clientWidth": 0,
+     "ready": true,
+     "hostFrames": 1439,
+     "hostPath": "D:\\MyProject\\DeepFaceLab-PyTorch-4.1\\workspace\\9月29日 (5).mp4"
+    },
+    "ct": 0,
+    "ctFrame": 0,
+    "dur": 47.971995,
+    "durFrame": 1439,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 0,
+     "video": true
+    },
+    "ovl": {
+     "disp": "none",
+     "len": 0,
+     "head": ""
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 0,
+     "wait": false
+    },
+    "hint": "这一帧没有检测到人脸",
+    "cmpNote": {
+     "hidden": true,
+     "text": "正在合成…"
+    }
+   },
+   "tags": {
+    "mtl:frame": 1,
+    "fetch-done": 4,
+    "fetch": 3
+   },
+   "log": [
+    {
+     "tp": 1,
+     "tag": "mtl:frame",
+     "n": 495
+    },
+    {
+     "tp": 2,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 987,
+     "tag": "fetch",
+     "url": "/api/models",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 988,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 993,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 1018,
+     "tag": "fetch-done",
+     "url": "/api/models",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 1986,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 1992,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    }
+   ]
+  },
+  {
+   "req": 500,
+   "snap": {
+    "tlFrame": 500,
+    "diag": {
+     "total": 1439,
+     "frame": 500,
+     "zoom": 1,
+     "ppf": 2,
+     "contentWidth": 2878,
+     "scrollLeft": 0,
+     "clientWidth": 0,
+     "ready": true,
+     "hostFrames": 1439,
+     "hostPath": "D:\\MyProject\\DeepFaceLab-PyTorch-4.1\\workspace\\9月29日 (5).mp4"
+    },
+    "ct": 0,
+    "ctFrame": 0,
+    "dur": 47.971995,
+    "durFrame": 1439,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 0,
+     "video": true
+    },
+    "ovl": {
+     "disp": "none",
+     "len": 0,
+     "head": ""
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 0,
+     "wait": false
+    },
+    "hint": "这一帧没有检测到人脸",
+    "cmpNote": {
+     "hidden": true,
+     "text": "正在合成…"
+    }
+   },
+   "tags": {
+    "mtl:frame": 1,
+    "fetch": 3,
+    "fetch-done": 3
+   },
+   "log": [
+    {
+     "tp": 2,
+     "tag": "mtl:frame",
+     "n": 500
+    },
+    {
+     "tp": 790,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 796,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 1781,
+     "tag": "fetch",
+     "url": "/api/models",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 1782,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 1789,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 1813,
+     "tag": "fetch-done",
+     "url": "/api/models",
+     "st": 200,
+     "t": ""
+    }
+   ]
+  },
+  {
+   "req": 505,
+   "snap": {
+    "tlFrame": 505,
+    "diag": {
+     "total": 1439,
+     "frame": 505,
+     "zoom": 1,
+     "ppf": 2,
+     "contentWidth": 2878,
+     "scrollLeft": 0,
+     "clientWidth": 0,
+     "ready": true,
+     "hostFrames": 1439,
+     "hostPath": "D:\\MyProject\\DeepFaceLab-PyTorch-4.1\\workspace\\9月29日 (5).mp4"
+    },
+    "ct": 0,
+    "ctFrame": 0,
+    "dur": 47.971995,
+    "durFrame": 1439,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 0,
+     "video": true
+    },
+    "ovl": {
+     "disp": "none",
+     "len": 0,
+     "head": ""
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 0,
+     "wait": false
+    },
+    "hint": "这一帧没有检测到人脸",
+    "cmpNote": {
+     "hidden": true,
+     "text": "正在合成…"
+    }
+   },
+   "tags": {
+    "mtl:frame": 1,
+    "fetch-done": 3,
+    "fetch": 2
+   },
+   "log": [
+    {
+     "tp": 1,
+     "tag": "mtl:frame",
+     "n": 505
+    },
+    {
+     "tp": 329,
+     "tag": "fetch-done",
+     "url": "/api/merge/analyze?step=24&model=TinyMog",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 565,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 569,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 1571,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 1576,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    }
+   ]
+  },
+  {
+   "req": 510,
+   "snap": {
+    "tlFrame": 510,
+    "diag": {
+     "total": 1439,
+     "frame": 510,
+     "zoom": 1,
+     "ppf": 2,
+     "contentWidth": 2878,
+     "scrollLeft": 0,
+     "clientWidth": 0,
+     "ready": true,
+     "hostFrames": 1439,
+     "hostPath": "D:\\MyProject\\DeepFaceLab-PyTorch-4.1\\workspace\\9月29日 (5).mp4"
+    },
+    "ct": 0,
+    "ctFrame": 0,
+    "dur": 47.971995,
+    "durFrame": 1439,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 0,
+     "video": true
+    },
+    "ovl": {
+     "disp": "none",
+     "len": 0,
+     "head": ""
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 0,
+     "wait": false
+    },
+    "hint": "这一帧没有检测到人脸",
+    "cmpNote": {
+     "hidden": true,
+     "text": "正在合成…"
+    }
+   },
+   "tags": {
+    "mtl:frame": 1,
+    "fetch": 3,
+    "fetch-done": 3
+   },
+   "log": [
+    {
+     "tp": 1,
+     "tag": "mtl:frame",
+     "n": 510
+    },
+    {
+     "tp": 348,
+     "tag": "fetch",
+     "url": "/api/models",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 349,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 365,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 423,
+     "tag": "fetch-done",
+     "url": "/api/models",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 1347,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 1355,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    }
+   ]
+  },
+  {
+   "req": 600,
+   "snap": {
+    "tlFrame": 600,
+    "diag": {
+     "total": 1439,
+     "frame": 600,
+     "zoom": 1,
+     "ppf": 2,
+     "contentWidth": 2878,
+     "scrollLeft": 0,
+     "clientWidth": 0,
+     "ready": true,
+     "hostFrames": 1439,
+     "hostPath": "D:\\MyProject\\DeepFaceLab-PyTorch-4.1\\workspace\\9月29日 (5).mp4"
+    },
+    "ct": 0,
+    "ctFrame": 0,
+    "dur": 47.971995,
+    "durFrame": 1439,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 0,
+     "video": true
+    },
+    "ovl": {
+     "disp": "none",
+     "len": 0,
+     "head": ""
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 0,
+     "wait": false
+    },
+    "hint": "这一帧没有检测到人脸",
+    "cmpNote": {
+     "hidden": true,
+     "text": "正在合成…"
+    }
+   },
+   "tags": {
+    "mtl:frame": 1,
+    "fetch": 4,
+    "fetch-done": 4
+   },
+   "log": [
+    {
+     "tp": 1,
+     "tag": "mtl:frame",
+     "n": 600
+    },
+    {
+     "tp": 144,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 154,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 1142,
+     "tag": "fetch",
+     "url": "/api/models",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 1143,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 1152,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 1187,
+     "tag": "fetch-done",
+     "url": "/api/models",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 2140,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 2149,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    }
+   ]
+  },
+  {
+   "req": 700,
+   "snap": {
+    "tlFrame": 700,
+    "diag": {
+     "total": 1439,
+     "frame": 700,
+     "zoom": 1,
+     "ppf": 2,
+     "contentWidth": 2878,
+     "scrollLeft": 0,
+     "clientWidth": 0,
+     "ready": true,
+     "hostFrames": 1439,
+     "hostPath": "D:\\MyProject\\DeepFaceLab-PyTorch-4.1\\workspace\\9月29日 (5).mp4"
+    },
+    "ct": 0,
+    "ctFrame": 0,
+    "dur": 47.971995,
+    "durFrame": 1439,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 0,
+     "video": true
+    },
+    "ovl": {
+     "disp": "none",
+     "len": 0,
+     "head": ""
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 0,
+     "wait": false
+    },
+    "hint": "这一帧没有检测到人脸",
+    "cmpNote": {
+     "hidden": true,
+     "text": "正在合成…"
+    }
+   },
+   "tags": {
+    "mtl:frame": 1,
+    "fetch": 3,
+    "fetch-done": 3
+   },
+   "log": [
+    {
+     "tp": 2,
+     "tag": "mtl:frame",
+     "n": 700
+    },
+    {
+     "tp": 937,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 949,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 1932,
+     "tag": "fetch",
+     "url": "/api/models",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 1933,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 1943,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 1980,
+     "tag": "fetch-done",
+     "url": "/api/models",
+     "st": 200,
+     "t": ""
+    }
+   ]
+  },
+  {
+   "req": 900,
+   "snap": {
+    "tlFrame": 900,
+    "diag": {
+     "total": 1439,
+     "frame": 900,
+     "zoom": 1,
+     "ppf": 2,
+     "contentWidth": 2878,
+     "scrollLeft": 0,
+     "clientWidth": 0,
+     "ready": true,
+     "hostFrames": 1439,
+     "hostPath": "D:\\MyProject\\DeepFaceLab-PyTorch-4.1\\workspace\\9月29日 (5).mp4"
+    },
+    "ct": 0,
+    "ctFrame": 0,
+    "dur": 47.971995,
+    "durFrame": 1439,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 0,
+     "video": true
+    },
+    "ovl": {
+     "disp": "none",
+     "len": 0,
+     "head": ""
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 0,
+     "wait": false
+    },
+    "hint": "这一帧没有检测到人脸",
+    "cmpNote": {
+     "hidden": true,
+     "text": "正在合成…"
+    }
+   },
+   "tags": {
+    "mtl:frame": 1,
+    "fetch": 2,
+    "fetch-done": 2
+   },
+   "log": [
+    {
+     "tp": 1,
+     "tag": "mtl:frame",
+     "n": 900
+    },
+    {
+     "tp": 723,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 731,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 1718,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 1727,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    }
+   ]
+  },
+  {
+   "req": 1200,
+   "snap": {
+    "tlFrame": 1200,
+    "diag": {
+     "total": 1439,
+     "frame": 1200,
+     "zoom": 1,
+     "ppf": 2,
+     "contentWidth": 2878,
+     "scrollLeft": 0,
+     "clientWidth": 0,
+     "ready": true,
+     "hostFrames": 1439,
+     "hostPath": "D:\\MyProject\\DeepFaceLab-PyTorch-4.1\\workspace\\9月29日 (5).mp4"
+    },
+    "ct": 0,
+    "ctFrame": 0,
+    "dur": 47.971995,
+    "durFrame": 1439,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 0,
+     "video": true
+    },
+    "ovl": {
+     "disp": "none",
+     "len": 0,
+     "head": ""
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 0,
+     "wait": false
+    },
+    "hint": "这一帧没有检测到人脸",
+    "cmpNote": {
+     "hidden": true,
+     "text": "正在合成…"
+    }
+   },
+   "tags": {
+    "mtl:frame": 1,
+    "fetch": 3,
+    "fetch-done": 3
+   },
+   "log": [
+    {
+     "tp": 2,
+     "tag": "mtl:frame",
+     "n": 1200
+    },
+    {
+     "tp": 518,
+     "tag": "fetch",
+     "url": "/api/models",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 519,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 529,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 569,
+     "tag": "fetch-done",
+     "url": "/api/models",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 1517,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 1526,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    }
+   ]
+  },
+  {
+   "req": 1300,
+   "snap": {
+    "tlFrame": 1300,
+    "diag": {
+     "total": 1439,
+     "frame": 1300,
+     "zoom": 1,
+     "ppf": 2,
+     "contentWidth": 2878,
+     "scrollLeft": 0,
+     "clientWidth": 0,
+     "ready": true,
+     "hostFrames": 1439,
+     "hostPath": "D:\\MyProject\\DeepFaceLab-PyTorch-4.1\\workspace\\9月29日 (5).mp4"
+    },
+    "ct": 0,
+    "ctFrame": 0,
+    "dur": 47.971995,
+    "durFrame": 1439,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 0,
+     "video": true
+    },
+    "ovl": {
+     "disp": "none",
+     "len": 0,
+     "head": ""
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 0,
+     "wait": false
+    },
+    "hint": "这一帧没有检测到人脸",
+    "cmpNote": {
+     "hidden": true,
+     "text": "正在合成…"
+    }
+   },
+   "tags": {
+    "mtl:frame": 1,
+    "fetch": 3,
+    "fetch-done": 3
+   },
+   "log": [
+    {
+     "tp": 2,
+     "tag": "mtl:frame",
+     "n": 1300
+    },
+    {
+     "tp": 315,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 324,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 1311,
+     "tag": "fetch",
+     "url": "/api/models",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 1312,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 1321,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 1368,
+     "tag": "fetch-done",
+     "url": "/api/models",
+     "st": 200,
+     "t": ""
+    }
+   ]
+  },
+  {
+   "req": 1438,
+   "snap": {
+    "tlFrame": 1438,
+    "diag": {
+     "total": 1439,
+     "frame": 1438,
+     "zoom": 1,
+     "ppf": 2,
+     "contentWidth": 2878,
+     "scrollLeft": 0,
+     "clientWidth": 0,
+     "ready": true,
+     "hostFrames": 1439,
+     "hostPath": "D:\\MyProject\\DeepFaceLab-PyTorch-4.1\\workspace\\9月29日 (5).mp4"
+    },
+    "ct": 0,
+    "ctFrame": 0,
+    "dur": 47.971995,
+    "durFrame": 1439,
+    "rs": 4,
+    "ns": 1,
+    "paused": true,
+    "err": null,
+    "mv": {
+     "frames": 1439,
+     "fps": 30,
+     "t": 0,
+     "video": true
+    },
+    "ovl": {
+     "disp": "none",
+     "len": 0,
+     "head": ""
+    },
+    "gv": {
+     "streamDown": false,
+     "playing": false,
+     "pngLen": 0,
+     "wait": false
+    },
+    "hint": "这一帧没有检测到人脸",
+    "cmpNote": {
+     "hidden": true,
+     "text": "正在合成…"
+    }
+   },
+   "tags": {
+    "mtl:frame": 1,
+    "fetch": 4,
+    "fetch-done": 4
+   },
+   "log": [
+    {
+     "tp": 1,
+     "tag": "mtl:frame",
+     "n": 1438
+    },
+    {
+     "tp": 98,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 106,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 1092,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 1100,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 2100,
+     "tag": "fetch",
+     "url": "/api/models",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 2101,
+     "tag": "fetch",
+     "url": "/api/merge/export/status",
+     "t": "",
+     "frame": ""
+    },
+    {
+     "tp": 2109,
+     "tag": "fetch-done",
+     "url": "/api/merge/export/status",
+     "st": 200,
+     "t": ""
+    },
+    {
+     "tp": 2154,
+     "tag": "fetch-done",
+     "url": "/api/models",
+     "st": 200,
+     "t": ""
+    }
+   ]
+  }
+ ],
+ "goto": true,
+ "app": "{\"mv\":\"function\",\"tl\":true,\"v\":true,\"ready\":\"complete\"}",
+ "instr": "ok",
+ "afterOpen": {
+  "tlFrame": 0,
+  "diag": {
+   "total": 1439,
+   "frame": 0,
+   "zoom": 1,
+   "ppf": 2,
+   "contentWidth": 2878,
+   "scrollLeft": 0,
+   "clientWidth": 0,
+   "ready": true,
+   "hostFrames": 1439,
+   "hostPath": "D:\\MyProject\\DeepFaceLab-PyTorch-4.1\\workspace\\9月29日 (5).mp4"
+  },
+  "ct": 0,
+  "ctFrame": 0,
+  "dur": 47.971995,
+  "durFrame": 1439,
+  "rs": 4,
+  "ns": 1,
+  "paused": true,
+  "err": null,
+  "mv": {
+   "frames": 1439,
+   "fps": 30,
+   "t": 0,
+   "video": true
+  },
+  "ovl": {
+   "disp": "none",
+   "len": 0,
+   "head": ""
+  },
+  "gv": {
+   "streamDown": false,
+   "playing": false,
+   "pngLen": 0,
+   "wait": true
+  },
+  "hint": "选择视频后显示",
+  "cmpNote": {
+   "hidden": true,
+   "text": "正在合成…"
+  }
+ },
+ "afterOpen2": {
+  "tlFrame": 0,
+  "diag": {
+   "total": 1439,
+   "frame": 0,
+   "zoom": 1,
+   "ppf": 2,
+   "contentWidth": 2878,
+   "scrollLeft": 0,
+   "clientWidth": 0,
+   "ready": true,
+   "hostFrames": 1439,
+   "hostPath": "D:\\MyProject\\DeepFaceLab-PyTorch-4.1\\workspace\\9月29日 (5).mp4"
+  },
+  "ct": 0,
+  "ctFrame": 0,
+  "dur": 47.971995,
+  "durFrame": 1439,
+  "rs": 4,
+  "ns": 1,
+  "paused": true,
+  "err": null,
+  "mv": {
+   "frames": 1439,
+   "fps": 30,
+   "t": 0,
+   "video": true
+  },
+  "ovl": {
+   "disp": "none",
+   "len": 0,
+   "head": ""
+  },
+  "gv": {
+   "streamDown": false,
+   "playing": false,
+   "pngLen": 0,
+   "wait": false
+  },
+  "hint": "这一帧没有检测到人脸",
+  "cmpNote": {
+   "hidden": true,
+   "text": "正在合成…"
+  }
+ },
+ "console": [
+  "{\"entry\": {\"source\": \"network\", \"level\": \"error\", \"text\": \"Failed to load resource: the server responded with a status of 404 (Not Found)\", \"timestamp\": 1795830760584.713, \"url\": \"http://127.0.0.1:8760/api/face\", \"networkRequestId\": \"71044.250\"}}",
+  "{\"type\": \"info\", \"args\": [{\"type\": \"string\", \"value\": \"[face] 没有保存过的 68 点（正常）：这一帧没有关键点（还没保存过 face68.json）\"}], \"executionContextId\": 2, \"timestamp\": 1795830760599.995, \"stackTrace\": {\"callFrames\": [{\"functionName\": \"\", \"scriptId\": \"10\", \"url\": \"http://127.0.0.1:8760/static/js/app.js?v=mwnoij94\", \"lin",
+  "{\"timestamp\": 1795830760672.176, \"exceptionDetails\": {\"exceptionId\": 1, \"text\": \"Uncaught\", \"lineNumber\": 14273, \"columnNumber\": 12, \"scriptId\": \"10\", \"url\": \"http://127.0.0.1:8760/static/js/app.js?v=mwnoij94\", \"stackTrace\": {\"callFrames\": [{\"functionName\": \"bind\", \"scriptId\": \"10\", \"url\": \"http://1",
+  "{\"entry\": {\"source\": \"recommendation\", \"level\": \"verbose\", \"text\": \"[DOM] Password field is not contained in a form: (More info: https://www.chromium.org/developers/design-documents/create-amazing-password-forms) %o\", \"timestamp\": 1795830760685.252, \"url\": \"http://127.0.0.1:8760/#home\", \"args\": [{\"t",
+  "{\"entry\": {\"source\": \"recommendation\", \"level\": \"verbose\", \"text\": \"[DOM] Password field is not contained in a form: (More info: https://www.chromium.org/developers/design-documents/create-amazing-password-forms) %o\", \"timestamp\": 1795830760685.386, \"url\": \"http://127.0.0.1:8760/#home\", \"args\": [{\"t",
+  "{\"entry\": {\"source\": \"intervention\", \"level\": \"info\", \"text\": \"Images loaded lazily and replaced with placeholders. Load events are deferred. See https://go.microsoft.com/fwlink/?linkid=2048113\", \"timestamp\": 1795830760731.004, \"url\": \"http://127.0.0.1:8760/#home\"}}",
+  "{\"entry\": {\"source\": \"network\", \"level\": \"error\", \"text\": \"Failed to load resource: the server responded with a status of 404 (Not Found)\", \"timestamp\": 1795830761058.614, \"url\": \"http://127.0.0.1:8760/favicon.ico\", \"networkRequestId\": \"71044.312\"}}"
+ ]
+}

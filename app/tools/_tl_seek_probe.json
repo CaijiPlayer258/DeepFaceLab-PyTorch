@@ -1,0 +1,124 @@
+{
+ "dur": 47.971995,
+ "frames_over_fps": 47.96666666666667,
+ "dur_x_fps": 1439.15985,
+ "tests": [
+  {
+   "label": "t=17.3333 (frame 520)",
+   "set": 17.333333333333332,
+   "ct": 17.333333,
+   "x30": 519.99999,
+   "round30": 520,
+   "readyState": 4,
+   "events": [
+    "seeking",
+    "timeupdate",
+    "seeked",
+    "canplay",
+    "progress",
+    "suspend"
+   ],
+   "seeking": 1,
+   "seeked": 1
+  },
+  {
+   "label": "same t again",
+   "set": 17.333333333333332,
+   "ct": 17.333333,
+   "x30": 519.99999,
+   "round30": 520,
+   "readyState": 4,
+   "events": [
+    "seeking",
+    "timeupdate",
+    "seeked",
+    "canplay"
+   ],
+   "seeking": 1,
+   "seeked": 1
+  },
+  {
+   "label": "same t again #2",
+   "set": 17.333333333333332,
+   "ct": 17.333333,
+   "x30": 519.99999,
+   "round30": 520,
+   "readyState": 4,
+   "events": [
+    "seeking",
+    "timeupdate",
+    "seeked",
+    "canplay"
+   ],
+   "seeking": 1,
+   "seeked": 1
+  },
+  {
+   "label": "t=40 (frame 1200)",
+   "set": 40.0,
+   "ct": 40,
+   "x30": 1200,
+   "round30": 1200,
+   "readyState": 4,
+   "events": [
+    "seeking",
+    "timeupdate",
+    "seeked",
+    "canplay",
+    "progress",
+    "suspend"
+   ],
+   "seeking": 1,
+   "seeked": 1
+  },
+  {
+   "label": "same 40 again",
+   "set": 40.0,
+   "ct": 40,
+   "x30": 1200,
+   "round30": 1200,
+   "readyState": 4,
+   "events": [
+    "seeking",
+    "timeupdate",
+    "seeked",
+    "canplay"
+   ],
+   "seeking": 1,
+   "seeked": 1
+  },
+  {
+   "label": "t=333.3333 (frame 10000, beyond dur)",
+   "set": 333.3333333333333,
+   "ct": 47.971995,
+   "x30": 1439.15985,
+   "round30": 1439,
+   "readyState": 4,
+   "events": [
+    "seeking",
+    "timeupdate",
+    "seeked",
+    "canplay"
+   ],
+   "seeking": 1,
+   "seeked": 1
+  },
+  {
+   "label": "same ct again (really identical)",
+   "set": 47.971995,
+   "ct": 47.971995,
+   "x30": 1439.15985,
+   "round30": 1439,
+   "readyState": 4,
+   "events": [
+    "seeking",
+    "timeupdate",
+    "seeked",
+    "canplay",
+    "timeupdate"
+   ],
+   "seeking": 1,
+   "seeked": 1
+  }
+ ]
+}

@@ -1,0 +1,1028 @@
+{
+ "steps": [
+  {
+   "req": 520,
+   "snap": {
+    "ct": 0,
+    "xfps": 0,
+    "rf": 0,
+    "dur": null,
+    "durFrame": null,
+    "tl": 520,
+    "ovlDisp": "none",
+    "ovlLen": 0,
+    "png": 0,
+    "playing": false,
+    "streamDown": false,
+    "hint": "选择视频后显示"
+   },
+   "log": [
+    {
+     "tp": 754,
+     "tag": "fetch",
+     "u": "/api/models",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 755,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 762,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 809,
+     "tag": "done",
+     "u": "/api/models",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 1753,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1763,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 2760,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2770,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 3759,
+     "tag": "fetch",
+     "u": "/api/models",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 3760,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 3772,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 3830,
+     "tag": "done",
+     "u": "/api/models",
+     "st": 200,
+     "f": ""
+    }
+   ]
+  },
+  {
+   "req": 520,
+   "snap": {
+    "ct": 0,
+    "xfps": 0,
+    "rf": 0,
+    "dur": null,
+    "durFrame": null,
+    "tl": 520,
+    "ovlDisp": "none",
+    "ovlLen": 0,
+    "png": 0,
+    "playing": false,
+    "streamDown": false,
+    "hint": "选择视频后显示"
+   },
+   "log": [
+    {
+     "tp": 731,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 743,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 1740,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1751,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 2737,
+     "tag": "fetch",
+     "u": "/api/models",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2738,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2747,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 2793,
+     "tag": "done",
+     "u": "/api/models",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 3732,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 3744,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    }
+   ]
+  },
+  {
+   "req": 10000,
+   "snap": {
+    "ct": 0,
+    "xfps": 0,
+    "rf": 0,
+    "dur": 1781.647007,
+    "durFrame": 53449,
+    "tl": 0,
+    "ovlDisp": "none",
+    "ovlLen": 0,
+    "png": 0,
+    "playing": false,
+    "streamDown": false,
+    "hint": "选择视频后显示"
+   },
+   "log": [
+    {
+     "tp": 726,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 737,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 1724,
+     "tag": "fetch",
+     "u": "/api/models",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1725,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1735,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 1782,
+     "tag": "done",
+     "u": "/api/models",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 2719,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2729,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 3048,
+     "tag": "done",
+     "u": "/api/merge/open",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 3103,
+     "tag": "fetch",
+     "u": "/api/merge/detect/0?model=Tiny",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 3129,
+     "tag": "fetch",
+     "u": "/api/merge/analyze?step=24&mod",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 3214,
+     "tag": "fetch",
+     "u": "/api/merge/preview/warm",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 3292,
+     "tag": "previewNow-in",
+     "ct": 0,
+     "xfps": 0,
+     "rf": 0,
+     "paused": true,
+     "gate": null,
+     "gateOpen": "na"
+    },
+    {
+     "tp": 3293,
+     "tag": "previewNow-out",
+     "got": "null",
+     "ct": 0,
+     "rf": 0
+    },
+    {
+     "tp": 3403,
+     "tag": "done",
+     "u": "/api/merge/detect/0?mo",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 3463,
+     "tag": "done",
+     "u": "/api/merge/preview/war",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 3527,
+     "tag": "previewNow-in",
+     "ct": 0,
+     "xfps": 0,
+     "rf": 0,
+     "paused": true,
+     "gate": null,
+     "gateOpen": "na"
+    },
+    {
+     "tp": 3530,
+     "tag": "fetch",
+     "u": "/api/merge/preview",
+     "f": "0",
+     "t": "0"
+    },
+    {
+     "tp": 3544,
+     "tag": "v:durationchange",
+     "ct": 0,
+     "rf": 0,
+     "rs": 4,
+     "ns": 1
+    },
+    {
+     "tp": 3669,
+     "tag": "previewNow-in",
+     "ct": 0,
+     "xfps": 0,
+     "rf": 0,
+     "paused": true,
+     "gate": null,
+     "gateOpen": "na"
+    },
+    {
+     "tp": 3671,
+     "tag": "fetch",
+     "u": "/api/merge/preview",
+     "f": "0",
+     "t": "0"
+    },
+    {
+     "tp": 3673,
+     "tag": "ferr",
+     "u": "/api/merge/preview",
+     "e": "AbortError"
+    },
+    {
+     "tp": 3673,
+     "tag": "previewNow-out",
+     "got": "null",
+     "ct": 0,
+     "rf": 0
+    },
+    {
+     "tp": 3721,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 3749,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    }
+   ]
+  },
+  {
+   "req": 10000,
+   "snap": {
+    "ct": 333.333333,
+    "xfps": 9999.99999,
+    "rf": 10000,
+    "dur": 1781.647007,
+    "durFrame": 53449,
+    "tl": 10000,
+    "ovlDisp": "none",
+    "ovlLen": 0,
+    "png": 0,
+    "playing": false,
+    "streamDown": false,
+    "hint": "这一帧没有检测到人脸"
+   },
+   "log": [
+    {
+     "tp": 5,
+     "tag": "fetch",
+     "u": "/api/merge/detect/10000?model=",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 18,
+     "tag": "v:seeking",
+     "ct": 333.333333,
+     "rf": 10000,
+     "rs": 1,
+     "ns": 1
+    },
+    {
+     "tp": 541,
+     "tag": "done",
+     "u": "/api/merge/detect/1000",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 662,
+     "tag": "fetch",
+     "u": "/api/models",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 662,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 680,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 747,
+     "tag": "done",
+     "u": "/api/models",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 1079,
+     "tag": "done",
+     "u": "/api/merge/preview",
+     "st": 200,
+     "f": "0"
+    },
+    {
+     "tp": 1085,
+     "tag": "previewNow-out",
+     "got": "null",
+     "ct": 333.333333,
+     "rf": 10000
+    },
+    {
+     "tp": 1346,
+     "tag": "v:seeked",
+     "ct": 333.333333,
+     "rf": 10000,
+     "rs": 4,
+     "ns": 2
+    },
+    {
+     "tp": 1478,
+     "tag": "previewNow-in",
+     "ct": 333.333333,
+     "xfps": 9999.99999,
+     "rf": 10000,
+     "paused": true,
+     "gate": null,
+     "gateOpen": "na"
+    },
+    {
+     "tp": 1479,
+     "tag": "fetch",
+     "u": "/api/merge/preview",
+     "f": "10000",
+     "t": "333.333"
+    },
+    {
+     "tp": 1664,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1683,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 2028,
+     "tag": "done",
+     "u": "/api/merge/preview",
+     "st": 200,
+     "f": "10000"
+    },
+    {
+     "tp": 2031,
+     "tag": "previewNow-out",
+     "got": "null",
+     "ct": 333.333333,
+     "rf": 10000
+    },
+    {
+     "tp": 2661,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2678,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 3661,
+     "tag": "fetch",
+     "u": "/api/models",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 3662,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 3677,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 3734,
+     "tag": "done",
+     "u": "/api/models",
+     "st": 200,
+     "f": ""
+    }
+   ]
+  },
+  {
+   "req": 600,
+   "snap": {
+    "ct": 20,
+    "xfps": 600,
+    "rf": 600,
+    "dur": 1781.647007,
+    "durFrame": 53449,
+    "tl": 600,
+    "ovlDisp": "none",
+    "ovlLen": 0,
+    "png": 0,
+    "playing": false,
+    "streamDown": false,
+    "hint": "本帧无人脸"
+   },
+   "log": [
+    {
+     "tp": 14,
+     "tag": "fetch",
+     "u": "/api/merge/detect/600?model=Ti",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 32,
+     "tag": "v:seeking",
+     "ct": 20,
+     "rf": 600,
+     "rs": 1,
+     "ns": 1
+    },
+    {
+     "tp": 200,
+     "tag": "v:seeked",
+     "ct": 20,
+     "rf": 600,
+     "rs": 4,
+     "ns": 1
+    },
+    {
+     "tp": 329,
+     "tag": "previewNow-in",
+     "ct": 20,
+     "xfps": 600,
+     "rf": 600,
+     "paused": true,
+     "gate": null,
+     "gateOpen": "na"
+    },
+    {
+     "tp": 329,
+     "tag": "previewNow-out",
+     "got": "null",
+     "ct": 20,
+     "rf": 600
+    },
+    {
+     "tp": 624,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 635,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 650,
+     "tag": "done",
+     "u": "/api/merge/detect/600?",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 1635,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1646,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 2621,
+     "tag": "fetch",
+     "u": "/api/models",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2622,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2633,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 2679,
+     "tag": "done",
+     "u": "/api/models",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 3630,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 3642,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    }
+   ]
+  },
+  {
+   "req": 601,
+   "snap": {
+    "ct": 20.033333,
+    "xfps": 600.99999,
+    "rf": 601,
+    "dur": 1781.647007,
+    "durFrame": 53449,
+    "tl": 601,
+    "ovlDisp": "none",
+    "ovlLen": 0,
+    "png": 0,
+    "playing": false,
+    "streamDown": false,
+    "hint": "本帧无人脸"
+   },
+   "log": [
+    {
+     "tp": 8,
+     "tag": "fetch",
+     "u": "/api/merge/detect/601?model=Ti",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 33,
+     "tag": "v:seeking",
+     "ct": 20.033333,
+     "rf": 601,
+     "rs": 1,
+     "ns": 1
+    },
+    {
+     "tp": 128,
+     "tag": "v:seeked",
+     "ct": 20.033333,
+     "rf": 601,
+     "rs": 4,
+     "ns": 1
+    },
+    {
+     "tp": 256,
+     "tag": "previewNow-in",
+     "ct": 20.033333,
+     "xfps": 600.99999,
+     "rf": 601,
+     "paused": true,
+     "gate": null,
+     "gateOpen": "na"
+    },
+    {
+     "tp": 256,
+     "tag": "previewNow-out",
+     "got": "null",
+     "ct": 20.033333,
+     "rf": 601
+    },
+    {
+     "tp": 582,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 597,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 668,
+     "tag": "done",
+     "u": "/api/merge/detect/601?",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 1578,
+     "tag": "fetch",
+     "u": "/api/models",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1579,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1591,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 1646,
+     "tag": "done",
+     "u": "/api/models",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 2590,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2600,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 3582,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 3594,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    }
+   ]
+  },
+  {
+   "req": 20000,
+   "snap": {
+    "ct": 666.666666,
+    "xfps": 19999.99998,
+    "rf": 20000,
+    "dur": 1781.647007,
+    "durFrame": 53449,
+    "tl": 20000,
+    "ovlDisp": "none",
+    "ovlLen": 0,
+    "png": 0,
+    "playing": false,
+    "streamDown": false,
+    "hint": "这一帧没有检测到人脸"
+   },
+   "log": [
+    {
+     "tp": 6,
+     "tag": "fetch",
+     "u": "/api/merge/detect/20000?model=",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 29,
+     "tag": "v:seeking",
+     "ct": 666.666666,
+     "rf": 20000,
+     "rs": 1,
+     "ns": 1
+    },
+    {
+     "tp": 478,
+     "tag": "done",
+     "u": "/api/merge/detect/2000",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 567,
+     "tag": "fetch",
+     "u": "/api/models",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 569,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 583,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 593,
+     "tag": "v:seeked",
+     "ct": 666.666666,
+     "rf": 20000,
+     "rs": 3,
+     "ns": 2
+    },
+    {
+     "tp": 652,
+     "tag": "done",
+     "u": "/api/models",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 721,
+     "tag": "previewNow-in",
+     "ct": 666.666666,
+     "xfps": 19999.99998,
+     "rf": 20000,
+     "paused": true,
+     "gate": null,
+     "gateOpen": "na"
+    },
+    {
+     "tp": 723,
+     "tag": "fetch",
+     "u": "/api/merge/preview",
+     "f": "20000",
+     "t": "666.667"
+    },
+    {
+     "tp": 1203,
+     "tag": "done",
+     "u": "/api/merge/preview",
+     "st": 200,
+     "f": "20000"
+    },
+    {
+     "tp": 1223,
+     "tag": "previewNow-out",
+     "got": "null",
+     "ct": 666.666666,
+     "rf": 20000
+    },
+    {
+     "tp": 1559,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 1570,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 2556,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 2568,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 3562,
+     "tag": "fetch",
+     "u": "/api/models",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 3563,
+     "tag": "fetch",
+     "u": "/api/merge/export/status",
+     "f": "",
+     "t": ""
+    },
+    {
+     "tp": 3579,
+     "tag": "done",
+     "u": "/api/merge/export/stat",
+     "st": 200,
+     "f": ""
+    },
+    {
+     "tp": 3642,
+     "tag": "done",
+     "u": "/api/models",
+     "st": 200,
+     "f": ""
+    }
+   ]
+  }
+ ],
+ "instr": "ok",
+ "afterOpen": {
+  "ct": 0,
+  "xfps": 0,
+  "rf": 0,
+  "dur": null,
+  "durFrame": null,
+  "tl": 0,
+  "ovlDisp": "none",
+  "ovlLen": 0,
+  "png": 0,
+  "playing": false,
+  "streamDown": false,
+  "hint": "选择视频后显示"
+ }
+}
