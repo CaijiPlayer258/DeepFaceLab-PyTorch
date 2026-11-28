@@ -333,6 +333,18 @@ def train_preview(wait: float = 0.0):
                 _webui_post("/request-preview", timeout=0.8)
                 requested = True
             except Exception:
+                # 请求没送达（引擎刚起 / 一时不应答）也别立刻认输：队列里可能已经
+                # 排着一张 —— /preview 是 pop 语义，取走就没了，先试一次再决定返回空。
+                try:
+                    _d = _json.loads(_get("/preview", timeout=1.2))
+                    if _d.get("previews"):
+                        _raw = _json.dumps(_d).encode("utf-8")
+                        _last_preview_state.update({"body": _raw,
+                                                    "iter": _train_job.get("iter") or 0,
+                                                    "at": time.time()})
+                        return _pack(_raw, True)
+                except Exception:
+                    pass
                 # 训练没在跑（或还没起 WebUI）：别让前端干等
                 cached = _last_preview_state.get("body")
                 if cached:
