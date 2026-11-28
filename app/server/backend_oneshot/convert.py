@@ -38,6 +38,10 @@ CONVERT_JOB = {
     "percent": 0,
     "error": "",
     "log": [],
+    # 结果落在哪：转换产物是 model_dir 下的 <stem>_*.pth，以前界面上一个字都不提，
+    # 用户看完「已完成」不知道文件去了哪。outDir 给目录，files 给实际写出的文件。
+    "outDir": "",
+    "files": [],             # [{"name": "...pth", "module": "encoder", "size": 0, "sizeText": "98.0 MB"}]
 }
 _LOCK = threading.Lock()
 
@@ -53,6 +57,33 @@ def _fmt_size(n: int) -> str:
             return ("%d %s" % (n, unit)) if unit == "B" else ("%.1f %s" % (n, unit))
         n /= 1024.0
     return str(n)
+
+
+def _scan_outputs(md: Path, stem: str) -> list:
+    """转换到底写出了哪几个文件 —— 直接问磁盘，不猜命名规则。
+
+    model.save() 写的是 <model_dir>/<stem>_<module>.pth（stem 已含 _SAEHD）。
+    以前界面上只有「已完成」，用户不知道文件落在哪个目录、叫什么名字。
+    优化器状态（*_opt.pth）不是权重，单独滤掉。
+    """
+    out = []
+    try:
+        _hit = sorted(md.glob(stem + "_*.pth"), key=lambda x: x.stat().st_mtime)
+    except Exception:
+        return out
+    for p in _hit:
+        _tail = p.name[len(stem) + 1:] if p.name.startswith(stem + "_") else p.name
+        if not _tail.endswith(".pth"):
+            continue
+        _mod = _tail[:-4]
+        if _mod.endswith("_opt") or "_opt_" in _mod:
+            continue
+        try:
+            _sz = p.stat().st_size
+        except OSError:
+            _sz = 0
+        out.append({"name": p.name, "module": _mod, "size": _sz, "sizeText": _fmt_size(_sz)})
+    return out
 
 
 def _migrate_dir() -> Path:
@@ -196,7 +227,8 @@ def start(name: str) -> dict:
         modules = [{"name": n, "state": "wait", "items": 0} for n in ("encoder", "inter", "decoder")]
 
     _set(running=True, name=stem, file=npy.name, started=time.time(), ended=0.0,
-         step="load", modules=modules, percent=0, error="", log=[])
+         step="load", modules=modules, percent=0, error="", log=[],
+         outDir=str(md), files=[])
 
     def worker():
         try:
@@ -264,7 +296,15 @@ def start(name: str) -> dict:
                     m.pop("detail", None)   # 匹配日志只在跑的时候看，收尾别留在卡片上
                     # items 保留 [match] 累计出来的真实张量数（18 / 4 / 0 / 88），
                     # 以前这里粗暴覆盖成 1，页面上每个模块都显示「1 项」
-                _set(running=False, step="done", modules=modules, percent=100, ended=time.time())
+                _files = _scan_outputs(md, stem)
+                for _m in modules:
+                    _hit = [f for f in _files if f["module"].endswith(_m.get("name") or "")
+                            or _m.get("name") in f["module"]]
+                    if _hit:
+                        _m["sizeText"] = _hit[0]["sizeText"]
+                        _m["file"] = _hit[0]["name"]
+                _set(running=False, step="done", modules=modules, percent=100,
+                     ended=time.time(), outDir=str(md), files=_files)
             else:
                 # 失败也要给出「哪个模块 / 为什么」，否则前端只有整张卡变红，
                 # 看不到设计稿里 .cvreason 那一行（形状不符/名字对不上/文件损坏）。
@@ -328,8 +368,11 @@ def start(name: str) -> dict:
                     # worker 的局部变量，前面 _set(modules=modules) 直接 UnboundLocalError，
                     # 整段 error 处理全崩，页面上就是「失败」却一个字原因都没有。
                     modules.append({"name": _who, "state": "bad", "reason": _detail})
+                # 失败也把已经写出来的文件列出来 —— 用户要知道「转了一半」时
+                # 目录里到底多了什么，能不能直接用。
                 _set(running=False, step="error", ended=time.time(),
-                     error=_detail, modules=modules)
+                     error=_detail, modules=modules, outDir=str(md),
+                     files=_scan_outputs(md, stem))
         except Exception as e:
             # 兜底：这里以前只写 error，不写 modules —— 前端拿到「全 wait」的模块表，
             # 页面上就是「失败」但四行全是「待转换」，一句原因都看不到。
@@ -337,7 +380,8 @@ def start(name: str) -> dict:
             _line = _tb3.format_exc().strip().splitlines()
             _last = (_line[-1] if _line else "%s: %s" % (type(e).__name__, e))[:300]
             _set(running=False, step="error", ended=time.time(), error=_last,
-                 modules=[{"name": "转换", "state": "bad", "reason": _last}])
+                 modules=[{"name": "转换", "state": "bad", "reason": _last}],
+                 outDir=str(md), files=_scan_outputs(md, stem))
 
     threading.Thread(target=worker, daemon=True).start()
     return {"ok": True, "name": stem, "modules": modules}

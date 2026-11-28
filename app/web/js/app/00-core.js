@@ -198,6 +198,11 @@
   /* ---- 转换卡片的渲染（顶层，和 cvRun 在一起）---- */
   var CV_SPIN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" ' +
                 'stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.6"/></svg>';
+  function cvEsc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
+      return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c];
+    });
+  }
   function cvStepSet(id, cls, mark) {
     var el = document.getElementById(id);
     if (!el) return;
@@ -213,7 +218,10 @@
       var mk = on === "ok" ? "✓" : (on === "run" ? "›" : (on === "bad" ? "!" : "·"));
       var cnt;
       /* items = 这个模块真实匹配上的张量个数（后端从 [match] 行累计） */
-      if (on === "ok") cnt = (m.items || m.total || 0) ? ((m.items || m.total) + " 项") : "已完成";
+      /* ok 时优先报落盘文件的大小 —— 转完了还在说「多少项」没意义，
+         用户关心的是「文件叫什么、多大」。 */
+      if (on === "ok") cnt = m.sizeText ? String(m.sizeText)
+                       : ((m.items || m.total || 0) ? ((m.items || m.total) + " 项") : "已完成");
       else if (on === "run") cnt = (m.items || 0) + " 项…";
       else if (on === "bad") cnt = (String(m.reason || "").indexOf("shape") >= 0 ? "形状不符" : "失败");
       else cnt = (m.items || 0) ? ((m.items) + " 项…") : "待转换";
@@ -268,6 +276,31 @@
     var r1 = document.getElementById("cvRows1"), r2 = document.getElementById("cvRows2");
     if (r1) r1.innerHTML = cvRowsHtml(mods);
     if (r2) r2.innerHTML = cvRowsHtml(mods);
+
+    /* 第 3 步：产物落在哪。转换完成必须告诉用户「目录 + 每个 .pth 的文件名 + 大小」，
+       否则只看到一句「完成」，文件去哪了一无所知（这次就是这么丢的）。 */
+    var _doneNow = (st.step === "done");
+    var out = document.getElementById("cvOut");
+    var s3 = document.getElementById("cvS3");
+    if (out) {
+      var fl = st.files || [];
+      if (_doneNow && (st.outDir || fl.length)) {
+        out.innerHTML =
+          '<div class="cvoutk">输出目录</div>' +
+          '<div class="cvoutp">' + cvEsc(st.outDir || "") + "</div>" +
+          (fl.length
+            ? '<div class="cvrows">' + fl.map(function (f) {
+                return '<div class="cvrowi ok"><span class="mk">✓</span>' +
+                       '<span class="n">' + cvEsc(f.name || "") + "</span>" +
+                       '<span class="c">' + cvEsc(f.sizeText || "") + "</span></div>";
+              }).join("") + "</div>"
+            : "");
+        if (s3) s3.classList.add("done", "open");
+      } else {
+        out.innerHTML = "";
+        if (s3 && !isErr) s3.classList.remove("open");
+      }
+    }
   }
   /* 转换完成后卡片下面那个圆形返回按钮：回模型选择 */
   (function () {
@@ -1501,7 +1534,7 @@
         /* 轮询节奏：前 2 秒 200ms（秒杀任务 1.4 秒，500ms 只够采 2~3 个点），
            之后 500ms，长任务不持续高频打请求。 */
         var next = age < MASK_POLL_FAST_MS ? 200 : 500;
-
+
 
 /* ============================================================================
  * 训练器 · 模型转换（.npy -> .pth，Stepper）

@@ -572,7 +572,13 @@ class SAEHDModel(ModelBase):
 
             self.ask_write_train_log()
 
-        if self.options['pretrain']:
+        # 预训练集只在**训练**时需要：转换 / 导出 dfm / 合成 都是拿存档跑前向，
+        # 根本没有数据集这回事。以前这里不看 is_training，只要 .dat 里 pretrain=True
+        # 就一路走到下面的 raise —— 拿预训练底丹转权重时模型能加载、四个模块都能建，
+        # 却在「预训练集未定义」上炸掉，界面上就是 encoder/inter/decoder_src 全「待转换」、
+        # 只有 decoder_dst 标红（错行归到了最后一行上）。和 XSeg / XSegLite / PIA
+        # 的写法对齐：它们都带 is_exporting / is_training 保护。
+        if self.options['pretrain'] and self.is_training:
             # 预训练集解析：
             #   1) 默认值 = dst 训练集（GUI 无该选项时的默认行为）；
             #      CLI 可用 --pretraining-data-dir 覆盖。

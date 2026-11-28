@@ -103,11 +103,15 @@ def _ver_tuple(v: str) -> tuple:
 
 
 def _local_built_at():
-    """本地这份代码是什么时候落盘的（version.txt 的 mtime）。"""
+    """本地这份代码是什么时候落盘的（version.txt 的 mtime）。
+
+    直接用模块级的 VERSION_FILE —— 它和 local_version() 读的是同一个文件，
+    已经处理过「源码跑 / 打包后跑」两种布局。别自己拿 _paths.root() 拼路径：
+    那个模块是动态转发的，取错属性会静默抛异常，函数就退化成返回 0，
+    兜底逻辑等于没写（第一版就是这么废掉的）。
+    """
     try:
-        from ._paths import root as _root
-        p = Path(_root()) / "version.txt"
-        return float(p.stat().st_mtime)
+        return float(VERSION_FILE.stat().st_mtime)
     except Exception:
         return 0.0
 
@@ -127,7 +131,11 @@ def _is_behind(tag, local, published):
         return False
     try:
         import datetime as _d2
-        pub = _d2.datetime.strptime(str(published)[:19], "%Y-%m-%dT%H:%M:%S").timestamp()
+        # ★ 必须按 **UTC** 解释：GitHub 的 published_at 是 UTC（...Z），
+        #   而 naive strptime().timestamp() 会按**本地时区**算 —— 在东八区就差 8 小时，
+        #   比 release 更晚落盘的本地文件会被误判成「比远端还新」，兜底等于失效。
+        pub = _d2.datetime.strptime(str(published)[:19], "%Y-%m-%dT%H:%M:%S")
+        pub = pub.replace(tzinfo=_d2.timezone.utc).timestamp()
     except Exception:
         return False
     local_t = _local_built_at()

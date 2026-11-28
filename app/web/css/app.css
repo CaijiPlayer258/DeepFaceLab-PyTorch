@@ -4349,6 +4349,14 @@ html[data-theme="dark"] #p-merge .mgempty { background: rgba(12, 16, 24, .42); }
 .cvcard .cvreason{flex:0 0 100%;padding:1px 0 5px 22px;color:var(--bad);opacity:.85;
   font-family:var(--mono);font-size:11px;line-height:1.65;word-break:break-word}
 
+/* 第 3 步「完成」展开的内容：转换产物写到哪个目录、叫什么名字、多大 */
+.cvcard .cvout{display:flex;flex-direction:column;gap:6px}
+.cvcard .cvoutk{font-size:11px;color:var(--ink-3)}
+.cvcard .cvoutp{font-family:var(--mono);font-size:11.5px;line-height:1.6;color:var(--ink-2);
+  word-break:break-all;user-select:text;cursor:text}
+.cvcard .cvout .cvrowi{cursor:default}
+.cvcard .cvout .cvrowi .n{cursor:text;user-select:text}
+
 /* 失败那一行抖一下（设计稿 .shake） */
 @keyframes cvshake{0%,100%{transform:translateX(0)}15%{transform:translateX(-4px)}
   30%{transform:translateX(4px)}45%{transform:translateX(-3px)}60%{transform:translateX(3px)}
