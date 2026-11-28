@@ -247,9 +247,15 @@ def case_c():
                 by_yaw.setdefault(k, []).append(mx / S)
             if AL.outlier_limit(S) > 0 and mx > AL.outlier_limit(S):
                 rejected.append((tag, name, mx))
-        say("%-4s n=%d  resid/S  p50 %.3f · p90 %.3f · p99 %.3f · max %.3f"
-            % (tag, len(res), np.percentile(res, 50), np.percentile(res, 90),
-               np.percentile(res, 99), np.max(res)))
+        # 空数组要先挡住：np.percentile([]) 在 numpy 2.x 里会走到 arr[-1, ...]，
+        # 报的是 "index -1 is out of bounds for axis 0 with size 0" —— 和统计本身
+        # 毫无关系的错误信息，整个验收就挂在这里（2026-11 就是这条把 fast 组弄红的）。
+        if len(res):
+            say("%-4s n=%d  resid/S  p50 %.3f · p90 %.3f · p99 %.3f · max %.3f"
+                % (tag, len(res), np.percentile(res, 50), np.percentile(res, 90),
+                   np.percentile(res, 99), np.max(res)))
+        else:
+            say("%-4s n=0（这一组没有可用样本）" % tag)
         all_res += res
     for k in sorted(by_yaw):
         v = np.array(by_yaw[k])
@@ -262,7 +268,14 @@ def case_c():
 
     # 自检 1：把 3 个下颌点推歪 2 个「单位」= 2×画布边长（平移量会被相似变换吸收，
     # 所以只推坏一部分点才是真的「外点」）
-    rows = scan_aligned(PROJ_ALIGNED, limit=2)
+    # 自检 1/2 只需要「两张真实对齐脸」。优先用项目目录（同一段视频的近邻帧最像），
+    # 没有就退回 data_src —— 以前这里硬用 PROJ_ALIGNED，目录不在/为空就 IndexError，
+    # 整个验收挂在一个跟切脸几何毫无关系的地方（fast 组就是这么被弄红的）。
+    _proj = scan_aligned(PROJ_ALIGNED, limit=2) if Path(PROJ_ALIGNED).is_dir() else []
+    rows = _proj if len(_proj) >= 2 else scan_aligned(SRC_ALIGNED, limit=2)
+    if len(rows) < 2:
+        say("  [skip] 两张真实对齐脸都凑不到（%s 为空），C2/C3 跳过" % PROJ_ALIGNED)
+        return
     name, lm, S, _m = rows[0]
     mat0, T0, resid0, ppu0 = AL.align_fit(lm, S)
     unit_px = 1.0 / float(np.hypot(T0[0, 0], T0[1, 0]))     # 原图里 1 个单位多长

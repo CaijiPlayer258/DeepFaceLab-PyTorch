@@ -53,19 +53,37 @@ def parse_version(v: str) -> dict:
     return {"version": v, "base": base, "build": build, "human": human}
 
 
-def _count_today_releases(today: _dt.date) -> int:
-    """数 git 里今天有几个 release 提交（标题形如 release: 4.1-1128-bN）。"""
+def _today_release_commits(today: _dt.date) -> list:
+    """今天所有 release 提交：[(短 sha, 标题)]。
+
+    **不用 git 的 --grep 过滤**：'^release:' 这种锚定会被行首的 BOM 打断 ——
+    发版时标题前如果混进一个 \ufeff，这一条就数不到、b 号退一格，而没人会发现
+    （2026-11-28 就发生过一次）。这里把标题整行取回来，在 Python 侧 strip 再判。
+    """
+    import subprocess
     try:
-        import subprocess
         out = subprocess.run(
             ["git", "log", "--since=%s 00:00:00" % today.isoformat(),
              "--until=%s 23:59:59" % today.isoformat(),
-             "--pretty=%s", "--grep", "^release: 4\\.1-"],
-            cwd=str(ROOT), capture_output=True, text=True, timeout=10)
-        lines = [x for x in (out.stdout or "").splitlines() if x.strip()]
-        return len(lines)
+             "--pretty=%h\t%s"],
+            cwd=str(ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=15)
     except Exception:
-        return 0
+        return []
+    hits = []
+    for line in (out.stdout or "").splitlines():
+        if "\t" not in line:
+            continue
+        sha, subj = line.split("\t", 1)
+        subj = subj.lstrip("\ufeff").strip()
+        if subj.startswith("release: " + BASE + "-"):
+            hits.append((sha.strip(), subj))
+    return hits
+
+
+def _count_today_releases(today: _dt.date) -> int:
+    """数 git 里今天有几个 release 提交（标题形如 release: 4.1-1128-bN）。"""
+    return len(_today_release_commits(today))
 
 
 def next_build(today: _dt.date, current: str) -> int:
@@ -89,6 +107,101 @@ def next_build(today: _dt.date, current: str) -> int:
     return cur_b + 1
 
 
+def _verify() -> int:
+    """核对三件事：version.txt / 本地 tag / 当天 release 提交数。
+
+    为什么要它：b 号是靠「当天有几次 release: 提交」数出来的。任何一次标题写歪
+    （行首 BOM、手滑、amend 掉、或者直接把 tag 打在手写的字符串上），编号就退一格
+    或跳一格 —— 而整条发布流程里没有任何地方会发现。发完版跑一次这个，比事后
+    翻 100 个 release 快得多。
+    """
+    import subprocess
+
+    cur = ""
+    try:
+        cur = VERSION_FILE.read_text(encoding="utf-8-sig").strip().splitlines()[0].strip()
+    except Exception as e:
+        print("version.txt  读不到：%s" % e)
+        return 2
+
+    m = _FMT.match(cur)
+    if not m:
+        print("version.txt  : %-20s  NG（不符合 4.1-MMDD[-bN]）" % cur)
+        return 1
+    base, mmdd, b = m.groups()
+    build = int(b or 0)
+    now = _dt.date.today()
+    try:
+        day = _dt.date(now.year, int(mmdd[:2]), int(mmdd[2:]))
+    except Exception:
+        print("version.txt  : %-20s  NG（日期段不合法）" % cur)
+        return 1
+
+    fails = []
+    print("version.txt  : %-20s  ok" % cur)
+
+    # 1) 本地 tag
+    tag = "v" + cur
+    try:
+        out = subprocess.run(["git", "tag", "--list", tag], cwd=str(ROOT),
+                             capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=15)
+        has_tag = bool((out.stdout or "").strip())
+    except Exception:
+        has_tag = False
+    if has_tag:
+        print("本地 tag     : %-20s  ok" % tag)
+    else:
+        print("本地 tag     : %-20s  NG（没有这个 tag）" % tag)
+        fails.append("tag")
+
+    # 2) 同一 MMDD 下的 tag：b 号必须从 b0 起、连续、且最新那个就是 version.txt
+    #    按 **tag** 数，不按 commit 数 —— commit 标题会被行首 BOM / amend 影响
+    #    （11-28 就漏过一次），而且跨日发版时「今天」和版本号里的日期根本不是一天
+    #    （1128 发 1129 的号，按今天去数必然是 0 条）。
+    try:
+        out = subprocess.run(["git", "tag", "--list", "v%s-%s-b*" % (base, mmdd)],
+                             cwd=str(ROOT), capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=15)
+        tags = [x.strip() for x in (out.stdout or "").splitlines() if x.strip()]
+    except Exception:
+        tags = []
+    builds = []
+    for t in tags:
+        tm = _FMT.match(t[1:] if t.startswith("v") else t)
+        if tm and tm.group(2) == mmdd:
+            builds.append(int(tm.group(3) or 0))
+    builds.sort()
+    print("同日 tag     : %d 个（%s）" % (len(builds),
+          ", ".join("b%d" % x for x in builds) or "—"))
+    if not builds:
+        print("              NG（v%s-%s-b* 一个都没有）" % (base, mmdd))
+        fails.append("tags")
+    elif builds != list(range(len(builds))):
+        print("              NG（b 号不连续：%s）" % ", ".join("b%d" % x for x in builds))
+        fails.append("seq")
+    elif build != len(builds) - 1:
+        print("              NG（共 %d 个 → 最新应是 b%d，version.txt 写的是 b%d）"
+              % (len(builds), len(builds) - 1, build))
+        fails.append("count")
+
+    # 3) 参考信息：今天有几条 release 提交（只打印，不判错）
+    try:
+        print("今天提交     : %d 条 release 提交（仅参考）"
+              % len(_today_release_commits(_dt.date.today())))
+    except Exception:
+        pass
+
+    print("-" * 46)
+    if fails:
+        print("VERIFY FAILED：%s" % ", ".join(fails))
+        print("  · tag 缺 → git tag v%s && git push origin v%s" % (cur, cur))
+        print("  · 计数不对 → 检查当天 release 提交的标题（会不会混了 BOM 或被 amend 掉）")
+        return 1
+    print("VERIFY OK")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--at", default="", help="指定日期，如 2026-12-01")
@@ -97,7 +210,12 @@ def main() -> int:
     #   以前留了这个口子，结果被一路手工传成 b55/b56/…/b70 —— 11 月 28 日当天
     #   只有三个版本，号却写着 b70，看起来像发了 69 次。
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--verify", action="store_true",
+                    help="核对 version.txt / 本地 tag / 当天 release 提交数 三者是否一致")
     args = ap.parse_args()
+
+    if args.verify:
+        return _verify()
 
     when = _dt.datetime.fromisoformat(args.at) if args.at else _dt.datetime.now()
     cur = ""
