@@ -325,7 +325,12 @@ def train_preview(wait: float = 0.0):
     while True:
         if not requested:
             try:
-                _get("/request-preview", timeout=0.8)
+                # ★ 必须 POST + 密码：引擎侧 train_control.py 的 /request-preview
+                #   只写在 do_POST 里，GET 走的是「unknown path」404。
+                #   以前这里用 _get()，于是每一次都在 404 上被下面的 except 吞掉、
+                #   立刻返回空 previews —— 训练跑得好好的（iter 在涨），界面却永远
+                #   停在「还没有预览图」。4.0 的 WebUI 用的也是 POST。
+                _webui_post("/request-preview", timeout=0.8)
                 requested = True
             except Exception:
                 # 训练没在跑（或还没起 WebUI）：别让前端干等

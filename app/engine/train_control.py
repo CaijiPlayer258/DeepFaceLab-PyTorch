@@ -110,6 +110,12 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):                 # noqa: N802
         path = self.path.split("?")[0]
+        if path == "/request-preview":
+            # 「请下一轮出一张预览」本身是幂等的，GET 也接受 —— 4.1 后端早期
+            # 就写成 GET，而这里只实现了 POST，于是每次请求都 404、预览永远不来。
+            # 两边都留一条路：用哪种都能触发。
+            _set("preview")
+            return self._send({"ok": True})
         if path == "/preview":
             # 与前端约定同形：previews 是 [{name, data(base64)}] 列表，不是字典。
             # （Trainer 往缓存里塞的是 {名字: jpeg bytes}，这里负责转成 JSON 可传的形状。）
