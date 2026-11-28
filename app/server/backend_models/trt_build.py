@@ -102,14 +102,22 @@ def _make_calibrator(trt):
         def get_batch(self, names):
             if self._i >= self._total:
                 return None
+            import numpy as np
             import torch
-            arr = self._b[self._i]
-            self._i += 1
-            t = torch.from_numpy(arr).contiguous().cuda()
+            # 必须凑满 get_batch_size() 张：动态 batch 的网络，TRT 是按**优化档位的 opt
+            # 批量**去执行校准前向的，给它 1 张的指针它照样读 8 张的内存 → 越界 →
+            # calibrateEngine 里 executeV2 断言失败（tinymog 的 1/8/8 就栽在这）。
+            chunk = self._b[self._i:self._i + self._bs]
+            if len(chunk) < self._bs and chunk:
+                chunk = chunk + [chunk[-1]] * (self._bs - len(chunk))   # 末尾补齐，不接受短批
+            self._i += len(chunk)
+            arr = chunk[0] if self._bs <= 1 else np.concatenate(chunk, axis=0)
+            t = torch.from_numpy(np.ascontiguousarray(arr)).cuda()
             self._keep = t
-            if self._i == 1 or self._i % 20 == 0 or self._i == self._total:
-                _say("@@P %d 校准 %d/%d" % (20 + int(60.0 * self._i / max(1, self._total)),
-                                            self._i, self._total))
+            _done = min(self._i, self._total)
+            if self._i <= self._bs or _done % (20 * self._bs) < self._bs or _done >= self._total:
+                _say("@@P %d 校准 %d/%d" % (20 + int(60.0 * _done / max(1, self._total)),
+                                            _done, self._total))
             return [int(t.data_ptr())]
 
         def read_calibration_cache(self):
@@ -153,6 +161,9 @@ def main():
     ap.add_argument("--calib-dir", action="append", default=[],
                     help="校准集目录（真实对齐脸），可给多次；只取前 N 张")
     ap.add_argument("--calib-n", type=int, default=200)
+    # 校准图的边长必须等于模型输入边长（遮罩 256、检测 640）：
+    # 预处理里的 resize 也会改变激活范围，按 256 校出来的 scale 喂 640 是错的
+    ap.add_argument("--calib-size", type=int, default=256)
     ap.add_argument("--calib-seed", type=int, default=0)
     ap.add_argument("--calib-cache", default="",
                     help="校准表缓存路径；默认 <out>.calib.cache")
@@ -207,13 +218,17 @@ def main():
         if not args.calib_dir:
             _say("@@ERR --int8 需要 --calib-dir（真实对齐脸目录）")
             return 6
+        # 校准批量 = 优化档位里的 **opt** 批量：TRT 就是按它执行校准前向的，
+        # get_batch() 必须凑够这么多张（见 get_batch 里的说明）。
+        # 遮罩的档位是 1/1/1 → 1 张；检测是 1/8/8 → 8 张一批。
         _bs = 1
         if args.profile:
             try:
                 _bs = max(1, int(args.profile.split(";")[1].split(",")[0]))
             except Exception:
                 _bs = 1
-        batches = _calib_batches(args.calib_dir, args.calib_n, seed=args.calib_seed)
+        batches = _calib_batches(args.calib_dir, args.calib_n,
+                                 size=int(args.calib_size), seed=args.calib_seed)
         if not batches:
             _say("@@ERR 校准集是空的（%s）—— 目录里没有 jpg/png"
                  % ", ".join(args.calib_dir))

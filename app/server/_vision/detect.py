@@ -495,10 +495,15 @@ class TinyMogDet:
     STEPS = (8, 16, 32)
     INPUT_SIZE = 640
 
-    # 精度优先级：int8 有就先用，没有再退 bf16，两个都没有才回 onnxruntime。
-    # int8 引擎必须是"用当前 onnx 的 md5 + 当前 TRT 版本"编出来的规范命名，
-    # 目录里那些 <name>_int8.engine 是旧命名，永远命中不到（见 _engines.try_engine 日志）。
-    PRECISION = ("int8", "bf16")
+    # 只认 bf16。**检测不能量化** —— 实测过，不是没试过：
+    #   同一批 40 帧真实画面（1080×1920）、同一条预处理，tinymog int8 vs bf16：
+    #     5 点关键点差  max 22.1 px / p95 20.3 / 中位 8.45 px
+    #     人头框差      max 33.1 px / p95 27.1 / 中位 11.65 px
+    #   而速度 3.459 → 3.369 ms（**只快 2.6%**）。
+    #   判据是 ≤0.1 px（canvas）——差了两个数量级，速度和几乎没变。
+    # 以前这里写 ("int8","bf16")：只要目录里放着 int8 引擎就会被静默用上，
+    # 而 22 px 的关键点会一路传进对齐矩阵。检测是 launch 瓶颈，该吃的是 CUDA Graph。
+    PRECISION = ("bf16",)
 
     def __init__(self, model_path, input_size=640, thresh=0.5, nms_thresh=0.4, graph_max_batch=None,
                  providers=None, workspace=None, engine_name=None, sess_options=None):

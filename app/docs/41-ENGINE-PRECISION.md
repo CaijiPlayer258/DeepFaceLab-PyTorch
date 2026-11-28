@@ -13,7 +13,7 @@
 |---|---|---|---|---|
 | `xseglite` 遮罩 | `workspace/model/XSegLite/xseglite.onnx` | **int8**（没有就 bf16） | `("int8", "bf16")` | 算力瓶颈（29 Conv + 4 上采样）：2.04 → **0.751 ms（2.7×）**；bf16 只快 10%；CUDA Graph 反而更慢 15% |
 | `xseg` 全量遮罩 | `workspace/model/XSeg/XSeg.onnx` | **bf16** | `("int8", "bf16")` | 同一套网络但更深：INT8 实测 IoU **0.9277** / 二值一致 98.13%（对比 XSegLite INT8 的 0.9861 / 99.64%）。它存在的理由就是比 Lite 准，为了速度丢掉 7% 准头等于抹平这个档 → **只编 bf16** |
-| `tinymog` 快检测 | `weights/tinymog.onnx` | **bf16 + CUDA Graph** | `("int8", "bf16")` | launch 瓶颈：Graph **2.0×**（3.91 → 2.98 ms）；INT8 只 1.22× 且**框质量没验证过 → 未采用** |
+| `tinymog` 快检测 | `weights/tinymog.onnx` | **bf16 + CUDA Graph** | `("bf16",)` | launch 瓶颈：Graph **2.0×**（3.91 → 2.98 ms）；INT8 **实测否决**：5 点关键点 max **22.1 px** / 中位 8.45 px、框 max **33.1 px**，速度只快 **2.6%** → 代码已锁 `("bf16",)` |
 | `retinaface_10g` 高精度检测 | `weights/retinaface_10g.onnx` | **bf16** | 默认 `"bf16"` | 高精度档，不为速度降精度；CUDA Graph 和 torch 抢同一线程会炸（`captures_underway.empty()`），必须 `use_graph=False` |
 | `insightface_2d106` 特征点 | `weights/insightface_2d106.onnx` | **bf16 + CUDA Graph** | 默认 `"bf16"` | launch 瓶颈：Graph **3.6×**（0.711 ms/脸）；INT8 **1.05× 且关键点漂移 2.26 px（最大 9.33）→ 否决** |
 | `arcface_mbf` 人脸特征 | `weights/arcface_mbf.onnx` | **bf16** | 无（走 onnxruntime） | 13 MB，比 r50 快 5 倍；精度够聚类用。引擎编了但目前没人加载（见 §四） |
@@ -33,7 +33,7 @@
 | XSegLite | IoU **0.9861** / 二值一致 99.64% / MAE 0.0036 | 可用（软标签，边缘抖动会被训练平滑） |
 | XSeg（全量） | IoU **0.9277** / 二值一致 98.13% / MAE 0.0204 | **否决**（它本来就是"准"的那一档） |
 | 特征点 | 关键点平均漂移 **2.26 px**（最大 9.33） | **否决**（硬坐标，会传给对齐矩阵） |
-| 检测 | 框质量**未验证**；INT8 只 1.22×，而 Graph 有 2.0× | 不采用 |
+| TinyMog（检测） | 5 点 **max 22.1 px / 中位 8.45 px**、框 **max 33.1 px**；速度 3.459 → 3.369 ms（**−2.6%**） | **否决**（坐标差两个数量级，速度几乎没变；该吃的是 CUDA Graph） |
 | GPEN | 未验证；256 的 9.5 ms 已经够 | 不做 |
 
 > 老 int8 引擎（手工编的那份）在同批数据上是 IoU 0.9681 / 99.15% / MAE 0.0084 ——

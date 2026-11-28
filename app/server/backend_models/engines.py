@@ -57,7 +57,9 @@ PROFILES = {
 #   · **XSeg（精细档）不编 INT8**：同一台机器实测 IoU 只有 0.9277（二值一致 98.13%），
 #     而它存在的理由就是比 Lite 准 —— 为了速度把准头丢掉 7%，等于把这个档的意义抹平
 #     （对比：XSegLite INT8 0.9861 vs XSeg INT8 0.9277，同一批 60 张对齐脸、同一条预处理）
-#   · 检测是 launch 瓶颈：CUDA Graph 才值，INT8 只 1.22× 且框质量没验证过 → 不编
+#   · 检测是 launch 瓶颈，而且**量化会毁掉坐标**：tinymog int8 vs bf16 实测
+#     5 点 max 22.1 px / 中位 8.45 px、框 max 33.1 px，速度却只快 2.6%
+#     （40 帧真实画面，1080×1920）→ 明确不编；该吃的是 CUDA Graph
 #   · 特征点是**硬坐标**：INT8 会让关键点漂移 2.26 px（最大 9.33）→ 明确否决
 #   · 人脸超分（GPEN）256 的 9.5ms 已经够；dfm 只走 onnxruntime → 都不编
 INT8_MODELS = ("xseglite",)
