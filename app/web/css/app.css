@@ -290,7 +290,14 @@ table.t tr:last-child td{border-bottom:0}
   will-change:bottom,transform,opacity;
   animation:toastIn .22s cubic-bezier(.2,.8,.2,1)
 }
+/* 图标颜色只能走 color，不能走 stroke：sprite 里每个 symbol 都写着
+   stroke="currentColor"，它在 <use> 的克隆树里会盖掉外层 svg 的 stroke 样式。
+   于是 toast() 里传什么色都没用 —— 图标永远是这里的 color。以前这一行写死
+   var(--ok)（绿），所以「红色报错」的图标一直是绿的、warn 也是绿的。 */
 .toast .ti{width:16px;height:16px;flex:none;margin-top:1px;color:var(--ok)}
+.toast[data-type="info"] .ti{color:var(--accent)}
+.toast[data-type="warn"] .ti{color:var(--warn)}
+.toast[data-type="error"] .ti{color:var(--bad)}
 .toast .tt{font-size:13px;font-weight:600;color:var(--ink);letter-spacing:-.01em}
 /* 出错时标题也用状态色：原来只有图标是红的，标题黑乎乎一片，扫一眼看不出是错误 */
 .toast[data-type="error"] .tt{color:var(--bad)}
@@ -6256,6 +6263,13 @@ body.fdb-dragging, body.fdb-dragging * { cursor: grabbing !important; }
 .loadbanner.danger .lbico,
 .loadbanner.danger .alhd b,
 .loadbanner.danger .albd{color:var(--bad,#ff6467)}
+/* warn / danger 的图标也得给状态色：上面只写了 .info 和 .loadbanner.danger，
+   于是 warn 的图标一路继承成灰白；danger 放在 .alert 容器下（27-tools-remote 的
+   横幅调试就是 alert warn/danger loadbanner）同样没有规则。
+   和 toast 图标那处是同一个毛病：状态色只喂给了标题和边框，图标漏了。 */
+.loadbanner.warn .lbico,
+.alert.warn .lbico{color:var(--warn)}
+.alert.danger .lbico{color:var(--bad,#ff6467)}
 :root[data-theme="light"] .alert.danger{border-color:rgba(220,38,38,.26);background:rgba(220,38,38,.05)}
 
 

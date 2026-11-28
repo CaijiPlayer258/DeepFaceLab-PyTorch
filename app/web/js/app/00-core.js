@@ -1076,8 +1076,6 @@
     var root = $("toastroot");
     if (!root) return null;
     var meta = TOAST_META[type] || TOAST_META.success;
-    /* error 的图标颜色直接给死：走 var(--bad) 在这套 sprite 上解析过一次绿的，很怪 */
-    var _tint = (type === "error") ? "#ff6467" : meta.color;
     var life = (typeof ms === "number" && ms > 400) ? ms : 3600;
     /* 报错不自动消失、也不画底部倒计时条：用户通常只会截个图，
        倒计时一到就没了等于把唯一的线索丢掉。要关自己点 ×。 */
@@ -1087,7 +1085,9 @@
     el.className = "toast";
     el.setAttribute("data-type", type || "success");
     el.innerHTML =
-      '<svg class="ic ti" style="stroke:' + _tint + ';opacity:1"><use href="' + meta.icon + '"/></svg>' +
+      /* 颜色交给 CSS（.toast[data-type=…] .ti）。以前这里给 svg 写 style="stroke:#…"，
+         sprite 的 stroke="currentColor" 会把它盖掉，纯属白写。 */
+      '<svg class="ic ti"><use href="' + meta.icon + '"/></svg>' +
       '<div><div class="tt">' + title + '</div><div class="ts">' + (sub || "") + '</div></div>' +
       '<button class="tx">×</button>' + (sticky ? "" : '<div class="tb"><i></i></div>');
     el.querySelector(".tx").addEventListener("click", function () { dismissToast(el); });
