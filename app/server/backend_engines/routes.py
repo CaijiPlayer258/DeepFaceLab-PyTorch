@@ -97,24 +97,46 @@ def _engine_build_worker(name: str):
         with _engine_job_lock:
             _engine_job.update({"running": False, "error": "找不到模型 " + name, "done": True})
         return
-    eng = _ep(WORKSPACE, name, row["onnx"], st["sm"])
+    from ..backend_models.engines import PROFILES, precision_for, calib_dirs
+
+    # 精度按模型定，不是全局开关：遮罩编 int8、其余编 bf16（见 engines.INT8_MODELS）。
+    # 以前这里写死 --bf16，于是界面上永远编不出 int8 —— 而运行时的 ("int8","bf16")
+    # 就一直是一张空头支票。
+    prec = precision_for(name)
+    eng = _ep(WORKSPACE, name, row["onnx"], st["sm"], precision=prec)
     if eng is None:
         with _engine_job_lock:
             _engine_job.update({"running": False, "error": "没有可用的 GPU", "done": True})
         return
 
-    from ..backend_models.engines import PROFILES
     cmd = [sys.executable, str(Path(__file__).resolve().parents[1] / "backend_models" / "trt_build.py"),
-           "--onnx", row["onnx"], "--out", str(eng), "--name", name, "--bf16"]
+           "--onnx", row["onnx"], "--out", str(eng), "--name", name]
+    if prec == "int8":
+        _dirs = calib_dirs(WORKSPACE)
+        if not _dirs:
+            with _engine_job_lock:
+                _engine_job.update({"running": False, "done": True, "pct": 0,
+                                    "error": "没有校准集：workspace/data_dst/aligned 与 "
+                                             "data_src/aligned 都是空的（INT8 要用真实对齐脸校准）"})
+            return
+        cmd += ["--int8", "--calib-n", "200", "--calib-cache", str(eng) + ".calib.cache"]
+        for _d in _dirs:
+            cmd += ["--calib-dir", _d]
+    else:
+        cmd += ["--bf16"]
     prof = PROFILES.get(name)
     if prof:
         cmd += ["--profile", ";".join(",".join(str(v) for v in p) for p in prof)]
     with _engine_job_lock:
-        _engine_job.update({"running": True, "name": name, "log": ["开始编译 " + name],
-                            "error": "", "done": False, "pct": 0})
+        _engine_job.update({"running": True, "name": name, "log": ["开始编译 " + name + "（" + prec + "）"],
+                            "error": "", "done": False, "pct": 0, "precision": prec})
     try:
+        # encoding 必须显式给 utf-8：Windows 默认按 GBK 解 trt_build.py 的 UTF-8 中文输出，
+        # 读到「· 解析」这种字节就抛 UnicodeDecodeError —— 编译器本身编完了，界面却报「失败」。
+        # 和其它子进程（runctl.py:229/521、backend_oneshot/convert.py）保持同一口径。
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, bufsize=1, creationflags=_NO_WINDOW)
+                                text=True, encoding="utf-8", errors="replace",
+                                bufsize=1, creationflags=_NO_WINDOW)
         for line in proc.stdout:
             line = line.strip()
             if line.startswith("@@P "):

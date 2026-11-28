@@ -51,6 +51,34 @@ PROFILES = {
     "arcface_mbf": [(1, 3, 112, 112), (32, 3, 112, 112), (32, 3, 112, 112)],
 }
 
+# 每颗模型该编什么精度 —— 这不是全局开关，是按**瓶颈**定的（docs/41-ENGINE-PRECISION.md）：
+#   · XSegLite（快速档）是算力瓶颈：INT8 实测 2.458 → 1.367 ms，
+#     质量 IoU 0.9861 / 二值一致 99.64% / MAE 0.0036（软标签，边缘抖动会被训练平滑）
+#   · **XSeg（精细档）不编 INT8**：同一台机器实测 IoU 只有 0.9277（二值一致 98.13%），
+#     而它存在的理由就是比 Lite 准 —— 为了速度把准头丢掉 7%，等于把这个档的意义抹平
+#     （对比：XSegLite INT8 0.9861 vs XSeg INT8 0.9277，同一批 60 张对齐脸、同一条预处理）
+#   · 检测是 launch 瓶颈：CUDA Graph 才值，INT8 只 1.22× 且框质量没验证过 → 不编
+#   · 特征点是**硬坐标**：INT8 会让关键点漂移 2.26 px（最大 9.33）→ 明确否决
+#   · 人脸超分（GPEN）256 的 9.5ms 已经够；dfm 只走 onnxruntime → 都不编
+INT8_MODELS = ("xseglite",)
+
+
+def precision_for(name: str) -> str:
+    """这颗模型该编哪种引擎。编译入口和状态表都走这里，别再各自写死 bf16。"""
+    return "int8" if str(name) in INT8_MODELS else "bf16"
+
+
+def calib_dirs(workspace):
+    """INT8 校准集目录：优先 dst 的对齐脸，再 src。
+
+    必须是**真实对齐脸** —— 合成数据/噪声会把激活范围估偏，校准出来的 scale 不可用
+    （docs/09-PERF.md 第 5 节：校准集用真实对齐脸，200 张）。
+    """
+    ws = Path(workspace)
+    out = [ws / "data_dst" / "aligned", ws / "data_src" / "aligned"]
+    return [str(p) for p in out if p.is_dir()]
+
+
 _MD5_CACHE = {}
 
 
@@ -148,7 +176,10 @@ def status(workspace, roots):
             row["state"] = "no-gpu"
             rows.append(row)
             continue
-        eng = engine_path(workspace, item["name"], p, sm)
+        # 按这颗模型**该用的精度**去查引擎：以前一律按 bf16 查，于是 xseglite 明明
+        # 跑的是 int8 引擎，引擎页却永远拿 bf16 那份说「就绪」—— 看到的不是在用的。
+        row["precision"] = precision_for(item["name"])
+        eng = engine_path(workspace, item["name"], p, sm, precision=row["precision"])
         row["engine"] = str(eng)
         if eng.is_file():
             row["engine_mb"] = round(eng.stat().st_size / (1024 * 1024), 1)

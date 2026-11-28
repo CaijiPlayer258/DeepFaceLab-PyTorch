@@ -12,7 +12,7 @@
 | 模型 | onnx | 期望精度 | 运行时查找顺序 | 依据 |
 |---|---|---|---|---|
 | `xseglite` 遮罩 | `workspace/model/XSegLite/xseglite.onnx` | **int8**（没有就 bf16） | `("int8", "bf16")` | 算力瓶颈（29 Conv + 4 上采样）：2.04 → **0.751 ms（2.7×）**；bf16 只快 10%；CUDA Graph 反而更慢 15% |
-| `xseg` 全量遮罩 | `workspace/model/XSeg/XSeg.onnx` | **int8**（没有就 bf16） | `("int8", "bf16")` | 同 XSegLite（同一套网络，只是权重不同） |
+| `xseg` 全量遮罩 | `workspace/model/XSeg/XSeg.onnx` | **bf16** | `("int8", "bf16")` | 同一套网络但更深：INT8 实测 IoU **0.9277** / 二值一致 98.13%（对比 XSegLite INT8 的 0.9861 / 99.64%）。它存在的理由就是比 Lite 准，为了速度丢掉 7% 准头等于抹平这个档 → **只编 bf16** |
 | `tinymog` 快检测 | `weights/tinymog.onnx` | **bf16 + CUDA Graph** | `("int8", "bf16")` | launch 瓶颈：Graph **2.0×**（3.91 → 2.98 ms）；INT8 只 1.22× 且**框质量没验证过 → 未采用** |
 | `retinaface_10g` 高精度检测 | `weights/retinaface_10g.onnx` | **bf16** | 默认 `"bf16"` | 高精度档，不为速度降精度；CUDA Graph 和 torch 抢同一线程会炸（`captures_underway.empty()`），必须 `use_graph=False` |
 | `insightface_2d106` 特征点 | `weights/insightface_2d106.onnx` | **bf16 + CUDA Graph** | 默认 `"bf16"` | launch 瓶颈：Graph **3.6×**（0.711 ms/脸）；INT8 **1.05× 且关键点漂移 2.26 px（最大 9.33）→ 否决** |
@@ -28,12 +28,17 @@
 
 ## 二、为什么不能"全都上 INT8"
 
-| 模型 | INT8 质量代价 | 结论 |
+| 模型 | INT8 质量代价（对同一条预处理、同一批 60 张真实对齐脸） | 结论 |
 |---|---|---|
-| 遮罩 | IoU 0.970 / 二值一致 99.1%，差异只在轮廓 1~2 px，且**单向内收** | 可用（软标签，边缘抖动会被训练平滑） |
+| XSegLite | IoU **0.9861** / 二值一致 99.64% / MAE 0.0036 | 可用（软标签，边缘抖动会被训练平滑） |
+| XSeg（全量） | IoU **0.9277** / 二值一致 98.13% / MAE 0.0204 | **否决**（它本来就是"准"的那一档） |
 | 特征点 | 关键点平均漂移 **2.26 px**（最大 9.33） | **否决**（硬坐标，会传给对齐矩阵） |
-| 检测 | 框质量**未验证** | 不采用 |
-| GPEN | 未验证 | 不做 |
+| 检测 | 框质量**未验证**；INT8 只 1.22×，而 Graph 有 2.0× | 不采用 |
+| GPEN | 未验证；256 的 9.5 ms 已经够 | 不做 |
+
+> 老 int8 引擎（手工编的那份）在同批数据上是 IoU 0.9681 / 99.15% / MAE 0.0084 ——
+> 用 `trt_build.py --int8` 重新校准后 **0.9861 / 99.64% / MAE 0.0036**，质量翻倍接近，
+> 代价是速度从 1.250 → 1.367 ms（−8%）。取质量那版。
 
 > 判据不是"快多少"，是**误差会不会被下游放大**。
 
@@ -52,15 +57,34 @@
 * 换显卡 / 换 onnx / 升 TRT 大版本 → 必须重编（三个都在文件名里）
 * 两个根：`workspace/_engines`（MODEL_SPECS 里的模型）、`weights/_engine`（GPEN）
 
-命令（界面「引擎」页背后跑的就是这条）：
+命令（界面「引擎」页背后跑的就是这条。**精度由 `engines.precision_for(name)` 决定**，
+不是全局开关 —— 以前界面写死 `--bf16`，所以 INT8 那张"空头支票"一直兑现不了）：
 
 ```bat
+:: bf16（检测 / 特征点 / 特征向量）
 python app\server\backend_models\trt_build.py ^
   --onnx weights\tinymog.onnx ^
   --out  workspace\_engines\tinymog_<md5>_sm1200_trt101339.bf16.engine ^
   --name tinymog --bf16 ^
   --profile "1,3,640,640;8,3,640,640;8,3,640,640"
+
+:: int8（只有 XSegLite 走这条；约 40 s 校准 + 45 s 构建）
+python app\server\backend_models\trt_build.py ^
+  --onnx workspace\model\XSegLite\xseglite.onnx ^
+  --out  workspace\_engines\xseglite_<md5>_sm1200_trt101339.int8.engine ^
+  --name xseglite --int8 ^
+  --calib-dir workspace\data_dst\aligned --calib-n 200 ^
+  --profile "1,3,256,256;1,3,256,256;1,3,256,256"
 ```
+
+INT8 的校准集必须**和推理同一条预处理**，否则 scale 是按另一套输入分布估的：
+
+```python
+cv2.dnn.blobFromImage(img, 1/255, (256,256), swapRB=True, crop=False)   # _vision/xseg.py mask()
+```
+
+编完会在引擎旁留一份 `<engine>.calib.json`（样本数 / 目录 / 种子 / 构建时间），
+排查「这份引擎到底用什么校准的」时看它。
 
 优化档位（`PROFILES`，动态维模型必须给，否则 TRT 拒绝构建）：
 
@@ -74,19 +98,23 @@ python app\server\backend_models\trt_build.py ^
 
 ---
 
-## 四、现状与缺口（核对过的）
+## 四、现状
 
 | 项 | 状态 |
 |---|---|
-| 已编 bf16（规范命名） | `xseglite` · `tinymog` · `retinaface_10g` · `insightface_2d106` · `arcface_mbf`（sm1200 / trt101339） |
+| **INT8 通道** | ✅ 已实现：`trt_build.py --int8`（`IInt8EntropyCalibrator2` + 真实对齐脸校准）。界面「引擎」页点编译就按 `precision_for(name)` 自动选精度 |
+| `xseglite` | **int8** · 7.6 MB（bf16 是 33.2 MB）· 2.458 → **1.367 ms/张** · IoU 0.9861 |
+| `xseg`（全量） | **bf16**（按 §二 的结论不用 int8） |
+| 已编 bf16 | `tinymog` · `retinaface_10g` · `insightface_2d106` · `arcface_mbf`（sm1200 / trt101339） |
 | 已编 bf16（GPEN） | `gpen_bfr_256.1200.bf16.engine` · `gpen_bfr_512.1200.bf16.engine` |
-| **缺** | `xseg`（全量）只有 onnx，没有引擎 |
-| **死文件** | `xseglite_int8` · `tinymog_int8` · `insightface_2d106_int8` · `xseglite_bf16_lvl5` · `xseglite_mixed_bf16` —— 旧命名，`try_engine` 永远命中不到 |
-| **编译端限制** | `trt_build.py` **只有 `--bf16`**，没有 `--int8`，也没有校准集通道 → 界面上编不出 INT8 引擎。所以 `("int8","bf16")` 里的 int8 目前是**空头支票**（除非手工用别的工具编出规范命名的 int8 引擎） |
+| **死文件** | `xseglite_int8.engine` · `tinymog_int8.engine` · `insightface_2d106_int8.engine` · `xseglite_bf16_lvl5.engine` · `xseglite_mixed_bf16.engine` —— 旧命名，`try_engine` 永远命中不到，可以删 |
 | `arcface_mbf` | 引擎编了，但 `face_embedder.py` 走 onnxruntime，没有加载点 |
 
-### 要做 INT8 还缺什么
+### 已知限制
 
-1. `trt_build.py` 加 `--int8` + `IInt8EntropyCalibrator2`，校准集用**真实对齐脸**（200 张，合成数据会让 scale 偏）；
-2. 校准集缓存文件写进引擎名（否则换校准集不重编，scale 是旧的）；
-3. 只有遮罩值得编 —— 检测/特征点按 §二 的结论不编。
+1. **TRT 10 的 implicit 校准表不导出**：`write_calibration_cache` 拿到了空内容，
+   `*.calib.cache` 是 0 字节 —— 所以每次重编都要重跑那 200 张校准（约 40 s）。
+   要省这 40 s 得换 explicit quantization（QDQ 图），那是另一套 ONNX 改造。
+2. **int8 引擎不能跨显卡 / 跨 TRT 大版本**（SM 与 trt 都在文件名里，换卡自动重编）。
+3. 校准集变了要重编：`<engine>.calib.json` 里记着样本数与目录，对不上就重编，
+   否则 scale 是按旧分布估的（引擎名不带校准指纹，这是当前命名方案的取舍）。

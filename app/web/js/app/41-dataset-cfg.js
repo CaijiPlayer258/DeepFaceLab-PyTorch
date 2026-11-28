@@ -332,11 +332,22 @@
            其余   → 按钮本身就是状态（点击即编译）
          不再「文字 + 按钮」并排，省掉一半宽度。 */
       var cell;
+      /* 精度不是全局开关：遮罩编 INT8（要真实对齐脸校准），其余编 BF16。
+         以前状态列只写「已编译」，看不出这一份到底编的是什么精度 ——
+         而 xseglite 明明跑 int8、页面却在拿 bf16 那份说「已编译」。 */
+      var _prec = m.precision || "";
+      var _precLbl = _prec === "int8" ? "INT8" : (_prec === "bf16" ? "BF16" : "");
       if (m.state === "ready") {
-        cell = '<span class="tag ok">已编译</span>';
+        cell = '<span class="tag ok"' + (_precLbl ? ' title="这份引擎是 ' + _precLbl + ' 编译的"' : "") + '>'
+             + '已编译' + (_precLbl ? " · " + _precLbl : "") + '</span>';
       } else {
         var text = m.state === "stale" ? "更新" : "编译";
-        var tip = m.state === "stale" ? "引擎需更新，点击重新编译" : "点击编译 " + m.name;
+        var tip = (m.state === "stale" ? "引擎需更新，点击重新编译" : "点击编译 " + m.name)
+                + (_precLbl
+                   ? (_prec === "int8"
+                      ? "（INT8：会用 workspace/data_dst/aligned 的真实对齐脸校准 200 张，约 1.5 分钟）"
+                      : "（BF16）")
+                   : "");
         cell = '<button class="mini" data-eng="' + m.name + '" title="' + tip + '">' + text + '</button>';
       }
       return '<tr>' +
