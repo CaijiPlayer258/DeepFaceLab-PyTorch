@@ -169,6 +169,26 @@ _NO_LEGACY = {
 }
 
 
+def _weights_kind(folder, model_name: str) -> str:
+    """这份模型算「还没转成 torch」（npy）还是「已经是 torch」（pth）。
+
+    判据不是「目录里有没有 decoder 的 .pth」—— 那只要有一个就算完。半套权重的
+    状态（encoder/inter/decoder_src 转出来了、decoder_dst 没转）以前会被判成
+    "pth"，模型卡于是把按钮画成「训练」，界面上**再没有转换入口**；而导出又会
+    因为权重不齐被拒绝 —— 用户就卡在「导出说缺权重，却没有地方点转换」。
+    现在按「每个 .npy 的模块是不是都有同名 .pth」判断：只要还有一个对不上，
+    就仍然算 "npy"（= 卡片上还有「转换」按钮可以补齐）。
+    """
+    try:
+        base = Path(folder)
+        _pths = {p.stem for p in base.glob(model_name + "_*decoder*.pth")}
+        _npys = {p.stem for p in base.glob(model_name + "_*decoder*.npy")}
+        # .npy 都归档进 old/ 之后就只剩 .pth，此时按「已转换」算（不再有可转的东西）
+        return "npy" if (_npys - _pths) else "pth"
+    except Exception:
+        return "pth"
+
+
 def _fast_model_entry(dat_path: Path) -> dict:
     """两个小文件就够：参数缓存 + 预览快照。都不在就返回 None 走老路。
 
@@ -221,7 +241,7 @@ def _fast_model_entry(dat_path: Path) -> dict:
         "iter": int(params.get("iter", 0) or 0),
         "spark": spark,
         "has_dfm": dfm.exists(),
-        "weights": "npy" if (any(dat_path.parent.glob(model_name + "_*decoder*.npy")) and not any(dat_path.parent.glob(model_name + "_*decoder*.pth"))) else "pth",
+        "weights": _weights_kind(dat_path.parent, model_name),
         "trained_at": int(dat_path.stat().st_mtime),
         "has_preview": has_prev,
         "preview_url": ("/api/models/" + model_name + "/preview.png") if has_prev else None,
@@ -274,7 +294,7 @@ def _model_entry(dat_path: Path) -> dict:
 
     ok_prev = _preview_png(dat, preview)
 
-    weights = "npy" if (any(dat_path.parent.glob(model_name + "_*decoder*.npy")) and not any(dat_path.parent.glob(model_name + "_*decoder*.pth"))) else "pth"
+    weights = _weights_kind(dat_path.parent, model_name)
     dfm = dat_path.parent / (model_name + ".dfm")
 
     _archi2 = str(opt.get("archi", archi_from_name)).lower()
