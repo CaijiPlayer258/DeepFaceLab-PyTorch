@@ -19,8 +19,13 @@
   'use strict';
 
   /* 4.0 四档缩放（值本身即 #res-select 的 option value） */
-  var ZOOM_ORDER = [1, 0.5, 0.25, 0.125];
-  var PPF = { '1': 2, '0.5': 1, '0.25': 0.5, '0.125': 0.25 };
+  /* 4.0 原来四档（1 / 0.5 / 0.25 / 0.125，对应 2 / 1 / 0.5 / 0.25 px/帧）。
+     几万帧的素材在最小档下仍要 8899px —— 一屏看不全，还是得一直滚。
+     补两档更小的（0.0625 / 0.03125 → 0.125 / 0.0625 px/帧）：
+     35597 帧 × 0.0625 = 2225px，主流窗口一屏能看完整部。 */
+  var ZOOM_ORDER = [1, 0.5, 0.25, 0.125, 0.0625, 0.03125];
+  var PPF = { '1': 2, '0.5': 1, '0.25': 0.5, '0.125': 0.25,
+              '0.0625': 0.125, '0.03125': 0.0625 };
 
   var RULER_STEP = 500;   /* 刻度尺每 500px 一个数字 */
   /* 视频轨以前铺 40 个均匀「缩略占位块」，纯装饰、和真实帧无关 ——
@@ -91,7 +96,16 @@
     if (!host) return;
     clear(host);
     var px, num, tk, label;
-    for (px = 0; px <= w; px += RULER_STEP) {
+    /* ★ 刻度间隔自适应。以前固定每 500px 一个数字：ppf=2 时是每 250 帧，
+       看着正常；缩到 0.0625（0.0625 px/帧）时 500px = 8000 帧，整条只标出三四个数，
+       完全没法定位。现在先按「希望每 ~90px 一个刻度」算出帧间隔，
+       再取整到 1/2/5×10^n 这种好读的数。 */
+    var wantFrames = (w > 0) ? Math.max(1, Math.round(90 / Math.max(S.ppf, 1e-6))) : 1;
+    var mag = Math.pow(10, Math.floor(Math.log10(wantFrames)));
+    var norm = wantFrames / mag;
+    var stepFrames = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10) * mag;
+    var stepPx = Math.max(1, stepFrames * S.ppf);
+    for (px = 0; px <= w; px += stepPx) {
       num = Math.round(px / S.ppf);
       tk = document.createElement('div');
       tk.className = 'mtl-tk';
@@ -385,6 +399,19 @@
       sc.addEventListener('mousedown', onDown);
       /* 4.0 行为：滚轮纵向滚动 → 时间轴横向滚动 */
       sc.addEventListener('wheel', function (e) {
+        /* ★ Ctrl + 滚轮 = 缩放时间轴（工业软件通行的快捷键）。
+           不按 Ctrl 还是老行为：纵向滚 → 横向滚。
+           几万帧的素材在 ppf=2 下要 7 万像素宽，一直滚轮翻不动 ——
+           缩到 0.125（每帧 0.25px）一屏能看半部片。 */
+        if (e.ctrlKey || e.metaKey) {
+          e.preventDefault();
+          var dir = (e.deltaY < 0) ? -1 : 1;      /* 上滚 = 放大 */
+          var idx = ZOOM_ORDER.indexOf(S.zoom);
+          if (idx < 0) idx = 0;
+          var next = Math.max(0, Math.min(ZOOM_ORDER.length - 1, idx + dir));
+          if (next !== idx) applyZoom(ZOOM_ORDER[next]);
+          return;
+        }
         sc.scrollLeft += e.deltaY;
         e.preventDefault();
       }, { passive: false });
@@ -507,6 +534,23 @@
   window.MergeTimeline = {
     /* 验收/排查用：当前每帧像素、播放头的逻辑 x（= 帧 × ppf）、缩放档位 */
     getPpf: function () { return S.ppf; },
+    /* 排查「帧数卡在某个值」用：一眼看出时间轴自己认为的总帧数、每帧像素、
+       内容宽度、以及内部状态是否 ready。在 Console 里敲 MergeTimeline.diag() */
+    diag: function () {
+      var sc = document.getElementById('mtlScroll');
+      return {
+        total: S.total,
+        frame: S.frame,
+        zoom: S.zoom,
+        ppf: S.ppf,
+        contentWidth: contentWidth(),
+        scrollLeft: sc ? Math.round(sc.scrollLeft) : null,
+        clientWidth: sc ? Math.round(sc.clientWidth) : null,
+        ready: S.ready,
+        hostFrames: (window.__mv && window.__mv.frames) || 0,
+        hostPath: (window.__mv && window.__mv.path) || ''
+      };
+    },
     getZoom: function () { return S.zoom; },
     getHeadX: function () { return S.frame * S.ppf; },
     isPlaying: function () { return !!S.playing; },
