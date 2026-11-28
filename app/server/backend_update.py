@@ -65,7 +65,7 @@ def parse_version(v=None) -> Dict[str, Any]:
     md = _VER_DATE.match(v)
     if md:
         major, minor, mm, dd, b = md.groups()
-        build = int(b or 1)
+        build = int(b or 0)          # 0 基：不带 -bN 的旧 tag 就是当天第一个版本
         human = "v%s.%s \u00b7 %s-%s" % (major, minor, mm, dd)
         # 只要版本号里**显式写了** -bN 就显示，包括 b0 / b1。
         # 以前是 `if build > 1`，于是 1126-b0、1126-b1 和「不带 build 的 1126」
@@ -95,7 +95,8 @@ def _ver_tuple(v: str) -> tuple:
     md = _VER_DATE.match(v)
     if md:
         major, minor, mm, dd, b = md.groups()
-        return (int(major), int(minor), int(mm + dd), int(b or 1))
+        # 0 基 b 号：「4.1-1129-b0」与「4.1-1129」是同一版，都读成 0
+        return (int(major), int(minor), int(mm + dd), int(b or 0))
     # 旧格式（4.1.2 / 4.1.26.1122.2310）一律当「更早」：
     # 它们没有日期段，混进新格式里比较没有意义（4.1-200 会被拆成 (4,1200) 排到 4.1-1122 前面）。
     return (0, 0, 0, 0)
@@ -119,14 +120,20 @@ def _local_built_at():
 def _is_behind(tag, local, published):
     """远端是不是比本地新。
 
-    1) 正常：版本号元组比较。
-    2) 兜底：号相同或更小，但远端发布时间晚于本地 version.txt 的落盘时间 → 也算新。
-       专治「b 号被写乱之后归位」造成的假阴性（11-28 当天发到 b70，归位成 b3/b4/b5
-       之后 _ver_tuple(remote) > _ver_tuple(local) 永远 False，老用户收不到更新）。
+    1) 正常：版本号元组比较（远端更大才算新）。
+    2) **号相同 = 同一版，直接 False。** 以前这里不分，号相等也去比时间 —— 于是
+       「装的正是刚发布的那版」也会被判成有更新：打包发生在发布之前，用户解压后
+       version.txt 的 mtime 必然早于 release 的 published_at，点更新下回来还是同一版，
+       永远提示。这条在 1129-b0 上实测复现（local 与 remote 都是 4.1-1129-b0 却 behind=True）。
+    3) 兜底只在「远端号**更小**」时生效：专治 b 号被写乱之后归位造成的假阴性
+       （11-28 当天发到 b70，归位成 b3 之后元组比较永远 False，老用户收不到更新）。
+       号相等说明就是同一版，没有可补的东西。
     """
     rt, lt = _ver_tuple(tag), _ver_tuple(local)
     if rt > lt:
         return True
+    if rt == lt:
+        return False
     if not published:
         return False
     try:

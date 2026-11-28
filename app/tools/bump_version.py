@@ -1,14 +1,18 @@
 # -*- coding: utf-8 -*-
-r"""版本号生成：4.1-<MMDD>，同一天第二个版本 4.1-<MMDD>-b2。
+r"""版本号生成：4.1-<MMDD>-b<N>，N = **当天第几个版本，从 0 开始**。
 
 规则
 ----
-    4.1-1122        11 月 22 日的第一个版本
-    4.1-1122-b2     同一���的第二个版本（b3、b4 依次类推）
+    4.1-1129-b0     11 月 29 日发的第 1 个版本
+    4.1-1129-b1     同一天的第 2 个（b2、b3 依次类推）
 
 * 只有日期，不带时分 —— 一天之内通常只发一版；真发多版用 -bN 区分。
+* **b 号永远带、从 0 起**：以前「当天第一版不带后缀、第二个叫 b2」，
+  于是 1126 出现 b0/b1/b2/b3 和 1127 从 b4 一路排到 b67 两种写法混在一起，
+  历史 tag 全乱。现在统一 0 基，字符串序仍 = 时间序，
+  解析时「不带 -bN」按 b0 读（兼容旧 tag）。
 * MMDD 固定四位（补零），所以字符串序 = 时间序，更新检查直接比元组。
-* 关于页显示成 v4.1 · 11-22（当天多版再加 B2）。
+* 关于页显示成 v4.1 · 11-29（当天多版再加 B1）。
 
 用法
 ----
@@ -30,20 +34,21 @@ BASE = "4.1"
 _FMT = re.compile(r"^(\d+\.\d+)-(\d{4})(?:-b(\d+))?$")
 
 
-def make_version(when=None, base: str = BASE, build: int = 1) -> str:
+def make_version(when=None, base: str = BASE, build: int = 0) -> str:
     t = when or _dt.datetime.now()
     v = "%s-%02d%02d" % (base, t.month, t.day)
-    return v if build <= 1 else "%s-b%d" % (v, build)
+    return "%s-b%d" % (v, max(0, int(build)))
 
 
 def parse_version(v: str) -> dict:
     m = _FMT.match((v or "").strip())
     if not m:
-        return {"version": v, "base": v, "build": 1, "human": "v" + v}
+        return {"version": v, "base": v, "build": 0, "human": "v" + v}
     base, mmdd, b = m.groups()
-    build = int(b or 1)
+    # 不带 -bN 的旧 tag 按 b0 读（0 基之后，无后缀就等于当天第一个版本）
+    build = int(b or 0)
     human = "v%s · %s-%s" % (base, mmdd[:2], mmdd[2:])
-    if build > 1:
+    if b is not None:
         human += " · B%d" % build
     return {"version": v, "base": base, "build": build, "human": human}
 
@@ -71,16 +76,16 @@ def next_build(today: _dt.date, current: str) -> int:
     """
     m = _FMT.match((current or "").strip())
     if not m:
-        return 1
+        return 0
     base, mmdd, b = m.groups()
     if int(mmdd[:2]) != today.month or int(mmdd[2:]) != today.day:
-        return 1
-    cur_b = int(b or 1)
-    # ★ 自愈：手里的号比「当天真实发布数 + 1」还大 → 说明是被手工传歪的历史包袱，
+        return 0                      # 换了一天 → 从 b0 重新数
+    cur_b = int(b or 0)
+    # ★ 自愈：手里的号比「当天真实发布数」还大 → 说明是被手工传歪的历史包袱，
     #   按当天真实数重排。（比如 11-28 当天只发了 3 版，version.txt 却写着 b70。）
     real = _count_today_releases(today)
-    if real > 0 and cur_b > real + 1:
-        return real + 1
+    if real > 0 and cur_b > real:
+        return real
     return cur_b + 1
 
 
