@@ -101,6 +101,41 @@ def _ver_tuple(v: str) -> tuple:
     return (0, 0, 0, 0)
 
 
+
+def _local_built_at():
+    """本地这份代码是什么时候落盘的（version.txt 的 mtime）。"""
+    try:
+        from ._paths import root as _root
+        p = Path(_root()) / "version.txt"
+        return float(p.stat().st_mtime)
+    except Exception:
+        return 0.0
+
+
+def _is_behind(tag, local, published):
+    """远端是不是比本地新。
+
+    1) 正常：版本号元组比较。
+    2) 兜底：号相同或更小，但远端发布时间晚于本地 version.txt 的落盘时间 → 也算新。
+       专治「b 号被写乱之后归位」造成的假阴性（11-28 当天发到 b70，归位成 b3/b4/b5
+       之后 _ver_tuple(remote) > _ver_tuple(local) 永远 False，老用户收不到更新）。
+    """
+    rt, lt = _ver_tuple(tag), _ver_tuple(local)
+    if rt > lt:
+        return True
+    if not published:
+        return False
+    try:
+        import datetime as _d2
+        pub = _d2.datetime.strptime(str(published)[:19], "%Y-%m-%dT%H:%M:%S").timestamp()
+    except Exception:
+        return False
+    local_t = _local_built_at()
+    if not local_t:
+        return False
+    return pub > local_t + 60.0
+
+
 def check() -> Dict[str, Any]:
     """返回远端最新版本信息；网络失败时给出 error 字段而不抛异常。"""
     local = local_version()
@@ -125,7 +160,7 @@ def check() -> Dict[str, Any]:
         "published": info.get("published_at"),
         "assets": assets,
         "source_zip": info.get("zipball_url"),
-        "behind": _ver_tuple(tag) > _ver_tuple(local),
+        "behind": _is_behind(tag, local, info.get("published_at")),
         "asset": code_asset,
         "package": "release asset" if code_asset else "source zipball",
     }
