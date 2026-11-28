@@ -212,7 +212,16 @@ class DfmTorch:
         # ---- CUDA Graph（DFL_DFM_GRAPH；默认开，=0 回 eager）----
         # graph_on 可以在运行时用 set_graph() 翻 —— A/B 台架就是靠它在**同一份会话**上交替
         # （不重载模型 = 不改 cuDNN 状态 = 两个臂比的是同一个计算）。
-        self.graph_on = _flag("DFL_DFM_GRAPH", "1")
+        # ★ 默认**关**。以前默认开，赌的是「捕获窗口内没人做 cudaMalloc /
+        #   stream 同步」—— 但 ONNXRuntime 的 CUDA EP 一跑就会 cudaStreamSynchronize，
+        #   这个赌注从架构上就赢不了。用户日志（_server_output (5).log:4247-4248）：
+        #     [dfm-torch] ★ CUDA Graph 捕获失败 batch=1
+        #       （CUDA error: operation failed due to a previous error during capture）
+        #     换脸：torch 后端起不来 → dfm 走 onnxruntime(CUDAExecutionProvider)
+        #   _GRAPH_OFF 事后止损也救不回来 —— 第一次捕获已经把 CUDA context 弄脏，
+        #   之后连 eager 都起不来，整条链路掉到 ORT（33ms/张，还多占 arena 显存）。
+        #   要开就显式设 DFL_DFM_GRAPH=1（台架 A/B 用）。
+        self.graph_on = _flag("DFL_DFM_GRAPH", "0")
         self.g_batches = _env_batches("DFL_DFM_GRAPH_B", "1,2,4,8")
         try:
             self.g_warm = max(1, int(_env("DFL_DFM_GRAPH_WARM", "3") or 3))
