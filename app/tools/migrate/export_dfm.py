@@ -51,14 +51,56 @@ def export(model_class_name: str, saved_models_path: str, force_model_name: str 
 
     os.environ['DFL_SILENT_INPUT'] = '1'
 
-    # Auto-convert .npy → .pth if no .pth files exist yet
+    # 需要先转的模块：**逐个比**，不是「目录里有一个 .pth 就整体跳过」。
+    # 以前的条件是 `not _pth_glob and _npy_glob`：只要有一个 .pth 就不转，
+    # 于是「encoder 转出来了、解码器全炸掉」这种半套权重的状态会被直接拿去导出 ——
+    # Saveable 对缺文件只打一行 [WARN] 然后随机初始化（Saveable.py:265），
+    # export_dfm() 照样写出一个 .dfm，界面显示成功，实际那几层是随机的废模型。
     if force_model_name:
-        _pth_glob = list(Path(saved_models_path).glob(f'{force_model_name}_{model_class_name}_*.pth'))
-        _npy_glob = list(Path(saved_models_path).glob(f'{force_model_name}_*.npy'))
-        if not _pth_glob and _npy_glob:
-            sys.__stdout__.write(f'[1] 转换 {force_model_name} (.npy → .pth)\n')
+        # 统一成**单后缀**：调用方可能传 DF-UDT416，也可能传 DF-UDT416_SAEHD。
+        # 以前直接拼 f'{force_model_name}_{model_class_name}'，传进来已带后缀时
+        # 就变成 DF-UDT416_SAEHD_SAEHD_*.pth —— glob 和 dat 路径全都对不上，
+        # 「权重齐不齐」的检查因此形同虚设（这次就是这么漏过去的）。
+        _stem = str(force_model_name)
+        _suf = '_' + model_class_name
+        if _stem.endswith(_suf):
+            _stem = _stem[: -len(_suf)]
+        _pre = f'{_stem}_{model_class_name}'
+        _base = Path(saved_models_path)
+        _MODS = ("encoder", "inter", "inter_AB", "inter_B", "decoder",
+                 "decoder_src", "decoder_dst", "decoder_mask")
+        _need = [m for m in _MODS
+                 if (_base / f'{_pre}_{m}.npy').exists()
+                 and not (_base / f'{_pre}_{m}.pth').exists()]
+        if _need:
+            sys.__stdout__.write('[1] 转换 %s（缺 %d 个模块：%s）\n'
+                                 % (force_model_name, len(_need), ", ".join(_need)))
             sys.__stdout__.flush()
             convert_npy_to_pth(model_class_name, saved_models_path, force_model_name)
+        # 转完再确认一遍：还是缺就直接失败，别让它导出一个随机初始化的 dfm。
+        # 期望哪些模块**以 .dat 的 archi 为准** —— .npy 转完就被 model.save()
+        # 归档进 old/ 了，那时「有没有 npy」什么都证不了，只能靠架构判断：
+        #   df   -> encoder / inter / decoder_src / decoder_dst
+        #   liae -> encoder / inter_AB / inter_B / decoder
+        _expect = ()
+        try:
+            import pickle as _pk
+            _dat = _base / f'{_pre}_data.dat'
+            if _dat.exists():
+                _cfg = _pk.loads(_dat.read_bytes())
+                _archi = str((_cfg.get('options') or {}).get('archi')
+                             or (_cfg.get('options') or {}).get('archi_type') or '').lower()
+                if 'liae' in _archi:
+                    _expect = ("encoder", "inter_AB", "inter_B", "decoder")
+                elif 'df' in _archi:
+                    _expect = ("encoder", "inter", "decoder_src", "decoder_dst")
+        except Exception:
+            _expect = ()
+        _lost = [m for m in _expect if not (_base / f'{_pre}_{m}.pth').exists()]
+        if _lost:
+            raise RuntimeError('权重不齐，拒绝导出（缺 %s）——先到「模型转换」补齐，'
+                               '否则导出的 dfm 里这几层是随机初始化的'
+                               % ", ".join(_lost))
 
 
     print("[stage] load", flush=True)          # 读配置、建模型
